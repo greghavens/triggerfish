@@ -696,6 +696,8 @@ async function reopenSentinelSourceResult(
     | "provenanceNodePage"
     | "observationSearch"
     | "taskObservationPage"
+    | "goalStateProjection"
+    | "caseHintFirstId"
     | "workerTracePage"
   >,
   selector: Record<string, unknown>,
@@ -793,6 +795,31 @@ async function reopenSentinelSourceResult(
         { snapshotPath: path, assessmentRevision: revision },
         selector,
       );
+    }
+  } else if (step.tool === "sentinel_goal_state") {
+    const projection = readSentinelGoalStateProjection(
+      step.goalStateProjection,
+    );
+    if (projection) {
+      text = readHistoricalSentinelGoalState(
+        path,
+        revision,
+        selector,
+        projection,
+      );
+    }
+  } else if (step.tool === "sentinel_case_hints") {
+    const args = sentinelGoalReceiptReadArguments(step.tool, selector);
+    const first = step.caseHintFirstId;
+    if (args && first === null) {
+      text = JSON.stringify({ hints: [], nextBefore: null });
+    }
+    if (
+      args && typeof first === "number" && Number.isSafeInteger(first + 1) &&
+      first >= 1 &&
+      (args.before === undefined || first < args.before)
+    ) {
+      text = projectCaseHints(path, args.limit ?? 3, first + 1, revision);
     }
   } else if (isSentinelArchivedInventoryRead(step.tool, selector)) {
     if ((selector.node ?? selector.to) !== step.target) return;

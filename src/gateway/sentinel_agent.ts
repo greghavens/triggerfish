@@ -4563,7 +4563,9 @@ function createAgent(
               name === SENTINEL_PROVENANCE_SEARCH ||
               name === SENTINEL_PROVENANCE_NODE_READ ||
               name === SENTINEL_WORKER_TRACE_SEARCH ||
-              name === SENTINEL_GOAL_TASK_READ))) &&
+              name === SENTINEL_GOAL_TASK_READ ||
+              name === SENTINEL_GOAL_STATE_READ ||
+              name === SENTINEL_CASE_HINTS_READ))) &&
           goalArgs &&
           (isSentinelPinnedSourceRead(name)
             ? sourceSnapshots?.length &&

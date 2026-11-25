@@ -1826,3 +1826,9 @@ Direct planner observation readback retains the exact assignment selector
 and page offset. It reopens the completed result in the saved revision,
 checks the response digest, and reapplies the original tool's hooks. The
 gateway fixture verifies a nonzero offset and response denial after restore.
+
+Planner goal-state and case-hint results can be reopened from the original
+round and attempt. The gateway uses the saved goal verification projection
+or first hint ID, verifies the response digest, and reapplies current
+policy. The archive fixture commits a newer hint before archiving and
+verifies readback still returns the original page.

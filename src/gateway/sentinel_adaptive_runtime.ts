@@ -4598,6 +4598,8 @@ export function createSentinelModelPlanner(
               provenanceNodePage,
               observationSearch,
               taskObservationPage,
+              goalStateProjection,
+              caseHintFirstId,
               workerTracePage,
               recheckFindingIds,
               peerFinding,
@@ -4627,11 +4629,15 @@ export function createSentinelModelPlanner(
                     provenanceNodePage,
                     observationSearch,
                     taskObservationPage,
+                    goalStateProjection,
+                    caseHintFirstId,
                     workerTracePage,
                     ...((sourceSnapshots?.length || aliasMapping ||
                       sharedAssetLinksPage || plannerProvenancePath ||
                       provenanceSearchPage || provenanceNodePage ||
                       observationSearch || taskObservationPage ||
+                      goalStateProjection ||
+                      caseHintFirstId !== undefined ||
                       workerTracePage ||
                       (goalReceiptRead &&
                         isSentinelArchivedInventoryRead(

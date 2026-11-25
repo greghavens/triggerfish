@@ -182,6 +182,8 @@ async function withGateway(
           "sentinel_provenance_node",
           "sentinel_worker_observation",
           "sentinel_worker_trace_search",
+          "sentinel_goal_state",
+          "sentinel_case_hints",
         ].includes(String(input.tool_name));
       if (workerSource) policy.workerSourceHooks.push(hook);
       const allowed = !(policy.denyArchive && hook === "PRE_TOOL_CALL" &&
@@ -2376,7 +2378,7 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
   }
 });
 
-async function verifyPlannerArchive(directObservation: boolean) {
+async function verifyPlannerArchive(mode: "search" | "direct" | "goals") {
   const baseDir = await Deno.makeTempDir();
   const caseId = "planner-archive";
   const sourceCase = "planner-origin";
@@ -2398,6 +2400,8 @@ async function verifyPlannerArchive(directObservation: boolean) {
           "sentinel_provenance_node",
           "sentinel_worker_observation",
           "sentinel_worker_trace_search",
+          "sentinel_goal_state",
+          "sentinel_case_hints",
         ].includes(String(input.tool_name))
       ) {
         plannerHooks.push(hook);
@@ -2511,7 +2515,7 @@ async function verifyPlannerArchive(directObservation: boolean) {
       {
         name: "sentinel_worker_observation",
         get args() {
-          return directObservation
+          return mode === "direct"
             ? { task: observedTaskId, offset: 5 }
             : { query: "retained planner fixture" };
         },
@@ -2521,6 +2525,12 @@ async function verifyPlannerArchive(directObservation: boolean) {
         args: { query: "sentinel_assigned_target", limit: 1 },
       },
     ];
+    if (mode === "goals") {
+      plannerCalls.splice(10, 2, {
+        name: "sentinel_goal_state",
+        args: { limit: 1 },
+      }, { name: "sentinel_case_hints", args: { limit: 1 } });
+    }
     let responses: string[] = [];
     registry.register({
       name: "planner-source-fixture",
@@ -2549,13 +2559,36 @@ async function verifyPlannerArchive(directObservation: boolean) {
       },
     });
     registry.setDefault("planner-source-fixture");
-    const state = startSentinelAssessment(path);
+    const goals: SentinelFormalGoal[] = [{
+      id: "review-control",
+      title: "Review recorded control evidence",
+      policy: "operator",
+      criteria: [{
+        id: "topology",
+        description: "Check the saved dependency.",
+        source: "graph_evidence",
+        reference: evidence.id,
+      }],
+    }];
+    const state = mode === "goals"
+      ? applySentinelFormalGoals(path, {
+        mode: "start",
+        requestId: crypto.randomUUID(),
+        proposalDigest: digestSentinelGoalProposal(goals),
+        goals,
+        plan: { goal: "Review recorded control evidence" },
+      }).state
+      : startSentinelAssessment(path);
+    if (mode === "goals") assert(ensureSentinelFormalGoalContract(path, state));
     advanceAdaptiveSentinel(path, state);
     const revision = adaptiveRevision(state);
     const store = openSentinelAdaptiveStore(
       join(dirname(path), "sentinel-adaptive.db"),
     );
     try {
+      if (mode === "goals") {
+        store.addCaseHint("Review the recorded dependency.", state.revision);
+      }
       const reason = "archive planner worker search fixture";
       const task = store.sync(revision, [{
         kind: "trace",
@@ -2620,7 +2653,24 @@ async function verifyPlannerArchive(directObservation: boolean) {
     );
     assertEquals(JSON.parse(responses[9]).node.id, "finding:control-finding");
     const observed = JSON.parse(responses[10]);
-    if (directObservation) {
+    if (mode === "goals") {
+      assertEquals(observed.criteria.length, 1);
+      assertEquals(
+        JSON.parse(responses[11]).hints[0].text,
+        "Review the recorded dependency.",
+      );
+      const later = openSentinelAdaptiveStore(
+        join(dirname(path), "sentinel-adaptive.db"),
+      );
+      try {
+        later.addCaseHint(
+          "A later hint must not replace the saved page.",
+          state.revision,
+        );
+      } finally {
+        later.close();
+      }
+    } else if (mode === "direct") {
       assertEquals(observed.task, observedTaskId);
       assertEquals(observed.offset, 5);
       assertEquals(
@@ -2630,7 +2680,9 @@ async function verifyPlannerArchive(directObservation: boolean) {
     } else {
       assertEquals(observed.observations[0].id, observedTaskId);
     }
-    assertEquals(JSON.parse(responses[11]).steps[0].taskId, observedTaskId);
+    if (mode !== "goals") {
+      assertEquals(JSON.parse(responses[11]).steps[0].taskId, observedTaskId);
+    }
     const linksPage = JSON.parse(linksResponse);
     assertEquals(linksPage.links.length, 1);
     const [linkSource] = linksPage.sourceSnapshots;
@@ -2808,6 +2860,8 @@ async function verifyPlannerArchive(directObservation: boolean) {
 }
 
 Deno.test("a dispatched Sentinel planner source receipt survives gateway archive and restore", () =>
-  verifyPlannerArchive(false));
+  verifyPlannerArchive("search"));
 Deno.test("a dispatched Sentinel planner direct observation page survives gateway archive and restore", () =>
-  verifyPlannerArchive(true));
+  verifyPlannerArchive("direct"));
+Deno.test("a dispatched Sentinel planner goal state and hints survive gateway archive and restore", () =>
+  verifyPlannerArchive("goals"));
