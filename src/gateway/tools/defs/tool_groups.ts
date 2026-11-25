@@ -36,7 +36,10 @@ import {
 import { buildTriggerToolDefinitions } from "../trigger/trigger_tools.ts";
 import { buildTriggerManageToolDefinitions } from "../trigger/trigger_manage_defs.ts";
 import { getClaudeToolDefinitions } from "../../../exec/claude.ts";
-import { getSkillToolDefinitions } from "../../../tools/skills/mod.ts";
+import {
+  buildSkillAdministrationToolDefinitions,
+  getSkillToolDefinitions,
+} from "../../../tools/skills/mod.ts";
 import { getLogReaderToolDefinitions } from "../../../tools/log_reader_tool.ts";
 import {
   buildExecCommandDefinitions,
@@ -83,6 +86,7 @@ export const TOOL_GROUPS = {
   triggerManage: buildTriggerManageToolDefinitions,
   claude: getClaudeToolDefinitions,
   skills: getSkillToolDefinitions,
+  skillAdmin: buildSkillAdministrationToolDefinitions,
   releaseNotes: getReleaseNotesToolDefinitions,
   logReader: getLogReaderToolDefinitions,
   agents: buildAgentInlineDefinitions,

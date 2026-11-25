@@ -258,15 +258,16 @@ export async function dispatchApprovedToolCall(
     (secCtx.resourceClassification === null ||
       canFlowTo(secCtx.resourceClassification, "INTERNAL"));
   if (beforeAuthorizedDispatch) await beforeAuthorizedDispatch();
-  const mcpConfiguration = call.name === "mcp_manage" &&
-    (call.args.action === "update" || call.args.action === "tools") &&
-    secCtx.isOwner && !secCtx.isTrigger &&
-    config.isOwnerSession?.() === true;
+  const ownerAdministration = call.name === "list_skills" ||
+    (call.name === "mcp_manage" &&
+      (call.args.action === "update" || call.args.action === "tools"));
+  const interactiveOwner = () =>
+    !signal?.aborted && config.isOwnerSession?.() === true;
   return {
-    resultText: mcpConfiguration
+    resultText: ownerAdministration && secCtx.isOwner && !secCtx.isTrigger &&
+        interactiveOwner()
       ? await toolExecutor(call.name, call.args, {
-        isCurrentMcpConfigurationOwner: () =>
-          !signal?.aborted && config.isOwnerSession?.() === true,
+        isCurrentInteractiveOwner: interactiveOwner,
       })
       : capture
       ? await toolExecutor(call.name, call.args, { allowSentinelCapture: true })

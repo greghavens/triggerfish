@@ -38,6 +38,7 @@ export type {
 } from "./author.ts";
 
 export {
+  buildSkillAdministrationToolDefinitions,
   buildSkillToolDefinitions,
   createSkillToolExecutor,
   getSkillToolDefinitions,

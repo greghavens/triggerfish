@@ -13,9 +13,13 @@
  */
 
 import { join } from "@std/path";
-import type { ToolDefinition } from "../../core/types/tool.ts";
+import type {
+  ToolDefinition,
+  ToolExecutionContext,
+} from "../../core/types/tool.ts";
 import type { ClassificationLevel } from "../../core/types/classification.ts";
-import type { SkillLoader } from "./loader.ts";
+import type { SkillLoader, SkillSource } from "./loader.ts";
+import { enforceSkillName } from "./registry_types.ts";
 import type { SkillContextTracker } from "./context.ts";
 import type { SkillScanner } from "./scanner.ts";
 import { enforceSkillClassificationCeiling } from "./enforcer.ts";
@@ -72,6 +76,86 @@ export function buildSkillToolDefinitions(): readonly ToolDefinition[] {
   return [buildReadSkillDef()];
 }
 
+/** The owner can discover currently eligible skills without activating one. */
+export function buildSkillAdministrationToolDefinitions(): readonly ToolDefinition[] {
+  return [{
+    name: "list_skills",
+    description:
+      "List active skills from the current owner skill registry. The result includes skill names and sources, with no instruction content. A skill can be opened with read_skill.",
+    parameters: {
+      type: {
+        type: "string",
+        description: "Optional source filter",
+        enum: ["BUNDLED", "USER_PROVIDED"],
+      },
+      after: {
+        type: "string",
+        description: "Skill name returned as next_after on the preceding page",
+      },
+      limit: {
+        type: "integer",
+        description: "Maximum number of skills to return, from 1 to 100",
+      },
+    },
+  }];
+}
+
+function skillType(source: SkillSource): SkillType {
+  return source === "bundled" ? "BUNDLED" : "USER_PROVIDED";
+}
+
+function validSkillSelector(value: unknown): value is string {
+  return typeof value === "string" && value.length <= 128 &&
+    enforceSkillName(value).ok;
+}
+
+async function executeListSkills(
+  ctx: SkillToolContext,
+  input: Record<string, unknown>,
+  dispatch?: ToolExecutionContext,
+): Promise<string> {
+  const isCurrentOwner = dispatch?.isCurrentInteractiveOwner;
+  if (!isCurrentOwner?.() || !ctx.getSessionTaint) {
+    return "Error: Skill discovery requires the active owner session.";
+  }
+  const { type, after, limit = 25 } = input;
+  if (
+    Object.keys(input).some((key) =>
+      !["type", "after", "limit"].includes(key)
+    ) ||
+    (type !== undefined && type !== "BUNDLED" && type !== "USER_PROVIDED") ||
+    (after !== undefined && !validSkillSelector(after)) ||
+    typeof limit !== "number" || !Number.isSafeInteger(limit) ||
+    limit < 1 || limit > 100
+  ) return "Error: Invalid skill listing filter or cursor.";
+
+  const skills = await ctx.skillLoader.discover();
+  if (!isCurrentOwner()) return "Error: The owner session is no longer active.";
+  const taint = ctx.getSessionTaint();
+  const candidates = skills.filter((skill) =>
+    validSkillSelector(skill.name) &&
+    (type === undefined || skillType(skill.source) === type) &&
+    (after === undefined || skill.name > after) &&
+    !enforceSkillClassificationCeiling(taint, skill)
+  ).sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
+  const page = candidates.slice(0, limit);
+  return JSON.stringify({
+    skills: page.map((skill) => ({
+      name: skill.name,
+      type: skillType(skill.source),
+      source: skill.source,
+      classification_ceiling: skill.classificationCeiling,
+      version:
+        typeof skill.version === "string" && skill.version.length <= 80 &&
+          /^[0-9]+\.[0-9]+\.[0-9]+(?:[-+][A-Za-z0-9.-]+)*$/.test(skill.version)
+          ? skill.version
+          : null,
+    })),
+    next_after: candidates.length > limit ? page.at(-1)?.name : null,
+    _classification: taint,
+  });
+}
+
 /**
  * Create a tool executor for skill reading operations.
  *
@@ -85,11 +169,19 @@ export function buildSkillToolDefinitions(): readonly ToolDefinition[] {
  */
 export function createSkillToolExecutor(
   ctx: SkillToolContext,
-): (name: string, input: Record<string, unknown>) => Promise<string | null> {
+): (
+  name: string,
+  input: Record<string, unknown>,
+  context?: ToolExecutionContext,
+) => Promise<string | null> {
   return async (
     name: string,
     input: Record<string, unknown>,
+    context?: ToolExecutionContext,
   ): Promise<string | null> => {
+    if (name === "list_skills") {
+      return await executeListSkills(ctx, input, context);
+    }
     if (name !== "read_skill") return null;
 
     const type = input.type;
@@ -109,18 +201,21 @@ export function createSkillToolExecutor(
     const trimmedName = skillName.trim();
     const skills = await ctx.skillLoader.discover();
 
-    const matchesType = type === "BUNDLED"
-      ? (s: { source: string }) => s.source === "bundled"
-      : (s: { source: string }) =>
-        s.source === "managed" || s.source === "workspace";
+    const matchesType = (s: { source: SkillSource }) =>
+      skillType(s.source) === type;
 
     const skill = skills.find(
       (s) => s.name === trimmedName && matchesType(s),
     );
 
     if (!skill) {
+      const taint = ctx.getSessionTaint?.();
       const available = skills
-        .filter(matchesType)
+        .filter((candidate) =>
+          matchesType(candidate) &&
+          (taint === undefined ||
+            !enforceSkillClassificationCeiling(taint, candidate))
+        )
         .map((s) => s.name)
         .sort()
         .join(", ");
@@ -160,9 +255,12 @@ export function createSkillToolExecutor(
       }`;
     }
 
-    // 2. Integrity check — hash content at activation time (TOCTOU-resistant)
+    // 2. Verify the content still matches the entry selected at discovery.
+    const currentHash = await computeSkillHash(content);
+    if (skill.contentHash !== currentHash) {
+      return "Error: The skill changed during activation. Retry discovery.";
+    }
     if (skill.source !== "bundled") {
-      const currentHash = await computeSkillHash(content);
       const integrityOk = await verifySkillIntegrity(skill.path, currentHash);
       if (integrityOk === false) {
         log.warn("Skill content integrity check failed", {

@@ -74,6 +74,7 @@ interface SkillFrontmatter {
   readonly classification_ceiling?: string;
   readonly requires_tools?: readonly string[];
   readonly network_domains?: readonly string[];
+  readonly status?: string;
 }
 
 /**
@@ -116,7 +117,11 @@ function buildSkillFromFrontmatter(
   source: SkillSource,
   contentHash: string,
 ): Skill | null {
-  if (!frontmatter || !frontmatter.name) return null;
+  if (
+    !frontmatter || !frontmatter.name ||
+    frontmatter.status === "PENDING_APPROVAL" ||
+    frontmatter.status === "REJECTED"
+  ) return null;
 
   const classResult = parseClassification(
     frontmatter.classification_ceiling ?? "PUBLIC",

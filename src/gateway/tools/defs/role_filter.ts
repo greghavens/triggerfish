@@ -50,6 +50,7 @@ export const OWNER_ONLY_TOOLS: ReadonlySet<string> = new Set([
   "trigger_add_to_context",
   // Skill management
   "read_skill",
+  "list_skills",
   // Subagent spawning
   "subagent",
   "agents_list",

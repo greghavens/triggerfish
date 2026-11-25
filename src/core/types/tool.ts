@@ -24,7 +24,7 @@ export interface ToolDefinition {
 
 export interface ToolExecutionContext {
   readonly allowSentinelCapture?: boolean;
-  readonly isCurrentMcpConfigurationOwner?: () => boolean;
+  readonly isCurrentInteractiveOwner?: () => boolean;
 }
 
 /** Handler that executes a tool call and returns the result text. */

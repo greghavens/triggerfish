@@ -170,7 +170,7 @@ async function executeAdd(
 async function executeUpdate(
   ctx: McpManageContext,
   input: Record<string, unknown>,
-  isCurrentOwner: ToolExecutionContext["isCurrentMcpConfigurationOwner"],
+  isCurrentOwner: ToolExecutionContext["isCurrentInteractiveOwner"],
 ): Promise<string> {
   if (!isCurrentOwner?.() || !ctx.getConfirmPrompt) {
     return "Error: MCP configuration updates require the active owner session.";
@@ -344,7 +344,7 @@ function executeStatus(
 function executeTools(
   ctx: McpManageContext,
   input: Record<string, unknown>,
-  isCurrentOwner: ToolExecutionContext["isCurrentMcpConfigurationOwner"],
+  isCurrentOwner: ToolExecutionContext["isCurrentInteractiveOwner"],
 ): string {
   if (!isCurrentOwner?.()) {
     return "Error: Connector tool discovery requires the active owner session.";
@@ -409,7 +409,7 @@ export function createMcpManageExecutor(
         return await executeUpdate(
           ctx,
           input,
-          context?.isCurrentMcpConfigurationOwner,
+          context?.isCurrentInteractiveOwner,
         );
       case "remove":
         return await executeRemove(ctx, serverId!);
@@ -423,7 +423,7 @@ export function createMcpManageExecutor(
         return executeTools(
           ctx,
           input,
-          context?.isCurrentMcpConfigurationOwner,
+          context?.isCurrentInteractiveOwner,
         );
       default:
         return `Error: Unknown action "${action}". Valid actions: list, add, update, remove, enable, disable, status, tools.`;
