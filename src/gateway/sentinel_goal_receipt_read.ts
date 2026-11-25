@@ -1,3 +1,5 @@
+import { redactCredentialText } from "../core/logger/redactor.ts";
+import { isDeepStrictEqual } from "node:util";
 import { createHash } from "node:crypto";
 import { dirname, join } from "@std/path";
 import { querySentinelWorkerObservations } from "../sentinel/adaptive_store.ts";
@@ -28,6 +30,66 @@ export function sentinelWorkerObservationPage(
     observationJson: json.slice(offset, end),
     observationSha256: createHash("sha256").update(json).digest("hex"),
   };
+}
+
+/** Only persist bounded search projections with the original page shape. */
+export function parseSavedSentinelObservationSearch(
+  result: string,
+  revision: number,
+  offset: number,
+) {
+  if (result.length > 7000 || redactCredentialText(result) !== result) return;
+  const page = JSON.parse(result);
+  if (
+    page?.revision !== revision || page.offset !== offset ||
+    !Array.isArray(page.observations) || page.observations.length > 5 ||
+    (page.nextOffset !== null && (!Number.isSafeInteger(page.nextOffset) ||
+      page.nextOffset !== offset + 5 || page.observations.length !== 5))
+  ) return;
+  const ids = new Set<string>();
+  for (const observation of page.observations) {
+    if (
+      typeof observation?.id !== "string" ||
+      !/^adaptive:[a-f0-9]{64}$/.test(observation.id) ||
+      typeof observation.kind !== "string" ||
+      typeof observation.nodeId !== "string" && observation.nodeId !== null ||
+      typeof observation.summary !== "string" && observation.summary !== null ||
+      Object.keys(observation).length !== 4 || ids.has(observation.id)
+    ) return;
+    ids.add(observation.id);
+  }
+  if (Object.keys(page).length !== 4) return;
+  return { page, ids: [...ids] };
+}
+
+export function validateSavedSentinelObservationSearch(
+  path: string,
+  runId: string,
+  revision: number,
+  args: { query: string; revision?: number; offset?: number },
+  result: string,
+) {
+  if (args.revision !== undefined && args.revision !== revision) return false;
+  const saved = parseSavedSentinelObservationSearch(
+    result,
+    revision,
+    args.offset ?? 0,
+  );
+  if (!saved) return false;
+  const retained = querySentinelWorkerObservations(
+    join(dirname(path), "sentinel-adaptive.db"),
+    revision,
+    {
+      query: args.query,
+      offset: args.offset ?? 0,
+      saved: { runId, ids: saved.ids },
+    },
+  );
+  return typeof retained === "object" &&
+    isDeepStrictEqual(
+      JSON.parse(JSON.stringify(retained.observations)),
+      saved.page.observations,
+    );
 }
 
 export function reopenSentinelGoalReceiptRead(

@@ -773,5 +773,10 @@ assignment, and matches the bytes the model receives. Gateway restart fixtures
 also verify recovery from an exact passing remediation recheck and withhold the
 saved result when response policy changes before restart. A completed peer task
 proof recovers both exact pages and their full-result digest. Only page zero
-can establish the prerequisite read for a task goal proof. Search queries
-remain outside this checkpoint path.
+can establish the prerequisite read for a task goal proof. A bounded plain-text
+peer search can recover its original page even if another matching assignment
+completes before restart. The gateway fixture verifies that the worker receives
+the original bytes after root authorization and that the saved rows still
+resolve within the same case, run, and revision. Temporary search receipts are
+removed after settlement and scrubbed from run archives. Queries outside the
+checkpoint's plain-text format remain available for live searches.

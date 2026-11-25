@@ -1,3 +1,4 @@
+import { redactCredentialText } from "../core/logger/redactor.ts";
 /** Canonical arguments retained for request-bound Sentinel goal proposals. */
 import { normalizeSentinelFormalGoals } from "./formal_goals.ts";
 
@@ -87,15 +88,30 @@ export function isSentinelGoalReceiptRead(tool: unknown) {
 export const SENTINEL_GOAL_RECHECK_READ = "sentinel_worker_findings";
 
 type GoalReceiptReadArguments =
-  | { id: string; task?: never; receiptId?: never }
+  | { id: string; task?: never; receiptId?: never; query?: never }
   | {
     task: string;
     revision?: number;
     offset?: number;
     id?: never;
     receiptId?: never;
+    query?: never;
   }
-  | { receiptId: string; revision?: number; id?: never; task?: never };
+  | {
+    receiptId: string;
+    revision?: number;
+    id?: never;
+    task?: never;
+    query?: never;
+  }
+  | {
+    query: string;
+    revision?: number;
+    offset?: number;
+    id?: never;
+    task?: never;
+    receiptId?: never;
+  };
 
 export function sentinelGoalReceiptReadArguments(
   tool: string,
@@ -122,6 +138,25 @@ export function sentinelGoalReceiptReadArguments(
   ) {
     return {
       task: args.task,
+      ...(args.revision !== undefined && { revision: args.revision }),
+      ...(args.offset !== undefined && { offset: args.offset }),
+    };
+  }
+  if (
+    tool === SENTINEL_GOAL_TASK_READ &&
+    Object.keys(args).every((key) =>
+      ["query", "revision", "offset"].includes(key)
+    ) &&
+    typeof args.query === "string" &&
+    /^[a-zA-Z0-9 ._-]{1,128}$/.test(args.query) &&
+    redactCredentialText(args.query) === args.query &&
+    (args.offset === undefined || typeof args.offset === "number" &&
+        Number.isSafeInteger(args.offset) && args.offset >= 0) &&
+    (args.revision === undefined || typeof args.revision === "number" &&
+        Number.isSafeInteger(args.revision) && args.revision > 0)
+  ) {
+    return {
+      query: args.query,
       ...(args.revision !== undefined && { revision: args.revision }),
       ...(args.offset !== undefined && { offset: args.offset }),
     };

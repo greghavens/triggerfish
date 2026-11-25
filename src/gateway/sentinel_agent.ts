@@ -1,6 +1,8 @@
 import {
+  parseSavedSentinelObservationSearch,
   reopenSentinelGoalReceiptRead,
   sentinelWorkerObservationPage,
+  validateSavedSentinelObservationSearch,
 } from "./sentinel_goal_receipt_read.ts";
 import {
   isSentinelGoalReceiptRead,
@@ -3351,9 +3353,18 @@ function createAgent(
           sha256: createHash("sha256").update(result).digest("hex"),
         };
         const goalReceiptRead = goalArgs &&
-          (goalArgs.task ? approvedTaskPage : turn.readGoalScopedReceipts.has(
-            goalArgs.id ?? goalArgs.receiptId ?? "",
-          )) &&
+          (goalArgs.task
+            ? approvedTaskPage
+            : goalArgs.query !== undefined
+            ? options.assessmentRevision !== undefined &&
+              parseSavedSentinelObservationSearch(
+                result,
+                options.assessmentRevision,
+                goalArgs.offset ?? 0,
+              )
+            : turn.readGoalScopedReceipts.has(
+              goalArgs.id ?? goalArgs.receiptId ?? "",
+            )) &&
           {
             args: goalArgs,
             sha256: createHash("sha256").update(result).digest("hex"),
@@ -3393,7 +3404,8 @@ function createAgent(
           ...(goalReceiptRead && { goalReceiptRead }),
         });
         if (
-          (assigned || recheckContext || trafficLinks) &&
+          (assigned || recheckContext || trafficLinks ||
+            (goalReceiptRead && goalReceiptRead.args.query !== undefined)) &&
           turn.traceStepCount <= 16
         ) {
           turn.onBatchReadReceipt?.(name, turn.traceStepCount - 1, result);
@@ -3569,6 +3581,22 @@ function createAgent(
                     state.revision !== revision ||
                     !readAssignedModelReview(options)
                   ) return false;
+                  const search = sentinelGoalReceiptReadArguments(
+                    call.name,
+                    call.args,
+                  );
+                  if (search?.query !== undefined) {
+                    if (
+                      !validateSavedSentinelObservationSearch(
+                        options.snapshotPath,
+                        state.plan.runId,
+                        revision,
+                        search,
+                        saved,
+                      )
+                    ) return false;
+                    continue;
+                  }
                   const opened = reopenSentinelGoalReceiptRead(
                     options.snapshotPath,
                     {
@@ -3734,7 +3762,8 @@ function createAgent(
                 isSentinelGoalReceiptRead(name)
               ) {
                 const read = sentinelGoalReceiptReadArguments(name, args);
-                const id = read && (read.id ?? read.receiptId ?? read.task);
+                const id = read &&
+                  (read.id ?? read.receiptId ?? read.task ?? "search");
                 return id
                   ? {
                     requestId: id,

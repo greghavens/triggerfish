@@ -1562,7 +1562,11 @@ export function querySentinelWorkerObservations(
   revision: number,
   request:
     | { readonly task: string; readonly runId?: string }
-    | { readonly query: string; readonly offset: number },
+    | {
+      readonly query: string;
+      readonly offset: number;
+      readonly saved?: { runId: string; ids: readonly string[] };
+    },
 ) {
   let db: DatabaseSync;
   try {
@@ -1595,6 +1599,26 @@ export function querySentinelWorkerObservations(
         `SELECT observation ${lookup} AND id = ?`,
       ).get(revision, taskId(request.task));
       return typeof row?.observation === "string" ? row.observation : undefined;
+    }
+    if (request.saved) {
+      const mapping = db.prepare(`SELECT goalId FROM adaptive_evidence_revisions
+        WHERE evidenceNumber = ? ORDER BY rowid DESC LIMIT 1`).get(revision);
+      if (mapping?.goalId !== request.saved.runId) return;
+      const row = db.prepare(`SELECT id, kind, substr(nodeId, 1, 100) AS nodeId,
+        substr(json_extract(observation, '$.summary'), 1, 96) AS summary
+        ${lookup} AND id = ? AND (instr(lower(observation), lower(?)) > 0
+          OR instr(lower(COALESCE(nodeId, '')), lower(?)) > 0)`);
+      const observations = request.saved.ids.flatMap((id) => {
+        const retained = row.get(
+          revision,
+          taskId(id),
+          request.query,
+          request.query,
+        );
+        return retained ? [retained] : [];
+      });
+      if (observations.length !== request.saved.ids.length) return;
+      return { observations, nextOffset: null };
     }
     const rows = db.prepare(`SELECT id, kind, substr(nodeId, 1, 100) AS nodeId,
       substr(json_extract(observation, '$.summary'), 1, 96) AS summary
@@ -2643,6 +2667,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
     "adaptive_assigned_target_batch_receipts",
     "adaptive_recheck_context_batch_receipts",
     "adaptive_traffic_links_batch_receipts",
+    "adaptive_observation_search_batch_receipts",
   ] as const;
   function workerBatchReadTable(tool: string) {
     return tool === ASSIGNED_TARGET_CHECKPOINT_TOOL
@@ -2651,6 +2676,8 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
       ? workerBatchReadTables[1]
       : tool === SENTINEL_TRAFFIC_LINKS
       ? workerBatchReadTables[2]
+      : tool === SENTINEL_GOAL_TASK_READ
+      ? workerBatchReadTables[3]
       : undefined;
   }
   function hasWorkerBatchReadTable(
@@ -4505,8 +4532,14 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
               step.resultSnapshot?.sha256 !== sha256
             : tool === SENTINEL_TRAFFIC_LINKS
             ? step.trafficLinks?.sha256 !== sha256
+            : tool === SENTINEL_GOAL_TASK_READ
+            ? step.goalReceiptRead?.args.query === undefined ||
+              step.goalReceiptRead.sha256 !== sha256
             : step.recheckContext?.sha256 !== sha256)
         ) return;
+        const key = tool === SENTINEL_GOAL_TASK_READ
+          ? "revision, taskId, stepIndex"
+          : "revision, taskId";
         db.exec(
           `CREATE TABLE IF NOT EXISTS ${table} (
           revision TEXT NOT NULL,
@@ -4515,12 +4548,12 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
           pendingEvent INTEGER NOT NULL,
           stepIndex INTEGER NOT NULL,
           result TEXT NOT NULL,
-          PRIMARY KEY(revision, taskId)
+          PRIMARY KEY(${key})
         )`,
         );
         db.prepare(
           `INSERT INTO ${table} VALUES (?, ?, ?, ?, ?, ?)
-          ON CONFLICT(revision, taskId) DO UPDATE SET evidenceRevision = excluded.evidenceRevision,
+          ON CONFLICT(${key}) DO UPDATE SET evidenceRevision = excluded.evidenceRevision,
             pendingEvent = excluded.pendingEvent, stepIndex = excluded.stepIndex, result = excluded.result`,
         )
           .run(
@@ -6214,7 +6247,9 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
           for (const [index, tool] of marker.tools.entries()) {
             if (typeof tool !== "string") break;
             if (
-              isSentinelGoalReceiptRead(tool)
+              isSentinelGoalReceiptRead(tool) &&
+              progress[earlierResults.length + index]?.goalReceiptRead?.args
+                  .query === undefined
             ) {
               const step = progress[earlierResults.length + index];
               const admitted = marker.journalRequests?.[index];
@@ -6349,6 +6384,24 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
                   step.resultSnapshot?.sha256 !== hash
                 ) break;
                 callId = ASSIGNED_TARGET_CHECKPOINT_CALL;
+              } else if (tool === SENTINEL_GOAL_TASK_READ) {
+                const input = sentinelGoalReceiptReadArguments(
+                  tool,
+                  step.goalReceiptRead?.args,
+                );
+                if (
+                  input?.query === undefined ||
+                  (input.revision !== undefined &&
+                    input.revision !== evidenceRevision) ||
+                  admitted?.requestId !== "search" ||
+                  step.goalReceiptRead?.sha256 !== hash ||
+                  admitted.argsDigest !==
+                    createHash("sha256").update(JSON.stringify(input)).digest(
+                      "hex",
+                    )
+                ) break;
+                args = input;
+                callId = `recovery-${tool}-${stepIndex}`;
               } else if (tool === SENTINEL_TRAFFIC_LINKS) {
                 const input = sentinelTrafficLinksArgs(step.trafficLinks?.args);
                 if (

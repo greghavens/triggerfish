@@ -118,7 +118,7 @@ for (
       : phase === "resume_recheck_goal_proof"
       ? "Sentinel reauthorizes an exact passing remediation recheck and recovers its committed goal proof"
       : phase === "resume_task_goal_proof"
-      ? "Sentinel recovers two exact peer task result pages and their committed goal proof"
+      ? "Sentinel recovers the original peer search and two task result pages with a committed goal proof"
       : phase === "resume_peer_goal_proof"
       ? "Sentinel recovers an exact peer graph fact and its committed goal proof"
       : phase === "resume_goal_proof"
@@ -391,6 +391,26 @@ for (
               { task: peerFactId },
             );
             assert(typeof saved === "string");
+            const search = readSentinelWorkerObservation(
+              path,
+              assessment.revision,
+              {
+                query: "retained peer",
+                offset: 0,
+              },
+            );
+            assert(typeof search === "object");
+            assertEquals(search.observations.map(({ id }) => id), [
+              completedTaskId,
+            ]);
+            await Deno.writeTextFile(
+              join(dir, "peer-goal-search"),
+              JSON.stringify({
+                revision: assessment.revision,
+                offset: 0,
+                ...search,
+              }),
+            );
             await Deno.writeTextFile(
               join(dir, "peer-goal-task"),
               JSON.stringify(
@@ -814,6 +834,51 @@ for (
           }]);
           assertEquals(later.record.status, "awaiting_confirmation");
         }
+        if (taskProof) {
+          assert(peerFactId);
+          const revision = adaptiveRevision(assessment);
+          const request = { kind: "trace" as const, nodeId: assetId, depth: 2 };
+          const store = openSentinelAdaptiveStore(
+            join(dirname(path), "sentinel-adaptive.db"),
+          );
+          try {
+            const id = sentinelAdaptiveTaskId(revision, request);
+            store.sync(revision, [request], revision);
+            const lease = store.claim(
+              revision,
+              60,
+              new Set(
+                store.list(revision).filter((task) => task.id !== id).map((
+                  task,
+                ) => task.id),
+              ),
+            );
+            assert(lease);
+            assertEquals(lease.task.id, id);
+            store.complete({
+              taskId: id,
+              leaseToken: lease.leaseToken,
+              observation: {
+                summary: "A new retained peer result.",
+              },
+            });
+            const now = readSentinelWorkerObservation(
+              path,
+              assessment.revision,
+              {
+                query: "retained peer",
+                offset: 0,
+              },
+            );
+            assert(typeof now === "object");
+            assertEquals(now.observations.map((row) => row.id), [
+              id,
+              peerFactId,
+            ]);
+          } finally {
+            store.close();
+          }
+        }
         child = spawn(phase);
         const resumed = await child.output();
         child = undefined;
@@ -1004,6 +1069,19 @@ for (
           return;
         }
         if (peerProof || taskProof || recheckProof) {
+          if (taskProof) {
+            const database = new DatabaseSync(
+              join(dirname(path), "sentinel-adaptive.db"),
+            );
+            try {
+              const retained = database.prepare(
+                "SELECT count(*) AS count FROM adaptive_observation_search_batch_receipts",
+              ).get();
+              assertEquals(retained?.count, 0);
+            } finally {
+              database.close();
+            }
+          }
           const saved = readSentinelGoalCompletionForState(path, assessment);
           assertEquals(saved?.status, "open");
           assertEquals(saved?.observations.length, 1);
@@ -1028,11 +1106,15 @@ for (
             hooks.filter((line) => /:peer_fact_(pre|post)$/.test(line)),
             [
               ...evidenceHooks(interrupted),
-              ...(taskProof ? evidenceHooks(interrupted) : []),
+              ...(taskProof
+                ? [...evidenceHooks(interrupted), ...evidenceHooks(interrupted)]
+                : []),
               ...(taskProof
                 ? [
                   `${phase}:peer_fact_pre`,
                   `${phase}:peer_fact_pre`,
+                  `${phase}:peer_fact_pre`,
+                  `${phase}:peer_fact_post`,
                   `${phase}:peer_fact_post`,
                   `${phase}:peer_fact_post`,
                 ]
