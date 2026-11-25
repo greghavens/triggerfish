@@ -23,6 +23,7 @@ import {
 } from "../../src/core/types/session.ts";
 import { createWorkspace } from "../../src/exec/workspace.ts";
 import { createChatSession } from "../../src/gateway/chat.ts";
+import { createOperatorRunToolExecutor } from "../../src/gateway/operator_run_tool.ts";
 import { executeOperatorRunArchive } from "../../src/gateway/operator_run_archive.ts";
 import type { EnhancedSessionManager } from "../../src/gateway/sessions.ts";
 import { buildTeamManager } from "../../src/gateway/startup/factory/team_executor.ts";
@@ -509,9 +510,12 @@ Deno.test("Owner gateway resumes a team delivery checklist without repeating a c
       deliveryId,
     );
     const traces = openExecutionTraces(fixture.tracePath);
+    let originalSnapshot;
     try {
       const archived = traces.archiveSnapshot("delegated", runId, "INTERNAL");
       assertEquals(archived?.run.status, "completed");
+      assert(archived?.entries.length);
+      originalSnapshot = archived;
       assertEquals(archived?.run.scope.sessionId, member.sessionId);
       assertEquals(
         traces.archiveSnapshot("delegated", runId, "PUBLIC"),
@@ -534,6 +538,205 @@ Deno.test("Owner gateway resumes a team delivery checklist without repeating a c
       JSON.parse(state.results[0]).revision !==
         JSON.parse(firstResult).revision,
     );
+
+    const foreign = createSession({
+      userId: "other-owner" as UserId,
+      channelId: "other" as ChannelId,
+    });
+    let approvals = 0;
+    const archiveHooks: HookLogEntry[] = [];
+    const archiveTool = async (
+      root: string,
+      actor: typeof parent,
+      input: Record<string, unknown>,
+      denyArchive = false,
+    ) => {
+      const registry = createProviderRegistry();
+      let observed: string | undefined;
+      registry.register({
+        name: "fixture",
+        supportsStreaming: false,
+        complete(messages) {
+          const prior = messages.findLast(({ role }) => role === "tool");
+          const usage = { inputTokens: 1, outputTokens: 1 };
+          if (prior) {
+            observed = String(prior.content);
+            return Promise.resolve({
+              content: "Reviewed the tool response.",
+              usage,
+              toolCalls: [],
+            });
+          }
+          return Promise.resolve({
+            content: "",
+            usage,
+            toolCalls: [{
+              type: "function",
+              id: crypto.randomUUID(),
+              function: {
+                name: "operator_runs",
+                arguments: JSON.stringify(input),
+              },
+            }],
+          });
+        },
+      });
+      registry.setDefault("fixture");
+      const hooks = createPolicyEngine();
+      for (const rule of createDefaultRules()) hooks.addRule(rule);
+      const runner = createHookRunner(hooks, {
+        logger: { log: (entry) => archiveHooks.push(entry) },
+      });
+      await sendBackgroundCommand(
+        createChatSession({
+          session: actor,
+          providerRegistry: registry,
+          enableStreaming: false,
+          hookRunner: {
+            ...runner,
+            evaluateHook(hook, args) {
+              if (
+                denyArchive && hook === "PRE_TOOL_CALL" &&
+                args.input.tool_name === "operator_runs"
+              ) {
+                return Promise.resolve({
+                  allowed: false,
+                  action: "BLOCK",
+                  ruleId: null,
+                  duration: 0,
+                });
+              }
+              return runner.evaluateHook(hook, args);
+            },
+          },
+          operatorRunExecutor: createOperatorRunToolExecutor({
+            baseDir: root,
+            confirm: () => {
+              approvals++;
+              return Promise.resolve(true);
+            },
+          }),
+        }),
+        "Inspect exact team delivery history.",
+      );
+      assert(observed);
+      return observed;
+    };
+    const id = [team.value.id, member.sessionId, deliveryId].join(":");
+    const traceArgs = {
+      action: "execution_traces",
+      traceRole: "delegated",
+      id: runId,
+      ordinal: 1,
+    };
+    const archiveId = crypto.randomUUID();
+    const archiveArgs = {
+      action: "archive",
+      kind: "team_delivery",
+      id,
+      requestId: archiveId,
+    };
+    const originalHistory = JSON.parse(
+      await archiveTool(baseDir, parent, traceArgs),
+    );
+    assertEquals(originalHistory.step.id, originalSnapshot.entries[0].step.id);
+    assertStringIncludes(
+      await archiveTool(baseDir, foreign, traceArgs),
+      "unavailable",
+    );
+    assertStringIncludes(
+      await archiveTool(baseDir, foreign, {
+        ...archiveArgs,
+        kind: "delegated",
+        id: runId,
+      }),
+      "unavailable",
+    );
+    await archiveTool(baseDir, parent, archiveArgs, true);
+    assertEquals(approvals, 0);
+    assertEquals(
+      JSON.parse(await archiveTool(baseDir, parent, archiveArgs)).receipt
+        .status,
+      "succeeded",
+    );
+    assertEquals(approvals, 1);
+    const cleanRoot = await Deno.makeTempDir({ dir: baseDir });
+    await Deno.mkdir(join(cleanRoot, "data"));
+    await Deno.rename(
+      join(baseDir, "data", "run-archives"),
+      join(cleanRoot, "data", "run-archives"),
+    );
+    assertStringIncludes(
+      await archiveTool(cleanRoot, parent, traceArgs),
+      "unavailable",
+    );
+    const restoreArgs = {
+      ...archiveArgs,
+      action: "restore",
+      requestId: crypto.randomUUID(),
+      archiveId,
+    };
+    assertStringIncludes(
+      await archiveTool(cleanRoot, foreign, restoreArgs),
+      "unavailable",
+    );
+    assertStringIncludes(
+      await archiveTool(cleanRoot, parent, {
+        ...restoreArgs,
+        id: [crypto.randomUUID(), member.sessionId, deliveryId].join(":"),
+      }),
+      "unavailable",
+    );
+    assertEquals(approvals, 1);
+    const restored = JSON.parse(
+      await archiveTool(cleanRoot, parent, restoreArgs),
+    );
+    assertEquals(restored.receipt.status, "succeeded");
+    assertEquals(
+      JSON.parse(await archiveTool(cleanRoot, parent, restoreArgs)),
+      restored,
+    );
+    assertEquals(approvals, 2);
+    assert(
+      archiveHooks.some(({ hook, input }) =>
+        hook === "POST_TOOL_RESPONSE" && input.tool_name === "operator_runs"
+      ),
+    );
+    assertEquals(
+      JSON.parse(await archiveTool(cleanRoot, parent, traceArgs)),
+      originalHistory,
+    );
+    assertStringIncludes(
+      await archiveTool(cleanRoot, foreign, traceArgs),
+      "unavailable",
+    );
+    const foreignSearch = JSON.parse(
+      await archiveTool(cleanRoot, foreign, {
+        action: "execution_traces",
+        traceRole: "delegated",
+        query: "todo",
+      }),
+    );
+    assertEquals(foreignSearch.page.matches, []);
+    const foreignList = JSON.parse(
+      await archiveTool(cleanRoot, foreign, {
+        action: "execution_traces",
+        traceRole: "delegated",
+      }),
+    );
+    assertEquals(foreignList.page.runs, []);
+    assertEquals(state.writes, 2);
+    const recoveredTraces = openExecutionTraces(
+      join(cleanRoot, "execution-traces.db"),
+    );
+    try {
+      assertEquals(
+        recoveredTraces.archiveSnapshot("delegated", runId, "INTERNAL"),
+        originalSnapshot,
+      );
+    } finally {
+      recoveredTraces.close();
+    }
   } finally {
     await Deno.remove(baseDir, { recursive: true });
   }

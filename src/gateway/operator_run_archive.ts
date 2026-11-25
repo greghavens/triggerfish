@@ -1,3 +1,8 @@
+import type { SessionId } from "../core/types/session.ts";
+import {
+  parseTeamDeliveryTraceSource,
+  teamDeliveryExecutionId,
+} from "./startup/factory/delegated_agent_recovery.ts";
 import { assignmentRecoveryKey as recoveryKey } from "../core/durable_assignment.ts";
 import { stageSentinelArchivedDigestCatalog } from "../sentinel/evidence_digests.ts";
 import { stageArchivedDiscoveryApprovals } from "../sentinel/archive_asset_discoveries.ts";
@@ -59,7 +64,7 @@ const workflowArtifacts = ["workflow.json"] as const;
 const ownerArtifacts = ["owner-checkpoint.json"] as const;
 const traceArtifacts = ["execution-trace.json"] as const;
 type ArchiveRef = OperatorRunRef | {
-  kind: ExecutionTraceRole | "owner_chat";
+  kind: ExecutionTraceRole | "owner_chat" | "team_delivery";
   id: string;
   revision?: undefined;
 };
@@ -75,9 +80,35 @@ export async function executeOperatorRunArchive(
   const { action, runId, requestId, archiveId, limit, before } = args;
   const history = action === "archive_history";
   const sentinel = ref.kind === "sentinel";
-  const role = ref.kind === "delegated" || ref.kind === "scheduled"
+  const team = ref.kind === "team_delivery";
+  const teamTuple = team ? ref.id.toLowerCase().split(":") : [];
+  if (
+    team && (!ownerScope || teamTuple.length !== 3 ||
+      !teamTuple.every((part) => uuid.test(part)) ||
+      !canFlowTo("INTERNAL", ownerScope.ceiling))
+  ) return unavailable;
+  const [teamId, recipient, delivery] = teamTuple;
+  const scopedTeamRun = team && ownerScope
+    ? await teamDeliveryExecutionId(
+      ownerScope.sessionId as SessionId,
+      recipient as SessionId,
+      delivery,
+    )
+    : undefined;
+  const role = team
+    ? "delegated"
+    : ref.kind === "delegated" || ref.kind === "scheduled"
     ? ref.kind
     : undefined;
+  function matchesTeamScope(
+    scope: { sourceId?: string; sessionId: string; runId: string },
+  ) {
+    const bound = parseTeamDeliveryTraceSource(scope.sourceId);
+    if (!team) return !scope.sourceId?.startsWith("team-delivery:");
+    return !!bound && bound.sender === ownerScope?.sessionId &&
+      bound.teamId === teamId && bound.delivery === delivery &&
+      scope.sessionId === recipient && scope.runId === scopedTeamRun;
+  }
   const ownerKey = ref.kind === "owner_chat" && ownerScope &&
     recoveryKey(ownerScope.sessionId, ref.id.toLowerCase());
   const ownerChecklistScope = ownerKey && ownerScope
@@ -128,15 +159,26 @@ export async function executeOperatorRunArchive(
   ) return unavailable;
   const identity: RunArchiveIdentity = {
     kind: ref.kind,
-    id: ownerKey ? ref.id.toLowerCase() : ref.id,
+    id: ownerKey || team ? ref.id.toLowerCase() : ref.id,
     revision: ref.revision,
-    runId: sentinel ? String(runId).toLowerCase() : ownerKey || ref.id,
+    runId: sentinel
+      ? String(runId).toLowerCase()
+      : ownerKey || scopedTeamRun || ref.id,
   };
   const directory = join(baseDir, "data", "run-archives");
   await Deno.mkdir(directory, { mode: 0o700, recursive: true });
   const info = await Deno.lstat(directory);
   if (!info.isDirectory || info.isSymlink || ((info.mode ?? 0) & 0o077) !== 0) {
     return unavailable;
+  }
+  if (role === "delegated") {
+    const trace = openTrace();
+    try {
+      const existing = trace.readRun(role, identity.runId, "RESTRICTED");
+      if (existing && !matchesTeamScope(existing.scope)) return unavailable;
+    } finally {
+      trace.close();
+    }
   }
   const journal = openRunArchiveActions(join(directory, "actions.db"));
   try {
@@ -432,7 +474,7 @@ export async function executeOperatorRunArchive(
             const trace = openTrace();
             try {
               const saved = trace.readRun(role, identity.runId, "INTERNAL");
-              if (!saved) return;
+              if (!saved || !matchesTeamScope(saved.scope)) return;
               if (saved.status !== "running") {
                 return trace.archiveSnapshot(role, identity.runId, "INTERNAL");
               }
@@ -599,6 +641,15 @@ export async function executeOperatorRunArchive(
                 try {
                   const record = snapshot?.checkpoint;
                   const scope = snapshot?.trace?.run?.scope;
+                  const archiveScope = scope ?? snapshot?.run?.scope;
+                  if (
+                    !archiveScope || !matchesTeamScope(archiveScope) ||
+                    (team && (record || snapshot?.run?.status === "running"))
+                  ) {
+                    throw new Error(
+                      "Execution trace archive is outside current scope",
+                    );
+                  }
                   const key = scope &&
                     recoveryKey(scope.sessionId, identity.runId);
                   using lock = record && key

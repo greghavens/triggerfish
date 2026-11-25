@@ -462,6 +462,7 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
     return {
       ceiling: ownerTargetClassification,
       inputClassification: taint(),
+      authenticatedOwnerSessionId: session.id,
       ...(config.recoverAgentTurn && { ownerRecoverySessionId: session.id }),
       ...(config.runSubagentRecoveryCommand && {
         delegatedRecovery: {

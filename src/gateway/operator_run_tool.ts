@@ -2,7 +2,10 @@ import {
   correctSentinelAssetDiscovery,
   listSentinelAssetDiscoveryProposals,
 } from "./sentinel_asset_discoveries.ts";
-import { delegatedSubagentIdentity } from "./startup/factory/delegated_agent_recovery.ts";
+import {
+  delegatedSubagentIdentity,
+  parseTeamDeliveryTraceSource,
+} from "./startup/factory/delegated_agent_recovery.ts";
 import type { SessionId } from "../core/types/session.ts";
 import { assignmentRecoveryKey } from "../core/durable_assignment.ts";
 import {
@@ -379,11 +382,19 @@ export const operatorRunTool: ToolDefinition = {
     kind: {
       type: "string",
       description: "Run type",
-      enum: ["sentinel", "workflow", "delegated", "scheduled", "owner_chat"],
+      enum: [
+        "sentinel",
+        "workflow",
+        "delegated",
+        "scheduled",
+        "owner_chat",
+        "team_delivery",
+      ],
     },
     id: {
       type: "string",
-      description: "Exact run, published case, or configured plan ID",
+      description:
+        "Exact run, published case, or configured plan ID. Team delivery archives use team UUID:recipient session UUID:delivery UUID.",
     },
     revision: {
       type: "integer",
@@ -785,6 +796,7 @@ export const operatorRunTool: ToolDefinition = {
 
 /** Runtime policy for reopening an approved original tool response. */
 export interface OperatorRunToolContext {
+  readonly authenticatedOwnerSessionId?: string;
   readonly ownerRecoverySessionId?: string;
   readonly delegatedRecovery?: {
     readonly parent: SessionId;
@@ -1782,6 +1794,14 @@ export function createOperatorRunToolExecutor(options: {
     ) {
       return "Error: Supply only defined operator run fields.";
     }
+    function canReadTeamTrace({ scope, classification }: ExecutionTraceRun) {
+      if (!scope.sourceId?.startsWith("team-delivery:")) return true;
+      const source = parseTeamDeliveryTraceSource(scope.sourceId);
+      return !!source &&
+        source.sender === context?.authenticatedOwnerSessionId &&
+        canFlowTo("INTERNAL", context.ceiling ?? "PUBLIC") &&
+        canFlowTo(classification, context.ceiling ?? "PUBLIC");
+    }
     const action = args.action;
     const backgroundRole =
       args.kind === "delegated" || args.kind === "scheduled"
@@ -1811,7 +1831,7 @@ export function createOperatorRunToolExecutor(options: {
           });
           return page
             ? safeProjection({
-              runs: page.runs.map((run) =>
+              runs: page.runs.filter(canReadTeamTrace).map((run) =>
                 projectBackgroundRun(
                   backgroundRunSummary(run, inspectBackgroundRecovery(run)),
                 )
@@ -1880,10 +1900,17 @@ export function createOperatorRunToolExecutor(options: {
             ? journal.readRun(role, runKey, "INTERNAL")
             : undefined;
           if (
-            ownerTrace && requestedId !== undefined &&
-            (!run || run.scope.sessionId !== owner ||
-              run.scope.sourceId !== requestedId)
+            (run && !canReadTeamTrace(run)) ||
+            (ownerTrace && requestedId !== undefined &&
+              (!run || run.scope.sessionId !== owner ||
+                run.scope.sourceId !== requestedId))
           ) return unavailable;
+          const visibleMatch = (
+            { role, runId }: { role: ExecutionTraceRole; runId: string },
+          ) => {
+            const source = journal.readRun(role, runId, "INTERNAL");
+            return !!source && canReadTeamTrace(source);
+          };
           const outputMatch = <T extends { runId: string }>(match: T): T =>
             ownerTrace ? { ...match, runId: requestedId! } : match;
           if (!reopen && typeof query === "string") {
@@ -1897,7 +1924,10 @@ export function createOperatorRunToolExecutor(options: {
             });
             return page
               ? safeProjection({
-                page: { ...page, matches: page.matches.map(outputMatch) },
+                page: {
+                  ...page,
+                  matches: page.matches.filter(visibleMatch).map(outputMatch),
+                },
               })
               : unavailable;
           }
@@ -1924,7 +1954,7 @@ export function createOperatorRunToolExecutor(options: {
                 candidate.runId,
                 "INTERNAL",
               );
-              if (!source) continue;
+              if (!source || !canReadTeamTrace(source)) continue;
               const payload = journal.readApprovedPayload(
                 source.scope,
                 candidate.ordinal,
@@ -1949,9 +1979,7 @@ export function createOperatorRunToolExecutor(options: {
             return safeProjection({
               page: {
                 matches: matches
-                  .filter(({ role, runId }) =>
-                    journal.readRun(role, runId, "INTERNAL")
-                  )
+                  .filter(visibleMatch)
                   .map(outputMatch),
                 nextCursor: page.nextCursor,
               },
@@ -1975,7 +2003,7 @@ export function createOperatorRunToolExecutor(options: {
                       scope: { ...entry.scope, runId: entry.scope.sourceId },
                     })),
                   }
-                  : page,
+                  : { ...page, runs: page.runs.filter(canReadTeamTrace) },
               })
               : unavailable;
           }
@@ -2068,8 +2096,8 @@ export function createOperatorRunToolExecutor(options: {
           );
           try {
             const run = journal.readRun(role, ref.id, "INTERNAL");
-            return run &&
-              backgroundRunSummary(run, inspectBackgroundRecovery(run));
+            if (!run || !canReadTeamTrace(run)) return;
+            return backgroundRunSummary(run, inspectBackgroundRecovery(run));
           } finally {
             journal.close();
           }
@@ -2276,22 +2304,25 @@ export function createOperatorRunToolExecutor(options: {
       ) {
         const archiveRef = ref ?? (
           (args.kind === "delegated" || args.kind === "scheduled" ||
-              args.kind === "owner_chat") &&
+              args.kind === "owner_chat" || args.kind === "team_delivery") &&
             typeof args.id === "string" && args.revision === undefined
             ? { kind: args.kind, id: args.id }
             : undefined
         );
         if (!archiveRef) return unavailable;
+        const archiveOwner = archiveRef.kind === "team_delivery"
+          ? context?.authenticatedOwnerSessionId
+          : context?.ownerRecoverySessionId;
         const result = await executeOperatorRunArchive(
           options.baseDir,
           archiveRef,
           args,
           options.confirm,
           options.workflows,
-          context?.ownerRecoverySessionId
+          archiveOwner
             ? {
-              sessionId: context.ownerRecoverySessionId,
-              ceiling: context.ceiling ?? "INTERNAL",
+              sessionId: archiveOwner,
+              ceiling: context?.ceiling ?? "INTERNAL",
             }
             : undefined,
         );

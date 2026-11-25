@@ -9,7 +9,8 @@ export interface RunArchiveIdentity {
     | "workflow"
     | "delegated"
     | "scheduled"
-    | "owner_chat";
+    | "owner_chat"
+    | "team_delivery";
   readonly id: string;
   readonly runId: string;
   readonly revision?: number;
@@ -65,7 +66,8 @@ function identityFor(raw: unknown): RunArchiveIdentity {
   if (
     !allowedKeys(value, ["kind", "id", "runId", "revision"]) ||
     (kind !== "sentinel" && kind !== "workflow" && kind !== "delegated" &&
-      kind !== "scheduled" && kind !== "owner_chat") ||
+      kind !== "scheduled" && kind !== "owner_chat" &&
+      kind !== "team_delivery") ||
     typeof id !== "string" || !identityPart.test(id) ||
     typeof runId !== "string" || !identityPart.test(runId) ||
     (kind === "sentinel"
