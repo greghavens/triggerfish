@@ -25,6 +25,7 @@ import {
   canRecoverScheduledSource,
   createScheduledAgent,
   runSchedulerOccurrence,
+  scheduledExecutionDispatchError,
   schedulerExecutionIdentity,
 } from "./service_execution.ts";
 import {
@@ -37,6 +38,7 @@ import type {
   WebhookAdmissionClaim,
 } from "./webhooks/admissions.ts";
 import { createLogger } from "../core/logger/mod.ts";
+import { openExecutionTraces } from "../core/execution_traces.ts";
 
 const log = createLogger("scheduler.webhook");
 
@@ -270,6 +272,19 @@ export async function dispatchVerifiedWebhook(
       : undefined;
   const options = { config, sourceId, body, ...validated, execution };
   try {
+    if (execution && config.executionTracePath) {
+      const history = openExecutionTraces(config.executionTracePath);
+      try {
+        if (scheduledExecutionDispatchError(history, execution.id)) {
+          return {
+            ok: false,
+            error: "Replay detected: duplicate webhook rejected",
+          };
+        }
+      } finally {
+        history.close();
+      }
+    }
     if (!recover || !execution || !config.webhookAdmissions) {
       if (execution && config.webhookAdmissions?.has(execution.id)) {
         return {

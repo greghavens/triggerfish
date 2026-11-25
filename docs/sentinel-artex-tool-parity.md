@@ -478,6 +478,12 @@ history without granting team membership. The
 provisions current membership separately and verifies that an exact retry
 cannot enter the model even when only the terminal trace is available.
 
+Restored scheduled terminal traces also prevent new dispatch of the same
+occurrence. The [signed-webhook gateway fixture](../tests/gateway/background_live_control_test.ts)
+restores completed and cancelled deliveries, recreates the scheduler with a
+fresh replay guard, and verifies that both original signatures are rejected
+before a model or tool call.
+
 Restored webhook occurrences accept explicit resume on the existing
 bearer-authenticated recovery endpoint with `resume_paused=true`. The original
 admitted body and current source policy must match. The webhook fixture archives

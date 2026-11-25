@@ -32,6 +32,18 @@ export function schedulerExecutionIdentity(
   return { kind, sourceId, id: `scheduler-${kind}-${digest}` };
 }
 
+/** A restored terminal history is an execution fence even in a fresh scheduler. */
+export function scheduledExecutionDispatchError(
+  journal: ReturnType<typeof openExecutionTraces>,
+  executionId: string,
+): string | undefined {
+  const saved = journal.readRun("scheduled", executionId, "RESTRICTED");
+  if (saved?.operatorCancelled) return "Run cancelled by operator.";
+  if (saved && saved.status !== "running") {
+    return "This scheduled execution already finished.";
+  }
+}
+
 function recoverySessionId(id: string): SessionId {
   const bytes = createHash("sha256").update(`scheduler-session:${id}`)
     .digest("hex");
@@ -164,24 +176,24 @@ export function bindScheduledAgent(
           if (tracePath && options.session.id === bundle.session.id) {
             try {
               journal = openExecutionTraces(tracePath);
+              const terminal = scheduledExecutionDispatchError(
+                journal,
+                execution.id,
+              );
+              if (terminal) return { ok: false as const, error: terminal };
               const receipt = journal.admit(scope);
-              if (receipt?.operatorCancelled) {
+              if (!receipt || receipt.status !== "running") {
                 return {
                   ok: false as const,
-                  error: "Run cancelled by operator.",
+                  error: "The scheduled execution trace is unavailable.",
                 };
               }
-              if (!receipt) {
-                journal.close();
-                journal = undefined;
-              } else {
-                live = bindLiveExecution(
-                  tracePath,
-                  scope,
-                  options.signal,
-                  options.targetClassification,
-                );
-              }
+              live = bindLiveExecution(
+                tracePath,
+                scope,
+                options.signal,
+                options.targetClassification,
+              );
             } catch {
               journal?.close();
               journal = undefined;

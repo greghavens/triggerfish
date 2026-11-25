@@ -12,6 +12,7 @@ import {
 import { createChatSession } from "../../src/gateway/chat.ts";
 import { createOperatorRunToolExecutor } from "../../src/gateway/operator_run_tool.ts";
 import { createGatewayServer } from "../../src/gateway/server/server.ts";
+import type { SchedulerServiceConfig } from "../../src/scheduler/service_types.ts";
 import { schedulerExecutionIdentity } from "../../src/scheduler/service_execution.ts";
 import {
   computeTimestampedHmac,
@@ -57,6 +58,7 @@ Deno.test("Owner gateway steers and cancels a live scheduled model at real tool 
   const finish = Promise.withResolvers<void>();
   const effects: string[] = [];
   let scheduledSteps = 0;
+  let completeNormally = false;
   let confirmations = 0;
   let deny = false;
   const hooks: HookRunner = {
@@ -71,7 +73,7 @@ Deno.test("Owner gateway steers and cancels a live scheduled model at real tool 
       });
     },
   };
-  const scheduler = createSchedulerService({
+  const schedulerConfig: SchedulerServiceConfig = {
     executionTracePath: join(baseDir, "execution-traces.db"),
     triggerMdPath: "/unused",
     trigger: {
@@ -97,12 +99,21 @@ Deno.test("Owner gateway steers and cancels a live scheduled model at real tool 
           supportsStreaming: false,
           async complete(messages) {
             const step = ++scheduledSteps;
-            if (step === 1) {
+            if (
+              completeNormally && messages.some(({ role }) => role === "tool")
+            ) {
+              return {
+                usage,
+                content: "Verification finished.",
+                toolCalls: [],
+              };
+            }
+            if (!completeNormally && step === 1) {
               entered.resolve();
               await initial.promise;
-            } else if (step === 2) {
+            } else if (!completeNormally && step === 2) {
               assertStringIncludes(JSON.stringify(messages), note);
-            } else {
+            } else if (!completeNormally) {
               assertStringIncludes(
                 JSON.stringify(messages),
                 "Verified configuration is current.",
@@ -149,7 +160,8 @@ Deno.test("Owner gateway steers and cancels a live scheduled model at real tool 
         });
       },
     },
-  });
+  };
+  const scheduler = createSchedulerService(schedulerConfig);
   const operator = createProviderRegistry();
   operator.register({
     name: "live-control-owner",
@@ -314,6 +326,84 @@ Deno.test("Owner gateway steers and cancels a live scheduled model at real tool 
     assertEquals(JSON.parse(await turn(restore)), restored);
     assertEquals(await controls(), savedControls);
     assertEquals(effects, ["2"]);
+
+    completeNormally = true;
+    const nextBody = '{"event":"defensive.review.completed"}';
+    const nextTimestamp = String(Date.now());
+    const nextSignature = await computeTimestampedHmac(
+      nextTimestamp,
+      nextBody,
+      "fixture-shared-webhook-key",
+    );
+    const completedRequest = {
+      ...request,
+      body: nextBody,
+      headers: { "x-timestamp": nextTimestamp, "x-signature": nextSignature },
+    };
+    const completedDelivery = await fetch(deliveryUrl, completedRequest);
+    await completedDelivery.body?.cancel();
+    assertEquals(effects, ["2", "4"]);
+    const completedRun = {
+      ...ref,
+      id: schedulerExecutionIdentity("webhook", "control", nextSignature).id,
+    };
+    const completedArchiveId = crypto.randomUUID();
+    assertEquals(
+      JSON.parse(
+        await turn({
+          action: "archive",
+          ...completedRun,
+          requestId: completedArchiveId,
+        }),
+      ).receipt.status,
+      "succeeded",
+    );
+    await Deno.rename(
+      join(baseDir, "execution-traces.db"),
+      join(baseDir, "terminal-source-traces.db"),
+    );
+    for (
+      const [archivedRun, id] of [[ref, archiveId], [
+        completedRun,
+        completedArchiveId,
+      ]] as const
+    ) {
+      assertEquals(
+        JSON.parse(
+          await turn({
+            action: "restore",
+            ...archivedRun,
+            archiveId: id,
+            requestId: crypto.randomUUID(),
+          }),
+        ).receipt.status,
+        "succeeded",
+      );
+    }
+
+    const restartScheduler = createSchedulerService(schedulerConfig);
+    const restart = createGatewayServer({
+      port: 0,
+      token,
+      schedulerService: restartScheduler,
+    });
+    const restarted = await restart.start();
+    try {
+      const beforeReplay = scheduledSteps;
+      for (const retry of [request, completedRequest]) {
+        const rejected = await fetch(
+          `http://127.0.0.1:${restarted.port}/webhooks/control`,
+          retry,
+        );
+        assertEquals(scheduledSteps, beforeReplay);
+        assertEquals(rejected.status, 409);
+        await rejected.body?.cancel();
+      }
+      assertEquals(effects, ["2", "4"]);
+    } finally {
+      restartScheduler.stop();
+      await restart.stop();
+    }
   } finally {
     initial.resolve();
     finish.resolve();
