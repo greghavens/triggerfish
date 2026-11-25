@@ -371,3 +371,11 @@ returns receipt metadata and a `nextCursor` for the same case and revision.
 The [operator gateway fixture](../tests/gateway/operator_run_tool_test.ts)
 follows a two-page listing into an exact receipt read and verifies that
 continuation fails across case or revision boundaries.
+
+Authenticated operator agents can use `operator_runs finding_report` to
+read the report as of an exact case revision, with an optional report version.
+Each result identifies the original finding, the receipt for the selected
+version, the source assignment, and its evidence revision. The
+[operator gateway fixture](../tests/gateway/operator_run_tool_test.ts)
+reads the amended report and original text, and rejects the amendment when
+viewing the earlier revision or another case.

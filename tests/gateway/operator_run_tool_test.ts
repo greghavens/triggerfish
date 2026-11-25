@@ -926,6 +926,56 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
           ).record,
           recheck,
         );
+        const amendment = rechecks.updateFindingReport({
+          caseId: original.caseId,
+          runId: original.runId,
+          targetId: original.targetId,
+          evidenceRevision: nextPeer.revision,
+          taskId: recheck.taskId,
+          requestId: crypto.randomUUID(),
+          findingId: original.id,
+          expectedVersion: 1,
+          title: "Updated finding",
+          summary: "Retained remediation evidence was reviewed.",
+        });
+        assert(amendment);
+        const reportAction = {
+          ...receiptAction,
+          action: "finding_report",
+          revision: nextPeer.revision,
+        };
+        const current = JSON.parse((await turn(reportAction)).result).report;
+        assertEquals(current, {
+          findingId: original.id,
+          version: 2,
+          latestVersion: 2,
+          sourceReceiptId: amendment.id,
+          evidenceRevision: nextPeer.revision,
+          taskId: recheck.taskId,
+          title: amendment.title,
+          summary: amendment.summary,
+        });
+        const prior = JSON.parse(
+          (await turn({
+            ...reportAction,
+            reportVersion: 1,
+          })).result,
+        ).report;
+        assertEquals(prior.sourceReceiptId, original.id);
+        assertEquals(prior.summary, original.summary);
+        const archived = { ...reportAction, revision: peer.revision };
+        assertEquals(
+          JSON.parse((await turn(archived)).result).report.version,
+          1,
+        );
+        assertStringIncludes(
+          (await turn({ ...archived, reportVersion: 2 })).result,
+          "unavailable",
+        );
+        assertStringIncludes(
+          (await turn({ ...reportAction, ...exact })).result,
+          "unavailable",
+        );
       } finally {
         rechecks.close();
       }

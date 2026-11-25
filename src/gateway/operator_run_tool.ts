@@ -110,6 +110,7 @@ export const operatorRunTool: ToolDefinition = {
         "findings",
         "finding_receipt",
         "finding_receipts",
+        "finding_report",
         "facts",
         "save_digest",
         "list_digests",
@@ -150,6 +151,11 @@ export const operatorRunTool: ToolDefinition = {
     receiptId: {
       type: "string",
       description: "Exact saved Sentinel worker finding or recheck ID",
+    },
+    reportVersion: {
+      type: "integer",
+      description:
+        "Exact finding report version. Defaults to the latest version at the selected revision.",
     },
     host: {
       type: "string",
@@ -1197,9 +1203,13 @@ export function createOperatorRunToolExecutor(options: {
         });
         return page ? safeProjection({ run: ref, page }) : unavailable;
       }
-      if (action === "finding_receipt" || action === "finding_receipts") {
-        const { receiptId, cursor, limit = 5 } = args;
+      if (
+        action === "finding_receipt" || action === "finding_receipts" ||
+        action === "finding_report"
+      ) {
+        const { receiptId, cursor, limit = 5, reportVersion } = args;
         const listing = action === "finding_receipts";
+        const readingReport = action === "finding_report";
         const receiptPattern = /^worker-(?:finding|recheck):[a-f0-9]{64}$/;
         if (
           ref.kind !== "sentinel" || ref.revision === undefined ||
@@ -1209,6 +1219,9 @@ export function createOperatorRunToolExecutor(options: {
                 (typeof cursor !== "string" || !receiptPattern.test(cursor)))
             : typeof receiptId !== "string" ||
               !receiptPattern.test(receiptId)) ||
+          reportVersion !== undefined &&
+            (typeof reportVersion !== "number" ||
+              !Number.isSafeInteger(reportVersion) || reportVersion < 1) ||
           Object.keys(args).some((key) =>
             ![
               "action",
@@ -1216,6 +1229,7 @@ export function createOperatorRunToolExecutor(options: {
               "id",
               "revision",
               ...(listing ? ["cursor", "limit"] : ["receiptId"]),
+              ...(readingReport ? ["reportVersion"] : []),
             ].includes(key)
           ) ||
           !await controller.inspect(ref)
@@ -1233,6 +1247,41 @@ export function createOperatorRunToolExecutor(options: {
         }
         const journal = openSentinelWorkerFindingStore(path);
         try {
+          if (readingReport) {
+            if (!(receiptId as string).startsWith("worker-finding:")) {
+              return unavailable;
+            }
+            const report = journal.readFindingReport(
+              receiptId as string,
+              ref.revision,
+            );
+            if (
+              !report || report.finding.caseId !== ref.id ||
+              report.finding.runId !== runId
+            ) return unavailable;
+            const version = reportVersion ?? report.version;
+            const selected = version === 1
+              ? report.finding
+              : report.amendments.find((amendment) =>
+                amendment.version === version && amendment.caseId === ref.id &&
+                amendment.runId === runId
+              );
+            return selected
+              ? safeProjection({
+                run: ref,
+                report: {
+                  findingId: report.finding.id,
+                  version,
+                  latestVersion: report.version,
+                  sourceReceiptId: selected.id,
+                  evidenceRevision: selected.evidenceRevision,
+                  taskId: selected.taskId,
+                  title: selected.title,
+                  summary: selected.summary,
+                },
+              })
+              : unavailable;
+          }
           if (listing) {
             const matching = journal.list(ref.revision).filter(
               (record) => record.caseId === ref.id && record.runId === runId,
