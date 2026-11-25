@@ -3093,9 +3093,14 @@ policy and current repository access. Native checks use the original case,
 asset, workflow, and assignment authorization. The gateway fixture proves that
 a durable delegated model receives the fixed finding projection, resumes from
 the exact saved result, and cannot reuse it after source or output policy
-denial. The same configured grant registry controls scheduled and team
-invocation.
-[Worker findings gateway fixture](../tests/gateway/sentinel_worker_findings_test.ts).
+denial. The original case-local finding also reaches a trusted team
+delivery and a verified webhook execution before any recheck exists. The
+gateway fixture interrupts both after the exact read, blocks recovery
+under revoked scope or a removed grant, and restores the same saved
+result without a second dispatch. A later case revision rejects the
+original revision grant.
+[Worker findings gateway fixture](../tests/gateway/sentinel_worker_findings_test.ts),
+[Team and scheduled gateway fixture](../tests/gateway/sentinel_graph_fact_test.ts).
 
 The same role-scoped grant accepts a verified local `worker-recheck:`
 receipt. It reopens the original finding's saved graph and the current

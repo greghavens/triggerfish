@@ -79,7 +79,10 @@ import {
 import { digestSentinelSnapshot } from "../../src/sentinel/shared_inventory.ts";
 import { resolveSentinelCasePath } from "../../src/sentinel/cases.ts";
 import { listSentinelPlannerGraphFacts } from "../../src/sentinel/worker_graph_facts.ts";
-import type { SentinelWorkerFindingRecheckRecord } from "../../src/sentinel/worker_finding_store.ts";
+import type {
+  SentinelWorkerFindingRecheckRecord,
+  SentinelWorkerFindingRecord,
+} from "../../src/sentinel/worker_finding_store.ts";
 
 const assigned = "sentinel_assigned_target";
 const publish = "sentinel_publish_graph_fact";
@@ -4045,13 +4048,88 @@ Deno.test("Owner workflows wait for an original finding and preserve the exact p
           summary: "Original retained result.",
         })
       ),
-    ])).results[1].map((result) => JSON.parse(result).record);
+    ])).results[1].map((result) =>
+      JSON.parse(result).record as SentinelWorkerFindingRecord
+    );
     assertEquals(original.kind, "finding");
     assertEquals(unrelated.kind, "finding");
     assert(original.id !== unrelated.id);
+
+    let constraintVersion = 0;
+    const reviewConstraints = (
+      evidenceRevision: number,
+      allowedAssetIds?: readonly string[],
+    ) => {
+      const updated = recordSentinelOperatingConstraints(path, {
+        runId: original.runId,
+        evidenceRevision,
+        expectedVersion: constraintVersion,
+        requestId: crypto.randomUUID(),
+        operatorScope: "owner",
+        constraints: {
+          deniedKinds: [],
+          ...(allowedAssetIds && { allowedAssetIds }),
+        },
+      });
+      assert(updated);
+      constraintVersion = updated.version;
+    };
+    const originalGrant = {
+      case: caseId,
+      run_id: original.runId,
+      revision: initial.revision,
+      observation_id: original.id,
+    };
+    let savedFindingProjection: Record<string, unknown> | undefined;
+    const verifyOriginal = (projection: Record<string, unknown>) => {
+      if (savedFindingProjection) {
+        assertEquals(projection, savedFindingProjection);
+      }
+      savedFindingProjection = projection;
+      assertEquals(projection, {
+        _classification: "INTERNAL",
+        kind: "finding",
+        finding: {
+          id: original.id,
+          caseId,
+          runId: original.runId,
+          evidenceRevision: initial.revision,
+          taskId: original.taskId,
+          recordedAt: original.recordedAt,
+          assetId: original.targetId,
+          graphFindingId: original.graphFindingId,
+          evidenceId: original.evidenceId,
+          controlId: original.controlId,
+          snapshotDigest: original.snapshotDigest,
+          outcome: "fail",
+          observedAt: original.observedAt,
+          validUntil: original.validUntil,
+          evaluatedAt: original.evaluatedAt,
+        },
+      });
+    };
+    await verifyDelegatedObservationGrant(
+      baseDir,
+      originalGrant,
+      verifyOriginal,
+      () => reviewConstraints(initial.revision, []),
+      () => reviewConstraints(initial.revision),
+    );
+    await verifyScheduledObservationGrant(
+      baseDir,
+      originalGrant,
+      verifyOriginal,
+    );
+
     await Deno.writeTextFile(path, JSON.stringify(graph(true)));
     const current = refreshSentinelAssessment(path);
     assert(current && current.revision > initial.revision);
+    assertStringIncludes(
+      await createScheduledObservationRead(baseDir, originalGrant, undefined)(
+        {},
+      ),
+      "unavailable",
+    );
     advanceAdaptiveSentinel(path, current);
     const lease = readLease(current);
     const { runId } = current.plan;
@@ -4235,22 +4313,6 @@ Deno.test("Owner workflows wait for an original finding and preserve the exact p
       observation_id: recheck.id,
     };
     let savedProjection: Record<string, unknown> | undefined;
-    const reviewConstraints = (
-      expectedVersion: number,
-      allowedAssetIds?: readonly string[],
-    ) => {
-      assert(recordSentinelOperatingConstraints(path, {
-        runId,
-        evidenceRevision: current.revision,
-        expectedVersion,
-        requestId: crypto.randomUUID(),
-        operatorScope: "owner",
-        constraints: {
-          deniedKinds: [],
-          ...(allowedAssetIds && { allowedAssetIds }),
-        },
-      }));
-    };
     const verifyRecheck = (projection: Record<string, unknown>) => {
       if (savedProjection) assertEquals(projection, savedProjection);
       savedProjection = projection;
@@ -4295,8 +4357,8 @@ Deno.test("Owner workflows wait for an original finding and preserve the exact p
       baseDir,
       grant,
       verifyRecheck,
-      () => reviewConstraints(0, []),
-      () => reviewConstraints(1),
+      () => reviewConstraints(current.revision, []),
+      () => reviewConstraints(current.revision),
     );
     await verifyScheduledObservationGrant(baseDir, grant, verifyRecheck);
     assertStringIncludes(
