@@ -473,6 +473,11 @@ export const operatorRunTool: ToolDefinition = {
       description: "Trusted execution trace role",
       enum: ["delegated", "scheduled"],
     },
+    includeResult: {
+      type: "boolean",
+      description:
+        "Reopen the exact approved result of a selected planner read",
+    },
     ordinal: {
       type: "integer",
       description:
@@ -647,6 +652,51 @@ function sentinelTraceSourceSelector(
     : step.tool === "sentinel_shared_asset" && step.target
     ? sentinelSharedAssetLinksArgs({ asset: step.target })
     : undefined;
+}
+
+async function reopenPinnedSentinelSourceResult(
+  baseDir: string,
+  path: string,
+  revision: number,
+  step: Pick<SentinelReviewStep, "tool" | "target" | "goalReceiptRead">,
+  selector: Record<string, unknown>,
+) {
+  const receipt = step.goalReceiptRead;
+  if (!receipt) return;
+  let text: string | undefined;
+  if (step.tool === "sentinel_shared_topology_source") {
+    const { evidenceId, sourceCase } = selector;
+    if (
+      typeof evidenceId !== "string" || typeof sourceCase !== "string" ||
+      step.target !== evidenceId
+    ) return;
+    const snapshot = readSentinelAssessmentRevision(path, revision)
+      ?.result.sharedGraph.snapshot;
+    const source = snapshot && await readSharedSentinelTopologySource(
+      baseDir,
+      snapshot,
+      evidenceId,
+      sourceCase,
+      path,
+    );
+    if (source) text = projectSentinelSharedTopologySource(source, revision);
+  } else if (step.tool === "sentinel_shared_finding_source") {
+    const finding = parseSentinelPinnedFindingRead(selector);
+    if (!finding || step.target !== finding.finding) return;
+    const source = await readArchivedSentinelFindingSource(baseDir, {
+      caseId: finding.sourceCase,
+      assetId: finding.sourceAsset,
+      findingId: finding.finding,
+      snapshotDigest: finding.snapshotDigest,
+    }, path);
+    if (source) {
+      text = projectSentinelSharedFindingSource(source, revision, finding);
+    }
+  }
+  if (
+    text && !text.startsWith("Error:") &&
+    createHash("sha256").update(text).digest("hex") === receipt.sha256
+  ) return text;
 }
 
 async function resolveCitedTraceSource(
@@ -2140,57 +2190,15 @@ export function createOperatorRunToolExecutor(options: {
                 taskId: task.id,
               };
               if (!await authorize(scope, step.tool, args)) return unavailable;
-              let text: string | undefined;
-              if (step.tool === "sentinel_shared_topology_source") {
-                if (
-                  !args.evidenceId || !args.sourceCase ||
-                  step.target !== args.evidenceId
-                ) return unavailable;
-                const snapshot = readSentinelAssessmentRevision(
-                  path,
-                  ref.revision,
-                )?.result.sharedGraph.snapshot;
-                const source = snapshot &&
-                  await readSharedSentinelTopologySource(
-                    options.baseDir,
-                    snapshot,
-                    args.evidenceId,
-                    args.sourceCase,
-                    path,
-                  );
-                if (source) {
-                  text = projectSentinelSharedTopologySource(
-                    source,
-                    ref.revision,
-                  );
-                }
-              } else {
-                const finding = parseSentinelPinnedFindingRead(args);
-                if (
-                  !finding || step.target !== finding.finding
-                ) return unavailable;
-                const source = await readArchivedSentinelFindingSource(
-                  options.baseDir,
-                  {
-                    caseId: finding.sourceCase,
-                    assetId: finding.sourceAsset,
-                    findingId: finding.finding,
-                    snapshotDigest: finding.snapshotDigest,
-                  },
-                  path,
-                );
-                if (source) {
-                  text = projectSentinelSharedFindingSource(
-                    source,
-                    ref.revision,
-                    finding,
-                  );
-                }
-              }
+              const text = await reopenPinnedSentinelSourceResult(
+                options.baseDir,
+                path,
+                ref.revision,
+                step,
+                args,
+              );
               if (
-                !text || text.startsWith("Error:") ||
-                createHash("sha256").update(text).digest("hex") !==
-                  citation.sha256 ||
+                !text ||
                 !await authorize(scope, step.tool, args, text)
               ) return unavailable;
               const current = readHistoricalAdaptiveSentinel(
@@ -4020,6 +4028,7 @@ export function createOperatorRunToolExecutor(options: {
           plannerIdentity,
           attempt,
           ordinal,
+          includeResult,
           limit = 5,
           offset = 0,
           sourceCase,
@@ -4031,6 +4040,9 @@ export function createOperatorRunToolExecutor(options: {
           snapshotDigest !== undefined || assetId !== undefined;
         if (
           ref.kind !== "sentinel" || ref.revision === undefined ||
+          (includeResult !== undefined &&
+            (typeof includeResult !== "boolean" || !exact ||
+              sourceRequested)) ||
           (sourceRequested && (!exact || typeof sourceCase !== "string" ||
             !isSentinelCaseId(sourceCase) ||
             typeof snapshotDigest !== "string" ||
@@ -4055,7 +4067,7 @@ export function createOperatorRunToolExecutor(options: {
               "id",
               "revision",
               ...(exact
-                ? ["plannerIdentity", "attempt", "ordinal"]
+                ? ["plannerIdentity", "attempt", "ordinal", "includeResult"]
                 : ["limit", "offset"]),
               ...(sourceRequested
                 ? ["sourceCase", "snapshotDigest", "assetId"]
@@ -4084,9 +4096,10 @@ export function createOperatorRunToolExecutor(options: {
             plannerIdentity,
             attempt,
             ordinal,
-            read,
           };
-          if (!sourceRequested) return safeProjection(selected);
+          if (!sourceRequested && !includeResult) {
+            return safeProjection({ ...selected, read });
+          }
           const authorize = context?.authorizeSentinelTraceRead;
           const selector = sentinelTraceSourceSelector(read);
           const scope = {
@@ -4096,21 +4109,28 @@ export function createOperatorRunToolExecutor(options: {
             attempt: attempt as number,
           };
           if (
-            !authorize || !selector ||
+            read.outcome !== "returned" || !authorize || !selector ||
             !await authorize(scope, read.tool, selector)
           ) {
             return unavailable;
           }
-          const source = await resolveCitedTraceSource(
-            options.baseDir,
-            path,
-            read,
-            args,
-          );
-          if (
-            !source ||
-            !await authorize(scope, read.tool, selector, JSON.stringify(source))
-          ) {
+          const text = includeResult
+            ? await reopenPinnedSentinelSourceResult(
+              options.baseDir,
+              path,
+              ref.revision,
+              read,
+              selector,
+            )
+            : JSON.stringify(
+              await resolveCitedTraceSource(
+                options.baseDir,
+                path,
+                read,
+                args,
+              ),
+            );
+          if (!text || !await authorize(scope, read.tool, selector, text)) {
             return unavailable;
           }
           const current = readHistoricalAdaptiveSentinel(path, ref.revision);
@@ -4118,7 +4138,11 @@ export function createOperatorRunToolExecutor(options: {
             entry.identity === plannerIdentity && entry.attempt === attempt
           )?.reads?.[(ordinal as number) - 1];
           return current?.goal.id === runId && isDeepStrictEqual(saved, read)
-            ? safeProjection({ ...selected, source })
+            ? safeProjection(
+              includeResult
+                ? { ...selected, result: JSON.parse(text) }
+                : { ...selected, read, source: JSON.parse(text) },
+            )
             : unavailable;
         }
         const end = (offset as number) + (limit as number);

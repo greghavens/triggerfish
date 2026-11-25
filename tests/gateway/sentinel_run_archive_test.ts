@@ -2537,12 +2537,37 @@ Deno.test("a dispatched Sentinel planner source receipt survives gateway archive
         "PRE_TOOL_CALL",
         "POST_TOOL_RESPONSE",
       ]);
+      const resultRead = {
+        action: sourceRead.action,
+        kind: sourceRead.kind,
+        id: sourceRead.id,
+        revision: sourceRead.revision,
+        plannerIdentity: sourceRead.plannerIdentity,
+        attempt: sourceRead.attempt,
+        ordinal: sourceRead.ordinal,
+        includeResult: true,
+      };
+      const result = JSON.parse(await turn(resultRead)).result;
+      assertEquals(JSON.stringify(result), toolResponse);
+      assertEquals(policy.workerSourceHooks.splice(0), [
+        "PRE_TOOL_CALL",
+        "POST_TOOL_RESPONSE",
+      ]);
+      assertStringIncludes(
+        await turn({ ...resultRead, attempt: round.attempt + 1 }),
+        "unavailable",
+      );
+      assertStringIncludes(
+        await turn({ ...sourceRead, includeResult: true }),
+        "unavailable",
+      );
+      assertEquals(policy.workerSourceHooks, []);
       policy.denyWorkerSourceBefore = true;
-      assertStringIncludes(await turn(sourceRead), "unavailable");
+      assertStringIncludes(await turn(resultRead), "unavailable");
       assertEquals(policy.workerSourceHooks.splice(0), ["PRE_TOOL_CALL"]);
       policy.denyWorkerSourceBefore = false;
       policy.denyWorkerSourceAfter = true;
-      assertStringIncludes(await turn(sourceRead), "unavailable");
+      assertStringIncludes(await turn(resultRead), "unavailable");
       assertEquals(policy.workerSourceHooks.splice(0), [
         "PRE_TOOL_CALL",
         "POST_TOOL_RESPONSE",

@@ -1768,3 +1768,9 @@ provider stub. It checks the exact topology tool selector and response
 digest in the planner journal, removes the reporting case and workspace
 snapshot, then restores the archive through operator chat. Source readback
 resolves the original asset and honors pre-call and response denials.
+
+An exact `planner_reads` request can set `includeResult: true` to reopen a
+pinned topology or finding response. The gateway reconstructs the original
+projection, checks its committed digest, and reapplies the source hooks.
+The dispatched planner archive fixture verifies byte-for-byte topology
+readback after restore, policy denial, and rejection of a mismatched attempt.
