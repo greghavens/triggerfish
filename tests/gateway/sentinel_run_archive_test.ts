@@ -364,6 +364,29 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
       assessmentDigest,
       assessmentSnapshot,
     );
+    const plannerSnapshot = loadSentinelGraph({
+      ...originalSource,
+      nodes: originalSource.nodes.map((node) => ({
+        ...node,
+        label: node.label + " (planner only)",
+      })),
+    }).snapshot();
+    const plannerDigest = digestSentinelSnapshot(plannerSnapshot);
+    await retainSentinelSourceSnapshot(
+      baseDir,
+      sourceCase,
+      plannerDigest,
+      plannerSnapshot,
+    );
+    const plannerRead = {
+      tool: "sentinel_shared_asset",
+      outcome: "returned" as const,
+      sourceSnapshots: [{
+        caseId: sourceCase,
+        snapshotDigest: plannerDigest,
+        assetId: "source-app",
+      }],
+    };
     const privateToken = "archive-traffic-fixture-secret";
     await ingestSentinelTraffic(
       new Blob([JSON.stringify({
@@ -491,6 +514,20 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
           sourceSnapshots: [traceReference],
         }],
       }));
+      const identity = `${revision}:obs:archive-fixture`;
+      assertEquals(store.claimModelPlan(identity), 1);
+      assert(store.recordModelPlanInputManifest(identity, 1, {
+        promptSha256: "a".repeat(64),
+        hintIds: [],
+        findingReviewIds: [],
+        incidentReviewIds: [],
+        incidentCandidateIds: [],
+        investigationIds: [],
+        inventoryNodeIds: [],
+        workerObservations: [],
+      }));
+      assert(store.recordModelPlanRead(identity, 1, plannerRead));
+      store.completeModelPlan(identity, 1, "no_new_assignments");
       sourceTaskId = source.id;
       const dependent = store.sync(revision, [{
         kind: "review_finding",
@@ -666,6 +703,12 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
       assessmentDigest,
     );
     await Deno.remove(workspaceAssessment);
+    const workspacePlanner = sentinelSourceSnapshotPath(
+      baseDir,
+      sourceCase,
+      plannerDigest,
+    );
+    await Deno.remove(workspacePlanner);
     await Deno.rename(dirname(path), join(baseDir, "original-fixture"));
     await Deno.rename(linkPath, join(baseDir, "old-links.db"));
     const packageFile = join(
@@ -884,6 +927,23 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
       }]);
       await assertRejects(
         () => Deno.lstat(workspaceAssessment),
+        Deno.errors.NotFound,
+      );
+      assertEquals(
+        adaptive?.modelPlannerHistory?.flatMap(({ reads }) => reads ?? []),
+        [plannerRead],
+      );
+      assertEquals(
+        await readArchivedSentinelSnapshot(
+          baseDir,
+          sourceCase,
+          plannerDigest,
+          path,
+        ),
+        plannerSnapshot,
+      );
+      await assertRejects(
+        () => Deno.lstat(workspacePlanner),
         Deno.errors.NotFound,
       );
       assertEquals(source?.plannerRound?.peerFindingCitations, [

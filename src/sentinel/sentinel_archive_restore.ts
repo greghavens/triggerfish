@@ -21,6 +21,7 @@ import {
   digestSentinelSnapshot,
   sentinelArchivedAssessmentSourcesFile,
   sentinelArchivedFindingSourcesFile,
+  sentinelArchivedPlannerSourcesFile,
   sentinelArchivedTopologyFile,
   sentinelArchivedTraceSourcesFile,
 } from "./shared_inventory.ts";
@@ -100,6 +101,7 @@ export const permittedSentinelRestoreArtifacts = [
   sentinelArchivedTopologyFile,
   sentinelArchivedFindingSourcesFile,
   sentinelArchivedTraceSourcesFile,
+  sentinelArchivedPlannerSourcesFile,
   sentinelArchivedAssessmentSourcesFile,
   ...auxiliaryArtifacts,
 ] as const;
@@ -766,6 +768,7 @@ export async function restoreVerifiedSentinelCaseArchive(
     const name of [
       sentinelArchivedFindingSourcesFile,
       sentinelArchivedTraceSourcesFile,
+      sentinelArchivedPlannerSourcesFile,
     ] as const
   ) {
     const source = stagedPath(archive, name);
@@ -778,7 +781,11 @@ export async function restoreVerifiedSentinelCaseArchive(
       path: adaptive,
       runId,
       revision,
-      traces: name === sentinelArchivedTraceSourcesFile,
+      source: name === sentinelArchivedTraceSourcesFile
+        ? "worker_traces"
+        : name === sentinelArchivedPlannerSourcesFile
+        ? "planner_reads"
+        : "findings",
     });
     sourceBundles.push({ name, source });
   }

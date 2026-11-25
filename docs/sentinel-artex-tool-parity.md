@@ -458,3 +458,10 @@ the reviewed run ID and digest. The
 [CLI process fixture](../tests/cli/sentinel_goal_proof_test.ts) checks missing
 and incorrect proof rejection and verifies that an identical retry returns
 the original decision across independent CLI invocations.
+
+Sentinel archives also retain sources cited only by returned planner tool
+reads. Collection binds each read's planning identity to the archived run
+and retained evidence revisions. The
+[archive gateway fixture](../tests/gateway/sentinel_run_archive_test.ts)
+deletes the distinct planner source from the workspace, then verifies the
+restored planning history and exact source digest.

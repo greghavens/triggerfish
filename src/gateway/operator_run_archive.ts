@@ -254,7 +254,13 @@ export async function executeOperatorRunArchive(
             name === "sentinel-adaptive.db"
           );
           if (adaptive) {
-            for (const traces of [false, true]) {
+            for (
+              const sourceKind of [
+                "findings",
+                "worker_traces",
+                "planner_reads",
+              ] as const
+            ) {
               const source = await stageArchivedSourceSnapshots(
                 baseDir,
                 staged.directory,
@@ -264,7 +270,7 @@ export async function executeOperatorRunArchive(
                   path: adaptive.path,
                   runId: identity.runId,
                   revision: ref.revision!,
-                  traces,
+                  source: sourceKind,
                 },
               );
               if (source) snapshots.push(source);

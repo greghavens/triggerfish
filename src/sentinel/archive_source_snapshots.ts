@@ -8,6 +8,7 @@ import {
   readArchivedSentinelSnapshot,
   sentinelArchivedAssessmentSourcesFile,
   sentinelArchivedFindingSourcesFile,
+  sentinelArchivedPlannerSourcesFile,
   sentinelArchivedTopologyFile,
   sentinelArchivedTraceSourcesFile,
 } from "./shared_inventory.ts";
@@ -62,7 +63,7 @@ interface AdaptiveScope {
   readonly path: string;
   readonly runId: string;
   readonly revision: number;
-  readonly traces?: boolean;
+  readonly source: "findings" | "worker_traces" | "planner_reads";
 }
 
 function adaptiveReferences(scope: AdaptiveScope) {
@@ -74,7 +75,11 @@ function adaptiveReferences(scope: AdaptiveScope) {
       !db.prepare(
         "SELECT 1 FROM sqlite_schema WHERE name = 'adaptive_evidence_revisions' AND type = 'table'",
       ).get() ||
-      (scope.traces
+      (scope.source === "planner_reads"
+        ? !db.prepare(
+          "SELECT 1 FROM sqlite_schema WHERE name = 'adaptive_model_reads' AND type = 'table'",
+        ).get()
+        : scope.source === "worker_traces"
         ? !db.prepare(
           "SELECT 1 FROM sqlite_schema WHERE name = 'adaptive_note_steps' AND type = 'table'",
         ).get()
@@ -82,7 +87,24 @@ function adaptiveReferences(scope: AdaptiveScope) {
           "SELECT 1 FROM pragma_table_info('adaptive_tasks') WHERE name = 'plannerRound'",
         ).get())
     ) return result;
-    const query = scope.traces
+    const query = scope.source === "planner_reads"
+      ? `
+      SELECT DISTINCT json_extract(source.value, '$.caseId') AS caseId,
+        json_extract(source.value, '$.snapshotDigest') AS digest
+      FROM adaptive_model_reads AS trace,
+        json_each(trace.plannerReads) AS step,
+        json_each(step.value, '$.sourceSnapshots') AS source
+      WHERE EXISTS (
+        SELECT 1 FROM adaptive_evidence_revisions AS revision
+        WHERE revision.goalId = ? AND revision.evidenceNumber <= ?
+          AND (trace.identity = revision.revision OR
+            substr(trace.identity, 1, length(revision.revision) + 1) = revision.revision || ':')
+      )
+        AND json_extract(step.value, '$.outcome') = 'returned'
+        AND json_type(source.value, '$.snapshotDigest') = 'text'
+      LIMIT ?
+    `
+      : scope.source === "worker_traces"
       ? `
       SELECT DISTINCT json_extract(source.value, '$.caseId') AS caseId,
         json_extract(source.value, '$.snapshotDigest') AS digest
@@ -170,8 +192,10 @@ export async function stageArchivedSourceSnapshots(
   const name = scope.kind === "assessment_reviews"
     ? sentinelArchivedAssessmentSourcesFile
     : scope.kind === "adaptive"
-    ? (scope.traces
+    ? (scope.source === "worker_traces"
       ? sentinelArchivedTraceSourcesFile
+      : scope.source === "planner_reads"
+      ? sentinelArchivedPlannerSourcesFile
       : sentinelArchivedFindingSourcesFile)
     : sentinelArchivedTopologyFile;
   const sourcePath = join(directory, name);
