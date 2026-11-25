@@ -16,6 +16,7 @@ import {
   readSentinelFindingReviews,
   readSentinelIncidentReviews,
 } from "./assessment_store.ts";
+import { locateSentinelCase } from "./cases.ts";
 import { exportSentinelFindingTrafficLinks } from "./finding_traffic_links.ts";
 import { loadSentinelGraph } from "./graph.ts";
 import { readSentinelWorkerFindingReport } from "./worker_finding_store.ts";
@@ -103,10 +104,9 @@ export function renderSentinelProvenanceJson(
     adaptive?.modelPlannerHistory ?? [];
   const workerFindings = assessment.workerFindings ??
     readSentinelWorkerFindingReport(path, assessment.revision);
-  const findingTrafficLinks = exportSentinelFindingTrafficLinks(
-    path,
-    assessment.revision,
-  );
+  const findingTrafficLinks = locateSentinelCase(path)?.caseId === caseId
+    ? exportSentinelFindingTrafficLinks(path, assessment.revision)
+    : [];
   const planningDecisions = [
     ...readSentinelDecisions(
       path,
