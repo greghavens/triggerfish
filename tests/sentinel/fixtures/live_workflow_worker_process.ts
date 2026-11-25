@@ -69,6 +69,13 @@ const peerTask = phase.endsWith("_task_goal_proof")
 const peerRecheck = phase.endsWith("_recheck_goal_proof") || recheckDenied
   ? JSON.parse(Deno.readTextFileSync(join(baseDir, "peer-goal-recheck")))
   : undefined;
+const peerFindingPage = peerRecheck && JSON.stringify({
+  _classification: "INTERNAL",
+  caseId: peerRecheck.caseId,
+  evidenceRevision: peerRecheck.evidenceRevision,
+  records: [peerRecheck],
+  nextBeforeReceiptId: null,
+});
 const peerSearch = peerTask
   ? Deno.readTextFileSync(join(baseDir, "peer-goal-search"))
   : undefined;
@@ -448,6 +455,7 @@ const hookRunner: HookRunner = {
         if (
           input.tool_response !== peerResponse &&
           input.tool_response !== peerFactPage &&
+          input.tool_response !== peerFindingPage &&
           input.tool_response !== peerSearch &&
           (!peerTask || input.tool_response !== JSON.stringify(peerTask[1]))
         ) {
@@ -863,6 +871,19 @@ registry.register({
                 },
               }]
               : []),
+            ...(peerFindingPage
+              ? [{
+                type: "function",
+                id: "peer-findings-page",
+                function: {
+                  name: peerTool,
+                  arguments: JSON.stringify({
+                    revision: peerRecheck.evidenceRevision,
+                    limit: 1,
+                  }),
+                },
+              }]
+              : []),
             peerEvidence
               ? {
                 type: "function",
@@ -1086,7 +1107,7 @@ registry.register({
     if (proofPhase) {
       const receipt = JSON.parse(String(results.at(-1)?.content));
       if (
-        results.length !== (peerTask ? 7 : peerFact ? 3 : 2) ||
+        results.length !== (peerTask ? 7 : peerFact || peerRecheck ? 3 : 2) ||
         receipt.status !== "open" ||
         (peerTask &&
           (results[0].content !== peerWorkflowPage ||
@@ -1095,9 +1116,11 @@ registry.register({
             results[3].content !== peerSearch ||
             results[5].content !== JSON.stringify(peerTask[1]))) ||
         (peerFactPage && results[0].content !== peerFactPage) ||
+        (peerFindingPage && results[0].content !== peerFindingPage) ||
         receipt.criterionId !== "pipeline-review/worker-proof" ||
         (peerEvidence &&
-          results[peerTask ? 4 : peerFact ? 1 : 0].content !== peerResponse)
+          results[peerTask ? 4 : peerFact || peerRecheck ? 1 : 0].content !==
+            peerResponse)
       ) {
         throw new Error("The original proof receipt was not recovered");
       }
@@ -1363,8 +1386,9 @@ try {
       (proofPhase && phase.startsWith("resume") &&
         adaptive?.modelReviews.some(({ summary, steps }) =>
           summary === "Recovered the worker goal proof." &&
-          steps.length === (peerTask ? 7 : peerFact ? 3 : 2) &&
+          steps.length === (peerTask ? 7 : peerFact || peerRecheck ? 3 : 2) &&
           (!peerFact || steps[0].goalReceiptRead?.args.offset === 1) &&
+          (!peerRecheck || steps[0].goalReceiptRead?.args.limit === 1) &&
           steps.at(-1)?.tool === "sentinel_prove_goal" &&
           steps.at(-1)?.target === (peerEvidence ?? "pipeline-record") &&
           (!peerTask ||
@@ -1375,10 +1399,13 @@ try {
               steps[3].goalReceiptRead?.args.query === "retained peer" &&
               steps[5].goalReceiptRead?.args.offset === 1000)) &&
           (!peerEvidence ||
-            (steps[peerTask ? 4 : peerFact ? 1 : 0].goalReceiptRead?.args.id ??
-                steps[peerTask ? 4 : peerFact ? 1 : 0].goalReceiptRead?.args
+            (steps[peerTask ? 4 : peerFact || peerRecheck ? 1 : 0]
+                .goalReceiptRead?.args.id ??
+                steps[peerTask ? 4 : peerFact || peerRecheck ? 1 : 0]
+                  .goalReceiptRead?.args
                   .task ??
-                steps[peerTask ? 4 : peerFact ? 1 : 0].goalReceiptRead?.args
+                steps[peerTask ? 4 : peerFact || peerRecheck ? 1 : 0]
+                  .goalReceiptRead?.args
                   .receiptId) ===
               peerEvidence)
         )) ||

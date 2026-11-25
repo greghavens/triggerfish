@@ -831,3 +831,10 @@ reapplies root policy and checks each row against the retained journal in the
 worker's case, run, revision, and target. The fixture inserts an additional
 fact during downtime and verifies that the original offset page still reaches
 the model alongside the separately opened exact fact and committed proof.
+
+Worker finding and recheck lists retain the original page and continuation
+cursor after restart. The gateway verifies each returned receipt and any
+supplied cursor against the assigned case, run, target, and evidence revision.
+The restart fixture adds a new finding during downtime and verifies the
+original page, exact passing recheck, and committed proof. A separate fixture
+withholds the saved page when response policy changes.

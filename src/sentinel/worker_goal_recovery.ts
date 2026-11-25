@@ -127,7 +127,8 @@ export function isSentinelGoalReceiptRead(tool: unknown) {
 }
 
 export function isRepeatableSentinelReceiptRead(tool: unknown) {
-  return tool === SENTINEL_GOAL_GRAPH_FACT_READ ||
+  return tool === SENTINEL_GOAL_RECHECK_READ ||
+    tool === SENTINEL_GOAL_GRAPH_FACT_READ ||
     tool === SENTINEL_GOAL_TASK_READ ||
     tool === SENTINEL_WORKER_TRACE_SEARCH ||
     tool === SENTINEL_INTERMEDIATE_WORKFLOW_READ ||
@@ -135,7 +136,9 @@ export function isRepeatableSentinelReceiptRead(tool: unknown) {
 }
 
 export function isSentinelRetainedReadReceipt(tool: unknown, args: unknown) {
-  return tool === SENTINEL_WORKER_TRACE_SEARCH ||
+  return (tool === SENTINEL_GOAL_RECHECK_READ && !!args &&
+    typeof args === "object" && !("receiptId" in args)) ||
+    tool === SENTINEL_WORKER_TRACE_SEARCH ||
     isSentinelPinnedSourceRead(tool) ||
     isSentinelAssignedPrerequisiteRead(tool) ||
     tool === SENTINEL_SHARED_DISCOVERY_READ ||
@@ -204,6 +207,7 @@ type GoalReceiptReadArguments =
     revision?: number;
     offset?: number;
     limit?: number;
+    beforeReceiptId?: string;
     evidenceId?: string;
     sourceCase?: string;
     asset?: string;
@@ -355,6 +359,31 @@ export function sentinelGoalReceiptReadArguments(
       ...(args.revision !== undefined && { revision: args.revision }),
       ...(args.offset !== undefined && { offset: args.offset }),
     };
+  }
+  if (
+    tool === SENTINEL_GOAL_RECHECK_READ &&
+    Object.keys(args).every((key) =>
+      ["revision", "limit", "beforeReceiptId"].includes(key)
+    )
+  ) {
+    const { revision, limit, beforeReceiptId } = args;
+    if (
+      (revision === undefined ||
+        typeof revision === "number" && Number.isSafeInteger(revision) &&
+          revision > 0) &&
+      (limit === undefined ||
+        typeof limit === "number" && Number.isSafeInteger(limit) && limit > 0 &&
+          limit <= 10) &&
+      (beforeReceiptId === undefined ||
+        typeof beforeReceiptId === "string" &&
+          /^worker-(?:finding|recheck):[a-f0-9]{64}$/.test(beforeReceiptId))
+    ) {
+      return {
+        ...(revision !== undefined && { revision }),
+        ...(limit !== undefined && { limit }),
+        ...(beforeReceiptId !== undefined && { beforeReceiptId }),
+      };
+    }
   }
   if (
     tool === SENTINEL_GOAL_RECHECK_READ &&

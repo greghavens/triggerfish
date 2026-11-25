@@ -1,10 +1,12 @@
 import { redactCredentialText } from "../core/logger/redactor.ts";
 import {
+  parseSavedFindingPage,
   parseSavedGraphFactPage,
   parseSavedIntermediateWorkflowPage,
   parseSavedSentinelObservationSearch,
   reopenSentinelGoalReceiptRead,
   sentinelWorkerObservationPage,
+  validateSavedFindingPage,
   validateSavedGraphFactPage,
   validateSavedIntermediateWorkflowPage,
   validateSavedSentinelObservationSearch,
@@ -19,6 +21,7 @@ import {
   SENTINEL_GOAL_GRAPH_FACT_READ,
   SENTINEL_GOAL_PROPOSE,
   SENTINEL_GOAL_PROVE,
+  SENTINEL_GOAL_RECHECK_READ,
   SENTINEL_GOAL_TASK_READ,
   SENTINEL_INTERMEDIATE_WORKFLOW_READ,
   SENTINEL_PINNED_FINDING_READ,
@@ -3549,6 +3552,13 @@ function createAgent(
             ? assignedReview !== undefined &&
               redactCredentialText(result) === result &&
               JSON.parse(result).taskId === assignedReview.id
+            : name === SENTINEL_GOAL_RECHECK_READ &&
+                goalArgs.receiptId === undefined
+            ? options.assessmentRevision !== undefined &&
+              parseSavedFindingPage(result, {
+                caseId: locateSentinelCase(options.snapshotPath)?.caseId ?? "",
+                evidenceRevision: options.assessmentRevision,
+              }, goalArgs)
             : name === SENTINEL_GOAL_GRAPH_FACT_READ &&
                 goalArgs.id === undefined
             ? parseSavedGraphFactPage(result, goalArgs.offset ?? 0)
@@ -3851,6 +3861,29 @@ function createAgent(
                           evidenceRevision: revision,
                         },
                         args.offset ?? 0,
+                        saved,
+                      )
+                    ) return false;
+                    continue;
+                  }
+                  if (
+                    call.name === SENTINEL_GOAL_RECHECK_READ &&
+                    !("receiptId" in call.args)
+                  ) {
+                    const args = sentinelGoalReceiptReadArguments(
+                      call.name,
+                      call.args,
+                    );
+                    if (
+                      !args || !validateSavedFindingPage(
+                        options.snapshotPath,
+                        {
+                          caseId,
+                          runId: state.plan.runId,
+                          targetId: task.nodeId,
+                          evidenceRevision: revision,
+                        },
+                        args,
                         saved,
                       )
                     ) return false;

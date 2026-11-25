@@ -128,7 +128,7 @@ for (
       : phase === "resume_recheck_goal_proof_denied"
       ? "Sentinel withholds a saved remediation recheck when response policy changes after restart"
       : phase === "resume_recheck_goal_proof"
-      ? "Sentinel reauthorizes an exact passing remediation recheck and recovers its committed goal proof"
+      ? "Sentinel restores the original worker finding page and committed remediation proof"
       : phase === "resume_task_goal_proof"
       ? "Sentinel restores the original intermediate workflow page alongside peer evidence and a committed proof"
       : phase === "resume_peer_goal_proof"
@@ -1429,6 +1429,26 @@ for (
             journal.close();
           }
         }
+        if (recheckProof) {
+          const saved = JSON.parse(
+            await Deno.readTextFile(join(dir, "peer-goal-recheck")),
+          );
+          const journal = openSentinelWorkerFindingStore(path);
+          try {
+            const original = journal.readFinding(saved.findingId);
+            assert(original);
+            const added = journal.recordFinding({
+              ...original,
+              evidenceRevision: assessment.revision,
+              requestId: crypto.randomUUID(),
+              summary: "Additional finding committed during downtime.",
+            });
+            assertEquals(journal.list(assessment.revision)[0].id, added.id);
+            assert(added.id !== saved.id);
+          } finally {
+            journal.close();
+          }
+        }
         child = spawn(phase);
         const resumed = await child.output();
         child = undefined;
@@ -1686,6 +1706,7 @@ for (
           if (recheckDenied) {
             assertEquals(hooks.filter((line) => line.startsWith(`${phase}:`)), [
               `${phase}:peer_fact_pre`,
+              `${phase}:peer_fact_pre`,
               `${phase}:peer_fact_post_denied`,
             ]);
             return;
@@ -1699,7 +1720,7 @@ for (
               ...evidenceHooks(interrupted),
               ...(taskProof
                 ? [...evidenceHooks(interrupted), ...evidenceHooks(interrupted)]
-                : peerProof
+                : peerProof || recheckProof
                 ? evidenceHooks(interrupted)
                 : []),
               ...(taskProof
@@ -1711,7 +1732,7 @@ for (
                   `${phase}:peer_fact_post`,
                   `${phase}:peer_fact_post`,
                 ]
-                : peerProof
+                : peerProof || recheckProof
                 ? [
                   `${phase}:peer_fact_pre`,
                   `${phase}:peer_fact_pre`,

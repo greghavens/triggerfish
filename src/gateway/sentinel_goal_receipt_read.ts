@@ -1,3 +1,4 @@
+import { MAX_SENTINEL_FINDING_RESULT_CHARS } from "../sentinel/worker_finding_recovery.ts";
 import { redactCredentialText } from "../core/logger/redactor.ts";
 import { isDeepStrictEqual } from "node:util";
 import { createHash } from "node:crypto";
@@ -200,6 +201,81 @@ export function validateSavedGraphFactPage(
     const retained = readSentinelWorkerGraphFact(path, scope, fact.id);
     return retained !== undefined && isDeepStrictEqual(retained, fact);
   });
+}
+
+export function parseSavedFindingPage(
+  result: string,
+  scope: { caseId: string; evidenceRevision: number },
+  args: { revision?: number; limit?: number; beforeReceiptId?: string },
+) {
+  if (
+    result.length > MAX_SENTINEL_FINDING_RESULT_CHARS ||
+    redactCredentialText(result) !== result
+  ) return;
+  const page = JSON.parse(result);
+  if (
+    page?._classification !== "INTERNAL" || !Array.isArray(page.records) ||
+    page.records.length > (args.limit ?? 5) ||
+    (args.revision !== undefined && args.revision > scope.evidenceRevision)
+  ) return;
+  if (
+    Object.keys(page).length === 3 && page.records.length === 0 &&
+    page.nextBeforeReceiptId === null && args.beforeReceiptId === undefined
+  ) return [];
+  if (
+    Object.keys(page).length !== 5 || page.caseId !== scope.caseId ||
+    page.evidenceRevision !== (args.revision ?? scope.evidenceRevision) ||
+    (page.nextBeforeReceiptId !== null &&
+      (!page.records.length ||
+        page.nextBeforeReceiptId !== page.records.at(-1)?.id))
+  ) return;
+  const ids = new Set<string>();
+  const records: { id: string }[] = [];
+  for (const record of page.records) {
+    if (
+      typeof record?.id !== "string" ||
+      !/^worker-(?:finding|recheck):[a-f0-9]{64}$/.test(record.id) ||
+      ids.has(record.id) || record.id === args.beforeReceiptId
+    ) return;
+    ids.add(record.id);
+    records.push(record);
+  }
+  return records;
+}
+
+export function validateSavedFindingPage(
+  path: string,
+  scope: {
+    caseId: string;
+    runId: string;
+    targetId: string;
+    evidenceRevision: number;
+  },
+  args: { revision?: number; limit?: number; beforeReceiptId?: string },
+  result: string,
+) {
+  const records = parseSavedFindingPage(result, scope, args);
+  if (!records) return false;
+  if (!records.length && args.beforeReceiptId === undefined) return true;
+  if (!hasSentinelWorkerFindingJournal(path)) return false;
+  const store = openSentinelWorkerFindingStore(path);
+  try {
+    const read = (id: string) => {
+      const record = store.read(id);
+      return record?.caseId === scope.caseId && record.runId === scope.runId &&
+          record.targetId === scope.targetId &&
+          record.evidenceRevision <= scope.evidenceRevision &&
+          (args.revision === undefined ||
+            args.revision === record.evidenceRevision)
+        ? record
+        : undefined;
+    };
+    return (args.beforeReceiptId === undefined ||
+      !!read(args.beforeReceiptId)) &&
+      records.every((record) => isDeepStrictEqual(read(record.id), record));
+  } finally {
+    store.close();
+  }
 }
 
 export function reopenSentinelGoalReceiptRead(
