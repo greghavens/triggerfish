@@ -26,6 +26,20 @@ export interface GoalObservation {
   readonly evidence: readonly GoalEvidence[];
 }
 
+export interface GoalEvidenceSubmission {
+  readonly requestId: string;
+  readonly binding: string;
+  readonly criterionId: string;
+  readonly source: string;
+  readonly reference: string;
+}
+
+export interface GoalEvidenceSubmissionReceipt {
+  readonly criterionId: string;
+  readonly status: GoalCompletionStatus;
+  readonly proof: GoalEvidence;
+}
+
 export interface GoalCompletionRecord {
   readonly scope: string;
   readonly goal: string;
@@ -302,32 +316,124 @@ export class GoalCompletionStore {
     ) {
       throw new Error("Goal completion requires a trusted evidence verifier");
     }
+    return this.#transaction(() =>
+      this.#report(scope, observations, verify, operatorConfirmed)
+    );
+  }
+
+  #report(
+    scope: string,
+    observations: readonly GoalObservation[],
+    verify: EvidenceVerifier,
+    operatorConfirmed: boolean,
+  ) {
+    const previous = this.read(scope);
+    if (!previous) throw new Error("Goal completion scope is not registered");
+    if (previous.status === "completed") return previous;
+    const supplied = normalizeObservations(observations, previous.criteria);
+    const verified = verifyObservations(previous, supplied, verify);
+    const satisfied = verified.length === previous.criteria.length;
+    const status = !satisfied
+      ? "open"
+      : previous.policy === "automatic" || operatorConfirmed
+      ? "completed"
+      : "awaiting_confirmation";
+    if (
+      status === previous.status &&
+      JSON.stringify(verified) === JSON.stringify(previous.observations)
+    ) return previous;
+    const at = new Date(this.#now()).toISOString();
+    const record: GoalCompletionRecord = {
+      ...previous,
+      status,
+      observations: verified,
+      updatedAt: at,
+      ...(status === "completed" && { completedAt: at }),
+    };
+    this.#update.run(encodeRecord(record), scope);
+    return record;
+  }
+
+  readEvidenceSubmission(
+    scope: string,
+    requestId: string,
+  ) {
+    if (
+      !this.#db.prepare(
+        "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'goal_evidence_submissions'",
+      ).get()
+    ) return;
+    const row = this.#db.prepare(
+      "SELECT binding, receipt FROM goal_evidence_submissions WHERE scope = ? AND requestId = ?",
+    )
+      .get(scope, requestId);
+    if (!row) return;
+    return {
+      binding: String(row.binding),
+      receipt: JSON.parse(String(row.receipt)) as GoalEvidenceSubmissionReceipt,
+    };
+  }
+
+  reportEvidenceSubmission(
+    scope: string,
+    observations: readonly GoalObservation[],
+    verify: EvidenceVerifier,
+    request: GoalEvidenceSubmission,
+  ): GoalEvidenceSubmissionReceipt {
+    if (
+      !/^[0-9a-f]{64}$/.test(request.binding) ||
+      !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(request.requestId)
+    ) {
+      throw new Error("Invalid goal evidence submission");
+    }
     return this.#transaction(() => {
-      const previous = this.read(scope);
-      if (!previous) throw new Error("Goal completion scope is not registered");
-      if (previous.status === "completed") return previous;
-      const supplied = normalizeObservations(observations, previous.criteria);
-      const verified = verifyObservations(previous, supplied, verify);
-      const satisfied = verified.length === previous.criteria.length;
-      const status = !satisfied
-        ? "open"
-        : previous.policy === "automatic" || operatorConfirmed
-        ? "completed"
-        : "awaiting_confirmation";
+      const existing = this.readEvidenceSubmission(scope, request.requestId);
+      if (existing) {
+        if (existing.binding !== request.binding) {
+          throw new Error("Conflicting goal evidence request");
+        }
+        return existing.receipt;
+      }
+      const record = this.#report(scope, observations, verify, false);
+      const proof = record.observations.find(({ criterionId }) =>
+        criterionId === request.criterionId
+      )?.evidence.find(({ source, reference }) =>
+        source === request.source && reference === request.reference
+      );
+      if (!proof) {
+        throw new Error("The submitted goal evidence could not be verified");
+      }
+      this.#db.exec(`CREATE TABLE IF NOT EXISTS goal_evidence_submissions (
+        scope TEXT NOT NULL REFERENCES goal_completion(scope),
+        requestId TEXT NOT NULL,
+        binding TEXT NOT NULL,
+        receipt TEXT NOT NULL,
+        PRIMARY KEY(scope, requestId)
+      ) STRICT`);
       if (
-        status === previous.status &&
-        JSON.stringify(verified) === JSON.stringify(previous.observations)
-      ) return previous;
-      const at = new Date(this.#now()).toISOString();
-      const record: GoalCompletionRecord = {
-        ...previous,
-        status,
-        observations: verified,
-        updatedAt: at,
-        ...(status === "completed" && { completedAt: at }),
+        Number(
+          this.#db.prepare(
+            "SELECT COUNT(*) AS count FROM goal_evidence_submissions WHERE scope = ?",
+          ).get(scope)?.count,
+        ) >= 512
+      ) {
+        throw new Error("Goal evidence submission receipt capacity reached");
+      }
+      const receipt = {
+        criterionId: request.criterionId,
+        status: record.status,
+        proof,
       };
-      this.#update.run(encodeRecord(record), scope);
-      return record;
+      this.#db.prepare(
+        "INSERT INTO goal_evidence_submissions VALUES (?, ?, ?, ?)",
+      )
+        .run(
+          scope,
+          request.requestId,
+          request.binding,
+          JSON.stringify(receipt),
+        );
+      return receipt;
     });
   }
 

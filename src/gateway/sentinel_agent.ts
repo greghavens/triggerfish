@@ -1,5 +1,7 @@
 import {
   SENTINEL_GOAL_PROPOSE,
+  SENTINEL_GOAL_PROVE,
+  sentinelGoalProofArguments,
   sentinelGoalProposalArguments,
 } from "../sentinel/worker_goal_recovery.ts";
 import {
@@ -2154,10 +2156,15 @@ const proposeWorkerGoalTool: ToolDefinition = {
 };
 
 const proveWorkerGoalTool: ToolDefinition = {
-  name: "sentinel_prove_goal",
+  name: SENTINEL_GOAL_PROVE,
   description:
     "Submit assigned graph evidence, a committed relationship or recheck receipt, or a same-target task result for an existing formal goal criterion.",
   parameters: {
+    requestId: {
+      type: "string",
+      description:
+        "Unique request UUID for durable recovery of the proof receipt",
+    },
     source: {
       type: "string",
       enum: [
@@ -2557,8 +2564,13 @@ function createAgent(
         );
       }
       if (name === proveWorkerGoalTool.name) {
-        const { goalId, criterionId, evidenceId, source = "graph_evidence" } =
-          args;
+        const {
+          goalId,
+          criterionId,
+          evidenceId,
+          requestId,
+          source = "graph_evidence",
+        } = args;
         const taskDigest =
           typeof evidenceId === "string" && source === "adaptive_task"
             ? turn.readGoalTaskResults.get(evidenceId)
@@ -2572,6 +2584,7 @@ function createAgent(
           ) ||
           typeof goalId !== "string" || typeof criterionId !== "string" ||
           typeof evidenceId !== "string" ||
+          (requestId !== undefined && !sentinelGoalProofArguments(args)) ||
           (source === "adaptive_task"
             ? !taskDigest
             : (source === "graph_fact" || source === "finding_recheck")
@@ -2590,6 +2603,8 @@ function createAgent(
               goalId,
               criterionId,
               evidenceId,
+              ...(typeof requestId === "string" &&
+                { requestId, targetId: task.nodeId }),
               ...((source === "graph_fact" || source === "finding_recheck") &&
                 { scopedProof: { source, target: task.nodeId } }),
               ...(taskDigest &&
@@ -3229,6 +3244,8 @@ function createAgent(
           const { record, amendment } = JSON.parse(result);
           return (record ?? amendment)?.id;
         })()
+        : !failed && name === SENTINEL_GOAL_PROVE
+        ? JSON.parse(result).proof?.reference
         : !failed && name === SENTINEL_GOAL_PROPOSE
         ? JSON.parse(result).proposal?.id
         : !failed && name === SENTINEL_ASSET_DISCOVERY_SUBMIT
@@ -3710,6 +3727,16 @@ function createAgent(
                 const input = task?.nodeId
                   ? sentinelAssetDiscoveryArguments(args, task.nodeId)
                   : undefined;
+                return input &&
+                  {
+                    requestId: input.requestId,
+                    argsDigest: createHash("sha256").update(
+                      JSON.stringify(input),
+                    ).digest("hex"),
+                  };
+              }
+              if (name === SENTINEL_GOAL_PROVE) {
+                const input = sentinelGoalProofArguments(args);
                 return input &&
                   {
                     requestId: input.requestId,

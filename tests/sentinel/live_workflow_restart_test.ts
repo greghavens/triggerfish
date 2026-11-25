@@ -1,3 +1,9 @@
+import { digestSentinelGoalProposal } from "../../src/sentinel/formal_goals.ts";
+import {
+  ensureSentinelFormalGoalContract,
+  readSentinelGoalCompletionForState,
+  reportSentinelGoalCompletion,
+} from "../../src/gateway/sentinel_goal_completion.ts";
 import { openSentinelAssetDiscoveryStore } from "../../src/sentinel/asset_discovery_store.ts";
 import {
   readSentinelTrafficReceiptPage,
@@ -12,6 +18,7 @@ import { assert, assertEquals } from "@std/assert";
 import { dirname, fromFileUrl, join } from "@std/path";
 import { DatabaseSync } from "node:sqlite";
 import {
+  applySentinelFormalGoals,
   readSentinelWorkerGoalProposalReceipt,
   readSentinelWorkerGoalProposals,
   refreshSentinelAssessment,
@@ -33,6 +40,7 @@ for (
     "resume_graph_batch",
     "resume_discovery",
     "resume_goal_proposal",
+    "resume_goal_proof",
     "resume_graph_batch_corrupt",
     "resume_graph_unproven",
     "resume_finding",
@@ -86,6 +94,8 @@ for (
       ? `Sentinel recovers a committed ${phase.slice(7)} write after restart`
       : phase === "resume_graph_unproven"
       ? "A graph journal receipt with a different admitted request stays held"
+      : phase === "resume_goal_proof"
+      ? "Sentinel recovers a goal proof with its original completion status"
       : phase === "resume_goal_proposal"
       ? "Sentinel reconciles a worker goal proposal without submitting it again"
       : phase === "resume_discovery"
@@ -122,7 +132,7 @@ for (
     ignore: Deno.build.os === "windows",
     async fn() {
       const graphPhase = phase === "resume_discovery" ||
-        phase === "resume_goal_proposal" ||
+        phase === "resume_goal_proposal" || phase === "resume_goal_proof" ||
         phase === "resume_graph" ||
         phase === "resume_graph_mutation" ||
         phase === "resume_graph_unproven" ||
@@ -275,7 +285,29 @@ for (
           );
         }
         await Deno.writeTextFile(path, JSON.stringify(snapshot));
-        const assessment = startSentinelAssessment(path);
+        let assessment = startSentinelAssessment(path);
+        if (phase === "resume_goal_proof") {
+          const goals = [{
+            id: "pipeline-review",
+            title: "Review delivery",
+            policy: "operator" as const,
+            criteria: ["worker-proof", "operator-proof"].map((id) => ({
+              id,
+              description: "Verify the retained pipeline record",
+              source: "graph_evidence" as const,
+              reference: "pipeline-record",
+            })),
+          }];
+          assessment = applySentinelFormalGoals(path, {
+            mode: "append",
+            requestId: crypto.randomUUID(),
+            expectedRunId: assessment.plan.runId,
+            expectedRevision: assessment.revision,
+            proposalDigest: digestSentinelGoalProposal(goals),
+            goals,
+          }).state;
+          assert(ensureSentinelFormalGoalContract(path, assessment));
+        }
         if (
           phase === "resume_recheck" || phase === "resume_recheck_batch" ||
           phase === "resume_amendment" || trafficPhase
@@ -573,6 +605,20 @@ for (
             store.close();
           }
         }
+        if (phase === "resume_goal_proof") {
+          const partial = readSentinelGoalCompletionForState(path, assessment);
+          assertEquals(partial?.status, "open");
+          assert(partial);
+          const later = reportSentinelGoalCompletion(path, partial.scope, [{
+            criterionId: "pipeline-review/operator-proof",
+            evidence: [{
+              source: "graph_evidence",
+              reference: "pipeline-record",
+              detail: "Confirmed retained evidence.",
+            }],
+          }]);
+          assertEquals(later.record.status, "awaiting_confirmation");
+        }
         child = spawn(phase);
         const resumed = await child.output();
         child = undefined;
@@ -760,6 +806,23 @@ for (
           } finally {
             db.close();
           }
+          return;
+        }
+        if (phase === "resume_goal_proof") {
+          const saved = readSentinelGoalCompletionForState(path, assessment);
+          assertEquals(saved?.status, "awaiting_confirmation");
+          assertEquals(saved?.observations.length, 2);
+          const proof = saved?.observations.find(({ criterionId }) =>
+            criterionId === "pipeline-review/worker-proof"
+          );
+          assertEquals(proof?.evidence.length, 1);
+          assertEquals(
+            hooks.filter((line) => line.endsWith(":goal_proof_result")),
+            [
+              "interrupt_goal_proof:goal_proof_result",
+              "resume_goal_proof:goal_proof_result",
+            ],
+          );
           return;
         }
         if (phase === "resume_goal_proposal") {

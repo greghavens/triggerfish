@@ -1,3 +1,8 @@
+import {
+  ensureSentinelFormalGoalContract,
+  readSentinelWorkerGoalProofReceipt,
+  reportSentinelWorkerGoalProof,
+} from "../../src/gateway/sentinel_goal_completion.ts";
 import type { BootstrapResult } from "../../src/gateway/startup/bootstrap.ts";
 import { createTidepoolSentinelHandler } from "../../src/gateway/startup/services/tidepool_sentinel.ts";
 import { loadSentinelGraph } from "../../src/sentinel/graph.ts";
@@ -576,6 +581,18 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
         journal.close();
       }
     })();
+    const proofRequestId = crypto.randomUUID();
+    assert(ensureSentinelFormalGoalContract(path, state));
+    const goalProofReceipt = reportSentinelWorkerGoalProof(path, {
+      revision: state.revision,
+      assignmentId: sourceTaskId,
+      targetId: "app",
+      goalId: "review-source",
+      criterionId: "saved-log",
+      evidenceId,
+      requestId: proofRequestId,
+    }, () => true);
+    assertEquals(goalProofReceipt?.status, "awaiting_confirmation");
     const trafficScope = {
       kind: exact.kind,
       id: exact.id,
@@ -846,6 +863,17 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
       assertEquals(restored.plan.runId, state.plan.runId);
       assertEquals(restored.plan.formalGoals, goals);
       assertEquals(restored.revision, state.revision);
+      assertEquals(
+        readSentinelWorkerGoalProofReceipt(
+          path,
+          restored,
+          sourceTaskId,
+          "app",
+          proofRequestId,
+        )?.receipt,
+        goalProofReceipt,
+      );
+
       assertEquals(JSON.parse(await turn(topologyAction)), originalTopology);
       await assertRejects(
         () => Deno.lstat(workspaceSource),

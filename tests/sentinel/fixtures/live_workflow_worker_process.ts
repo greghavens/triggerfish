@@ -49,9 +49,10 @@ const findingTool = phase.endsWith("_finding") || findingBatch
   : phase.endsWith("_amendment")
   ? "sentinel_update_finding_report"
   : undefined;
+const proofPhase = phase.endsWith("_goal_proof");
 const proposalPhase = phase.endsWith("_goal_proposal");
 const discoveryPhase = phase.endsWith("_discovery");
-const assignedPhase = proposalPhase || discoveryPhase ||
+const assignedPhase = proofPhase || proposalPhase || discoveryPhase ||
   phase === "interrupt_assigned" ||
   phase === "resume_assigned" || graphPhase || findingTool !== undefined;
 const firstBatch = phase.endsWith("_first_batch");
@@ -302,6 +303,25 @@ const hookRunner: HookRunner = {
         return new Promise(() => {});
       }
     }
+    if (
+      proofPhase && hook === "POST_TOOL_RESPONSE" &&
+      tool === "sentinel_prove_goal"
+    ) {
+      const receipt = JSON.parse(String(input.tool_response));
+      if (
+        receipt.status !== "open" ||
+        receipt.proof?.reference !== "pipeline-record"
+      ) {
+        throw new Error(
+          "The proof receipt did not preserve the original status",
+        );
+      }
+      record("goal_proof_result");
+      if (phase === "interrupt_goal_proof") {
+        Deno.writeTextFileSync(join(baseDir, "checkpoint-ready"), "ready");
+        return new Promise(() => {});
+      }
+    }
     if (hook === "PRE_OUTPUT") {
       allowed &&= input.target_classification === "INTERNAL";
       record(allowed ? "output_internal" : "output_denied");
@@ -532,7 +552,7 @@ registry.register({
         phase === "resume" || phase === "resume_assigned" ||
         phase === "resume_graph" || phase === "resume_graph_mutation" ||
         phase === "resume_graph_batch" || phase === "resume_discovery" ||
-        phase === "resume_goal_proposal"
+        phase === "resume_goal_proposal" || phase === "resume_goal_proof"
       ) {
         throw new Error("Resume lost the saved tool result");
       }
@@ -558,7 +578,21 @@ registry.register({
         content: "Synthetic checkpoint draft: fixture-only-draft",
         reasoning: "Synthetic checkpoint reasoning: fixture-only-reasoning",
         usage,
-        toolCalls: phase === "interrupt_goal_proposal"
+        toolCalls: phase === "interrupt_goal_proof"
+          ? [targetCall, {
+            type: "function",
+            id: "goal-proof",
+            function: {
+              name: "sentinel_prove_goal",
+              arguments: JSON.stringify({
+                goalId: "pipeline-review",
+                criterionId: "worker-proof",
+                evidenceId: "pipeline-record",
+                requestId: "15673bf0-5479-4f75-93c9-1f144e97eee9",
+              }),
+            },
+          }]
+          : phase === "interrupt_goal_proposal"
           ? [targetCall, {
             type: "function",
             id: "goal-proposal",
@@ -707,6 +741,21 @@ registry.register({
       return Promise.resolve({
         content:
           '{"summary":"Resumed the committed finding write.","followUps":[]}',
+        toolCalls: [],
+        usage,
+      });
+    }
+    if (proofPhase) {
+      const receipt = JSON.parse(String(results[1]?.content));
+      if (
+        results.length !== 2 || receipt.status !== "open" ||
+        receipt.criterionId !== "pipeline-review/worker-proof"
+      ) {
+        throw new Error("The original proof receipt was not recovered");
+      }
+      return Promise.resolve({
+        content:
+          '{"summary":"Recovered the worker goal proof.","followUps":[]}',
         toolCalls: [],
         usage,
       });
@@ -927,6 +976,13 @@ try {
     planner.advance(state);
     const adaptive = readAdaptiveSentinel(path, state);
     if (
+      (phase === "resume_goal_proof" &&
+        adaptive?.modelReviews.some(({ summary, steps }) =>
+          summary === "Recovered the worker goal proof." &&
+          steps.length === 2 &&
+          steps[1].tool === "sentinel_prove_goal" &&
+          steps[1].target === "pipeline-record"
+        )) ||
       (phase === "resume_goal_proposal" &&
         adaptive?.modelReviews.some(({ summary, steps }) =>
           summary === "Recovered the worker goal proposal." &&

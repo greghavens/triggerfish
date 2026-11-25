@@ -1,3 +1,4 @@
+import { sentinelGoalProofArguments } from "../sentinel/worker_goal_recovery.ts";
 import { readSentinelCaseGraphFacts } from "../sentinel/worker_graph_facts.ts";
 import { digestSentinelSnapshot } from "../sentinel/shared_inventory.ts";
 /** Bind shared goal completion to exact Sentinel case evidence and lifecycle. */
@@ -506,25 +507,96 @@ function recordGoalEvidence(
   }
   const store = new GoalCompletionStore(goalDatabasePath(snapshotPath));
   try {
-    const workerProofs = new Set(record.observations.flatMap(
-      ({ criterionId, evidence }) =>
-        evidence.filter(({ detail }) => detail.startsWith(workerProofPrefix))
-          .map(({ source, reference }) =>
-            JSON.stringify([criterionId, source, reference])
-          ),
-    ));
-    const supplied = observations.map(({ criterionId, evidence }) => ({
-      criterionId,
-      evidence: evidence.filter(({ source, reference }) =>
-        !workerProofs.has(JSON.stringify([criterionId, source, reference]))
-      ),
-    }));
+    const supplied = withoutDuplicateWorkerProofs(record, observations);
     return store.report(
       record.scope,
       supplied,
       verify,
       operatorConfirmed,
     );
+  } finally {
+    store.close();
+  }
+}
+
+function withoutDuplicateWorkerProofs(
+  record: GoalRecord,
+  observations: readonly Observation[],
+) {
+  const workerProofs = new Set(record.observations.flatMap(
+    ({ criterionId, evidence }) =>
+      evidence.filter(({ detail }) => detail.startsWith(workerProofPrefix))
+        .map(({ source, reference }) =>
+          JSON.stringify([criterionId, source, reference])
+        ),
+  ));
+  return observations.map(({ criterionId, evidence }) => ({
+    criterionId,
+    evidence: evidence.filter(({ source, reference }) =>
+      !workerProofs.has(JSON.stringify([criterionId, source, reference]))
+    ),
+  }));
+}
+
+function workerProofRequestBinding(
+  assignmentId: string,
+  targetId: string,
+  args: NonNullable<ReturnType<typeof sentinelGoalProofArguments>>,
+) {
+  return createHash("sha256").update(
+    JSON.stringify([assignmentId, targetId, args]),
+  ).digest("hex");
+}
+
+export function readSentinelWorkerGoalProofReceipt(
+  snapshotPath: string,
+  state: State,
+  assignmentId: string,
+  targetId: string,
+  requestId: string,
+) {
+  const scope = goalScope(snapshotPath, state);
+  const path = goalDatabasePath(snapshotPath);
+  if (!state.plan.runId || !exists(path)) return;
+  const store = new GoalCompletionStore(path);
+  try {
+    const registered = store.read(scope);
+    const saved = store.readEvidenceSubmission(scope, requestId);
+    if (!saved || !registered) return;
+    const { criterionId, proof, status } = saved.receipt;
+    const [goalId, localCriterion] = criterionId.split("/");
+    if (!state.plan.activeFormalGoalIds?.includes(goalId)) return;
+    const args = sentinelGoalProofArguments({
+      goalId,
+      criterionId: localCriterion,
+      evidenceId: proof.reference,
+      source: proof.source,
+      requestId,
+    });
+    if (
+      !args ||
+      saved.binding !==
+        workerProofRequestBinding(assignmentId, targetId, args) ||
+      !registered.observations.some((observation) =>
+        observation.criterionId === criterionId && observation.evidence.some(
+          (evidence) =>
+            evidence.source === proof.source &&
+            evidence.reference === proof.reference &&
+            evidence.detail === proof.detail,
+        )
+      ) ||
+      !goalEvidenceVerifier(snapshotPath, state, registered)(criterionId, proof)
+    ) return;
+    return {
+      args,
+      receipt: {
+        runId: state.plan.runId,
+        evidenceRevision: state.revision,
+        criterionId,
+        proof,
+        status,
+      },
+    };
   } finally {
     store.close();
   }
@@ -538,6 +610,8 @@ export function reportSentinelWorkerGoalProof(
     goalId: string;
     criterionId: string;
     evidenceId: string;
+    requestId?: string;
+    targetId?: string;
     taskProof?: { target: string; digest: string };
     scopedProof?: { source: "graph_fact" | "finding_recheck"; target: string };
   },
@@ -589,22 +663,63 @@ export function reportSentinelWorkerGoalProof(
           input.taskProof ?? input.scopedProof,
         )
       ) return false;
-      const saved = recordGoalEvidence(snapshotPath, state, registered, [{
-        criterionId,
-        evidence: [evidence],
-      }], false);
-      const proof = saved.observations.find((observation) =>
-        observation.criterionId === criterionId
-      )?.evidence.find(({ source, reference }) =>
-        source === evidence.source && reference === evidence.reference
-      );
+      const observations = [{ criterionId, evidence: [evidence] }];
+      let proof: Evidence | undefined;
+      let status: GoalRecord["status"];
+      if (input.requestId !== undefined) {
+        const args = sentinelGoalProofArguments({
+          goalId: input.goalId,
+          criterionId: input.criterionId,
+          evidenceId: input.evidenceId,
+          source: evidence.source,
+          requestId: input.requestId,
+        });
+        if (!args || !input.targetId) return false;
+        const store = new GoalCompletionStore(goalDatabasePath(snapshotPath));
+        try {
+          const saved = store.reportEvidenceSubmission(
+            registered.scope,
+            withoutDuplicateWorkerProofs(registered, observations),
+            goalEvidenceVerifier(snapshotPath, state, registered),
+            {
+              requestId: args.requestId,
+              binding: workerProofRequestBinding(
+                input.assignmentId,
+                input.targetId,
+                args,
+              ),
+              criterionId,
+              source: evidence.source,
+              reference: evidence.reference,
+            },
+          );
+          ({ proof, status } = saved);
+        } finally {
+          store.close();
+        }
+      } else {
+        const saved = recordGoalEvidence(
+          snapshotPath,
+          state,
+          registered,
+          observations,
+          false,
+        );
+        proof = saved.observations.find((observation) =>
+          observation.criterionId === criterionId
+        )
+          ?.evidence.find(({ source, reference }) =>
+            source === evidence.source && reference === evidence.reference
+          );
+        status = saved.status;
+      }
       if (!proof) return false;
       receipt = {
         runId: state.plan.runId,
         evidenceRevision: state.revision,
         criterionId,
         proof,
-        status: saved.status,
+        status,
       };
       // The assessment service applies the decision after the worker returns.
       return false;

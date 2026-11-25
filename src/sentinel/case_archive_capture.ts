@@ -118,7 +118,14 @@ const evidenceStoreSchemas: Partial<
   >
 > = {
   "sentinel-goal-completion.db": {
-    tables: [{ name: "goal_completion", columns: ["scope", "record"] }],
+    tables: [
+      { name: "goal_completion", columns: ["scope", "record"] },
+      {
+        name: "goal_evidence_submissions",
+        columns: ["scope", "requestId", "binding", "receipt"],
+        optionalTable: true,
+      },
+    ],
   },
   "sentinel-worker-findings.db": {
     applicationId: 0x53574644,

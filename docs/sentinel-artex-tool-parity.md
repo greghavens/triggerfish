@@ -759,5 +759,9 @@ assignment, target, and normalized criterion. The saved result retains
 operator review as its policy. The process restart fixture interrupts a
 first batch after the proposal commits and verifies one saved proposal,
 the original evidence criterion, and root reauthorization without
-resubmission. Goal proof writes still need an exact recovery receipt for
-the completion status returned at submission time.
+resubmission. Worker goal proofs can also carry a request UUID. The shared
+completion store commits the proof and its original status in the same
+transaction. The restart fixture advances the live goal from open to
+awaiting confirmation and verifies that the worker still receives its
+original open receipt. The archive gateway fixture verifies that the
+proof receipt survives restoration of a paused case.

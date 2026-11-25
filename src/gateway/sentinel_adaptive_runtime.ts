@@ -1,6 +1,7 @@
 import { readSentinelWorkerGoalProposalReceipt } from "../sentinel/assessment_store.ts";
 import {
   SENTINEL_GOAL_PROPOSE,
+  SENTINEL_GOAL_PROVE,
   sentinelGoalProposalArguments,
 } from "../sentinel/worker_goal_recovery.ts";
 import {
@@ -104,6 +105,7 @@ import type { GoalObservation } from "../core/goal_completion.ts";
 import {
   ensureSentinelFormalGoalContract,
   readSentinelGoalCompletionForState,
+  readSentinelWorkerGoalProofReceipt,
   reconcileSentinelAutomaticGoal,
   reportSentinelGoalCompletion,
 } from "./sentinel_goal_completion.ts";
@@ -2800,6 +2802,24 @@ export function createSentinelModelPlanner(
         targetId,
         evidenceRevision: current.revision,
       };
+      if (tool === SENTINEL_GOAL_PROVE) {
+        const saved = readSentinelWorkerGoalProofReceipt(
+          snapshotPath,
+          current,
+          taskId,
+          targetId,
+          requestId,
+        );
+        return saved &&
+          {
+            id: saved.receipt.criterionId,
+            args: saved.args,
+            result: JSON.stringify({
+              _classification: "INTERNAL",
+              ...saved.receipt,
+            }),
+          };
+      }
       if (tool === SENTINEL_GOAL_PROPOSE) {
         const proposal = readSentinelWorkerGoalProposalReceipt(snapshotPath, {
           runId,
@@ -3307,6 +3327,28 @@ export function createSentinelModelPlanner(
                     if (saved) resumedProgress.add(saved);
                     steps.push(
                       saved ?? { tool, outcome: "returned", target: output.id },
+                    );
+                    continue;
+                  }
+                  if (
+                    typeof output.criterionId === "string" &&
+                    typeof output.proof?.reference === "string" &&
+                    output.runId === current.plan.runId &&
+                    output.evidenceRevision === current.revision
+                  ) {
+                    const tool = SENTINEL_GOAL_PROVE;
+                    const saved = previousProgress.find((step) =>
+                      step.tool === tool && step.outcome === "returned" &&
+                      step.target === output.proof.reference
+                    );
+                    if (saved) resumedProgress.add(saved);
+                    steps.push(
+                      saved ??
+                        {
+                          tool,
+                          outcome: "returned",
+                          target: output.proof.reference,
+                        },
                     );
                     continue;
                   }

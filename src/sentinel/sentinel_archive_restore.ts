@@ -172,6 +172,8 @@ function checkedDatabase<T>(
       typeof name === "string" &&
       (auxiliary
         ? Object.hasOwn(auxiliary.tables, name) ||
+          family === "sentinel-goal-completion.db" &&
+            name === "goal_evidence_submissions" ||
           family === "sentinel-finding-traffic-links.db" &&
             version === 2 && name === "traffic_link_request_aliases"
         : name === family || name.startsWith(family + "_") ||
@@ -426,6 +428,14 @@ function validateAuxiliary(
       const [table, fields] of Object.entries(auxiliarySchemas[name].tables)
     ) {
       requireColumns(db, table, fields);
+    }
+    if (tables.has("goal_evidence_submissions")) {
+      requireColumns(db, "goal_evidence_submissions", [
+        "scope",
+        "requestId",
+        "binding",
+        "receipt",
+      ]);
     }
     if (tables.has("traffic_link_request_aliases")) {
       requireColumns(db, "traffic_link_request_aliases", [
