@@ -48,7 +48,7 @@ routes. [Model registration and dispatch](../src/gateway/sentinel_agent.ts),
 | ARTEX tool                                                                                                  | ARTEX binding and runtime path                                                                                                                                        | Sentinel equivalent and boundary                                                                                                                                                                                                                                                                                                                                          |
 | ----------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `Read`, `Write`, `Edit`, `MultiEdit`, `LS`, `Glob`, `Grep`, `Bash`, `Sleep`, `skill`, `MCP`                 | SDK defaults are assembled by role. The worker excludes `MultiEdit`, `Glob`, and `Grep` from its SDK default set. Assembly augments with enabled skill and MCP tools. | Sentinel model tools read typed, scoped evidence through dedicated readers. The host triage reader is a CLI path. Generic filesystem mutation, shell, open-ended delays, and unrestricted extension discovery are outside the isolated model surface. [Agent fixture](../tests/sentinel/agent_test.ts), [host triage fixture](../tests/sentinel/host_triage_test.ts).     |
-| `create_skill`, `update_skill_file`, `create_custom_tool`, `update_custom_tool`, `create_mcp`, `update_mcp` | Server platform tools are bound to Auto by default.                                                                                                                   | The ordinary owner agent can create a pending reviewed skill and stage an exact revision. Plugin scan, install and reload reuse Triggerfish's configured execution grant. MCP discovery, runtime settings, enable, disable and removal use `mcp_manage`; connector creation from an exact operator proposal is open. Sentinel planner and worker bindings expose scoped investigation operations. [Skill gateway](../tests/gateway/skill_approval_gateway_test.ts), [plugin gateway](../tests/plugin/integration_test.ts), [MCP gateway](../tests/gateway/tools/mcp_manage_reload_test.ts). |
+| `create_skill`, `update_skill_file`, `create_custom_tool`, `update_custom_tool`, `create_mcp`, `update_mcp` | Server platform tools are bound to Auto by default.                                                                                                                   | The ordinary owner agent can create a pending reviewed skill and stage an exact revision. Plugin scan, install and reload reuse Triggerfish's configured execution grant. MCP discovery, runtime settings, enable, disable, removal and creation from an exact operator-staged proposal use `mcp_manage`. Sentinel planner and worker bindings expose scoped investigation operations. [Skill gateway](../tests/gateway/skill_approval_gateway_test.ts), [plugin gateway](../tests/plugin/integration_test.ts), [MCP gateway](../tests/gateway/tools/mcp_manage_reload_test.ts). |
 
 [ARTEX worker assembly](https://github.com/jiwoochris/artex-global/blob/06b36d72/agent/worker.go),
 [platform tools](https://github.com/jiwoochris/artex-global/blob/06b36d72/server/platform_tools.go).
@@ -75,7 +75,10 @@ configured connector revision. The gateway fixture exercises policy and
 configuration drift, denial, duplicate decisions, and separate restarts
 that remove and restore the connector's model-callable tools. The same inbox
 gates removal. The gateway fixture verifies exact removal across restart
-and preserves neighboring connector entries.
+and preserves neighboring connector entries. Creation also requires an exact
+operator-staged proposal and inbox approval. The saved entry starts
+disabled. The process fixture applies a separate enable approval and
+restarts before invoking the new connector.
 
 The ordinary owner agent can call `mcp_manage tools` for an exact
 configured connector. It lists the tool names in the live registry used
@@ -2384,6 +2387,14 @@ with the original action. The synthetic records verify that request
 parameters stay outside the projection. Check the approved destination and
 selection separately to determine whether forwarding changed.
 [AWS subscription filter reference](https://docs.aws.amazon.com/AmazonCloudWatchLogs/latest/APIReference/API_PutSubscriptionFilter.html).
+
+The CloudTrail sign-in projection emits an immediate high-severity
+credential-abuse alert for a successful root console sign-in that
+explicitly records no MFA. The same event remains eligible for the
+existing authentication correlations. Adapter tests cover failed logins,
+IAM users, missing MFA fields, and MFA-backed root logins. The gateway
+fixture reopens the exact alert evidence after archive restoration.
+[AWS sign-in event reference](https://docs.aws.amazon.com/awscloudtrail/latest/userguide/cloudtrail-event-reference-aws-console-sign-in-events.html).
 
 The same CloudTrail feed reports account-level S3 Block Public Access
 writes and removals separately from bucket-level removals. The coverage

@@ -144,6 +144,7 @@ export const telemetryAlertSeverities = {
   authentication_failure_fanout: "medium",
   authentication_success_after_fanout: "high",
   authentication_success_after_failures: "high",
+  privileged_authentication_without_mfa: "high",
   egress_denied_burst: "medium",
   authorization_denial_burst: "medium",
   web_multistage_activity: "medium",
@@ -561,7 +562,16 @@ export function createTelemetryDetector(): {
           : event.kind;
       const key = JSON.stringify([family, event.asset, event.subject]);
       const window = windows.get(key);
-      if (window && event.time < window.lastTime) return [];
+      const privilegedAlerts = event.kind === "auth_success" &&
+          event.action === "signin.amazonaws.com:ConsoleLogin:root-without-mfa"
+        ? alert(event, "privileged_authentication_without_mfa", [event.id])
+        : [];
+      if (window && event.time < window.lastTime) {
+        if (privilegedAlerts.length) {
+          remember(recentEvents, eventKey, null, MAX_RECENT_IDS);
+        }
+        return privilegedAlerts;
+      }
       remember(recentEvents, eventKey, null, MAX_RECENT_IDS);
       const sourceAlerts = observeAuthenticationSource(
         authenticationSources,
@@ -579,12 +589,15 @@ export function createTelemetryDetector(): {
           lastTime: event.time,
           observations: [],
         }, MAX_TRACKED_SUBJECTS);
-        if (active.length < threshold) return sourceAlerts;
+        if (active.length < threshold) {
+          return [...privilegedAlerts, ...sourceAlerts];
+        }
         return [
           ...alert(event, "authentication_success_after_failures", [
             ...active.map(({ id }) => id),
             event.id,
           ], commonAlertReferences([...active, event])),
+          ...privilegedAlerts,
           ...sourceAlerts,
         ];
       }

@@ -11,6 +11,7 @@ const signalOrigins: Record<Signal, SignalOrigin> = {
   authentication_failure_fanout: "sentinel_rule",
   authentication_success_after_fanout: "sentinel_rule",
   authentication_success_after_failures: "sentinel_rule",
+  privileged_authentication_without_mfa: "sentinel_rule",
   authorization_denial_burst: "sentinel_rule",
   egress_denied_burst: "sentinel_rule",
   web_multistage_activity: "sentinel_rule",
@@ -66,6 +67,7 @@ const behaviors: readonly Behavior[] = [
       "authentication_success_after_failures",
       "authentication_failure_fanout",
       "authentication_success_after_fanout",
+      "privileged_authentication_without_mfa",
     ],
     limitation:
       "The rules show failures on one account or across accounts that share an authority-scoped source. Valid stolen credentials without failures or activity split across unrelated source references can escape detection.",
@@ -113,6 +115,14 @@ const behaviors: readonly Behavior[] = [
 ];
 
 export const sentinelUpstreamChecks = [
+  {
+    id: "cloudtrail_root_console_login_without_mfa",
+    sigmaId: "3fe039b5-53f9-4287-b5ed-45defe3c0c61",
+    type: "privileged_authentication_without_mfa",
+    actions: ["signin.amazonaws.com:ConsoleLogin:root-without-mfa"],
+    limitation:
+      "CloudTrail reports a successful root console sign-in without MFA. Confirm whether the privileged access was expected and review subsequent account activity.",
+  },
   {
     id: "cloudtrail_logging_stopped",
     sigmaId: "d2a85e6e-6baf-4134-92f2-554251cef28f",

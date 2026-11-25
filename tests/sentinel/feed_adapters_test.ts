@@ -1860,3 +1860,42 @@ Deno.test("CloudTrail separates successful CloudWatch Logs changes from denied o
     false,
   );
 });
+
+Deno.test("CloudTrail root login without MFA produces exact privileged authentication evidence", () => {
+  const base = {
+    eventVersion: "1.11",
+    eventTime: "2026-01-01T00:00:00Z",
+    eventSource: "signin.amazonaws.com",
+    eventName: "ConsoleLogin",
+    userIdentity: { type: "Root", principalId: "123456789012" },
+    responseElements: { ConsoleLogin: "Success" },
+    additionalEventData: { MFAUsed: "No", LoginTo: "private-login-url" },
+  };
+  const records = [
+    base,
+    { ...base, additionalEventData: { MFAUsed: "Yes" } },
+    { ...base, additionalEventData: {} },
+    { ...base, userIdentity: { ...base.userIdentity, type: "IAMUser" } },
+    { ...base, responseElements: { ConsoleLogin: "Failure" } },
+    { ...base, errorMessage: "Authentication failed" },
+  ].map((record, index) => ({ ...record, eventID: `console-${index}` }));
+  const events = decodeSentinelFeedLine(
+    JSON.stringify({ Records: records }),
+    "cloudtrail",
+    "account-a",
+  )
+    .map(normalizeSentinelTelemetryEvent);
+  assertEquals(events[0].kind, "auth_success");
+  const lateDetector = createTelemetryDetector();
+  lateDetector.ingest({ ...events[1], timestamp: "2026-01-01T00:01:00.000Z" });
+  assertEquals(lateDetector.ingest(events[0]).length, 1);
+  assertEquals(lateDetector.ingest(events[0]), []);
+  const alerts = events.flatMap(createTelemetryDetector().ingest);
+  assertEquals(alerts.map(({ type, evidenceIds }) => [type, evidenceIds]), [
+    ["privileged_authentication_without_mfa", [events[0].id]],
+  ]);
+  assertEquals(
+    JSON.stringify({ events, alerts }).includes("private-login-url"),
+    false,
+  );
+});

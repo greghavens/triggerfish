@@ -25,6 +25,7 @@ const signalClasses: Record<TelemetryAlert["type"], SignalClass> = {
   authentication_failure_fanout: "authentication",
   authentication_success_after_fanout: "authentication",
   authentication_success_after_failures: "authentication",
+  privileged_authentication_without_mfa: "authentication",
   authorization_denial_burst: "authorization",
   unexpected_privilege_grant: "authorization",
   integrity_change: "endpoint",

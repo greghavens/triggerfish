@@ -3488,6 +3488,11 @@ async function verifyPlannerArchive(
     }];
     const cloudTrailChecks = [
       {
+        source: "signin.amazonaws.com",
+        action: "ConsoleLogin",
+        id: "cloudtrail_root_console_login_without_mfa",
+      },
+      {
         source: "logs.amazonaws.com",
         action: "DeleteLogGroup",
         id: "cloudtrail_cloudwatch_log_group_deleted",
@@ -3523,7 +3528,13 @@ async function verifyPlannerArchive(
             eventSource: source,
             eventName: action,
             readOnly: false,
-            userIdentity: { principalId: "audit-operator" },
+            userIdentity: source === "signin.amazonaws.com"
+              ? { type: "Root", principalId: "123456789012" }
+              : { principalId: "audit-operator" },
+            ...(source === "signin.amazonaws.com" && {
+              responseElements: { ConsoleLogin: "Success" },
+              additionalEventData: { MFAUsed: "No" },
+            }),
             requestParameters: {
               ...(source === "logs.amazonaws.com"
                 ? {
@@ -3688,7 +3699,9 @@ async function verifyPlannerArchive(
       : startSentinelAssessment(path);
     if (mode === "goals") assert(ensureSentinelFormalGoalContract(path, state));
     if (mode === "telemetry") {
-      const incident = sentinelIncidentCandidates(state)[0];
+      const incident = sentinelIncidentCandidates(state).find(({ asset }) =>
+        asset === "app"
+      );
       assert(incident);
       plannerCalls.splice(10, 2, { name: "sentinel_defense", args: {} }, {
         name: "sentinel_incident_alerts",
@@ -4427,10 +4440,12 @@ async function verifyPlannerArchive(
           JSON.parse(await turn(incidentReviewRequest)).review,
           incidentReview,
         );
-        assertEquals(
-          JSON.parse(await turn({ ...directory, assetId: "db" })).incidents,
-          [],
-        );
+        const databaseIncidents = JSON.parse(
+          await turn({ ...directory, assetId: "db" }),
+        ).incidents;
+        assertEquals(databaseIncidents.length, 1);
+        assertEquals(databaseIncidents[0].asset, "db");
+        assert(databaseIncidents[0].id !== listed.incidents[0].id);
         const incident = {
           ...exact,
           action: "incident_alerts",

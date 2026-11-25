@@ -926,9 +926,18 @@ function decodeCloudTrail(text: string, source?: string): readonly unknown[] {
         ).digest("hex")
       }`
       : undefined;
+    const loginData = event.additionalEventData;
+    const rootWithoutMfa = consoleLogin && kind === "auth_success" &&
+      type === "Root" && cloudTrailMutationSucceeded(event) &&
+      loginData !== null && typeof loginData === "object" &&
+      Object.hasOwn(loginData, "MFAUsed") &&
+      (loginData as { MFAUsed: unknown }).MFAUsed === "No";
     const sessionReference = cloudTrailSessionReference(identity);
     const eventId = boundedText(event.eventID, "CloudTrail event ID");
-    const action = controlReduction ?? accessKeyChange ??
+    const action = (rootWithoutMfa
+      ? "signin.amazonaws.com:ConsoleLogin:root-without-mfa"
+      : undefined) ??
+      controlReduction ?? accessKeyChange ??
       (typeof event.eventSource === "string" &&
           typeof event.eventName === "string"
         ? `${event.eventSource}:${event.eventName}`
