@@ -1270,6 +1270,7 @@ async function verifyReceiptFamily(
     let scheduledResult: unknown;
     let scheduledRead: unknown;
     let scheduledFindingRead: unknown;
+    let scheduledFindingPage: unknown;
     const clock = Date.now();
     receiptPlanner = createSentinelModelPlanner(
       path,
@@ -1328,7 +1329,10 @@ async function verifyReceiptFamily(
                       })],
                       [tool(context, { findingId: check.findingId })],
                       [tool(recheck, check), tool(recheck, check)],
-                      [tool(findings, { receiptId: check.findingId })],
+                      [
+                        tool(findings, { receiptId: check.findingId }),
+                        tool(findings, { limit: 1 }),
+                      ],
                     ],
                     undefined,
                     baseDir,
@@ -1340,6 +1344,7 @@ async function verifyReceiptFamily(
                   );
                   scheduledRead = JSON.parse(review.results[0][0]);
                   scheduledFindingRead = JSON.parse(review.results[3][0]);
+                  scheduledFindingPage = JSON.parse(review.results[3][1]);
                   assertEquals(
                     JSON.parse(review.results[1][0]).current.evidenceId,
                     check.evidenceId,
@@ -1549,6 +1554,14 @@ async function verifyReceiptFamily(
         evidenceId: passingNode,
         digest: nativeSources[1].resultSha256,
         trace: { taskId, index: 4, result: scheduledFindingRead },
+      });
+      await verifyOperatorNativeRecheck({
+        baseDir,
+        state: updated,
+        findingId: finding.id,
+        evidenceId: passingNode,
+        digest: nativeSources[1].resultSha256,
+        trace: { taskId, index: 5, result: scheduledFindingPage },
       });
       await withTidepool(baseDir, async (_list, _provenance, request) => {
         const lineage = await request("worker_recheck_lineage", {

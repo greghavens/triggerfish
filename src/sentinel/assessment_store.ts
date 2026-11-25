@@ -160,6 +160,11 @@ export interface SentinelReviewStep {
       typeof import("./worker_goal_recovery.ts").readSentinelTaskObservationPageReference
     >
   >;
+  readonly findingPage?: NonNullable<
+    ReturnType<
+      typeof import("./worker_goal_recovery.ts").readSentinelFindingPageReference
+    >
+  >;
   readonly graphFactPage?: NonNullable<
     ReturnType<
       typeof import("./worker_graph_facts.ts").readSentinelGraphFactPageReference

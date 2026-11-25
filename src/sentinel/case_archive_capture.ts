@@ -1,3 +1,4 @@
+import { readSentinelFindingPageReference } from "./worker_goal_recovery.ts";
 import { sentinelGoalReceiptReadArguments } from "./worker_goal_recovery.ts";
 import { readSentinelTaskObservationPageReference } from "./worker_goal_recovery.ts";
 import { readSentinelDiscoveryPageReference } from "./worker_goal_recovery.ts";
@@ -372,6 +373,8 @@ function retainedTraceReceiptFields(step: Record<string, unknown>) {
     if (page) fields.taskObservationPage = page;
   }
   if (step.tool === "sentinel_worker_findings") {
+    const page = readSentinelFindingPageReference(step.findingPage);
+    if (page) fields.findingPage = page;
     const citation = step.goalReceiptRead as {
       args?: unknown;
       sha256?: unknown;

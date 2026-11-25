@@ -1638,3 +1638,9 @@ worker step that read it. The gateway resolves the assigned asset, checks
 the run, revision, and committed response digest, and reapplies the
 original tool policy. The remediation fixture compares the retained
 finding response with the worker's result and exercises policy denial.
+
+Finding list steps retain the ordered journal IDs, filters, cursor, and
+response digest. Historical lookups rebuild the page from those IDs under
+the original case, revision, and asset, and reapply read and response
+policy. The gateway remediation fixture compares the exact page seen by
+the worker and verifies that policy denial withholds it.

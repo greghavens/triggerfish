@@ -4527,6 +4527,20 @@ function createAgent(
           offset: goalArgs.offset ?? 0,
           sha256: createHash("sha256").update(result).digest("hex"),
         };
+        const findingRows = !failed && name === SENTINEL_GOAL_RECHECK_READ &&
+          goalArgs && goalArgs.receiptId === undefined &&
+          options.assessmentRevision !== undefined &&
+          parseSavedFindingPage(result, {
+            caseId: locateSentinelCase(options.snapshotPath)?.caseId ?? "",
+            evidenceRevision: options.assessmentRevision,
+          }, goalArgs);
+        const findingPage = findingRows && goalArgs && {
+          args: goalArgs,
+          ids: findingRows.map(({ id }) => id),
+          nextBeforeReceiptId: JSON.parse(result).nextBeforeReceiptId,
+          empty: JSON.parse(result).caseId === undefined,
+          sha256: createHash("sha256").update(result).digest("hex"),
+        };
         turn.trace?.({
           tool: name,
           ...(recheckFindingIds?.length && { recheckFindingIds }),
@@ -4567,6 +4581,7 @@ function createAgent(
           ...(trafficLinks && { trafficLinks }),
           ...(goalReceiptRead && { goalReceiptRead }),
           ...(graphFactPage && { graphFactPage }),
+          ...(findingPage && { findingPage }),
           ...(taskObservationPage && { taskObservationPage }),
           ...(intermediateWorkflowPage && { intermediateWorkflowPage }),
           ...(discoveryPageReference &&

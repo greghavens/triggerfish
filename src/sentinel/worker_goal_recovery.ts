@@ -871,3 +871,37 @@ export function readSentinelTaskObservationPageReference(value: unknown) {
   ) return;
   return { task, offset, sha256 };
 }
+
+export function readSentinelFindingPageReference(value: unknown) {
+  if (!value || typeof value !== "object") return;
+  const { args, ids, nextBeforeReceiptId, empty, sha256 } = value as Record<
+    string,
+    unknown
+  >;
+  const call = sentinelGoalReceiptReadArguments(
+    SENTINEL_GOAL_RECHECK_READ,
+    args,
+  );
+  if (!call || call.receiptId !== undefined) return;
+  if (
+    !Array.isArray(ids) || ids.length > (call.limit ?? 5) ||
+    new Set(ids).size !== ids.length ||
+    !ids.every((id) =>
+      typeof id === "string" &&
+      /^worker-(?:finding|recheck):[a-f0-9]{64}$/.test(id) &&
+      id !== call.beforeReceiptId
+    ) ||
+    (nextBeforeReceiptId !== null &&
+      (!ids.length || nextBeforeReceiptId !== ids.at(-1))) ||
+    typeof empty !== "boolean" ||
+    (empty && (ids.length || call.beforeReceiptId)) ||
+    typeof sha256 !== "string" || !/^[a-f0-9]{64}$/.test(sha256)
+  ) return;
+  return {
+    args: call,
+    ids: ids as string[],
+    nextBeforeReceiptId: nextBeforeReceiptId as string | null,
+    empty,
+    sha256,
+  };
+}

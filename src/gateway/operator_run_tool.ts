@@ -1,3 +1,4 @@
+import { readSentinelFindingPageReference } from "../sentinel/worker_goal_recovery.ts";
 import { readSentinelTaskObservationPageReference } from "../sentinel/worker_goal_recovery.ts";
 import { reopenSentinelGoalReceiptRead } from "./sentinel_goal_receipt_read.ts";
 import { readSentinelDiscoveryPageReference } from "../sentinel/worker_goal_recovery.ts";
@@ -2080,11 +2081,13 @@ export function createOperatorRunToolExecutor(options: {
             if (step?.tool === "sentinel_worker_findings") {
               const task = history?.tasks.find(({ id }) => id === taskId);
               const authorize = context.authorizeSentinelTraceRead;
+              const page = readSentinelFindingPageReference(step.findingPage);
               const citation = step.goalReceiptRead;
               const receiptId = citation?.args.receiptId;
               const revision = citation?.args.revision;
               if (
-                !task?.nodeId || !authorize || !citation || !receiptId ||
+                !task?.nodeId || !authorize ||
+                (!page && (!citation || !receiptId)) ||
                 step.outcome !== "returned" ||
                 (step.target !== undefined && step.target !== receiptId)
               ) return unavailable;
@@ -2093,7 +2096,7 @@ export function createOperatorRunToolExecutor(options: {
                 revision: ref.revision,
                 taskId: task.id,
               };
-              const call = {
+              const call = page?.args ?? {
                 receiptId,
                 ...(revision !== undefined && { revision }),
               };
@@ -2106,23 +2109,53 @@ export function createOperatorRunToolExecutor(options: {
                 ? snapshot && executionFindingAsset(snapshot, task.nodeId)
                 : task.nodeId;
               if (!targetId) return unavailable;
-              const retained = reopenSentinelGoalReceiptRead(
-                path,
-                {
-                  caseId: ref.id,
-                  runId,
-                  taskId: task.id,
-                  evidenceRevision: ref.revision,
-                  targetId,
-                },
-                step.tool,
-                call,
-              );
+              const recordScope = {
+                caseId: ref.id,
+                runId,
+                taskId: task.id,
+                evidenceRevision: ref.revision,
+                targetId,
+              };
+              const reopen = (id: string, revision?: number) =>
+                reopenSentinelGoalReceiptRead(
+                  path,
+                  recordScope,
+                  step.tool,
+                  {
+                    receiptId: id,
+                    ...(revision !== undefined && { revision }),
+                  },
+                );
+              let text: string | undefined;
+              if (page) {
+                if (
+                  page.args.beforeReceiptId &&
+                  !reopen(page.args.beforeReceiptId, page.args.revision)
+                ) return unavailable;
+                const records = [];
+                for (const id of page.ids) {
+                  const item = reopen(id, page.args.revision);
+                  if (!item) return unavailable;
+                  records.push(JSON.parse(item.result).record);
+                }
+                text = JSON.stringify({
+                  _classification: "INTERNAL",
+                  ...(!page.empty &&
+                    {
+                      caseId: ref.id,
+                      evidenceRevision: page.args.revision ?? ref.revision,
+                    }),
+                  records,
+                  nextBeforeReceiptId: page.nextBeforeReceiptId,
+                });
+              } else if (receiptId) {
+                text = reopen(receiptId, revision)?.result;
+              }
               if (
-                !retained ||
-                createHash("sha256").update(retained.result).digest("hex") !==
-                  citation.sha256 ||
-                !await authorize(scope, step.tool, call, retained.result)
+                !text ||
+                createHash("sha256").update(text).digest("hex") !==
+                  (page?.sha256 ?? citation?.sha256) ||
+                !await authorize(scope, step.tool, call, text)
               ) return unavailable;
               const current = readHistoricalAdaptiveSentinel(
                 path,
@@ -2137,7 +2170,7 @@ export function createOperatorRunToolExecutor(options: {
                 runId,
                 taskId,
                 index,
-                result: JSON.parse(retained.result),
+                result: JSON.parse(text),
               });
             }
             if (
