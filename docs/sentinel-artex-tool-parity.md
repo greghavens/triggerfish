@@ -703,5 +703,10 @@ Recovery requires the exact staged result and the returned progress step
 at the original position. It verifies that the publication cites that
 step, then reauthorizes both exchanges and the current connector access.
 The restart fixture verifies a single runs read and single publication.
-Removing proof of the authorized read leaves the assignment held. First
-batches without a prior checkpoint and other read types still need support.
+Removing proof of the authorized read leaves the assignment held. For an
+eligible first batch, Sentinel stores the generated assignment prompt
+under its digest in the same transaction that admits the batch. That
+starting checkpoint contains no tool exchange and cannot be resumed on
+its own. The restart fixture proves recovery when the process stops after
+the read and publication commit in the first batch. Other read types still
+need durable receipts when they share a batch with writes.

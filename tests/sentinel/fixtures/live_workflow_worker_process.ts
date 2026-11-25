@@ -38,7 +38,8 @@ const findingTool = phase.endsWith("_finding") || findingBatch
   : undefined;
 const assignedPhase = phase === "interrupt_assigned" ||
   phase === "resume_assigned" || graphPhase || findingTool !== undefined;
-const mixedWrite = phase.endsWith("_workflow_batch");
+const firstBatch = phase.endsWith("_first_batch");
+const mixedWrite = phase.endsWith("_workflow_batch") || firstBatch;
 const mixedPhase = phase.endsWith("_mixed") || phase.endsWith("_multi");
 const multiPhase = phase.endsWith("_multi");
 const targetTool = "sentinel_assigned_target";
@@ -106,12 +107,15 @@ const hookRunner: HookRunner = {
         throw new Error("The fixture did not commit its observation");
       }
       record(
-        (phase === "resume_mutation" || phase === "resume_workflow_batch")
+        (phase === "resume_mutation" || phase === "resume_workflow_batch" ||
+            phase === "resume_first_batch")
           ? "publication_reauthorized"
           : "mutation_committed",
       );
       if (
-        phase === "interrupt_mutation" || phase === "interrupt_workflow_batch"
+        phase === "interrupt_mutation" ||
+        phase === "interrupt_workflow_batch" ||
+        phase === "interrupt_first_batch"
       ) {
         Deno.writeTextFileSync(join(baseDir, "checkpoint-ready"), "ready");
         return new Promise(() => {});
@@ -234,11 +238,14 @@ registry.register({
     const result = results[0];
     const usage = { inputTokens: 1, outputTokens: 1 };
     if (mixedWrite) {
-      if (phase === "interrupt_workflow_batch") {
-        const names = !results.length
+      if (
+        phase === "interrupt_workflow_batch" ||
+        phase === "interrupt_first_batch"
+      ) {
+        const names = !firstBatch && !results.length
           ? [targetTool]
           : [selectedTool, "sentinel_publish_workflow_observation"];
-        if (results.length > 1) {
+        if (results.length > (firstBatch ? 0 : 1)) {
           throw new Error("Publication did not interrupt");
         }
         return Promise.resolve({
@@ -251,11 +258,15 @@ registry.register({
           })),
         });
       }
+      const read = firstBatch ? 0 : 1;
       if (
-        results.length !== 3 ||
-        !String(results[0].content).includes('"id":"delivery"') ||
-        !String(results[1].content).includes('"id":51') ||
-        !String(results[2].content).includes('"id":"workflow-observation:')
+        results.length !== read + 2 ||
+        (!firstBatch &&
+          !String(results[0].content).includes('"id":"delivery"')) ||
+        !String(results[read].content).includes('"id":51') ||
+        !String(results[read + 1].content).includes(
+          '"id":"workflow-observation:',
+        )
       ) {
         throw new Error("The mixed checkpoint lost an exact result");
       }
@@ -593,14 +604,16 @@ try {
     planner.advance(state);
     const adaptive = readAdaptiveSentinel(path, state);
     if (
-      (phase === "resume_workflow_batch" &&
-        adaptive?.modelReviews.some(({ summary, steps }) =>
-          summary === "Recovered a live read and publication from one batch." &&
-          steps.length === 3 &&
-          steps[0].assignedTarget?.targetId === "delivery" &&
-          steps[1].githubWorkflowRead?.runs[0]?.id === 51 &&
-          steps[2].target?.startsWith("workflow-observation:")
-        )) ||
+      ((phase === "resume_workflow_batch" || phase === "resume_first_batch") &&
+        adaptive?.modelReviews.some(({ summary, steps }) => {
+          const read = firstBatch ? 0 : 1;
+          return summary ===
+              "Recovered a live read and publication from one batch." &&
+            steps.length === read + 2 &&
+            (firstBatch || steps[0].assignedTarget?.targetId === "delivery") &&
+            steps[read].githubWorkflowRead?.runs[0]?.id === 51 &&
+            steps[read + 1].target?.startsWith("workflow-observation:");
+        })) ||
       (phase === "resume_mutation" &&
         adaptive?.modelReviews.some(({ summary, steps }) =>
           summary === "Resumed the committed publication." &&

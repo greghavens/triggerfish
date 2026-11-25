@@ -3190,6 +3190,7 @@ export function createSentinelModelPlanner(
                   tools,
                   publicationIteration,
                   journalRequests,
+                  publicationIteration === 1 ? prompt : undefined,
                 ),
               onToolBatchCheckpoint: (checkpoint) => {
                 if (!signal.aborted) {

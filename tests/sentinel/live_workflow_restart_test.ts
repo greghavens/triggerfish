@@ -28,6 +28,7 @@ for (
     "resume_multi",
     "resume_mutation",
     "resume_workflow_batch",
+    "resume_first_batch",
     "resume_workflow_unapproved",
     "resume_unproven",
     "fresh",
@@ -41,6 +42,8 @@ for (
   Deno.test({
     name: phase === "resume_workflow_unapproved"
       ? "Sentinel keeps a mixed batch held without proof the read passed response policy"
+      : phase === "resume_first_batch"
+      ? "Sentinel recovers a first tool batch before any tool checkpoint exists"
       : phase === "resume_workflow_batch"
       ? "Sentinel recovers a live status read and publication in the same batch"
       : phase === "resume_finding_batch"
@@ -269,6 +272,21 @@ for (
             ).get()?.count,
             1,
           );
+          if (phase === "resume_first_batch") {
+            const baseline = JSON.parse(
+              String(
+                store.prepare(
+                  "SELECT checkpoint FROM adaptive_worker_checkpoints",
+                ).get()?.checkpoint,
+              ),
+            );
+            assertEquals(baseline.completedIterations, 0);
+            assertEquals(
+              baseline.history.map(({ role }: { role: string }) => role),
+              ["user"],
+            );
+            assertEquals(baseline.toolCallCounts, []);
+          }
           if (phase !== "resume_assigned" && !graphPhase && !findingPhase) {
             assertEquals(
               store.prepare(
@@ -502,23 +520,25 @@ for (
           }
           return;
         }
-        if (phase === "resume_workflow_batch") {
+        if (
+          phase === "resume_workflow_batch" || phase === "resume_first_batch"
+        ) {
           assertEquals(
             hooks.filter((line) => line.endsWith(":mutation_committed")),
             [
-              "interrupt_workflow_batch:mutation_committed",
+              `${phase.replace("resume_", "interrupt_")}:mutation_committed`,
             ],
           );
           assertEquals(
             hooks.filter((line) => line.endsWith(":publication_reauthorized")),
             [
-              "resume_workflow_batch:publication_reauthorized",
+              `${phase}:publication_reauthorized`,
             ],
           );
           assertEquals(
             hooks.filter((line) => line.endsWith(":probe_metadata")),
             [
-              "resume_workflow_batch:probe_metadata",
+              `${phase}:probe_metadata`,
             ],
           );
           const db = new DatabaseSync(database);
@@ -527,7 +547,10 @@ for (
               "SELECT id, stepIndex FROM adaptive_workflow_observations",
             ).all();
             assertEquals(observations.length, 1);
-            assertEquals(observations[0].stepIndex, 1);
+            assertEquals(
+              observations[0].stepIndex,
+              phase === "resume_first_batch" ? 0 : 1,
+            );
             assertEquals(
               db.prepare(
                 "SELECT note FROM adaptive_events WHERE event = 'model_mutation_settled'",
