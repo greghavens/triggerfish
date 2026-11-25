@@ -146,6 +146,13 @@ function archiveCitations(
           ...steps.filter(({ sharedAssetDiscovery }) => sharedAssetDiscovery),
         );
       }
+      for (const { reads } of store.modelPlanHistory(mapped.revision, true)) {
+        citations.push(
+          ...(reads ?? []).filter(({ sharedAssetDiscovery }) =>
+            sharedAssetDiscovery
+          ),
+        );
+      }
     }
     return citations;
   } finally {

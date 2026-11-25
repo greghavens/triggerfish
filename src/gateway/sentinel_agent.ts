@@ -1,3 +1,4 @@
+import { readScopedSentinelSharedAssetDiscoveries } from "./sentinel_asset_discoveries.ts";
 import {
   assetLinkProof,
   parseSharedAssetLinkPage,
@@ -3279,6 +3280,12 @@ function createAgent(
     ]
     : canReadPlannerCase
     ? [...tools, {
+      ...sharedAssetDiscoveriesTool,
+      description: "Reopen one current approved peer discovery by exact ID.",
+      parameters: {
+        id: { ...sharedAssetDiscoveriesTool.parameters.id, required: true },
+      },
+    }, {
       ...sentinelReadGraphFact,
       description:
         "List committed relationship facts for the current case or read an exact fact ID.",
@@ -3894,6 +3901,25 @@ function createAgent(
           args,
           name === publishWorkflowObservationTool.name,
         );
+      }
+      if (name === SENTINEL_SHARED_DISCOVERY_READ && canReadPlannerCase) {
+        const id = sentinelGoalReceiptReadArguments(name, args)?.id;
+        if (
+          id && options.assessmentRevision !== undefined &&
+          currentPlannerReceiptScope(turn)
+        ) {
+          const [record] = await readScopedSentinelSharedAssetDiscoveries(
+            options.snapshotPath,
+            options.assessmentRevision,
+            id,
+            turn.signal,
+            undefined,
+            (asset) => currentPlannerReceiptScope(turn, asset),
+            () => currentPlannerReceiptScope(turn),
+          );
+          if (record) return boundResult({ discovery: record });
+        }
+        return "Error: The approved peer discovery is unavailable.";
       }
       if (
         name === submitAssetDiscoveryTool.name ||
@@ -4608,7 +4634,8 @@ function createAgent(
               name === SENTINEL_INCIDENT_ALERTS_READ ||
               name === SENTINEL_DEFENSE_READ ||
               name === SENTINEL_GOAL_GRAPH_FACT_READ ||
-              name === SENTINEL_GOAL_RECHECK_READ))) &&
+              name === SENTINEL_GOAL_RECHECK_READ ||
+              name === SENTINEL_SHARED_DISCOVERY_READ))) &&
           goalArgs &&
           (isSentinelPinnedSourceRead(name)
             ? sourceSnapshots?.length &&

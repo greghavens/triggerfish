@@ -796,6 +796,8 @@ async function reopenSentinelSourceResult(
     | "caseHintFirstId"
     | "graphFactPage"
     | "findingPage"
+    | "sharedAssetDiscovery"
+    | "outcome"
     | "plannerDefenseContainment"
     | "workerTracePage"
   >,
@@ -949,6 +951,68 @@ async function reopenSentinelSourceResult(
           }, snapshot),
         args.id === undefined ? page : undefined,
       );
+    }
+  } else if (step.tool === "sentinel_shared_asset_discoveries") {
+    const citation = step.sharedAssetDiscovery;
+    const caseId = locateSentinelCase(path)?.caseId;
+    const runId = readSentinelRunIdForRevision(path, revision);
+    if (!caseId || !runId || !citation || selector.id !== citation.id) return;
+    const entry = readHistoricalDiscoveryEvidence(
+      baseDir,
+      path,
+      citation.id,
+      citation.version,
+    );
+    const snapshot = readSentinelAssessmentRevision(path, revision)?.result
+      .sharedGraph.snapshot;
+    const record = entry &&
+      verifiedSharedAssetDiscovery(
+        caseId,
+        new Map([[citation.id, entry.record]]),
+        step,
+      );
+    const match = record && snapshot && matchSentinelAssetDiscoveryDestination(
+      loadSentinelGraph(entry.snapshot),
+      loadSentinelGraph(snapshot),
+      record.claim,
+    );
+    const constraints = readSentinelOperatingConstraints(path, runId)
+      ?.constraints;
+    if (
+      record && match && sentinelOperatingConstraintsAllow(
+        constraints,
+        { kind: "review_evidence", nodeId: match.assetId },
+        snapshot,
+      )
+    ) {
+      const {
+        sourceCaseId,
+        taskId,
+        evidenceRevision,
+        sourceDigest,
+        claim,
+        id,
+        status,
+        version,
+        proposedAt,
+        updatedAt,
+      } = record;
+      text = JSON.stringify({
+        discovery: {
+          sourceCaseId,
+          taskId,
+          evidenceRevision,
+          sourceDigest,
+          claim,
+          id,
+          status,
+          version,
+          proposedAt,
+          updatedAt,
+          mappedAssetId: match.assetId,
+          ...(match.to && { mappedTo: match.to }),
+        },
+      });
     }
   } else if (step.tool === "sentinel_worker_findings") {
     const runId = readSentinelRunIdForRevision(path, revision);

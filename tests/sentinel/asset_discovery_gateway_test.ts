@@ -381,6 +381,79 @@ Deno.test("Gateway workers share an approved discovery with exact cross-case pro
       evidenceId: approved.claim.evidenceId,
     });
 
+    const plannerIdentity = `${
+      adaptiveRevision(destination)
+    }:obs:discovery-archive`;
+    let originalPlannerResult: string | undefined;
+    const plannerRegistry = createProviderRegistry();
+    plannerRegistry.register({
+      name: "planner-discovery-fixture",
+      supportsStreaming: false,
+      complete(messages) {
+        const response = messages.findLast(({ role }) => role === "tool");
+        if (response) {
+          originalPlannerResult = String(response.content);
+          return Promise.resolve({ content: "[]", usage, toolCalls: [] });
+        }
+        return Promise.resolve(
+          call("sentinel_shared_asset_discoveries", { id: proposal.id }),
+        );
+      },
+    });
+    plannerRegistry.setDefault("planner-discovery-fixture");
+    const plannerReader = createSentinelSubagent({
+      providerRegistry: plannerRegistry,
+      snapshotPath: consumerPath,
+      assessmentRevision: destination.revision,
+      plannerExecutionEvidenceRunId: destination.plan.runId,
+      sharedInventoryBaseDir: baseDir,
+      allowModelAccess: true,
+      hookRunner: {
+        evaluateHook: () =>
+          Promise.resolve({
+            allowed: true,
+            action: "ALLOW",
+            duration: 0,
+            ruleId: null,
+          }),
+      },
+    });
+    const plannerJournal = openSentinelAdaptiveStore(
+      join(dirname(consumerPath), "sentinel-adaptive.db"),
+      () => Date.now() + 120_000,
+    );
+    try {
+      assertEquals(plannerJournal.claimModelPlan(plannerIdentity), 1);
+      assert(plannerJournal.recordModelPlanInputManifest(plannerIdentity, 1, {
+        promptSha256: "a".repeat(64),
+        hintIds: [],
+        findingReviewIds: [],
+        incidentReviewIds: [],
+        incidentCandidateIds: [],
+        investigationIds: [],
+        inventoryNodeIds: [],
+        workerObservations: [],
+      }));
+      await plannerReader.execute(
+        "Read the approved peer discovery.",
+        () => {},
+        undefined,
+        (step) => {
+          assert(step.sharedAssetDiscovery && step.goalReceiptRead);
+          assert(plannerJournal.recordModelPlanRead(plannerIdentity, 1, step));
+        },
+      );
+      plannerJournal.completeModelPlan(
+        plannerIdentity,
+        1,
+        "no_new_assignments",
+      );
+    } finally {
+      plannerJournal.close();
+    }
+    assert(originalPlannerResult);
+    assertEquals(JSON.parse(originalPlannerResult).discovery.id, proposal.id);
+
     const assertUnavailable = () => {
       const state = refreshSentinelAssessment(consumerPath)!;
       const revision = adaptiveRevision(state);
@@ -526,6 +599,7 @@ Deno.test("Gateway workers share an approved discovery with exact cross-case pro
     const registry = createProviderRegistry();
     let reopened: string | undefined;
     let selectedStep = index;
+    let selectPlanner = false;
     registry.register({
       name: "discovery-trace-fixture",
       supportsStreaming: false,
@@ -538,6 +612,18 @@ Deno.test("Gateway workers share an approved discovery with exact cross-case pro
             usage,
             toolCalls: [],
           });
+        }
+        if (selectPlanner) {
+          return Promise.resolve(call("operator_runs", {
+            action: "planner_reads",
+            kind: "sentinel",
+            id: "consumer",
+            revision: destination.revision,
+            plannerIdentity,
+            attempt: 1,
+            ordinal: 1,
+            includeResult: true,
+          }));
         }
         return Promise.resolve(call("operator_runs", {
           action: "worker_trace_result",
@@ -691,6 +777,21 @@ Deno.test("Gateway workers share an approved discovery with exact cross-case pro
         JSON.parse(consumedPages[position]),
       );
     }
+    selectPlanner = true;
+    await chat.executeAgentTurn(
+      "Open the restored planner discovery.",
+      () => {},
+    );
+    assertEquals(
+      JSON.stringify(JSON.parse(reopened ?? "").result),
+      originalPlannerResult,
+    );
+    deny = true;
+    await chat.executeAgentTurn(
+      "Open the restored planner discovery again.",
+      () => {},
+    );
+    assert(reopened?.includes("unavailable"));
     assert(
       archived.edges.some((edge: { to: string; relation: string }) =>
         edge.to === discovery.id && edge.relation === "references"

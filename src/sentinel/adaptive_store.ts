@@ -655,6 +655,7 @@ export interface AdaptivePlannerInputManifest {
 /** Metadata from one completed tool call in a dispatched planner attempt. */
 export interface AdaptivePlannerRead {
   readonly sharedAssetLinksPage?: string;
+  readonly sharedAssetDiscovery?: SentinelReviewStep["sharedAssetDiscovery"];
   readonly findingPage?: SentinelReviewStep["findingPage"];
   readonly graphFactPage?: SentinelReviewStep["graphFactPage"];
   readonly trafficLinks?: SentinelReviewStep["trafficLinks"];
@@ -990,6 +991,20 @@ function normalizePlannerRead(read: AdaptivePlannerRead): AdaptivePlannerRead {
     containment !== undefined && (read.tool !== "sentinel_defense" ||
       !receipt || (containment !== null && typeof containment !== "boolean"))
   ) throw new Error("Invalid Sentinel planner defense configuration");
+  const discovery = read.sharedAssetDiscovery;
+  if (
+    discovery && (read.tool !== "sentinel_shared_asset_discoveries" ||
+      !receipt || args?.id !== discovery.id || target !== discovery.id ||
+      !/^asset-discovery:[a-f0-9]{64}$/.test(discovery.id) ||
+      !Number.isSafeInteger(discovery.version) ||
+      (discovery.version ?? 0) < 2 ||
+      !isSentinelCaseId(discovery.sourceCaseId) ||
+      !/^adaptive:[a-f0-9]{64}$/.test(discovery.taskId) ||
+      !Number.isSafeInteger(discovery.evidenceRevision) ||
+      discovery.evidenceRevision < 1 ||
+      !/^[a-f0-9]{64}$/.test(discovery.sourceDigest) ||
+      !optionalText(discovery.evidenceId, "discovery evidence ID", 4096))
+  ) throw new Error("Invalid Sentinel planner discovery receipt");
   const findingPage = readSentinelFindingPageReference(read.findingPage);
   if (
     read.findingPage !== undefined &&
@@ -1025,6 +1040,7 @@ function normalizePlannerRead(read: AdaptivePlannerRead): AdaptivePlannerRead {
           "sentinel_incident_alerts",
           "sentinel_graph_facts",
           "sentinel_worker_findings",
+          "sentinel_shared_asset_discoveries",
         ].includes(read.tool) &&
         !isSentinelArchivedInventoryRead(read.tool, args) &&
         provenancePath === undefined && !provenanceSearchPage &&
@@ -1068,6 +1084,17 @@ function normalizePlannerRead(read: AdaptivePlannerRead): AdaptivePlannerRead {
     ...(target !== undefined && { target }),
     ...(read.resultSha256 !== undefined && { resultSha256: read.resultSha256 }),
     ...(sourceSnapshots?.length && { sourceSnapshots }),
+    ...(discovery && {
+      sharedAssetDiscovery: {
+        id: discovery.id,
+        version: discovery.version,
+        sourceCaseId: discovery.sourceCaseId,
+        taskId: discovery.taskId,
+        evidenceRevision: discovery.evidenceRevision,
+        sourceDigest: discovery.sourceDigest,
+        evidenceId: discovery.evidenceId,
+      },
+    }),
     ...(findingPage && { findingPage }),
     ...(graphFactPage && { graphFactPage }),
     ...(trafficLinks && { trafficLinks }),

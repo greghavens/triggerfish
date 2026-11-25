@@ -1876,3 +1876,10 @@ or ordered page IDs. Explicit historical readback uses the read-only
 journal and reapplies case, revision, operating constraints, and tool
 policy. The archive gateway fixture verifies an exact recheck and a
 paginated finding response after restore, including response denial.
+
+A planner can read an exact approved peer discovery under current case
+scope and operating constraints. Its journal pins the approval version
+and source evidence. The archive gateway fixture withdraws the live
+approval, restores the consumer run, and verifies exact readback and
+response-policy denial of the original receipt. Planner discovery
+listing and pagination remain open.

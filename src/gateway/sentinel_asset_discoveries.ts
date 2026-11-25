@@ -242,11 +242,38 @@ export async function readSentinelSharedAssetDiscoveries(
     assignment.taskId,
     assignment.token,
   );
-  const pinned = readSentinelAssessmentRevision(
+  if (!location || !task?.nodeId) return [];
+  const isCurrent = () =>
+    !!readAssignedSentinelModelReview(
+      snapshotPath,
+      assignment.evidenceRevision,
+      assignment.taskId,
+      assignment.token,
+    );
+  return await readScopedSentinelSharedAssetDiscoveries(
     snapshotPath,
     assignment.evidenceRevision,
-  )?.result?.sharedGraph.snapshot;
-  if (!location || !task?.nodeId || !pinned || signal?.aborted) return [];
+    exactId,
+    signal,
+    after,
+    (asset) => asset === task.nodeId,
+    isCurrent,
+  );
+}
+
+export async function readScopedSentinelSharedAssetDiscoveries(
+  snapshotPath: string,
+  revision: number,
+  exactId: string | undefined,
+  signal: AbortSignal | undefined,
+  after: string | undefined,
+  allowsAsset: (id: string) => boolean,
+  isCurrent: () => boolean,
+) {
+  const location = locateSentinelCase(snapshotPath);
+  const pinned = readSentinelAssessmentRevision(snapshotPath, revision)
+    ?.result.sharedGraph.snapshot;
+  if (!location || !pinned || signal?.aborted || !isCurrent()) return [];
   const destination = loadSentinelGraph(pinned);
   const records = discoveryStore(location.baseDir, (store) => {
     if (!exactId) return store.listPeerApprovals(location.caseId, after);
@@ -268,7 +295,7 @@ export async function readSentinelSharedAssetDiscoveries(
         destination,
         record.claim,
       );
-      if (match?.assetId !== task.nodeId) continue;
+      if (!match || !allowsAsset(match.assetId)) continue;
       const currentSource = await currentDiscovery(
         source.path,
         record,
@@ -300,20 +327,12 @@ export async function readSentinelSharedAssetDiscoveries(
       // An unavailable source cannot authorize a discovery.
     }
   }
-  return signal?.aborted ||
-      !readAssignedSentinelModelReview(
-        snapshotPath,
-        assignment.evidenceRevision,
-        assignment.taskId,
-        assignment.token,
-      )
-    ? []
-    : discoveryStore(
-      location.baseDir,
-      (store) =>
-        results.filter(({ id, version }) => {
-          const current = store.get(id);
-          return current?.status === "approved" && current.version === version;
-        }),
-    );
+  return signal?.aborted || !isCurrent() ? [] : discoveryStore(
+    location.baseDir,
+    (store) =>
+      results.filter(({ id, version }) => {
+        const current = store.get(id);
+        return current?.status === "approved" && current.version === version;
+      }),
+  );
 }
