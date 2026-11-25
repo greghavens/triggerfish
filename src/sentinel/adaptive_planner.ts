@@ -802,6 +802,8 @@ export function validateSentinelPlanSuggestions(
     string,
     { nodeId: string; hashes: ReadonlySet<string> }
   > = new Map(),
+  graphFacts: ReadonlyMap<string, { targetId: string; taskId: string }> =
+    new Map(),
 ):
   | (AdaptiveTaskRequest & {
     sourceKind?: AdaptiveSourceKind;
@@ -809,6 +811,7 @@ export function validateSentinelPlanSuggestions(
     upstreamCheckId?: string;
     peerFindingCitations?: readonly AdaptivePeerFindingCitation[];
     githubWorkflowCitation?: AdaptivePlannerRound["githubWorkflowCitation"];
+    graphFactId?: string;
   })[]
   | undefined {
   if (response.length > 8_000) return undefined;
@@ -841,6 +844,7 @@ export function validateSentinelPlanSuggestions(
     upstreamCheckId?: string;
     peerFindingCitations?: readonly AdaptivePeerFindingCitation[];
     githubWorkflowCitation?: AdaptivePlannerRound["githubWorkflowCitation"];
+    graphFactId?: string;
   })[] = [];
   const accepted = new Map<number, string>();
   for (const [index, item] of raw.entries()) {
@@ -864,6 +868,11 @@ export function validateSentinelPlanSuggestions(
         !Number.isSafeInteger(dependency) || !accepted.has(dependency)
       )
     ) continue;
+    const graphFactId = item.graphFactId;
+    const graphFact = typeof graphFactId === "string"
+      ? graphFacts.get(graphFactId)
+      : undefined;
+    if (graphFactId !== undefined && graphFact?.targetId !== nodeId) continue;
     const source = item.sourceTaskId;
     const sourceKind = item.sourceKind;
     const workflowHash = item.sourceWorkflowResultSha256;
@@ -962,6 +971,7 @@ export function validateSentinelPlanSuggestions(
     const prerequisites = [
       ...new Set([
         ...dependencies.map((dependency) => accepted.get(dependency)!),
+        ...(graphFact ? [graphFact.taskId] : []),
         ...(typeof source === "string" ? [source] : []),
         ...(workerSources?.map(({ taskId }) => taskId) ?? []),
       ]),
@@ -1020,6 +1030,7 @@ export function validateSentinelPlanSuggestions(
       }
       tasks.push({
         ...task,
+        ...(graphFact && typeof graphFactId === "string" && { graphFactId }),
         ...(typeof workflowHash === "string" && typeof source === "string" && {
           githubWorkflowCitation: {
             sourceTaskId: source,

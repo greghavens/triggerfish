@@ -186,7 +186,12 @@ Deno.test("Only a post-authorized exact leased graph edge can be published and r
     try {
       store.sync(revision, [
         { kind: "impact", nodeId: "app", reason: MODEL_ASSIGNMENT_REASON },
-        { kind: "trace", nodeId: "app", reason: MODEL_ASSIGNMENT_REASON },
+        {
+          kind: "trace",
+          nodeId: "app",
+          depth: 1,
+          reason: MODEL_ASSIGNMENT_REASON,
+        },
         {
           kind: "impact",
           nodeId: "other-app",
@@ -274,7 +279,14 @@ Deno.test("Only a post-authorized exact leased graph edge can be published and r
             observed.resolve(
               JSON.parse(String(prompt).split("\n").at(-1)!).graphFacts,
             );
-            send({ type: "response", text: "[]", taint: "INTERNAL" });
+            send({
+              type: "response",
+              text: JSON.stringify([
+                { kind: "trace", nodeId: "other-app", graphFactId: fact.id },
+                { kind: "trace", nodeId: "app", graphFactId: fact.id },
+              ]),
+              taint: "INTERNAL",
+            });
           }
           return Promise.resolve();
         },
@@ -304,6 +316,29 @@ Deno.test("Only a post-authorized exact leased graph edge can be published and r
           store.modelPlanHistory(revision, true).at(-1)?.inputManifest
             ?.graphFactIds,
           [fact.id],
+        );
+        const expires = Date.now() + 2000;
+        while (
+          !store.list(revision).some((task) =>
+            task.plannerRound?.graphFactId
+          ) && Date.now() < expires
+        ) {
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+        const cited = store.list(revision).filter((task) =>
+          task.plannerRound?.graphFactId
+        );
+        assertEquals(
+          cited.map(({ nodeId, prerequisites, plannerRound }) => ({
+            nodeId,
+            prerequisites,
+            factId: plannerRound?.graphFactId,
+          })),
+          [{
+            nodeId: "app",
+            prerequisites: [producer.assignedTaskId],
+            factId: fact.id,
+          }],
         );
       } finally {
         planner.stop();

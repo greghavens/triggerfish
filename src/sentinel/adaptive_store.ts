@@ -276,6 +276,7 @@ export interface AdaptiveCarriedAssignedTargetCitation {
 }
 
 export interface AdaptivePlannerRound {
+  readonly graphFactId?: string;
   readonly identity: string;
   readonly githubWorkflowCitation?: {
     readonly sourceTaskId: string;
@@ -658,7 +659,9 @@ function normalizePlanningInputManifest(input: AdaptivePlannerInputManifest) {
     workerObservations,
     ...(input.graphFactIds !== undefined && {
       graphFactIds: manifestList(input.graphFactIds, 5, (id) => {
-        if (typeof id !== "string" || !/^worker-graph-fact:[a-f0-9]{64}$/.test(id)) {
+        if (
+          typeof id !== "string" || !/^worker-graph-fact:[a-f0-9]{64}$/.test(id)
+        ) {
           throw new Error("Invalid Sentinel graph fact ID");
         }
         return id;
@@ -847,6 +850,7 @@ function normalizePlannerRound(round: AdaptivePlannerRound | undefined) {
     upstreamCheckId,
     upstreamCitations,
     workerSources,
+    graphFactId,
     githubWorkflowCitation,
     peerFindingCitations,
     priorAssignedTargetCitations,
@@ -862,6 +866,12 @@ function normalizePlannerRound(round: AdaptivePlannerRound | undefined) {
     (hintId !== undefined && (!Number.isSafeInteger(hintId) || hintId < 1))
   ) {
     throw new Error("Invalid Sentinel assignment planner round");
+  }
+  if (
+    graphFactId !== undefined &&
+    !/^worker-graph-fact:[a-f0-9]{64}$/.test(graphFactId)
+  ) {
+    throw new Error("Invalid Sentinel graph fact citation");
   }
   if (
     githubWorkflowCitation &&
@@ -895,6 +905,7 @@ function normalizePlannerRound(round: AdaptivePlannerRound | undefined) {
   ) throw new Error("Invalid Sentinel worker sources");
   return {
     identity: revisionKey(identity),
+    ...(graphFactId && { graphFactId }),
     ...(githubWorkflowCitation && {
       githubWorkflowCitation: {
         sourceTaskId: taskId(githubWorkflowCitation.sourceTaskId),
@@ -4455,7 +4466,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
             !witnesses.some(({ taskId }) => taskId === sourceTaskId)) ||
           round?.peerFindingCitations?.length ||
           round?.priorAssignedTargetCitations?.length ||
-          round?.githubWorkflowCitation
+          (round?.githubWorkflowCitation || round?.graphFactId)
         ) return false;
         const saved = JSON.parse(source.observation);
         const trace = saved?.trace;
