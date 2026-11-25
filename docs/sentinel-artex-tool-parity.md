@@ -1734,5 +1734,6 @@ Operators can reopen a committed worker's shared asset-link page through
 with the normalized request and response digest. Readback reapplies source
 policy and verifies the exact case revision and trace step. The restart
 fixture removes a contributing live publication, then proves exact readback
-and response-policy denial through operator chat. Archived interrupted traces
-have separate retention rules and this fixture does not cover their readback.
+and response-policy denial through operator chat. The archive gateway fixture
+also reopens an interrupted worker's committed page after restore, rejects
+a digest-mismatched step, and verifies response-policy denial.

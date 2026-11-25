@@ -1,3 +1,4 @@
+import { parseSharedAssetLinkPage } from "./shared_asset_link_page.ts";
 import { readSentinelProvenanceNodeReference } from "./worker_goal_recovery.ts";
 import { readSentinelProvenanceSearchReference } from "./worker_goal_recovery.ts";
 import { readSentinelWorkerTracePageReference } from "./worker_goal_recovery.ts";
@@ -8,6 +9,7 @@ import {
   isSentinelInventoryFindingRead,
   isSentinelInventoryNeighborhoodRead,
   sentinelGoalReceiptReadArguments,
+  sentinelSharedAssetLinksArgs,
 } from "./worker_goal_recovery.ts";
 import { readSentinelTaskObservationPageReference } from "./worker_goal_recovery.ts";
 import { readSentinelDiscoveryPageReference } from "./worker_goal_recovery.ts";
@@ -353,7 +355,10 @@ function scrubAssessment(
     .run(scope.caseId, scope.runId, scope.evidenceRevision, snapshotDigest);
 }
 
-function retainedTraceReceiptFields(step: Record<string, unknown>) {
+function retainedTraceReceiptFields(
+  step: Record<string, unknown>,
+  revision: number,
+) {
   if (step.outcome !== "returned") return {};
   const uuid = (value: unknown): value is string =>
     typeof value === "string" &&
@@ -403,6 +408,22 @@ function retainedTraceReceiptFields(step: Record<string, unknown>) {
     const args = sentinelGoalReceiptReadArguments(step.tool, citation?.args);
     if (args && digest(citation?.sha256)) {
       fields.goalReceiptRead = { args, sha256: citation?.sha256 };
+    }
+  }
+  if (step.tool === "sentinel_shared_asset_links") {
+    const receipt = step.goalReceiptRead as
+      | { args?: unknown; sha256?: unknown }
+      | undefined;
+    const args = sentinelGoalReceiptReadArguments(step.tool, receipt?.args);
+    const selector = args && sentinelSharedAssetLinksArgs(args);
+    const text = step.sharedAssetLinksPage;
+    if (
+      selector && typeof text === "string" && digest(receipt?.sha256) &&
+      parseSharedAssetLinkPage(text, revision, selector) &&
+      createHash("sha256").update(text).digest("hex") === receipt.sha256
+    ) {
+      fields.goalReceiptRead = { args, sha256: receipt.sha256 };
+      fields.sharedAssetLinksPage = text;
     }
   }
   if (step.tool === "sentinel_goal_state") {
@@ -547,6 +568,12 @@ export function retainArchivedWorkerTraceMetadata(db: DatabaseSync) {
   const write = db.prepare(`
     INSERT OR REPLACE INTO adaptive_archived_worker_traces VALUES (?, ?, ?)
   `);
+  const evidenceNumber = tableExists(db, "adaptive_evidence_revisions")
+    ? db.prepare(`
+      SELECT evidenceNumber FROM adaptive_evidence_revisions
+      WHERE revision = ? ORDER BY evidenceNumber DESC, rowid DESC LIMIT 1
+    `)
+    : undefined;
   for (const table of [archivedTable, progressTable]) {
     if (!tableExists(db, table)) continue;
     const rows = db.prepare(`
@@ -558,6 +585,9 @@ export function retainArchivedWorkerTraceMetadata(db: DatabaseSync) {
       db.exec("DELETE FROM adaptive_archived_worker_traces");
     }
     for (const row of rows) {
+      const revision = Number(
+        evidenceNumber?.get(row.revision)?.evidenceNumber,
+      );
       const trace = JSON.parse(String(row.steps));
       if (!Array.isArray(trace) || trace.length > 16) {
         throw new Error("Invalid archived Sentinel worker trace");
@@ -578,7 +608,7 @@ export function retainArchivedWorkerTraceMetadata(db: DatabaseSync) {
           tool: step.tool,
           ...(target && { target }),
           outcome: step.outcome,
-          ...retainedTraceReceiptFields(step),
+          ...retainedTraceReceiptFields(step, revision),
         };
       });
       if (steps.length) {

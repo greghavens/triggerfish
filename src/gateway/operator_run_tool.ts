@@ -1,3 +1,4 @@
+import { parseSharedAssetLinkPage } from "../sentinel/shared_asset_link_page.ts";
 import { querySentinelWorkerObservations } from "../sentinel/adaptive_store.ts";
 import {
   isSentinelInventoryFindingRead,
@@ -112,7 +113,6 @@ import {
 import {
   inspectSentinelProvenance,
   inspectSentinelWorkerObservation,
-  parseSharedAssetLinkPage,
   projectCaseHints,
   projectSentinelAssignedTarget,
   projectSentinelSharedFindingSource,

@@ -133,6 +133,7 @@ async function withGateway(
       denyArchive: boolean;
       denyRunResponse: boolean;
       denyWorkflowMetadata: boolean;
+      denySharedAssetLinks: boolean;
       workflowMetadataCalls: number;
     },
   ) => Promise<void>,
@@ -142,6 +143,7 @@ async function withGateway(
     denyArchive: false,
     denyRunResponse: false,
     denyWorkflowMetadata: false,
+    denySharedAssetLinks: false,
     workflowMetadataCalls: 0,
   };
   const registry = createProviderRegistry();
@@ -153,7 +155,9 @@ async function withGateway(
       const allowed = !(policy.denyArchive && hook === "PRE_TOOL_CALL" &&
         call?.args?.action === "archive") &&
         !(policy.denyRunResponse && hook === "POST_TOOL_RESPONSE" &&
-          input.tool_name === "operator_runs");
+          input.tool_name === "operator_runs") &&
+        !(policy.denySharedAssetLinks && hook === "POST_TOOL_RESPONSE" &&
+          input.tool_name === "sentinel_shared_asset_links");
       return Promise.resolve({
         allowed,
         action: allowed ? "ALLOW" : "BLOCK",
@@ -668,6 +672,29 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
       runs: workflowRuns,
     };
     const interruptedProofRequestId = crypto.randomUUID();
+    const assetLinksArgs = { asset: "app" };
+    const assetLinksPage = {
+      ...assetLinksArgs,
+      offset: 0,
+      links: [],
+      sourceSnapshots: [],
+      totalLinks: 0,
+      nextOffset: null,
+      source: "live_published_inventory",
+      caseEvidenceRevision: state.revision,
+      unavailableSourceCount: 0,
+    };
+    const assetLinksText = JSON.stringify(assetLinksPage);
+    const assetLinksStep = {
+      tool: "sentinel_shared_asset_links",
+      target: "app",
+      outcome: "returned" as const,
+      sharedAssetLinksPage: assetLinksText,
+      goalReceiptRead: {
+        args: assetLinksArgs,
+        sha256: createHash("sha256").update(assetLinksText).digest("hex"),
+      },
+    };
     const privateProgress = "fixture-only-interrupted-progress-secret";
     let dependentId: string;
     try {
@@ -758,26 +785,38 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
           revision,
           interrupted.id,
           pendingReview.token,
-          [{
-            tool: "sentinel_assigned_target",
-            target: "app",
-            outcome: "returned",
-            resultSnapshot: {
-              sha256: "a".repeat(64),
-              excerpt: privateProgress,
-              truncated: false,
+          [
+            {
+              tool: "sentinel_assigned_target",
+              target: "app",
+              outcome: "returned",
+              resultSnapshot: {
+                sha256: "a".repeat(64),
+                excerpt: privateProgress,
+                truncated: false,
+              },
             },
-          }, {
-            tool: "sentinel_prove_goal",
-            target: evidenceId,
-            outcome: "returned",
-            goalProofRequestId: interruptedProofRequestId,
-          }, {
-            tool: "sentinel_live_workflow_status",
-            target: "app",
-            outcome: "returned",
-            githubWorkflowRead: workflowReceipt,
-          }],
+            {
+              tool: "sentinel_prove_goal",
+              target: evidenceId,
+              outcome: "returned",
+              goalProofRequestId: interruptedProofRequestId,
+            },
+            {
+              tool: "sentinel_live_workflow_status",
+              target: "app",
+              outcome: "returned",
+              githubWorkflowRead: workflowReceipt,
+            },
+            assetLinksStep,
+            {
+              ...assetLinksStep,
+              sharedAssetLinksPage: JSON.stringify({
+                ...assetLinksPage,
+                unavailableSourceCount: 1,
+              }),
+            },
+          ],
         ),
       );
       const trafficTask = store.sync(revision, [{
@@ -1286,6 +1325,18 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
         taskId: interruptedTaskId,
         stepIndices: [2],
       };
+      const assetLinksTrace = { ...workflowTrace, stepIndices: [3] };
+      assertEquals(
+        JSON.parse(await turn(assetLinksTrace)).result,
+        assetLinksPage,
+      );
+      assertStringIncludes(
+        await turn({ ...assetLinksTrace, stepIndices: [4] }),
+        "unavailable",
+      );
+      policy.denySharedAssetLinks = true;
+      assertStringIncludes(await turn(assetLinksTrace), "unavailable");
+      policy.denySharedAssetLinks = false;
       const workflowResult = JSON.parse(await turn(workflowTrace)).result;
       assertEquals(workflowResult, { targetId: "app", ...workflowReceipt });
       assertEquals(policy.workflowMetadataCalls, 1);

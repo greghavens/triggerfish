@@ -1,3 +1,7 @@
+import {
+  parseSharedAssetLinkPage,
+  type SharedAssetLinkPage,
+} from "../sentinel/shared_asset_link_page.ts";
 import { readSentinelProvenanceNodeReference } from "../sentinel/worker_goal_recovery.ts";
 import { readSentinelProvenanceSearchReference } from "../sentinel/worker_goal_recovery.ts";
 import { readSentinelWorkerTracePageReference } from "../sentinel/worker_goal_recovery.ts";
@@ -1850,58 +1854,6 @@ async function workflowObservation(
   } catch {
     return unavailable;
   }
-}
-
-type SharedAssetLinkPage =
-  & Omit<
-    Awaited<ReturnType<typeof readSharedSentinelAssetLinks>>,
-    "unavailable" | "mappingSources"
-  >
-  & {
-    source: string;
-    caseEvidenceRevision: number;
-    unavailableSourceCount: number;
-    mappingProof?: string;
-  };
-
-export function parseSharedAssetLinkPage(
-  result: string,
-  revision: number,
-  args: NonNullable<ReturnType<typeof sentinelSharedAssetLinksArgs>>,
-): SharedAssetLinkPage | undefined {
-  if (
-    result.length > MAX_TOOL_CHARS || redactCredentialText(result) !== result
-  ) return;
-  const page = JSON.parse(result);
-  const { offset = 0, limit = 5, includeFindings = false } = args;
-  if (
-    page?.source !== "live_published_inventory" ||
-    page.caseEvidenceRevision !== revision ||
-    page.asset !== args.asset || page.offset !== offset ||
-    !Array.isArray(page.links) || page.links.length > limit ||
-    !Array.isArray(page.sourceSnapshots) ||
-    !Number.isSafeInteger(page.totalLinks) || page.totalLinks < 0 ||
-    !Number.isSafeInteger(page.unavailableSourceCount) ||
-    page.unavailableSourceCount < 0 ||
-    (page.mappingProof !== undefined &&
-      (typeof page.mappingProof !== "string" ||
-        !/^[a-f0-9]{64}$/.test(page.mappingProof))) ||
-    Object.keys(page).length !== (includeFindings ? 11 : 9) +
-        (page.mappingProof === undefined ? 0 : 1) ||
-    (includeFindings &&
-      (!Array.isArray(page.findings) || page.findings.length > limit ||
-        !Number.isSafeInteger(page.totalFindings) || page.totalFindings < 0))
-  ) return;
-  const total = Math.max(page.totalLinks, page.totalFindings ?? 0);
-  if (
-    page.nextOffset !== (offset + limit < total ? offset + limit : null) ||
-    page.links.length !==
-      Math.max(0, Math.min(limit, page.totalLinks - offset)) ||
-    (includeFindings &&
-      page.findings.length !==
-        Math.max(0, Math.min(limit, page.totalFindings - offset)))
-  ) return;
-  return page;
 }
 
 function assetLinkProof(
