@@ -2846,6 +2846,7 @@ export function createSentinelModelPlanner(
 ) {
   const superseded = Symbol("Sentinel plan superseded");
   let seen: string | undefined;
+  let lastExecutionEvidenceIds = new Set<string>();
   let lastStarted = 0;
   let lastFormalGoalSet: string | undefined;
   let lastConstraintVersion: string | undefined;
@@ -3809,9 +3810,25 @@ export function createSentinelModelPlanner(
         `${constraints.runId}:${constraints.version}`;
       const newConstraints = constraintVersion !== undefined &&
         constraintVersion !== lastConstraintVersion;
+      const executionEvidenceIds = snapshot.nodes.flatMap((node) =>
+        node.kind === "evidence" && node.executionSource &&
+          node.controlVerification &&
+          sentinelOperatingConstraintsAllow(
+            constraints?.constraints,
+            { kind: "review_evidence", nodeId: node.id },
+            snapshot,
+          )
+          ? [{ id: node.id, observedAt: node.controlVerification.observedAt }]
+          : []
+      ).sort((left, right) => right.observedAt.localeCompare(left.observedAt))
+        .map(({ id }) => id);
+      const newExecutionEvidence = executionEvidenceIds.some((id) =>
+        !lastExecutionEvidenceIds.has(id)
+      );
       if (
         roundIdentity === seen ||
-        (!newFormalGoals && !newConstraints && now() - lastStarted < 60_000)
+        (!newFormalGoals && !newConstraints && !newExecutionEvidence &&
+          now() - lastStarted < 60_000)
       ) {
         fillReviews(state, identity);
         return;
@@ -3917,6 +3934,7 @@ export function createSentinelModelPlanner(
               prerequisites,
             }));
           claim = store.claimModelPlan(roundIdentity, {
+            executionEvidenceIds,
             operatingConstraintKey: constraintVersion
               ? createHash("sha256").update(constraintVersion).digest("hex")
               : undefined,
@@ -3947,6 +3965,7 @@ export function createSentinelModelPlanner(
         return;
       }
       lastStarted = now();
+      lastExecutionEvidenceIds = new Set(executionEvidenceIds);
       lastFormalGoalSet = formalGoalSet;
       lastConstraintVersion = constraintVersion;
       reviewedSincePlan = false;
@@ -4076,6 +4095,8 @@ export function createSentinelModelPlanner(
             ]
             : []),
           "Read an exact execution-evidence node with sentinel_case_execution_evidence when this tool is available. Use review_evidence on that same node for follow-up.",
+          "Inspect recentExecutionEvidence with sentinel_case_execution_evidence when available.",
+          "If an execution receipt returns recheckFindingIds, propose review_evidence on its exact evidence node so the worker can recheck those findings.",
           "Only use exact graph IDs.",
           ...(goalCompletion
             ? [
@@ -4137,6 +4158,8 @@ export function createSentinelModelPlanner(
           }[],
           ...(graphFacts.length && { graphFacts: [...graphFacts] }),
           ...(findingRechecks.length && { findingRechecks }),
+          ...(executionEvidenceIds.length &&
+            { recentExecutionEvidence: executionEvidenceIds.slice(0, 8) }),
           savedObservationCount: observations.length,
           ...(upstreamChecks.length && { upstreamChecks }),
           incidents: incidentContext

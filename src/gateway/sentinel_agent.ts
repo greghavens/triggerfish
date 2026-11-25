@@ -1,3 +1,4 @@
+import { plannerExecutionRecheckCandidates } from "./sentinel_execution_rechecks.ts";
 import { sentinelOperatingConstraintsAllow } from "../sentinel/operating_constraints.ts";
 import {
   authorizeSavedToolCalls,
@@ -3469,10 +3470,24 @@ function createAgent(
             },
           );
           if (result.blocked || !current()) return unavailable;
+          const plannerState = plannerRead &&
+            payload.kind === "github_branch_protection" &&
+            payload.approvedBranches?.length &&
+            readSentinelAssessment(options.snapshotPath);
+          const recheckFindingIds =
+            plannerState && payload.kind === "github_branch_protection"
+              ? plannerExecutionRecheckCandidates(
+                options.snapshotPath,
+                plannerState,
+                node,
+                payload.approvedBranches ?? [],
+              )
+              : undefined;
           return boundResult({
             evidenceId: node,
             evidenceRevision: assessmentRevision,
             evidence,
+            ...(recheckFindingIds?.length && { recheckFindingIds }),
           });
         } catch {
           return unavailable;

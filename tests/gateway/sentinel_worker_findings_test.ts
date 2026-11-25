@@ -764,6 +764,7 @@ Deno.test("Leased Sentinel workers report, recheck, and amend findings visible i
 Deno.test("Leased execution evidence reviews publish a failed check and recheck it from a newer receipt", async () => {
   const baseDir = await Deno.makeTempDir();
   const path = resolveSentinelCasePath(baseDir);
+  let receiptPlanner: ReturnType<typeof createSentinelModelPlanner> | undefined;
   const placeholder = `execution-evidence:${"a".repeat(64)}`;
   const validUntil = new Date(Date.now() + 3_600_000).toISOString();
   const payload = {
@@ -876,6 +877,97 @@ Deno.test("Leased execution evidence reviews publish a failed check and recheck 
       [tool(findings, { receiptId: finding.id })],
     ]);
     assertEquals(JSON.parse(peer.results[0][0]).record, finding);
+    const planningRegistry = createProviderRegistry();
+    let plannerTurns = 0;
+    let receiptTargets: string[] = [];
+    let recheckCandidates: (string[] | undefined)[] = [];
+    planningRegistry.register({
+      name: "receipt-candidate-planner",
+      supportsStreaming: false,
+      complete(messages) {
+        const completed = messages.filter(({ role }) => role === "tool");
+        if (completed.length) {
+          recheckCandidates = completed.map(({ content }) =>
+            JSON.parse(String(content)).recheckFindingIds
+          );
+        }
+        if (completed.length || !receiptTargets.length) {
+          plannerTurns++;
+          return Promise.resolve({
+            content: "[]",
+            usage: { inputTokens: 1, outputTokens: 1 },
+            toolCalls: [],
+          });
+        }
+        return Promise.resolve({
+          content: "",
+          usage: { inputTokens: 1, outputTokens: 1 },
+          toolCalls: receiptTargets.map((node, index) => ({
+            type: "function",
+            id: `candidate-receipt-${index}`,
+            function: {
+              name: "sentinel_case_execution_evidence",
+              arguments: JSON.stringify({ node }),
+            },
+          })),
+        });
+      },
+    });
+    planningRegistry.setDefault("receipt-candidate-planner");
+    const clock = Date.now();
+    receiptPlanner = createSentinelModelPlanner(
+      path,
+      (state, _task, _token, role) =>
+        role === "planner"
+          ? createSentinelSubagent({
+            snapshotPath: path,
+            assessmentRevision: state.revision,
+            plannerExecutionEvidenceRunId: state.plan.runId,
+            sharedInventoryBaseDir: baseDir,
+            providerRegistry: planningRegistry,
+            authorizeExecutionTracePayload: (receipt) =>
+              Promise.resolve(receipt.repositoryId === 42),
+            allowModelAccess: true,
+            hookRunner: {
+              evaluateHook: () =>
+                Promise.resolve({
+                  allowed: true,
+                  action: "ALLOW",
+                  duration: 0,
+                  ruleId: null,
+                }),
+            },
+          })
+          : {
+            execute: (_message, send) => {
+              send({
+                type: "response",
+                text: '{"summary":"Reviewed the assignment.","followUps":[]}',
+                taint: "INTERNAL",
+              });
+              return Promise.resolve();
+            },
+            clear() {},
+          },
+      undefined,
+      () => clock,
+    );
+    const finishPlanning = async (state: State, count: number) => {
+      for (let index = 0; index < 100; index++) {
+        receiptPlanner!.advance(state);
+        if (plannerTurns === count && !receiptPlanner!.hasInFlightWork()) {
+          return;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      assertEquals(
+        plannerTurns,
+        count,
+        JSON.stringify(readAdaptiveSentinel(path, state)),
+      );
+      assert(!receiptPlanner!.hasInFlightWork());
+    };
+    await finishPlanning(state, 1);
     const passingPayload = {
       ...payload,
       protectedCount: 1,
@@ -968,6 +1060,11 @@ Deno.test("Leased execution evidence reviews publish a failed check and recheck 
     );
     const updated = refreshSentinelAssessment(path);
     assert(updated && updated.revision > state.revision);
+    receiptTargets = [passingNode, foreignNode];
+    advanceAdaptiveSentinel(path, updated);
+    await finishPlanning(updated, 2);
+    assertEquals(recheckCandidates, [[finding.id], undefined]);
+    receiptPlanner.stop();
     const passingLease = assignedLease(
       path,
       updated,
@@ -1055,6 +1152,7 @@ Deno.test("Leased execution evidence reviews publish a failed check and recheck 
       assertEquals(history.rechecks, [saved]);
     });
   } finally {
+    receiptPlanner?.stop();
     await Deno.remove(baseDir, { recursive: true });
   }
 });

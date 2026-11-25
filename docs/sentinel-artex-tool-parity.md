@@ -1231,3 +1231,11 @@ also writes a recheck. The mixed-batch restart fixture kills the worker
 after the recheck commits and verifies that the replacement receives the
 original finding and exact journaled recheck. Recovery retains the prior
 journal-only lookup for older pending batches.
+
+A newly committed execution verification wakes planning without waiting
+for the normal cooldown. The adaptive store remembers which receipt IDs
+have already triggered that exception across restarts. The planner can
+open an exact receipt through root dispatch and receive matching finding
+IDs only after source authorization. The gateway fixture commits two
+receipts and verifies that the valid branch is suggested during the next
+round while a different branch yields no recheck candidate.

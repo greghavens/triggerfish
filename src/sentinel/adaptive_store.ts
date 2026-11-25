@@ -4084,6 +4084,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
         readonly incidentReviewId?: number;
         readonly formalGoalSetKey?: string;
         readonly operatingConstraintKey?: string;
+        readonly executionEvidenceIds?: readonly string[];
       },
     ): number | "already_claimed" | "cooldown" {
       identity = revisionKey(identity);
@@ -4149,8 +4150,28 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
             ).run(constraintKey).changes,
           );
         }
+        let firstExecutionRound = false;
+        const executionEvidenceIds = context?.executionEvidenceIds;
+        if (!prior && executionEvidenceIds?.length) {
+          db.exec(
+            `CREATE TABLE IF NOT EXISTS adaptive_model_execution_receipt_rounds (
+            evidenceId TEXT PRIMARY KEY
+          )`,
+          );
+          const remember = db.prepare(
+            "INSERT OR IGNORE INTO adaptive_model_execution_receipt_rounds VALUES (?)",
+          );
+          for (const id of executionEvidenceIds) {
+            if (
+              /^execution-evidence:[a-f0-9]{64}$/.test(id) &&
+              remember.run(id).changes
+            ) {
+              firstExecutionRound = true;
+            }
+          }
+        }
         if (
-          !firstGoalRound && !firstConstraintRound &&
+          !firstGoalRound && !firstConstraintRound && !firstExecutionRound &&
           typeof last === "number" && time - last < 60_000
         ) {
           return "cooldown";

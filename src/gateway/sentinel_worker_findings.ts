@@ -1,11 +1,13 @@
-import { branchExecutionEvidenceId } from "../sentinel/case_execution_evidence.ts";
-import type { GraphNode } from "../sentinel/graph.ts";
+import {
+  branchRecheckScope,
+  type ExecutionBranches,
+  receiptRecheckCandidate,
+} from "./sentinel_execution_rechecks.ts";
 import { MAX_SENTINEL_FINDING_RESULT_CHARS } from "../sentinel/worker_finding_recovery.ts";
 /** Exact case/lease gate for worker findings and retained remediation evidence. */
 import type { ToolDefinition } from "../core/types/tool.ts";
 import {
   readSentinelAssessment,
-  readSentinelAssessmentRevision,
   withSentinelAssessmentWriteLock,
 } from "../sentinel/assessment_store.ts";
 import { locateSentinelCase } from "../sentinel/cases.ts";
@@ -17,7 +19,6 @@ import {
 import {
   hasSentinelWorkerFindingJournal,
   openSentinelWorkerFindingStore,
-  type SentinelWorkerFindingRecord,
 } from "../sentinel/worker_finding_store.ts";
 import { readAssignedSentinelModelReview } from "./sentinel_adaptive_runtime.ts";
 import type { SentinelAgentOptions } from "./sentinel_agent.ts";
@@ -175,81 +176,6 @@ function withFindingJournal<T>(
       journal?.close();
     }
   });
-}
-
-function branchRecheckScope(
-  path: string,
-  finding: SentinelWorkerFindingRecord,
-  evidenceId: string,
-  branches: readonly { name: string; protected: boolean }[] | undefined,
-) {
-  const original = readSentinelAssessmentRevision(
-    path,
-    finding.evidenceRevision,
-  )
-    ?.result.sharedGraph.snapshot?.nodes.find(({ id }) =>
-      id === finding.evidenceId
-    );
-  if (!original) {
-    return finding.evidenceId.startsWith("execution-evidence:")
-      ? false
-      : undefined;
-  }
-  if (original.kind !== "evidence" || !original.executionSource) {
-    return undefined;
-  }
-  const matches = (node: GraphNode, branch: string) =>
-    node.kind === "evidence" && !!node.executionSource &&
-    !!node.controlVerification &&
-    node.id === branchExecutionEvidenceId(
-        finding.runId,
-        finding.targetId,
-        finding.controlId,
-        node.executionSource,
-        branch,
-        node.controlVerification.validUntil,
-      );
-  const branch = branches?.find(({ name }) => matches(original, name));
-  if (!branch) return false;
-  return (node: GraphNode) =>
-    matches(node, branch.name) &&
-    (node.id !== evidenceId || node.kind === "evidence" &&
-        node.controlVerification?.outcome ===
-          (branch.protected ? "pass" : "fail"));
-}
-
-type ExecutionBranches = readonly { name: string; protected: boolean }[];
-
-function receiptRecheckCandidate(
-  path: string,
-  state: NonNullable<ReturnType<typeof readSentinelAssessment>>,
-  finding: SentinelWorkerFindingRecord,
-  evidenceId: string,
-  branches: ExecutionBranches | undefined,
-) {
-  const snapshot = state.result?.sharedGraph.snapshot;
-  if (
-    !snapshot || !branches?.length || finding.runId !== state.plan.runId ||
-    finding.targetId !== executionFindingAsset(snapshot, evidenceId)
-  ) return;
-  const boundary = branchRecheckScope(path, finding, evidenceId, branches);
-  if (boundary === false) return;
-  const check = verifyWorkerFindingRecheck(snapshot, {
-    caseId: finding.caseId,
-    evidenceRevision: state.revision,
-    evaluatedAt: state.result?.controlEvaluationAt ?? state.updatedAt,
-  }, {
-    assetId: finding.targetId,
-    findingId: finding.graphFindingId,
-    controlId: finding.controlId,
-    evidenceId,
-  }, boundary);
-  return check && check.observedAt > finding.observedAt &&
-      branches.some(({ protected: enabled }) =>
-        enabled === (check.outcome === "pass")
-      )
-    ? check
-    : undefined;
 }
 
 function projectResult(value: unknown): string {
