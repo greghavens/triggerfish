@@ -33,6 +33,8 @@ import {
 } from "../../src/gateway/startup/factory/team_session_registry.ts";
 import type { EnhancedSessionManager } from "../../src/gateway/sessions.ts";
 import { buildTeamManager } from "../../src/gateway/startup/factory/team_executor.ts";
+import { createChatSession } from "../../src/gateway/chat.ts";
+import { createOperatorRunToolExecutor } from "../../src/gateway/operator_run_tool.ts";
 
 const usage = { inputTokens: 1, outputTokens: 1 };
 const userId = "owner" as UserId;
@@ -442,11 +444,12 @@ function orchestratorWith(
 Deno.test("Normal subagent factory reopens a trusted scoped execution without repeating its approved read", async () => {
   const directory = await Deno.makeTempDir();
   const path = join(directory, "agent-recovery.db");
+  const tracePath = join(directory, "execution-traces.db");
   const parent = createSession({ userId, channelId: "owner" as ChannelId });
   const childSessions: SessionId[] = [];
   const prompt = "Check the recorded defensive control.";
   let reads = 0;
-  const run: AgentRecoveryExecutor = (id, orchestrator, options) =>
+  const run: AgentRecoveryExecutor = (id, orchestrator, options, control) =>
     runRecoverableAgentTurn(
       path,
       id,
@@ -467,6 +470,7 @@ Deno.test("Normal subagent factory reopens a trusted scoped execution without re
       },
       orchestrator,
       options,
+      control,
     );
   const createFactory = (
     failBeforeCheckpoint = false,
@@ -588,6 +592,121 @@ Deno.test("Normal subagent factory reopens a trusted scoped execution without re
     assert(childSessions[4] !== childSessions[0]);
 
     assertEquals(await recreated(prompt), "ordinary");
+
+    const operatorExecutionId = crypto.randomUUID();
+    const traced = () =>
+      buildSubagentFactory(createFactory(), {
+        executionTracePath: tracePath,
+      });
+    assertStringIncludes(
+      await buildOwnerSubagentRecoveryCommand(traced(), run)(
+        `/recover-subagent ${operatorExecutionId} ${prompt}`,
+        parent,
+        undefined,
+        "INTERNAL",
+      ) ?? "",
+      "Interrupted after checkpoint",
+    );
+    assertEquals(reads, 3);
+    const identity = await delegatedSubagentIdentity(
+      parent.id,
+      operatorExecutionId,
+    );
+    const ref = { kind: "delegated", id: identity.executionId };
+    const providerRegistry = createProviderRegistry();
+    let call: Record<string, unknown> | undefined;
+    let result = "";
+    providerRegistry.register({
+      name: "owner-delegated-resume-fixture",
+      supportsStreaming: false,
+      complete(messages) {
+        const next = call;
+        call = undefined;
+        if (!next) {
+          result = String(
+            messages.findLast(({ role }) => role === "tool")?.content,
+          );
+        }
+        return Promise.resolve({
+          usage,
+          content: next ? "" : "Checked delegated run.",
+          toolCalls: next
+            ? [{
+              type: "function",
+              id: crypto.randomUUID(),
+              function: {
+                name: "operator_runs",
+                arguments: JSON.stringify(next),
+              },
+            }]
+            : [],
+        });
+      },
+    });
+    providerRegistry.setDefault("owner-delegated-resume-fixture");
+    const chat = () =>
+      createChatSession({
+        session: parent,
+        targetClassification: "INTERNAL",
+        providerRegistry,
+        enableStreaming: false,
+        hookRunner: {
+          evaluateHook: () =>
+            Promise.resolve({
+              allowed: true,
+              action: "ALLOW",
+              ruleId: null,
+              duration: 0,
+            }),
+        },
+        operatorRunExecutor: createOperatorRunToolExecutor({
+          baseDir: directory,
+          confirm: () => Promise.resolve(true),
+        }),
+        runSubagentRecoveryCommand: buildOwnerSubagentRecoveryCommand(
+          traced(),
+          run,
+        ),
+      });
+    const turn = async (
+      chat: ReturnType<typeof createChatSession>,
+      args: Record<string, unknown>,
+    ) => {
+      call = args;
+      result = "";
+      await chat.executeAgentTurn("Control the delegated run.", () => {});
+      return result;
+    };
+    assertEquals(
+      JSON.parse(await turn(chat(), { ...ref, action: "pause" })).run.status,
+      "paused",
+    );
+    const restarted = chat();
+    const resume = {
+      ...ref,
+      action: "resume",
+      executionId: operatorExecutionId,
+      originalTask: prompt,
+    };
+    assertStringIncludes(
+      await turn(restarted, { ...resume, originalTask: "Changed request" }),
+      "unavailable",
+    );
+    assertStringIncludes(
+      await turn(restarted, { ...resume, executionId: crypto.randomUUID() }),
+      "unavailable",
+    );
+    assertEquals(
+      JSON.parse(await turn(restarted, { ...ref, action: "inspect" })).run
+        .status,
+      "paused",
+    );
+    assertEquals(
+      JSON.parse(await turn(restarted, resume)).run.status,
+      "completed",
+    );
+    assertStringIncludes(await turn(restarted, resume), "unavailable");
+    assertEquals(reads, 3);
   } finally {
     await Deno.remove(directory, { recursive: true });
   }

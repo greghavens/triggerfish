@@ -1,3 +1,5 @@
+import { delegatedSubagentIdentity } from "./startup/factory/delegated_agent_recovery.ts";
+import type { SessionId } from "../core/types/session.ts";
 import { assignmentRecoveryKey } from "../core/durable_assignment.ts";
 import {
   AgentRecoveryStore,
@@ -547,6 +549,15 @@ export const operatorRunTool: ToolDefinition = {
       description:
         "Optional exact asset IDs to restrict future tasks within baseline authorization",
     },
+    executionId: {
+      type: "string",
+      description: "Original delegated recovery request UUID",
+    },
+    originalTask: {
+      type: "string",
+      description:
+        "Original non-secret delegated task text for recovery binding",
+    },
     targetKind: {
       type: "string",
       description: "Linked run type",
@@ -734,6 +745,10 @@ export const operatorRunTool: ToolDefinition = {
 /** Runtime policy for reopening an approved original tool response. */
 export interface OperatorRunToolContext {
   readonly ownerRecoverySessionId?: string;
+  readonly delegatedRecovery?: {
+    readonly parent: SessionId;
+    readonly resume: (executionId: string, task: string) => Promise<void>;
+  };
   readonly inputClassification?: ClassificationLevel;
   readonly ceiling?: ClassificationLevel;
   readonly authorizeSentinelTraceRead?: (
@@ -6581,13 +6596,41 @@ export function createOperatorRunToolExecutor(options: {
       }
       if (backgroundRole && (action === "pause" || action === "resume")) {
         const pausing = action === "pause";
+        const delegated = !pausing && backgroundRole === "delegated";
+        const recovery = context?.delegatedRecovery;
+        const { executionId, originalTask } = args;
         if (
           Object.keys(args).some((key) =>
-            !["action", "kind", "id"].includes(key)
-          ) ||
-          (!pausing && (backgroundRole !== "scheduled" ||
-            !/^scheduler-(?:cron|trigger)-[a-f0-9]{64}$/.test(ref.id) ||
-            !options.resumeScheduledExecution))
+            ![
+              "action",
+              "kind",
+              "id",
+              ...(delegated ? ["executionId", "originalTask"] : []),
+            ].includes(key)
+          )
+        ) return unavailable;
+        const delegatedRequest =
+          delegated && recovery && typeof executionId === "string" &&
+            digestPattern.test(executionId) &&
+            typeof originalTask === "string" &&
+            originalTask.trim() && originalTask.length <= 8_000 &&
+            !originalTask.includes("\0") &&
+            redactCredentialText(originalTask) === originalTask
+            ? {
+              executionId: executionId.toLowerCase(),
+              task: originalTask,
+              recovery,
+            }
+            : undefined;
+        const identity = delegatedRequest && await delegatedSubagentIdentity(
+          delegatedRequest.recovery.parent,
+          delegatedRequest.executionId,
+        );
+        if (delegated && identity?.executionId !== ref.id) return unavailable;
+        if (
+          !pausing && !delegated &&
+          (!/^scheduler-(?:cron|trigger)-[a-f0-9]{64}$/.test(ref.id) ||
+            !options.resumeScheduledExecution)
         ) return unavailable;
         const before = await controller.inspect(ref);
         if (!before) return unavailable;
@@ -6613,10 +6656,25 @@ export function createOperatorRunToolExecutor(options: {
           const current = journal.readRun(backgroundRole, ref.id, "INTERNAL");
           if (current?.status !== "running") return unavailable;
           if (!pausing) {
-            if (
-              !pausedBackground(current) ||
-              !await options.resumeScheduledExecution?.(ref.id)
-            ) return unavailable;
+            if (!pausedBackground(current)) return unavailable;
+            if (delegatedRequest && identity) {
+              if (
+                current.scope.sessionId !== identity.sessionId ||
+                current.scope.sourceId !== delegatedRequest.recovery.parent
+              ) return unavailable;
+              await delegatedRequest.recovery.resume(
+                delegatedRequest.executionId,
+                delegatedRequest.task,
+              );
+              if (
+                journal.readRun(backgroundRole, ref.id, "INTERNAL")?.status !==
+                  "completed"
+              ) {
+                return unavailable;
+              }
+            } else if (!await options.resumeScheduledExecution?.(ref.id)) {
+              return unavailable;
+            }
           } else {
             const key = recoveryKey(current);
             using lock = lockAgentRecovery(recoveryPath, key);

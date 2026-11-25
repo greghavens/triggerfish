@@ -312,6 +312,20 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
       ceiling: ownerTargetClassification,
       inputClassification: taint(),
       ...(config.recoverAgentTurn && { ownerRecoverySessionId: session.id }),
+      ...(config.runSubagentRecoveryCommand && {
+        delegatedRecovery: {
+          parent: session.id,
+          async resume(executionId: string, task: string) {
+            if (!isCurrent()) return;
+            await config.runSubagentRecoveryCommand?.(
+              `/recover-subagent --resume-paused ${executionId} ${task}`,
+              session,
+              undefined,
+              ownerTargetClassification,
+            );
+          },
+        },
+      }),
       async authorizeSentinelTraceRead(scope, tool, call, result) {
         if (!isCurrent()) return false;
         const metadata = {
