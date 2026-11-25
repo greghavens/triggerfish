@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { isSentinelCaseId } from "./cases.ts";
 import { redactCredentialText } from "../core/logger/redactor.ts";
 /** Canonical arguments retained for request-bound Sentinel goal proposals. */
@@ -1149,4 +1150,43 @@ export function readSentinelProvenanceNodeReference(value: unknown) {
     nextOffset,
     sha256,
   };
+}
+
+/** Verify the approved node page against its exact request and connection fingerprints. */
+export function readSavedPlannerProvenanceNode(
+  text: unknown,
+  page: NonNullable<ReturnType<typeof readSentinelProvenanceNodeReference>>,
+  revision?: number,
+): string | undefined {
+  if (
+    typeof text !== "string" || text.length > 7000 ||
+    redactCredentialText(text) !== text ||
+    /"(?:githubWorkflowRead|resultSnapshot|sharedAssetLinksPage)"\s*:/.test(
+      text,
+    ) ||
+    createHash("sha256").update(text).digest("hex") !== page.sha256
+  ) return;
+  try {
+    const result = JSON.parse(text);
+    if (
+      !Number.isSafeInteger(result?.revision) || result.revision < 1 ||
+      (revision !== undefined && result.revision !== revision) ||
+      (page.args.revision !== undefined &&
+        result.revision !== page.args.revision) ||
+      Object.keys(result).length !== 6 || result.node?.id !== page.args.node ||
+      result.offset !== (page.args.offset ?? 0) ||
+      result.totalConnections !== page.totalConnections ||
+      result.nextOffset !== page.nextOffset ||
+      !Array.isArray(result.connections) ||
+      result.connections.length !== page.connections.length ||
+      result.connections.some((connection: unknown, index: number) =>
+        createHash("sha256").update(JSON.stringify(connection)).digest(
+          "hex",
+        ) !== page.connections[index]
+      )
+    ) return;
+    return text;
+  } catch {
+    return;
+  }
 }

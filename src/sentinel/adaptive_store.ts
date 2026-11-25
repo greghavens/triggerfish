@@ -17,6 +17,7 @@ import {
   isSentinelGoalReceiptRead,
   isSentinelRetainedReadReceipt,
   parseSavedPlannerProvenancePath,
+  readSavedPlannerProvenanceNode,
   readSentinelDiscoveryPageReference,
   readSentinelFindingPageReference,
   readSentinelGoalStateProjection,
@@ -679,6 +680,7 @@ export interface AdaptivePlannerRead {
   readonly caseHintFirstId?: SentinelReviewStep["caseHintFirstId"];
   readonly goalStateProjection?: SentinelReviewStep["goalStateProjection"];
   readonly plannerProvenancePath?: string;
+  readonly plannerProvenanceNodeResult?: string;
   readonly plannerDefenseContainment?: boolean | null;
   readonly provenanceSearchPage?: SentinelReviewStep["provenanceSearchPage"];
   readonly provenanceNodePage?: SentinelReviewStep["provenanceNodePage"];
@@ -982,6 +984,17 @@ function normalizePlannerRead(read: AdaptivePlannerRead): AdaptivePlannerRead {
         !isDeepStrictEqual(provenanceNodePage.args, args) ||
         provenanceNodePage.sha256 !== receipt?.sha256))
   ) throw new Error("Invalid Sentinel planner provenance page");
+  const plannerProvenanceNodeResult = provenanceNodePage &&
+    readSavedPlannerProvenanceNode(
+      read.plannerProvenanceNodeResult,
+      provenanceNodePage,
+    );
+  if (
+    read.plannerProvenanceNodeResult !== undefined &&
+    !plannerProvenanceNodeResult
+  ) {
+    throw new Error("Invalid Sentinel planner provenance node result");
+  }
   const observationSearch = readSentinelObservationSearchReference(
     read.observationSearch,
   );
@@ -1230,6 +1243,7 @@ function normalizePlannerRead(read: AdaptivePlannerRead): AdaptivePlannerRead {
     ...(workerTracePage && { workerTracePage }),
     ...(provenanceSearchPage && { provenanceSearchPage }),
     ...(provenanceNodePage && { provenanceNodePage }),
+    ...(plannerProvenanceNodeResult && { plannerProvenanceNodeResult }),
     ...(pageText !== undefined && { sharedAssetLinksPage: pageText }),
     ...(provenancePath !== undefined &&
       { plannerProvenancePath: provenancePath }),
@@ -4910,6 +4924,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
                     {
                       sharedAssetLinksPage,
                       plannerProvenancePath,
+                      plannerProvenanceNodeResult,
                       plannerDefenseContainment,
                       plannerDigestResult,
                       plannerCoverageResult,
@@ -4923,6 +4938,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
                         ...read,
                         sharedAssetLinksPage,
                         plannerProvenancePath,
+                        plannerProvenanceNodeResult,
                         plannerDefenseContainment,
                         plannerDigestResult,
                         plannerCoverageResult,

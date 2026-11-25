@@ -57,6 +57,7 @@ import {
   isSentinelRetainedReadReceipt,
   parseSavedPlannerProvenancePath,
   parseSentinelPinnedFindingRead,
+  readSavedPlannerProvenanceNode,
   readSentinelGraphOverviewProjection,
   SENTINEL_ASSIGNED_EXECUTION_EVIDENCE,
   SENTINEL_CASE_HINTS_READ,
@@ -5119,6 +5120,14 @@ function createAgent(
           !failed && canReadPlannerCase && name === sentinelInventoryTool.name
             ? readSentinelPlannerCoverageResult(args, result)
             : undefined;
+        const plannerProvenanceNodeResult =
+          canReadPlannerCase && provenanceNodePage
+            ? readSavedPlannerProvenanceNode(
+              result,
+              provenanceNodePage,
+              options.assessmentRevision,
+            )
+            : undefined;
         turn.trace?.({
           tool: name,
           ...(recheckFindingIds?.length && { recheckFindingIds }),
@@ -5132,6 +5141,7 @@ function createAgent(
           ...(workerTracePage && { workerTracePage }),
           ...(provenanceSearchPage && { provenanceSearchPage }),
           ...(provenanceNodePage && { provenanceNodePage }),
+          ...(plannerProvenanceNodeResult && { plannerProvenanceNodeResult }),
           ...(assigned && assignedTargetEvidenceIds && {
             assignedTarget: {
               targetId: assigned.target.id,

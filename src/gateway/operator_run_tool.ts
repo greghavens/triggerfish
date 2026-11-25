@@ -12,6 +12,7 @@ import {
   isSentinelInventoryNeighborhoodRead,
   parseSavedPlannerProvenancePath,
   parseSentinelPinnedFindingRead,
+  readSavedPlannerProvenanceNode,
   readSentinelDiscoveryPageReference,
   readSentinelFindingPageReference,
   readSentinelGoalStateProjection,
@@ -801,6 +802,7 @@ async function reopenSentinelSourceResult(
     | "plannerProvenancePath"
     | "provenanceSearchPage"
     | "provenanceNodePage"
+    | "plannerProvenanceNodeResult"
     | "observationSearch"
     | "taskObservationPage"
     | "goalStateProjection"
@@ -878,7 +880,13 @@ async function reopenSentinelSourceResult(
       isDeepStrictEqual(page.args, selector) &&
       page.sha256 === receipt.sha256
     ) {
-      text = reopenSentinelProvenanceNode(path, revision, page);
+      text = step.plannerProvenanceNodeResult === undefined
+        ? reopenSentinelProvenanceNode(path, revision, page)
+        : readSavedPlannerProvenanceNode(
+          step.plannerProvenanceNodeResult,
+          page,
+          revision,
+        );
     }
   } else if (step.tool === "sentinel_worker_trace_search") {
     const page = readSentinelWorkerTracePageReference(step.workerTracePage);

@@ -3119,6 +3119,7 @@ async function verifyPlannerArchive(
     }
     const round = readRound();
     assert(round?.reads?.length === plannerCalls.length);
+    assertEquals(round.reads[9].plannerProvenanceNodeResult, undefined);
     const [toolResponse, linksResponse] = responses;
     assert(toolResponse);
     const sha256 = createHash("sha256").update(toolResponse).digest("hex");
@@ -3455,12 +3456,6 @@ async function verifyPlannerArchive(
         }
         const read = { ...resultRead, ordinal: index + 1 };
         const readText = await turn(read);
-        if (mode === "coverage" && index === 9) {
-          // The existing node projection requires a matching review overlay.
-          assertStringIncludes(readText, "unavailable");
-          assertEquals(policy.workerSourceHooks.splice(0), ["PRE_TOOL_CALL"]);
-          continue;
-        }
         assert(
           !readText.startsWith("Error:"),
           `index ${index}: ${readText} hooks ${
