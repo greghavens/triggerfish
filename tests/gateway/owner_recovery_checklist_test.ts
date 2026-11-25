@@ -1,6 +1,7 @@
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { join } from "@std/path";
 import { createProviderRegistry } from "../../src/agent/llm.ts";
+import { scopedOwnerChecklistStorage } from "../../src/core/agent_recovery_store.ts";
 import { createPolicyEngine } from "../../src/core/policy/engine.ts";
 import {
   createDefaultRules,
@@ -70,7 +71,7 @@ Deno.test("Owner gateway archives, restores and resumes one exact recoverable ch
 
   async function turn(request: string, opts?: {
     session?: typeof owner;
-    interrupt?: boolean;
+    interrupt?: "before_checkpoint" | "after_checkpoint";
   }) {
     const registry = createProviderRegistry();
     let observed: string | undefined;
@@ -142,7 +143,9 @@ Deno.test("Owner gateway archives, restores and resumes one exact recoverable ch
                   ...options,
                   ...(opts?.interrupt && {
                     async onToolBatchCheckpoint(batch) {
-                      await options.onToolBatchCheckpoint?.(batch);
+                      if (opts.interrupt === "after_checkpoint") {
+                        await options.onToolBatchCheckpoint?.(batch);
+                      }
                       throw new Error(
                         "fixture interruption after durable checkpoint",
                       );
@@ -185,7 +188,9 @@ Deno.test("Owner gateway archives, restores and resumes one exact recoverable ch
   }
   try {
     const recoverRequest = `/recover ${execution} ${prompt}`;
-    const interrupted = await turn(recoverRequest, { interrupt: true });
+    const interrupted = await turn(recoverRequest, {
+      interrupt: "after_checkpoint",
+    });
     assertStringIncludes(interrupted.error ?? "", "checkpoint");
     assertEquals(modelWrites, 1);
     const requestId = crypto.randomUUID();
@@ -231,6 +236,39 @@ Deno.test("Owner gateway archives, restores and resumes one exact recoverable ch
       JSON.parse((await turn("Read shared owner list")).observed!),
       sharedBefore,
     );
+    const uncertainExecution = crypto.randomUUID();
+    const uncertainRequest = `/recover ${uncertainExecution} ${prompt}`;
+    assertStringIncludes(
+      (await turn(uncertainRequest, { interrupt: "before_checkpoint" }))
+        .error ?? "",
+      "checkpoint",
+    );
+    const committed = await scopedOwnerChecklistStorage(recoveryPath, {
+      role: "owner_chat",
+      sessionId: owner.id,
+      runId: uncertainExecution,
+    }).get(`todos:${uncertainExecution}`);
+    assert(committed);
+    engine.addRule({
+      id: "fixture-deny-saved-checklist",
+      priority: 999,
+      hook: "PRE_TOOL_CALL",
+      conditions: [{
+        field: "tool_name",
+        operator: "equals",
+        value: "todo_write",
+      }],
+      action: "BLOCK",
+    });
+    assertStringIncludes(
+      (await turn(uncertainRequest)).error ?? "",
+      "blocked by the current policy",
+    );
+    engine.removeRule("fixture-deny-saved-checklist");
+    const reconciled = await turn(uncertainRequest);
+    assertEquals(reconciled.error, undefined);
+    assertEquals(JSON.parse(reconciled.observed!), JSON.parse(committed));
+    assertEquals(modelWrites, 2);
   } finally {
     await Deno.remove(baseDir, { recursive: true });
   }

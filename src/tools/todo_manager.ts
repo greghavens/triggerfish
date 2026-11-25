@@ -81,7 +81,7 @@ function preserveAbsentTodoItems(
 
 /** Write validated todo items to storage, merging preserved items. */
 async function writeTodoList(
-  { storage, getClassification }: TodoManagerOptions,
+  { storage, getClassification, allowScopedItems }: TodoManagerOptions,
   key: string,
   todos: readonly TodoItem[],
   expectedRevision?: string,
@@ -111,7 +111,10 @@ async function writeTodoList(
         new Set(validated.map((todo) => todo.id)),
       );
     const items = [...preserved, ...validated];
-    if (level && !canPersistExecutionChecklistItems(items)) {
+    if (
+      level && (!canPersistExecutionChecklistItems(items) ||
+        allowScopedItems?.(items) === false)
+    ) {
       throw new TodoScopeUnavailable(true);
     }
     const merged = {

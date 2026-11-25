@@ -26,8 +26,17 @@ const currentChecklist = new AsyncLocalStorage<{
   runId: string;
 }>();
 
+type ChecklistScope = NonNullable<ReturnType<typeof currentChecklist.getStore>>;
+const checklistIdentity = ({ sessionId, runId }: ChecklistScope) => ({
+  role: "owner_chat" as const,
+  sessionId,
+  runId,
+});
+const withinRecoveryBudget = (todos: readonly unknown[]) =>
+  todos.length <= 20 && JSON.stringify(todos).length <= 5_500;
+
 export function withOwnerRecoveryChecklist<T>(
-  scope: NonNullable<ReturnType<typeof currentChecklist.getStore>>,
+  scope: ChecklistScope,
   operation: () => T,
 ): T {
   return currentChecklist.run(scope, operation);
@@ -49,32 +58,44 @@ export function dispatchOwnerRecoveryChecklist(
   ) return Promise.resolve("Error: Owner execution checklist is unavailable.");
   return createTodoToolExecutor(createTodoManager({
     agentId: scope.runId,
-    storage: scopedOwnerChecklistStorage(scope.path, {
-      role: "owner_chat",
-      sessionId,
-      runId: scope.runId,
-    }),
+    storage: scopedOwnerChecklistStorage(scope.path, checklistIdentity(scope)),
     getClassification,
+    allowScopedItems: withinRecoveryBudget,
   }))(name, input, { todoAuthorization: { readCeiling: scope.ceiling } });
 }
 
 export function withOwnerRecoveryChecklistPolicy(
   base: AgentRecoveryPolicy,
-  scope: NonNullable<ReturnType<typeof currentChecklist.getStore>>,
+  scope: ChecklistScope,
 ): AgentRecoveryPolicy {
+  const identity = checklistIdentity(scope);
+  const currentRecord = async () => {
+    const contents = await scopedOwnerChecklistStorage(scope.path, identity)
+      .get(`todos:${scope.runId}`);
+    if (contents === null) return { revision: "empty" };
+    if (
+      !validExecutionChecklist(
+        { ...identity, contents },
+        identity,
+        scope.ceiling,
+      )
+    ) {
+      return;
+    }
+    const row = JSON.parse(contents);
+    return {
+      revision: String(row.revision),
+      result: JSON.stringify(row, null, 2),
+    };
+  };
   const isTodo = (name: string) =>
     name === "todo_read" || name === "todo_write";
   const validResult = (text: string) =>
     /^No todos\. Use todo_write to create your task list\. Revision: (?:empty|[a-f0-9-]{36})$/i
       .test(text) ||
     (text.length <= 7_000 && validExecutionChecklist(
-      {
-        role: "owner_chat",
-        sessionId: scope.sessionId,
-        runId: scope.runId,
-        contents: text,
-      },
-      { role: "owner_chat", sessionId: scope.sessionId, runId: scope.runId },
+      { ...identity, contents: text },
+      identity,
       scope.ceiling,
     ));
   return {
@@ -95,15 +116,40 @@ export function withOwnerRecoveryChecklistPolicy(
         return { expected_revision: revision };
       }
       return Object.keys(call.args).length === 2 &&
-          Array.isArray(todos) && todos.length <= 20 &&
-          canPersistExecutionChecklistItems(todos) &&
-          JSON.stringify(todos).length <= 5_500
+          Array.isArray(todos) && canPersistExecutionChecklistItems(todos) &&
+          withinRecoveryBudget(todos)
         ? { expected_revision: revision }
         : undefined;
     },
     isReplaySafeRead: (call) =>
       call.name === "todo_read" ||
       base.isReplaySafeRead?.(call) === true,
+    canReconcile: (call) =>
+      call.name === "todo_write" || base.canReconcile?.(call) === true,
+    async authorizeDispatch(call, approvedRuleId, signal) {
+      if (call.name !== "todo_write") {
+        return await base.authorizeDispatch?.(call, approvedRuleId, signal) ??
+          false;
+      }
+      const current = await currentRecord();
+      return !signal?.aborted && !scope.signal?.aborted &&
+        current?.revision === call.args.expected_revision;
+    },
+    async reconcile(call, signal) {
+      if (call.name !== "todo_write") {
+        return await base.reconcile?.(call, signal);
+      }
+      if (
+        call.executionId !== scope.runId || signal?.aborted ||
+        scope.signal?.aborted
+      ) return;
+      // The recovery lock admits one compare-and-set from the recorded
+      // revision. Reopening the committed row avoids repeating that write.
+      const current = await currentRecord();
+      return current?.result && current.revision !== call.args.expected_revision
+        ? current.result
+        : undefined;
+    },
     projectResult: (call, text) =>
       isTodo(call.name)
         ? validResult(text) ? text : undefined

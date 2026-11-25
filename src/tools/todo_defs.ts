@@ -44,6 +44,7 @@ export interface TodoManagerOptions {
   readonly agentId: string;
   /** Trusted runtime taint for execution-scoped lists. */
   readonly getClassification?: () => ClassificationLevel;
+  readonly allowScopedItems?: (items: readonly TodoItem[]) => boolean;
 }
 
 /** Manager for agent todo operations. */
