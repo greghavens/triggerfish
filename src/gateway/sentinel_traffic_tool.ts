@@ -90,13 +90,14 @@ export const sentinelTrafficGetTool: ToolDefinition = {
 export const sentinelTrafficBlobTool: ToolDefinition = {
   name: "sentinel_traffic_blob",
   description:
-    "Read a page of explicitly retained, reviewed UTF-8 HAR request or response text. Use the exact case revision, evidence ID and receipt digest.",
+    "Read a page of explicitly retained, reviewed HAR body text or headers. Use the exact case revision, evidence ID and receipt digest.",
   parameters: {
     ...sentinelTrafficGetTool.parameters,
     payloadPart: {
       type: "string",
-      enum: ["request", "response"],
-      description: "Select the request or response body. Defaults to response.",
+      enum: ["request", "response", "headers"],
+      description:
+        "Select a request body, response body, or retained header projection. Defaults to response.",
     },
     offset: {
       type: "integer",
@@ -157,6 +158,9 @@ export function projectSentinelTrafficReceipt(
     evidenceId,
     assetIds: onlyAsset ? [onlyAsset] : assetIds,
     observation: metadata,
+    ...(includePayloadMetadata && receipt.reviewedHeaders !== undefined && {
+      headersPayload: trafficPayloadMetadata(receipt.reviewedHeaders),
+    }),
     ...(includePayloadMetadata && receipt.reviewedRequestBody !== undefined && {
       requestPayload: trafficPayloadMetadata(receipt.reviewedRequestBody),
     }),
@@ -324,7 +328,8 @@ export function executeSentinelTrafficTool(
           typeof digest !== "string" || !/^[a-f0-9]{64}$/.test(digest) ||
           typeof offset !== "number" || !Number.isSafeInteger(offset) ||
           offset < 0 ||
-          (payloadPart !== "request" && payloadPart !== "response")
+          (payloadPart !== "request" && payloadPart !== "response" &&
+            payloadPart !== "headers")
         ) {
           return "Error: Provide the exact traffic evidence ID, receipt digest, and valid offset.";
         }
@@ -334,6 +339,8 @@ export function executeSentinelTrafficTool(
         }, onlyAsset);
         const text = payloadPart === "request"
           ? receipt?.reviewedRequestBody
+          : payloadPart === "headers"
+          ? receipt?.reviewedHeaders
           : receipt?.reviewedResponseBody;
         if (text === undefined) {
           return `Error: Reviewed ${payloadPart} content is unavailable for this exact receipt.`;
@@ -349,6 +356,8 @@ export function executeSentinelTrafficTool(
           digest,
           ...(payloadPart === "request"
             ? { requestPayload: trafficPayloadMetadata(text) }
+            : payloadPart === "headers"
+            ? { headersPayload: trafficPayloadMetadata(text) }
             : { responsePayload: trafficPayloadMetadata(text) }),
           offset,
           text: body.slice(offset, end).join(""),

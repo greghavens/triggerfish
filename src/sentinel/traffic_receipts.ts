@@ -37,6 +37,7 @@ export interface SentinelTrafficReceipt {
   readonly observation: TrafficObservation;
   readonly reviewedResponseBody?: string;
   readonly reviewedRequestBody?: string;
+  readonly reviewedHeaders?: string;
 }
 
 export interface SentinelTrafficReceiptQuery {
@@ -219,6 +220,55 @@ function validReviewedTrafficBody(body: unknown): body is string {
     redactCredentialText(body) === body;
 }
 
+const reviewedHeaderNames = new Set([
+  "accept",
+  "accept-encoding",
+  "cache-control",
+  "content-encoding",
+  "content-length",
+  "content-type",
+  "transfer-encoding",
+]);
+
+/** Retain a deterministic projection of approved headers in captured order. */
+export function projectReviewedHarHeaders(request: unknown, response: unknown) {
+  function pick(list: unknown) {
+    if (list === undefined) return [];
+    if (!Array.isArray(list) || list.length > 256) {
+      throw new Error("Invalid HAR header list.");
+    }
+    return list.flatMap((entry) => {
+      const { name, value } = entry ?? {};
+      if (
+        typeof name !== "string" || !reviewedHeaderNames.has(name.toLowerCase())
+      ) return [];
+      if (
+        typeof value !== "string" || value.length > 512 ||
+        !/^[\t\x20-\x7e]*$/.test(value) ||
+        !validReviewedTrafficBody(value)
+      ) throw new Error("Invalid reviewed HAR header value.");
+      return [{ name, value }];
+    });
+  }
+  const projection = { request: pick(request), response: pick(response) };
+  if (!projection.request.length && !projection.response.length) return;
+  const text = JSON.stringify(projection);
+  if (text.length > 8192) {
+    throw new Error("Reviewed HAR headers exceed the receipt limit.");
+  }
+  return text;
+}
+
+function validReviewedHarHeaders(text: unknown): boolean {
+  if (typeof text !== "string" || text.length > 8192) return false;
+  try {
+    const { request, response } = JSON.parse(text);
+    return projectReviewedHarHeaders(request, response) === text;
+  } catch {
+    return false;
+  }
+}
+
 /** Record the sanitized output of the selected ingestion adapter before publishing its graph. */
 export function recordSentinelTrafficReceipt(
   path: string,
@@ -227,6 +277,7 @@ export function recordSentinelTrafficReceipt(
   raw: TrafficObservation,
   reviewedResponseBody?: string,
   reviewedRequestBody?: string,
+  reviewedHeaders?: string,
 ) {
   const observation = safeObservation(family, raw);
   if (!observation) throw new Error("Invalid trusted traffic observation.");
@@ -246,6 +297,10 @@ export function recordSentinelTrafficReceipt(
       (family !== "har" || !validReviewedTrafficBody(body))
     )
   ) throw new Error("Invalid reviewed HAR body text.");
+  if (
+    reviewedHeaders !== undefined &&
+    (family !== "har" || !validReviewedHarHeaders(reviewedHeaders))
+  ) throw new Error("Invalid reviewed HAR headers.");
   const payload = {
     family,
     evidenceId,
@@ -253,6 +308,7 @@ export function recordSentinelTrafficReceipt(
     observation,
     ...(reviewedResponseBody !== undefined && { reviewedResponseBody }),
     ...(reviewedRequestBody !== undefined && { reviewedRequestBody }),
+    ...(reviewedHeaders !== undefined && { reviewedHeaders }),
   };
   const receipt: SentinelTrafficReceipt = {
     digest: hash([1, payload, proof]),
@@ -319,6 +375,9 @@ function receiptsAtRevision(path: string, revision: number, exactId?: string) {
       const assetIds = links.get(receipt.evidenceId)?.sort();
       return evidence && assetIds && proof === hash([evidence, assetIds]) &&
           digest === hash([1, payload, proof]) &&
+          (receipt.reviewedHeaders === undefined ||
+            (receipt.family === "har" &&
+              validReviewedHarHeaders(receipt.reviewedHeaders))) &&
           [receipt.reviewedResponseBody, receipt.reviewedRequestBody].every((
             body,
           ) =>

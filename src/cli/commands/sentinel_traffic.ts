@@ -16,6 +16,7 @@ import {
 import { sentinelDnsPath, sentinelTrafficPath } from "../../sentinel/paths.ts";
 import { publishSentinelInput } from "../../sentinel/published_input.ts";
 import {
+  projectReviewedHarHeaders,
   recordSentinelTrafficReceipt,
   type SentinelTrafficSource,
 } from "../../sentinel/traffic_receipts.ts";
@@ -31,6 +32,7 @@ async function appendTrafficEvidence(
   limit: number,
   reviewedResponseBody?: string,
   reviewedRequestBody?: string,
+  reviewedHeaders?: string,
 ) {
   await Deno.mkdir(dirname(output), { mode: 0o700, recursive: true });
   using lock = await Deno.open(`${output}.lock`, {
@@ -50,6 +52,7 @@ async function appendTrafficEvidence(
     observation,
     reviewedResponseBody,
     reviewedRequestBody,
+    reviewedHeaders,
   );
   if (raw === undefined) {
     await publishSentinelInput(output, snapshot);
@@ -135,13 +138,15 @@ export async function ingestSentinelTraffic(
   format: TrafficFormat = "har",
   retainReviewedResponseBody = false,
   retainReviewedRequestBody = false,
+  retainReviewedHeaders = false,
 ): Promise<void> {
   if (
-    (retainReviewedResponseBody || retainReviewedRequestBody) &&
+    (retainReviewedResponseBody || retainReviewedRequestBody ||
+      retainReviewedHeaders) &&
     (format !== "har" || !snapshotPath)
   ) {
     throw new Error(
-      "Reviewed body retention requires publishing a HAR feed.",
+      "Reviewed payload retention requires publishing a HAR feed.",
     );
   }
   const http = format === "har" || format === "zeek-http" ||
@@ -158,8 +163,14 @@ export async function ingestSentinelTraffic(
       const { snapshot, observation } = captured;
       if (output) {
         const har = entry as {
-          request?: { postData?: { text?: unknown; encoding?: unknown } };
-          response?: { content?: { text?: unknown; encoding?: unknown } };
+          request?: {
+            headers?: unknown;
+            postData?: { text?: unknown; encoding?: unknown };
+          };
+          response?: {
+            headers?: unknown;
+            content?: { text?: unknown; encoding?: unknown };
+          };
         };
         try {
           await appendTrafficEvidence(
@@ -173,6 +184,12 @@ export async function ingestSentinelTraffic(
               : undefined,
             retainReviewedRequestBody
               ? readReviewedHarBody(har.request?.postData)
+              : undefined,
+            retainReviewedHeaders
+              ? projectReviewedHarHeaders(
+                har.request?.headers,
+                har.response?.headers,
+              )
               : undefined,
           );
         } catch (cause) {
