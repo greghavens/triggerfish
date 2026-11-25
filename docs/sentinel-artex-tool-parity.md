@@ -1673,3 +1673,9 @@ receipt. It verifies the assigned asset, source review prerequisite, retained
 tool step, and response digest, and reapplies the original tool policy.
 The restart fixture compares the receipt through ordinary operator chat
 after resumption and confirms a later policy denial.
+
+Operator traces reopen the exact carried-assignment evidence response by
+resolving the original citation and checking the cited graph evidence
+against the assigned revision. The gateway checks the saved digest and
+reapplies source policy. The worker restart fixture verifies exact operator
+readback of the carried response and a subsequent policy denial.

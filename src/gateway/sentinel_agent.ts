@@ -1323,79 +1323,95 @@ async function readPriorAssignedEvidence(
     }
     const current = (await turn.readGraph()).snapshot();
     turn.signal.throwIfAborted();
-    const store = openSentinelAdaptiveStore(
-      join(dirname(options.snapshotPath), "sentinel-adaptive.db"),
-    );
-    let retainedCitations;
-    try {
-      const goal = store.forEvidence(revision)?.goal;
-      retainedCitations = goal
-        ? authorized.flatMap((citation) => {
-          if (citation.targetId !== task.nodeId) return [];
-          const retained = store.readPriorAssignedTargetCitation(
-            citation,
-            revision,
-            goal,
-          );
-          return retained
-            ? [{ citation, sourceTargetId: retained.sourceTargetId }]
-            : [];
-        })
-        : [];
-    } finally {
-      store.close();
-    }
-    const citations = retainedCitations.flatMap(
-      ({ citation, sourceTargetId }) => {
-        const previous = readSentinelAssessmentRevision(
-          options.snapshotPath,
-          citation.evidenceRevision,
-        )?.result?.sharedGraph.snapshot ?? undefined;
-        const evidence = current.nodes.find(({ id }) =>
-          id === citation.targetId
-        );
-        if (
-          evidence?.kind !== "evidence" ||
-          !unchangedAssignedTargetEvidence(previous, current, sourceTargetId, [
-            evidence.id,
-          ]).length
-        ) return [];
-        return [{
-          ...citation,
-          sourceTargetId,
-          evidence: {
-            id: evidence.id,
-            kind: evidence.kind,
-            label: evidence.label.slice(0, 512),
-          },
-          relationships: current.edges.filter(({ from, to }) =>
-            (from === sourceTargetId && to === evidence.id) ||
-            (to === sourceTargetId && from === evidence.id)
-          ),
-        }];
-      },
-    );
-    if (!readAssignedModelReview(options)) {
-      return "Error: The Sentinel assignment is no longer active.";
-    }
-    const response = {
+    const result = readSentinelCarriedEvidence(
+      options.snapshotPath,
       revision,
-      taskId: task.id,
-      citations: [] as typeof citations,
-      unavailableCount: authorized.length - citations.length,
-      truncated: true,
-    };
-    for (const citation of citations) {
-      response.citations.push(citation);
-      if (JSON.stringify(response).length > MAX_TOOL_CHARS - 1) {
-        response.citations.pop();
-      }
-    }
-    response.truncated = response.citations.length < citations.length;
-    return boundResult(response);
+      task,
+      current,
+    );
+    return readAssignedModelReview(options)
+      ? result
+      : "Error: The Sentinel assignment is no longer active.";
   } catch {
     return "Error: The prior assigned Sentinel evidence is unavailable.";
   }
+}
+
+export function readSentinelCarriedEvidence(
+  path: string,
+  revision: number,
+  task: AdaptiveTask,
+  current: ReturnType<Graph["snapshot"]>,
+) {
+  const authorized = task.plannerRound?.priorAssignedTargetCitations;
+  if (!authorized?.length) {
+    return "Error: The assignment has no available prior evidence citation.";
+  }
+  const store = openSentinelAdaptiveStore(
+    join(dirname(path), "sentinel-adaptive.db"),
+  );
+  let retainedCitations;
+  try {
+    const goal = store.forEvidence(revision)?.goal;
+    retainedCitations = goal
+      ? authorized.flatMap((citation) => {
+        if (citation.targetId !== task.nodeId) return [];
+        const retained = store.readPriorAssignedTargetCitation(
+          citation,
+          revision,
+          goal,
+        );
+        return retained
+          ? [{ citation, sourceTargetId: retained.sourceTargetId }]
+          : [];
+      })
+      : [];
+  } finally {
+    store.close();
+  }
+  const citations = retainedCitations.flatMap(
+    ({ citation, sourceTargetId }) => {
+      const previous = readSentinelAssessmentRevision(
+        path,
+        citation.evidenceRevision,
+      )?.result?.sharedGraph.snapshot ?? undefined;
+      const evidence = current.nodes.find(({ id }) => id === citation.targetId);
+      if (
+        evidence?.kind !== "evidence" ||
+        !unchangedAssignedTargetEvidence(previous, current, sourceTargetId, [
+          evidence.id,
+        ]).length
+      ) return [];
+      return [{
+        ...citation,
+        sourceTargetId,
+        evidence: {
+          id: evidence.id,
+          kind: evidence.kind,
+          label: evidence.label.slice(0, 512),
+        },
+        relationships: current.edges.filter(({ from, to }) =>
+          (from === sourceTargetId && to === evidence.id) ||
+          (to === sourceTargetId && from === evidence.id)
+        ),
+      }];
+    },
+  );
+  const response = {
+    revision,
+    taskId: task.id,
+    citations: [] as typeof citations,
+    unavailableCount: authorized.length - citations.length,
+    truncated: true,
+  };
+  for (const citation of citations) {
+    response.citations.push(citation);
+    if (JSON.stringify(response).length > MAX_TOOL_CHARS - 1) {
+      response.citations.pop();
+    }
+  }
+  response.truncated = response.citations.length < citations.length;
+  return boundResult(response);
 }
 
 async function readNativeExecutionEvidence(

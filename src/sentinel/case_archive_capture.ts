@@ -381,6 +381,7 @@ function retainedTraceReceiptFields(step: Record<string, unknown>) {
     (step.tool === "sentinel_incident_alerts" ||
       step.tool === "sentinel_defense" || step.tool === "sentinel_path" ||
       step.tool === "sentinel_saved_workflow_receipt" ||
+      step.tool === "sentinel_prior_assigned_evidence" ||
       isSentinelInventoryFindingRead(step.tool) ||
       isSentinelInventoryNeighborhoodRead(step.tool))
   ) {

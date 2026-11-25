@@ -2562,6 +2562,13 @@ for (
               "resume_prior_assigned:prior_post",
             ],
           );
+          await verifyHistoricalWorkerReads(
+            dir,
+            path,
+            assessment,
+            "Recovered the exact historical evidence.",
+            [0],
+          );
           return;
         }
         if (

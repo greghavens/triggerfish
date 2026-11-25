@@ -105,6 +105,7 @@ import {
   inspectSentinelWorkerObservation,
   queryIncidentAlerts,
   readDefenseCoverage,
+  readSentinelCarriedEvidence,
   readSentinelGraphProjection,
   readSentinelPrerequisiteWorkflowReceipt,
   searchSentinelProvenance,
@@ -2092,6 +2093,7 @@ export function createOperatorRunToolExecutor(options: {
               step?.tool === "sentinel_defense" ||
               step?.tool === "sentinel_path" ||
               step?.tool === "sentinel_saved_workflow_receipt" ||
+              step?.tool === "sentinel_prior_assigned_evidence" ||
               isSentinelInventoryFindingRead(step?.tool) ||
               isSentinelInventoryNeighborhoodRead(step?.tool)
             ) {
@@ -2116,6 +2118,11 @@ export function createOperatorRunToolExecutor(options: {
                 assessmentRevision: ref.revision,
                 webContainmentConfigured: options.webContainmentConfigured,
               };
+              const carriedSnapshot =
+                step.tool === "sentinel_prior_assigned_evidence"
+                  ? readSentinelAssessmentRevision(path, ref.revision)?.result
+                    .sharedGraph.snapshot
+                  : undefined;
               const text = step.tool === "sentinel_incident_alerts"
                 ? queryIncidentAlerts(readOptions, args)
                 : step.tool === "sentinel_defense"
@@ -2126,6 +2133,14 @@ export function createOperatorRunToolExecutor(options: {
                   ref.revision,
                   task,
                 )
+                : step.tool === "sentinel_prior_assigned_evidence"
+                ? carriedSnapshot &&
+                  readSentinelCarriedEvidence(
+                    path,
+                    ref.revision,
+                    task,
+                    carriedSnapshot,
+                  )
                 : await readSentinelGraphProjection(
                   path,
                   ref.revision,
