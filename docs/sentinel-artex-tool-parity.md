@@ -1704,3 +1704,9 @@ the results against the same run and revision, checks the response
 digest, and reapplies tool policy. The restart fixture adds another
 matching observation during downtime and verifies the original search
 page through operator chat.
+
+Operator trace retrieval reopens original worker-trace searches by the
+retained assignment and step indices. It preserves the original count
+and cursor, applies the same worker visibility filter, verifies the
+response digest, and reapplies source policy. The peer-evidence restart
+fixture checks exact readback and policy denial through operator chat.

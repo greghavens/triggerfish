@@ -940,3 +940,38 @@ export function readSentinelObservationSearchReference(value: unknown) {
     sha256,
   };
 }
+
+export function readSentinelWorkerTracePageReference(value: unknown) {
+  if (!value || typeof value !== "object") return;
+  const { args, rows, totalSteps, nextOffset, sha256 } = value as Record<
+    string,
+    unknown
+  >;
+  if (!args || typeof args !== "object" || Array.isArray(args)) return;
+  const call = sentinelWorkerTraceSearchArgs(args as Record<string, unknown>);
+  if (
+    !call || !Array.isArray(rows) || rows.length > (call.limit ?? 10) ||
+    typeof totalSteps !== "number" || !Number.isSafeInteger(totalSteps) ||
+    totalSteps < 0 ||
+    typeof sha256 !== "string" || !/^[a-f0-9]{64}$/.test(sha256)
+  ) return;
+  const end = (call.offset ?? 0) + rows.length;
+  if (
+    !Number.isSafeInteger(end) ||
+    nextOffset !== (end < totalSteps ? end : null) ||
+    (rows.length ? end > totalSteps : end < totalSteps)
+  ) return;
+  const keys: { taskId: string; index: number }[] = [];
+  for (const row of rows) {
+    if (
+      typeof row?.taskId !== "string" ||
+      !/^adaptive:[a-f0-9]{64}$/.test(row.taskId) ||
+      !Number.isSafeInteger(row.index) || row.index < 0 ||
+      keys.some(({ taskId, index }) =>
+        taskId === row.taskId && index === row.index
+      )
+    ) return;
+    keys.push({ taskId: row.taskId, index: row.index });
+  }
+  return { args: call, rows: keys, totalSteps, nextOffset, sha256 };
+}

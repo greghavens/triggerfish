@@ -1,3 +1,4 @@
+import { readSentinelWorkerTracePageReference } from "../sentinel/worker_goal_recovery.ts";
 import { readSentinelGoalStateProjection } from "../sentinel/worker_goal_recovery.ts";
 import { readSentinelDiscoveryPage } from "../sentinel/worker_goal_recovery.ts";
 import {
@@ -2530,13 +2531,13 @@ function workerTraceMatches(
   options: ProvenanceScope,
   graph: NonNullable<ReturnType<typeof readSentinelProvenance>>["graph"],
   args: SentinelWorkerTraceSearchArgs,
+  workerRead = options.assignedTaskLeaseToken !== undefined,
 ) {
   const requested = args.stepIndices ? new Set(args.stepIndices) : undefined;
   return graph.searchReviewSteps(args.query ?? "", args.task).filter(
     ({ taskId, tool, index }) =>
       (args.task !== undefined || taskId !== options.assignedTaskId) &&
-      (options.assignedTaskLeaseToken === undefined ||
-        tool !== liveWorkflowStatusTool.name) &&
+      (!workerRead || tool !== liveWorkflowStatusTool.name) &&
       (!requested || requested.has(index)),
   );
 }
@@ -2596,6 +2597,35 @@ function validateSavedWorkerTracePage(
     allowed.get(JSON.stringify([step.reviewId, step.index])) ===
       JSON.stringify(step)
   );
+}
+
+export function reopenSentinelWorkerTraceSearch(
+  path: string,
+  revision: number,
+  taskId: string,
+  saved: NonNullable<ReturnType<typeof readSentinelWorkerTracePageReference>>,
+) {
+  const options = {
+    snapshotPath: path,
+    assessmentRevision: revision,
+    assignedTaskId: taskId,
+  };
+  const retained = readAgentProvenance(options, saved.args.revision);
+  if ("error" in retained) return;
+  const steps = workerTraceMatches(options, retained.graph, saved.args, true);
+  const page = saved.rows.map((row) =>
+    steps.find(({ taskId, index }) =>
+      taskId === row.taskId && index === row.index
+    )
+  );
+  if (page.some((step) => !step)) return;
+  return JSON.stringify({
+    revision,
+    totalSteps: saved.totalSteps,
+    offset: saved.args.offset ?? 0,
+    nextOffset: saved.nextOffset,
+    steps: page,
+  });
 }
 
 export function searchSentinelWorkerTraces(
@@ -4687,6 +4717,18 @@ function createAgent(
           nextOffset: searchPage.page.nextOffset,
           sha256: goalReceiptRead.sha256,
         };
+        const searchTracePage = name === SENTINEL_WORKER_TRACE_SEARCH &&
+          goalReceiptRead &&
+          options.assessmentRevision !== undefined &&
+          parseSavedWorkerTracePage(result, options.assessmentRevision, args);
+        const workerTracePage = searchTracePage && goalReceiptRead &&
+          readSentinelWorkerTracePageReference({
+            args: goalReceiptRead.args,
+            rows: searchTracePage.steps,
+            totalSteps: searchTracePage.totalSteps,
+            nextOffset: searchTracePage.nextOffset,
+            sha256: goalReceiptRead.sha256,
+          });
         turn.trace?.({
           tool: name,
           ...(recheckFindingIds?.length && { recheckFindingIds }),
@@ -4697,6 +4739,7 @@ function createAgent(
           ...(intermediateWorkflowObservation &&
             { intermediateWorkflowObservation }),
           ...(workerTrace && { workerTrace }),
+          ...(workerTracePage && { workerTracePage }),
           ...(assigned && assignedTargetEvidenceIds && {
             assignedTarget: {
               targetId: assigned.target.id,

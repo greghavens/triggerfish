@@ -7,6 +7,7 @@ import {
   readSentinelGoalStateProjection,
   readSentinelObservationSearchReference,
   readSentinelTaskObservationPageReference,
+  readSentinelWorkerTracePageReference,
   sentinelGoalReceiptReadArguments,
   sentinelIntermediateWorkflowPageReference,
 } from "../sentinel/worker_goal_recovery.ts";
@@ -114,6 +115,7 @@ import {
   readSentinelCarriedEvidence,
   readSentinelGraphProjection,
   readSentinelPrerequisiteWorkflowReceipt,
+  reopenSentinelWorkerTraceSearch,
   searchSentinelProvenance,
   searchSentinelWorkerTraces,
   type SentinelReadTrace,
@@ -2126,6 +2128,54 @@ export function createOperatorRunToolExecutor(options: {
                 createHash("sha256").update(text).digest("hex") !==
                   digest ||
                 !await authorize(scope, step.tool, {}, text)
+              ) return unavailable;
+              const current = readHistoricalAdaptiveSentinel(
+                path,
+                ref.revision,
+              );
+              if (
+                current?.goal.id !== runId ||
+                !isDeepStrictEqual(savedStep(current), step)
+              ) return unavailable;
+              return safeProjection({
+                run: ref,
+                runId,
+                taskId,
+                index,
+                result: JSON.parse(text),
+              });
+            }
+            if (
+              step?.tool === "sentinel_worker_trace_search" &&
+              step.workerTracePage
+            ) {
+              const task = history?.tasks.find(({ id }) => id === taskId);
+              const authorize = context.authorizeSentinelTraceRead;
+              const page = readSentinelWorkerTracePageReference(
+                step.workerTracePage,
+              );
+              if (
+                !task || !authorize || !page || step.outcome !== "returned"
+              ) return unavailable;
+              const scope = {
+                caseId: ref.id,
+                revision: ref.revision,
+                taskId: task.id,
+              };
+              if (
+                !await authorize(scope, step.tool, page.args)
+              ) return unavailable;
+              const text = reopenSentinelWorkerTraceSearch(
+                path,
+                ref.revision,
+                task.id,
+                page,
+              );
+              if (
+                !text ||
+                createHash("sha256").update(text).digest("hex") !==
+                  page.sha256 ||
+                !await authorize(scope, step.tool, page.args, text)
               ) return unavailable;
               const current = readHistoricalAdaptiveSentinel(
                 path,

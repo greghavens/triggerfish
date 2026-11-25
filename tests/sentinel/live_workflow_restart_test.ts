@@ -2868,7 +2868,7 @@ for (
               path,
               assessment,
               "Recovered the worker goal proof.",
-              [3, 5],
+              [2, 3, 5],
             );
           }
           if (taskProof) {
