@@ -1475,3 +1475,11 @@ receipts, and finding-traffic pages. They omit free-text search filters and
 response bodies. The gateway round trip reopens a committed goal proof
 after restore by its archived request binding and rechecks the original
 source policy.
+
+Archived traffic search steps retain ordered evidence IDs, receipt digests,
+the original continuation cursor, and the response digest. Search filters
+and result bodies are absent from the archived trace. Restore reconstructs
+the original page from the retained traffic journal, applies the search
+policy and exact receipt read policy, and verifies the response digest.
+The gateway archive round trip verifies readback and absence of search
+arguments. The worker restart fixture verifies capture of the page references.

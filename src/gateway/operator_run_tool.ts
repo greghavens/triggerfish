@@ -9,6 +9,7 @@ import {
   SENTINEL_TRAFFIC_READ,
   SENTINEL_TRAFFIC_SEARCH,
   sentinelTrafficLinksArgs,
+  sentinelTrafficPageReference,
   sentinelTrafficReadArgs,
   sentinelTrafficSearchArgs,
 } from "../sentinel/traffic_recovery.ts";
@@ -2382,6 +2383,81 @@ export function createOperatorRunToolExecutor(options: {
               if (
                 current?.goal.id !== runId || saved?.tool !== step.tool ||
                 saved.outcome !== "returned" || saved.target !== linkId
+              ) return unavailable;
+              return safeProjection({
+                run: ref,
+                runId,
+                taskId,
+                index,
+                result: retained,
+              });
+            }
+            if (step?.tool === SENTINEL_TRAFFIC_SEARCH && !step.trafficSearch) {
+              const page = sentinelTrafficPageReference(step.trafficSearchPage);
+              const task = history?.tasks.find(({ id }) => id === taskId);
+              const authorize = context.authorizeSentinelTraceRead;
+              if (
+                !worker?.archivedProgress || !page ||
+                page.revision !== ref.revision ||
+                !task?.nodeId || !authorize || step.outcome !== "returned"
+              ) return unavailable;
+              const scope = {
+                caseId: ref.id,
+                revision: ref.revision,
+                taskId: task.id,
+              };
+              const call = { revision: ref.revision };
+              if (!await authorize(scope, step.tool, call)) return unavailable;
+              const receipts = [];
+              for (const reference of page.receipts) {
+                const args = { ...call, ...reference };
+                if (
+                  !await authorize(scope, SENTINEL_TRAFFIC_READ, args)
+                ) return unavailable;
+                const saved = readProjectedSentinelTrafficReceipt(
+                  path,
+                  ref.id,
+                  ref.revision,
+                  args,
+                  task.nodeId,
+                );
+                if (
+                  !saved ||
+                  !await authorize(
+                    scope,
+                    SENTINEL_TRAFFIC_READ,
+                    args,
+                    JSON.stringify(saved),
+                  )
+                ) {
+                  return unavailable;
+                }
+                receipts.push(saved.receipt);
+              }
+              const retained = {
+                caseId: ref.id,
+                evidenceRevision: ref.revision,
+                _classification: "INTERNAL",
+                receipts,
+                nextCursor: page.nextCursor,
+              };
+              const text = JSON.stringify(retained);
+              if (
+                createHash("sha256").update(text).digest("hex") !==
+                  page.sha256 ||
+                !await authorize(scope, step.tool, call, text)
+              ) return unavailable;
+              const current = readHistoricalAdaptiveSentinel(
+                path,
+                ref.revision,
+              );
+              const saved = savedStep(current);
+              if (
+                current?.goal.id !== runId || saved?.tool !== step.tool ||
+                saved.outcome !== "returned" ||
+                JSON.stringify(
+                    sentinelTrafficPageReference(saved.trafficSearchPage),
+                  ) !== JSON.stringify(page)
               ) return unavailable;
               return safeProjection({
                 run: ref,

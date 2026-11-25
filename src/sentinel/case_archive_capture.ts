@@ -1,7 +1,9 @@
 import {
   SENTINEL_TRAFFIC_LINKS,
   SENTINEL_TRAFFIC_READ,
+  SENTINEL_TRAFFIC_SEARCH,
   sentinelTrafficLinksArgs,
+  sentinelTrafficPageReference,
   sentinelTrafficReadArgs,
 } from "./traffic_recovery.ts";
 /** Capture a stopped case as privately staged, sanitized archive artifacts. */
@@ -384,6 +386,10 @@ function retainedTraceReceiptFields(step: Record<string, unknown>) {
       (nextOffset === null || (linkIds.length > 0 &&
         nextOffset === (args.offset ?? 0) + linkIds.length))
     ) fields.trafficLinks = { args, linkIds, nextOffset, sha256: saved.sha256 };
+  }
+  if (step.tool === SENTINEL_TRAFFIC_SEARCH) {
+    const page = sentinelTrafficPageReference(step.trafficSearchPage);
+    if (page) fields.trafficSearchPage = page;
   }
   return fields;
 }

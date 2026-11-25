@@ -68,6 +68,39 @@ export function sentinelTrafficSearchArgs(value: unknown) {
   return { revision: input.revision, ...typed };
 }
 
+/** Exact page references contain no original search filters or response bodies. */
+export function sentinelTrafficPageReference(value: unknown) {
+  const input = record(value);
+  if (
+    !input || !Number.isSafeInteger(input.revision) ||
+    typeof input.revision !== "number" || input.revision < 1 ||
+    !Array.isArray(input.receipts) || input.receipts.length > 10 ||
+    !digestHex(input.sha256)
+  ) return;
+  const receipts: { evidenceId: string; digest: string }[] = [];
+  for (const value of input.receipts) {
+    const receipt = record(value);
+    if (
+      !receipt || typeof receipt.evidenceId !== "string" ||
+      !/^(?:har|dns):evidence:[a-f0-9]{64}$/.test(receipt.evidenceId) ||
+      !digestHex(receipt.digest)
+    ) return;
+    receipts.push({ evidenceId: receipt.evidenceId, digest: receipt.digest });
+  }
+  const nextCursor = input.nextCursor;
+  if (
+    nextCursor !== null && (typeof nextCursor !== "string" ||
+      !/^[a-f0-9]{64}\.[a-f0-9]{64}$/.test(nextCursor) ||
+      !receipts.length || !nextCursor.endsWith("." + receipts.at(-1)!.digest))
+  ) return;
+  return {
+    revision: input.revision,
+    receipts,
+    nextCursor,
+    sha256: input.sha256,
+  };
+}
+
 export function sentinelTrafficLinksArgs(value: unknown) {
   const args = record(value);
   if (

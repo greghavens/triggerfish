@@ -2429,6 +2429,18 @@ for (
             }
           }
           if (phase === "resume_traffic_search") {
+            const search = readAdaptiveSentinel(path, assessment)?.modelReviews
+              .flatMap(({ steps }) => steps)
+              .find(({ trafficSearch }) => trafficSearch);
+            assert(search?.trafficSearchPage);
+            assertEquals(
+              search.trafficSearchPage.sha256,
+              search.trafficSearch?.sha256,
+            );
+            assertEquals(
+              search.trafficSearchPage.revision,
+              assessment.revision,
+            );
             assertEquals(
               hooks.filter((line) => line.endsWith(":traffic_search")),
               [

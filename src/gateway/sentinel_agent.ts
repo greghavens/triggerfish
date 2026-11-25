@@ -89,6 +89,7 @@ import {
   SENTINEL_TRAFFIC_SEARCH,
   sentinelTrafficAttachArgs,
   sentinelTrafficLinksArgs,
+  sentinelTrafficPageReference,
   sentinelTrafficReadArgs,
   sentinelTrafficSearchArgs,
 } from "../sentinel/traffic_recovery.ts";
@@ -4190,6 +4191,12 @@ function createAgent(
           args: searchArgs,
           sha256: createHash("sha256").update(result).digest("hex"),
         };
+        const trafficSearchPage = trafficSearch &&
+          sentinelTrafficPageReference({
+            ...JSON.parse(result),
+            revision: searchArgs.revision,
+            sha256: trafficSearch.sha256,
+          });
         const linkArgs = name === SENTINEL_TRAFFIC_LINKS && !failed &&
           sentinelTrafficLinksArgs(args);
         const trafficLinkPage = linkArgs && JSON.parse(result);
@@ -4383,6 +4390,7 @@ function createAgent(
           ...(assetDiscoveryRequestId && { assetDiscoveryRequestId }),
           ...(trafficRead && { trafficRead }),
           ...(trafficSearch && { trafficSearch }),
+          ...(trafficSearchPage && { trafficSearchPage }),
           ...(trafficLinks && { trafficLinks }),
           ...(goalReceiptRead && { goalReceiptRead }),
         });

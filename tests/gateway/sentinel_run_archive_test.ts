@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+import { reopenProjectedSentinelTrafficPage } from "../../src/gateway/sentinel_traffic_tool.ts";
 import {
   withVerifiedRunArchive,
   writeRunArchive,
@@ -586,6 +588,25 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
     const store = openSentinelAdaptiveStore(
       join(dirname(path), "sentinel-adaptive.db"),
     );
+    const traffic = readSentinelTrafficReceiptPage(path, state.revision)
+      ?.receipts[0];
+    assert(traffic);
+    const trafficArgs = {
+      revision: state.revision,
+      origin: "https://app.example",
+      limit: 1,
+    };
+    const trafficPage = reopenProjectedSentinelTrafficPage(
+      path,
+      "restorable",
+      state.revision,
+      trafficArgs,
+      traffic.assetIds[0],
+    );
+    assert(trafficPage);
+    const page = JSON.parse(trafficPage);
+    assertEquals(page.receipts.length, 1);
+    let trafficTaskId: string;
     let sourceTaskId: string;
     let interruptedTaskId: string;
     const interruptedProofRequestId = crypto.randomUUID();
@@ -696,6 +717,54 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
           }],
         ),
       );
+      const trafficTask = store.sync(revision, [{
+        kind: "trace",
+        nodeId: traffic.assetIds[0],
+        depth: 7,
+        reason: "fixture interrupted traffic search",
+      }], revision).find(({ reason }) =>
+        reason === "fixture interrupted traffic search"
+      );
+      assert(trafficTask);
+      const excluded = new Set(
+        store.list(revision).filter(({ id }) => id !== trafficTask.id).map((
+          { id },
+        ) => id),
+      );
+      const leased = store.claim(revision, 60, excluded);
+      assert(leased);
+      assert(
+        store.complete({
+          taskId: trafficTask.id,
+          leaseToken: leased.leaseToken,
+          observation: {},
+        }),
+      );
+      const trafficReview = store.claimModelReview(
+        revision,
+        "fixture interrupted traffic search",
+      );
+      assert(trafficReview);
+      trafficTaskId = trafficTask.id;
+      const sha256 = createHash("sha256").update(trafficPage).digest("hex");
+      assert(
+        store.recordModelReviewProgress(
+          revision,
+          trafficTask.id,
+          trafficReview.token,
+          [{
+            tool: "sentinel_traffic_search",
+            outcome: "returned",
+            trafficSearch: { args: trafficArgs, sha256 },
+            trafficSearchPage: {
+              revision: state.revision,
+              receipts: page.receipts,
+              nextCursor: page.nextCursor,
+              sha256,
+            },
+          }],
+        ),
+      );
       const dependent = store.sync(revision, [{
         kind: "review_finding",
         nodeId: findingId,
@@ -713,9 +782,6 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
       revision: state.revision,
       runId: state.plan.runId,
     };
-    const traffic = readSentinelTrafficReceiptPage(path, state.revision)
-      ?.receipts[0];
-    assert(traffic);
     const journal = openSentinelWorkerFindingStore(path);
     const workerFinding = (() => {
       try {
@@ -957,6 +1023,11 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
     assert(
       !new TextDecoder().decode(archivedAdaptive).includes(privateProgress),
     );
+    assert(
+      !new TextDecoder().decode(archivedAdaptive).includes(
+        '"trafficSearch":{"args"',
+      ),
+    );
     const manifest = JSON.parse(
       await Deno.readTextFile(join(archiveDirectory, "manifest.json")),
     );
@@ -1131,6 +1202,17 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
         _classification: "INTERNAL",
         ...interruptedProof,
       });
+      const trafficResult = JSON.parse(
+        await turn({
+          action: "worker_trace_result",
+          kind: "sentinel",
+          id: exact.id,
+          revision: state.revision,
+          taskId: trafficTaskId,
+          stepIndices: [0],
+        }),
+      );
+      assertEquals(trafficResult.result, page);
       assertEquals(restored.plan.formalGoals, goals);
       assertEquals(restored.revision, state.revision);
       assertEquals(

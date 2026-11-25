@@ -162,6 +162,9 @@ export interface SentinelReviewStep {
     >;
     readonly sha256: string;
   };
+  readonly trafficSearchPage?: ReturnType<
+    typeof import("./traffic_recovery.ts").sentinelTrafficPageReference
+  >;
   readonly trafficSearch?: {
     readonly args: ReturnType<
       typeof import("./traffic_recovery.ts").sentinelTrafficSearchArgs
