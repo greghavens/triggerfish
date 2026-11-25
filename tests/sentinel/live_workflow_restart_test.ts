@@ -27,6 +27,7 @@ import {
   addSentinelCaseHint,
   advanceAdaptiveSentinel,
   readAdaptiveSentinel,
+  readHistoricalAdaptiveSentinel,
   readSentinelProvenance,
   readSentinelWorkerObservation,
 } from "../../src/gateway/sentinel_adaptive_runtime.ts";
@@ -156,8 +157,7 @@ async function verifyHistoricalWorkerReads(
     assertEquals(
       createHash("sha256").update(result).digest("hex"),
       review.steps[index].goalReceiptRead?.sha256 ??
-        review.steps[index].resultSha256 ??
-        review.steps[index].resultSnapshot?.sha256,
+        review.steps[index].resultSha256,
     );
   }
   denied = true;
@@ -2562,6 +2562,31 @@ for (
                   : []),
                 `resume_pinned_sources:${source}_post`,
               ],
+            );
+          }
+          const history = readHistoricalAdaptiveSentinel(
+            path,
+            assessment.revision,
+            undefined,
+            false,
+            true,
+          );
+          const exactPaths = history?.modelReviews
+            .find(({ summary }) =>
+              summary === "Recovered exact pinned sources."
+            )
+            ?.steps.filter(({ tool, goalReceiptRead }) =>
+              tool === "sentinel_path" &&
+              goalReceiptRead?.args.graph === "provenance"
+            );
+          assertEquals(exactPaths?.length, 2);
+          for (const step of exactPaths ?? []) {
+            assert(step.plannerProvenancePath);
+            assertEquals(
+              createHash("sha256").update(step.plannerProvenancePath).digest(
+                "hex",
+              ),
+              step.goalReceiptRead?.sha256,
             );
           }
           await verifyHistoricalWorkerReads(

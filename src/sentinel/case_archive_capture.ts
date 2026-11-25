@@ -4,6 +4,7 @@ import {
   parseSharedAssetLinkPage,
 } from "./shared_asset_link_page.ts";
 import {
+  parseSavedPlannerProvenancePath,
   readSavedSentinelProvenanceNode,
   readSavedSentinelProvenanceSearch,
   readSentinelProvenanceNodeReference,
@@ -424,6 +425,21 @@ function retainedTraceReceiptFields(
     if (args && digest(citation?.sha256)) {
       fields.goalReceiptRead = { args, sha256: citation?.sha256 };
     }
+  }
+  if (
+    step.tool === "sentinel_path" &&
+    typeof step.plannerProvenancePath === "string"
+  ) {
+    const citation = fields.goalReceiptRead as {
+      args: Record<string, unknown>;
+      sha256: string;
+    } | undefined;
+    const text = step.plannerProvenancePath;
+    if (
+      citation &&
+      parseSavedPlannerProvenancePath(text, citation.args, revision) &&
+      createHash("sha256").update(text).digest("hex") === citation.sha256
+    ) fields.plannerProvenancePath = text;
   }
   if (step.tool === "sentinel_shared_finding_source") {
     const receipt = fields.goalReceiptRead as

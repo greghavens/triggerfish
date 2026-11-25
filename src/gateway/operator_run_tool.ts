@@ -3954,6 +3954,14 @@ export function createOperatorRunToolExecutor(options: {
                     args,
                     goalState,
                   )
+                : step.tool === "sentinel_path" && step.plannerProvenancePath
+                ? parseSavedPlannerProvenancePath(
+                    step.plannerProvenancePath,
+                    args,
+                    ref.revision,
+                  )
+                  ? step.plannerProvenancePath
+                  : undefined
                 : await readSentinelGraphProjection(
                   path,
                   ref.revision,
@@ -3969,6 +3977,9 @@ export function createOperatorRunToolExecutor(options: {
               const current = readHistoricalAdaptiveSentinel(
                 path,
                 ref.revision,
+                undefined,
+                false,
+                true,
               );
               if (
                 current?.goal.id !== runId ||

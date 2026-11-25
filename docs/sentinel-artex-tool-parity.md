@@ -1677,10 +1677,14 @@ the committed response digest. The pinned-source restart fixture replaces
 the live inventory, then verifies both original path projections through
 operator chat.
 
-Historical operator reads also support shortest and alternate provenance
-paths. The gateway reapplies the worker's response filtering and checks
-the original digest. The restart fixture verifies both path projections.
-If added provenance changes the original result, lookup returns unavailable.
+Historical operator reads support shortest and alternate provenance paths.
+New worker steps retain the exact authorized projection and its digest.
+Readback rechecks scope, response policy, and the digest without replacing
+the original answer as provenance grows. Normal trace listings omit the
+saved body. The gateway restart fixture verifies that both saved path
+projections match their original digests and can be reopened through owner
+chat. Older steps without the saved body still require an exact digest
+match against the recomputed projection.
 
 Operator trace retrieval reopens a worker's exact prerequisite workflow
 receipt. It verifies the assigned asset, source review prerequisite, retained

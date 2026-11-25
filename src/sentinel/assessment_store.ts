@@ -1,4 +1,5 @@
 import {
+  parseSavedPlannerProvenancePath,
   readSavedSentinelProvenanceNode,
   readSavedSentinelProvenanceSearch,
   readSentinelProvenanceNodeReference,
@@ -293,7 +294,7 @@ export function projectSentinelTraceMetadata<T extends SentinelReviewStep>(
 ) {
   const {
     sharedAssetLinksPage,
-    plannerProvenancePath: _path,
+    plannerProvenancePath,
     plannerProvenanceNodeResult: _plannerNode,
     provenanceSearchResult,
     workerProvenanceNodeResult,
@@ -306,6 +307,8 @@ export function projectSentinelTraceMetadata<T extends SentinelReviewStep>(
     ...(resultSha256 && { resultSha256 }),
     ...(includeReadResults && sharedAssetLinksPage !== undefined &&
       { sharedAssetLinksPage }),
+    ...(includeReadResults && plannerProvenancePath !== undefined &&
+      { plannerProvenancePath }),
     ...(includeReadResults && provenanceSearchResult !== undefined &&
       { provenanceSearchResult }),
     ...(includeReadResults && workerProvenanceNodeResult !== undefined &&
@@ -409,6 +412,21 @@ export function normalizeSentinelWorkflowReviewStep(
         page,
         evidenceRevision,
       )
+    ) step = metadata;
+  }
+  if (step.plannerProvenancePath !== undefined) {
+    const { plannerProvenancePath, ...metadata } = step;
+    const read = step.goalReceiptRead;
+    if (
+      step.tool !== "sentinel_path" || step.outcome !== "returned" ||
+      !read ||
+      !parseSavedPlannerProvenancePath(
+        plannerProvenancePath,
+        read.args,
+        evidenceRevision,
+      ) ||
+      createHash("sha256").update(plannerProvenancePath).digest("hex") !==
+        read.sha256
     ) step = metadata;
   }
   if (step.githubWorkflowRead === undefined) return step;

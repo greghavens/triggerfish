@@ -5301,7 +5301,9 @@ function createAgent(
             goalReceiptRead && assetLinksPage && {
             sharedAssetLinksPage: result,
           }),
-          ...(options.plannerExecutionEvidenceRunId && goalReceiptRead &&
+          ...((turn.requiresLiveAssignment ||
+            options.plannerExecutionEvidenceRunId) &&
+            goalReceiptRead &&
             name === SENTINEL_PATH_READ &&
             parseSavedPlannerProvenancePath(
               result,
