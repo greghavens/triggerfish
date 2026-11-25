@@ -12,6 +12,7 @@ import { readSentinelFindingPageReference } from "./worker_goal_recovery.ts";
 import {
   isSentinelInventoryFindingRead,
   isSentinelInventoryNeighborhoodRead,
+  parseSentinelPinnedFindingRead,
   sentinelGoalReceiptReadArguments,
   sentinelSharedAssetLinksArgs,
 } from "./worker_goal_recovery.ts";
@@ -418,6 +419,20 @@ function retainedTraceReceiptFields(
       fields.goalReceiptRead = { args, sha256: citation?.sha256 };
     }
   }
+  if (step.tool === "sentinel_shared_finding_source") {
+    const receipt = fields.goalReceiptRead as
+      | { args: Record<string, unknown> }
+      | undefined;
+    const read = receipt && parseSentinelPinnedFindingRead(receipt.args);
+    if (read && read.finding === step.target && read.sourceCase !== caseId) {
+      fields.target = read.finding;
+      fields.sourceSnapshots = [{
+        caseId: read.sourceCase,
+        assetId: read.sourceAsset,
+        snapshotDigest: read.snapshotDigest,
+      }];
+    }
+  }
   if (step.tool === "sentinel_shared_asset_links") {
     const receipt = step.goalReceiptRead as
       | { args?: unknown; sha256?: unknown }
@@ -636,7 +651,7 @@ export function retainArchivedWorkerTraceMetadata(
         ) throw new Error("Invalid archived Sentinel worker trace step");
         const target = typeof step.target === "string" &&
             (step.target === row.nodeId ||
-              /^(?:execution-evidence|native-workflow-evidence|worker-graph-fact|workflow-observation|worker-finding|worker-recheck|finding-traffic-link|goal-proposal|asset-discovery|har:evidence|dns:evidence):[a-f0-9]{64}$/
+              /^(?:shared-topology|execution-evidence|native-workflow-evidence|worker-graph-fact|workflow-observation|worker-finding|worker-recheck|finding-traffic-link|goal-proposal|asset-discovery|har:evidence|dns:evidence):[a-f0-9]{64}$/
                 .test(step.target))
           ? step.target
           : undefined;

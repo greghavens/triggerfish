@@ -1,5 +1,9 @@
 import { assetLinkProof } from "../../src/sentinel/shared_asset_link_page.ts";
-import { createSentinelSubagent } from "../../src/gateway/sentinel_agent.ts";
+import {
+  createSentinelSubagent,
+  projectSentinelSharedFindingSource,
+  projectSentinelSharedTopologySource,
+} from "../../src/gateway/sentinel_agent.ts";
 import { DatabaseSync } from "node:sqlite";
 import { createSentinelLiveWorkflowReader } from "../../src/gateway/sentinel_live_workflow.ts";
 import { createHash } from "node:crypto";
@@ -25,8 +29,10 @@ import {
   collectSharedSentinelTopology,
   digestSentinelSnapshot,
   maxSentinelArchivedTopologyBytes,
+  readArchivedSentinelFindingSource,
   readArchivedSentinelSnapshot,
   readPinnedSentinelSharedFindingSource,
+  readSharedSentinelTopologySource,
   retainSentinelSourceSnapshot,
   sentinelArchivedFindingSourcesFile,
   sentinelArchivedTraceSourcesFile,
@@ -746,6 +752,58 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
         sha256: createHash("sha256").update(assetLinksText).digest("hex"),
       },
     };
+    const interruptedFinding = loadSentinelGraph({
+      ...findingSource,
+      nodes: findingSource.nodes.map((node) => ({
+        ...node,
+        label: node.label + " (interrupted read)",
+      })),
+    }).snapshot();
+    const interruptedFindingDigest = digestSentinelSnapshot(interruptedFinding);
+    await retainSentinelSourceSnapshot(
+      baseDir,
+      sourceCase,
+      interruptedFindingDigest,
+      interruptedFinding,
+    );
+    const findingArgs = {
+      asset: "app",
+      sourceCase,
+      sourceAsset: "source-app",
+      finding: "borrowed-finding",
+      snapshotDigest: interruptedFindingDigest,
+    };
+    const interruptedFindingSource = await readArchivedSentinelFindingSource(
+      baseDir,
+      {
+        caseId: sourceCase,
+        assetId: findingArgs.sourceAsset,
+        findingId: findingArgs.finding,
+        snapshotDigest: interruptedFindingDigest,
+      },
+      path,
+    );
+    assert(interruptedFindingSource);
+    const interruptedFindingText = projectSentinelSharedFindingSource(
+      interruptedFindingSource,
+      state.revision,
+      findingArgs,
+    );
+    const topologyArgs = { evidenceId: cited.id, sourceCase };
+    const assessmentGraph = state.result?.sharedGraph.snapshot;
+    assert(assessmentGraph);
+    const interruptedTopology = await readSharedSentinelTopologySource(
+      baseDir,
+      assessmentGraph,
+      topologyArgs.evidenceId,
+      sourceCase,
+      path,
+    );
+    assert(interruptedTopology);
+    const interruptedTopologyText = projectSentinelSharedTopologySource(
+      interruptedTopology,
+      state.revision,
+    );
     const privateProgress = "fixture-only-interrupted-progress-secret";
     let dependentId: string;
     try {
@@ -866,6 +924,26 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
                 ...assetLinksPage,
                 unavailableSourceCount: 1,
               }),
+            },
+            {
+              tool: "sentinel_shared_finding_source",
+              target: findingArgs.finding,
+              outcome: "returned",
+              goalReceiptRead: {
+                args: findingArgs,
+                sha256: createHash("sha256").update(interruptedFindingText)
+                  .digest("hex"),
+              },
+            },
+            {
+              tool: "sentinel_shared_topology_source",
+              target: topologyArgs.evidenceId,
+              outcome: "returned",
+              goalReceiptRead: {
+                args: topologyArgs,
+                sha256: createHash("sha256").update(interruptedTopologyText)
+                  .digest("hex"),
+              },
             },
           ],
         ),
@@ -1121,6 +1199,9 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
     );
     await Deno.remove(workspaceTrace);
     await Deno.remove(interruptedLinkPath);
+    await Deno.remove(
+      sentinelSourceSnapshotPath(baseDir, sourceCase, interruptedFindingDigest),
+    );
     await Deno.remove(
       sentinelSourceSnapshotPath(
         baseDir,
@@ -1430,6 +1511,33 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
       assertStringIncludes(await turn(assetLinksTrace), "unavailable");
       assertStringIncludes(await turn(interruptedSource), "unavailable");
       policy.denySharedAssetLinks = false;
+      const findingRead = { ...workflowTrace, stepIndices: [5] };
+      assertEquals(
+        JSON.parse(await turn(findingRead)).result,
+        JSON.parse(interruptedFindingText),
+      );
+      assertEquals(
+        JSON.parse(
+          await turn({
+            ...findingRead,
+            action: "worker_trace_source",
+            sourceCase,
+            snapshotDigest: interruptedFindingDigest,
+            assetId: findingArgs.sourceAsset,
+          }),
+        ).source,
+        {
+          caseId: sourceCase,
+          snapshotDigest: interruptedFindingDigest,
+          asset: interruptedFinding.nodes.find(({ id }) =>
+            id === findingArgs.sourceAsset
+          ),
+        },
+      );
+      assertEquals(
+        JSON.parse(await turn({ ...workflowTrace, stepIndices: [6] })).result,
+        JSON.parse(interruptedTopologyText),
+      );
       const workflowResult = JSON.parse(await turn(workflowTrace)).result;
       assertEquals(workflowResult, { targetId: "app", ...workflowReceipt });
       assertEquals(policy.workflowMetadataCalls, 1);

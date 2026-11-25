@@ -4484,10 +4484,13 @@ export function createOperatorRunToolExecutor(options: {
         const authorize = context?.authorizeSentinelTraceRead;
         const scope = { caseId: ref.id, revision: ref.revision, taskId };
         const receipt = interrupted?.goalReceiptRead;
-        const selector = receipt && sentinelSharedAssetLinksArgs(receipt.args);
+        const selector = interrupted && receipt &&
+          sentinelGoalReceiptReadArguments(interrupted.tool, receipt.args);
         if (
           !completed && (
-            !authorize || interrupted?.tool !== "sentinel_shared_asset_links" ||
+            !authorize ||
+            (interrupted?.tool !== "sentinel_shared_asset_links" &&
+              interrupted?.tool !== "sentinel_shared_finding_source") ||
             !selector || !await authorize(scope, interrupted.tool, selector)
           )
         ) return unavailable;

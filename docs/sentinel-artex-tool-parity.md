@@ -1743,3 +1743,8 @@ snapshots. The archive gateway fixture removes both workspace copies, restores
 the stopped run, and follows the pinned sources through `worker_trace_source`.
 The fixture checks that a different source digest and a response-policy denial
 both withhold the source.
+
+Interrupted pinned topology and finding reads survive archive restore. The
+gateway fixture removes workspace copies of their sources and verifies exact
+responses through `worker_trace_result`. It also follows the finding's cited
+asset through `worker_trace_source` and confirms the archived copy resolves.
