@@ -274,6 +274,11 @@ async function withTidepool(
         workerFindings: NonNullable<
           ReturnType<typeof readSentinelWorkerFindingReport>
         >;
+        provenance: ReturnType<
+          ReturnType<
+            typeof import("../../src/sentinel/provenance.ts").buildSentinelProvenance
+          >["snapshot"]
+        >;
         planningAttempts: readonly {
           inputManifest?: { findingRecheckIds?: readonly string[] };
         }[];
@@ -368,6 +373,7 @@ async function withTidepool(
       assert(Array.isArray(result.planningAttempts));
       return {
         workerFindings: result.workerFindings,
+        provenance: result.provenance,
         planningAttempts: result.planningAttempts,
       };
     }, request);
@@ -398,6 +404,7 @@ Deno.test("Leased Sentinel workers report, recheck, and amend findings visible i
       version: 1,
       nodes: [
         { id: "app", kind: "asset", label: "Assigned application" },
+        { id: "dependent-asset", kind: "asset", label: "Dependent asset" },
         {
           id: "review-gap",
           kind: "finding",
@@ -436,6 +443,7 @@ Deno.test("Leased Sentinel workers report, recheck, and amend findings visible i
     let finding: SentinelWorkerFindingJournalRecord | undefined;
     let check: SentinelWorkerFindingJournalRecord | undefined;
     let secondRevision: number | undefined;
+    let satisfiedGateId: string | undefined;
     let amendment: SentinelWorkerFindingReportAmendment | undefined;
 
     await withTidepool(baseDir, async (list, provenance) => {
@@ -536,7 +544,27 @@ Deno.test("Leased Sentinel workers report, recheck, and amend findings visible i
               type: "response",
               taint: "INTERNAL",
               text: JSON.stringify({
-                assignments: [],
+                assignments: receipt
+                  ? [
+                    {
+                      kind: "trace",
+                      nodeId: receipt.targetId,
+                      depth: 1,
+                      passingRecheckId: receipt.id,
+                    },
+                    {
+                      kind: "impact",
+                      nodeId: "dependent-asset",
+                      dependsOn: [0],
+                    },
+                    {
+                      kind: "trace",
+                      nodeId: "dependent-asset",
+                      depth: 1,
+                      passingRecheckId: receipt.id,
+                    },
+                  ]
+                  : [],
                 prioritize: [],
                 ...(receipt && {
                   goalObservations: [{
@@ -684,6 +712,35 @@ Deno.test("Leased Sentinel workers report, recheck, and amend findings visible i
         observedAt: verified.observedAt,
         validUntil: verified.validUntil,
       }]]);
+      const queue = () => readAdaptiveSentinel(path, second)?.tasks ?? [];
+      await waitFor(() =>
+        queue().some(({ nodeId, kind, status }) =>
+          nodeId === "dependent-asset" && kind === "impact" &&
+          status === "completed"
+        )
+      );
+      const gate = queue().find(({ plannerRound }) =>
+        plannerRound?.passingRecheckId === verified.id
+      );
+      assert(gate);
+      satisfiedGateId = gate.id;
+      assertEquals(gate.status, "completed");
+      assertEquals(gate.attempts, 0);
+      assertEquals(gate.factSatisfaction?.findingRecheckId, verified.id);
+      assertEquals(gate.factSatisfaction?.sourceTaskId, verified.taskId);
+      assertEquals(gate.factSatisfaction?.evidenceRevision, second.revision);
+      assertEquals(
+        queue().find(({ nodeId, kind }) =>
+          nodeId === "dependent-asset" && kind === "impact"
+        )?.prerequisites,
+        [gate.id],
+      );
+      assertEquals(
+        queue().filter(({ plannerRound }) =>
+          plannerRound?.passingRecheckId !== undefined
+        ).length,
+        1,
+      );
       const savedHistory = readAdaptiveSentinel(path, second)
         ?.modelPlannerHistory;
       assertEquals(
@@ -819,6 +876,20 @@ Deno.test("Leased Sentinel workers report, recheck, and amend findings visible i
       const restored = await provenance(secondRevision!);
       assertEquals(restored.workerFindings.findings, [finding!]);
       assertEquals(restored.workerFindings.rechecks, [check!]);
+      const gateNode = restored.provenance.nodes.find(({ sourceId }) =>
+        sourceId === satisfiedGateId
+      );
+      const receiptNode = restored.provenance.nodes.find(({ sourceId }) =>
+        sourceId === check!.id
+      );
+      assert(gateNode && receiptNode);
+      assert(
+        restored.provenance.edges.some(({ from, to, relation }) =>
+          from === gateNode.id && to === receiptNode.id &&
+          relation === "references"
+        ),
+      );
+
       assertEquals(
         restored.planningAttempts.map(({ inputManifest }) =>
           inputManifest?.findingRecheckIds

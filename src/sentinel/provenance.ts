@@ -1,3 +1,4 @@
+import type { SentinelWorkerFindingRecheckRecord } from "./worker_finding_store.ts";
 import {
   satisfiesSentinelGraphFactRequirement,
   type SentinelWorkerGraphFact,
@@ -135,6 +136,20 @@ interface UnresolvedReference {
   readonly relation: "prompted" | "references";
 }
 
+type SatisfiedRecheckProvenance =
+  & Pick<
+    SentinelWorkerFindingRecheckRecord,
+    | "id"
+    | "caseId"
+    | "runId"
+    | "evidenceRevision"
+    | "taskId"
+    | "targetId"
+    | "evidenceId"
+    | "outcome"
+  >
+  & { readonly receiptSha256: string };
+
 /** An adaptive goal and its current persisted task list. */
 export interface AdaptiveProvenanceView {
   readonly goal: { readonly id: string; readonly label: string };
@@ -147,6 +162,7 @@ export interface AdaptiveProvenanceView {
     readonly taskId: string;
     readonly status: string;
   }[];
+  readonly satisfiedRechecks?: readonly SatisfiedRecheckProvenance[];
   readonly graphFacts?: readonly SentinelWorkerGraphFact[];
   readonly workflowObservations?: readonly AdaptiveWorkflowObservation[];
   readonly assetDiscoveries?: readonly SentinelAssetDiscoveryRecord[];
@@ -913,7 +929,8 @@ function validatedFactSatisfaction(
 ): AdaptiveFactSatisfaction | undefined {
   const receipt = task.factSatisfaction;
   if (
-    !receipt || receipt.graphFactId || task.status !== "completed" ||
+    !receipt || receipt.graphFactId || receipt.findingRecheckId ||
+    task.status !== "completed" ||
     task.observation === undefined
   ) {
     return undefined;
@@ -1073,6 +1090,16 @@ function addAdaptive(
   });
 
   const assignments = new Map(view.tasks.map((task) => [task.id, task]));
+  const rechecks = new Map(
+    view.satisfiedRechecks?.map((receipt) => [
+      receipt.id,
+      receipt,
+    ]),
+  );
+  const recheckSatisfactions: {
+    task: string;
+    receipt: SatisfiedRecheckProvenance;
+  }[] = [];
   const factSatisfactions: { target: string; source: string }[] = [];
   for (const task of view.tasks) {
     const sourceId = text(task.id, "adaptive task ID");
@@ -1097,10 +1124,27 @@ function addAdaptive(
           )
           : task.prerequisites.includes(fact.taskId))
       );
-    const factSatisfaction = relationshipFact
+    const recheck = receipt?.findingRecheckId &&
+      rechecks.get(receipt.findingRecheckId);
+    const verifiedRecheck = recheck && task.status === "completed" &&
+      recheck.id === task.plannerRound?.passingRecheckId &&
+      recheck.caseId === view.caseId && recheck.runId === view.goal.id &&
+      recheck.evidenceRevision === view.evidenceRevision &&
+      recheck.evidenceRevision === receipt?.evidenceRevision &&
+      recheck.targetId === task.nodeId && recheck.outcome === "pass" &&
+      recheck.taskId === receipt.sourceTaskId &&
+      assignments.has(recheck.taskId) &&
+      recheck.receiptSha256 === receipt.sourceObservationSha256;
+    if (verifiedRecheck) {
+      recheckSatisfactions.push({ task: id, receipt: recheck });
+    }
+    const factSatisfaction = relationshipFact || verifiedRecheck
       ? receipt
       : validatedFactSatisfaction(task, assignments);
-    if (factSatisfaction && !factSatisfaction.graphFactId) {
+    if (
+      factSatisfaction && !factSatisfaction.graphFactId &&
+      !factSatisfaction.findingRecheckId
+    ) {
       factSatisfactions.push({
         target: id,
         source: derivedRef(
@@ -1146,6 +1190,22 @@ function addAdaptive(
     view,
     assignments,
   );
+  for (const { task, receipt } of recheckSatisfactions) {
+    const id = derivedRef("observation", origin, receipt.id);
+    if (!index.hasNode(id)) {
+      index.addNode({
+        id,
+        sourceId: receipt.id,
+        label: "Verified remediation recheck",
+        kind: "observation",
+        origin,
+      });
+      index.addEdge(derivedRef("task", origin, receipt.taskId), id, "produces");
+      const evidence = imported.get(receipt.evidenceId)?.ref;
+      if (evidence) index.addEdge(id, evidence, "references");
+    }
+    index.addEdge(task, id, "references");
+  }
   const factNodes = new Map<string, SentinelWorkerGraphFact>();
   for (const fact of view.graphFacts ?? []) {
     const source = assignments.get(fact.taskId);

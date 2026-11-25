@@ -344,6 +344,16 @@ covers duplicate publication, planner citation for operator confirmation, and
 suppression in later planner input when the operating policy denies evidence
 review. Existing citations remain available in saved provenance.
 
+For queued work whose sole requirement is an already committed remediation
+recheck, the planner can place its exact `passingRecheckId` on a depth-one
+trace for the receipt's asset. The scheduler replays the matching pass
+against the current case revision, inventory, and operating scope before
+completing the prerequisite without a worker claim. The authentication
+fixture proves that the dependent completes, a different asset cannot use
+the same receipt, and the task-to-recheck link resolves after reconnecting
+to Tidepool. Queuing a selector before a matching recheck is committed
+remains open.
+
 Sentinel planners and leased workers can reopen a retained finding or recheck
 with `sentinel_worker_findings` and its exact `receiptId`, optionally pinning
 the receipt's evidence revision. The lookup is independent of the recent

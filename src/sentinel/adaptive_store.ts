@@ -1,3 +1,4 @@
+import type { SentinelWorkerFindingRecheckRecord } from "./worker_finding_store.ts";
 import { createEvidenceTaskSettler } from "../core/evidence_task_progression.ts";
 import { createAssignmentObservationJournal } from "../core/assignment_observations.ts";
 import {
@@ -672,6 +673,7 @@ export type AdaptiveCommittedObservationCitation = NonNullable<
 >;
 
 export interface AdaptivePlannerRound {
+  readonly passingRecheckId?: string;
   readonly recheckFindingId?: string;
   readonly graphFactId?: string;
   readonly graphFactOnly?: true;
@@ -767,6 +769,7 @@ export interface AdaptivePlannerRead {
 }
 
 export interface AdaptiveTaskRequest {
+  readonly passingRecheckId?: string;
   readonly recheckFindingId?: string;
   readonly kind: AdaptiveTaskKind;
   readonly nodeId?: string;
@@ -823,6 +826,8 @@ export interface AdaptiveFactSatisfaction {
   readonly sourceTaskId: string;
   readonly sourceObservationSha256: string;
   readonly graphFactId?: string;
+  readonly findingRecheckId?: string;
+  readonly evidenceRevision?: number;
   readonly checkedAt?: string;
 }
 
@@ -897,7 +902,11 @@ export interface AdaptiveTaskNote {
 
 type RelationshipTaskIdentity = Pick<
   AdaptivePlannerRound,
-  "graphFactOnly" | "graphFactId" | "graphRelationship" | "recheckFindingId"
+  | "graphFactOnly"
+  | "graphFactId"
+  | "graphRelationship"
+  | "recheckFindingId"
+  | "passingRecheckId"
 >;
 type TaskIdentity =
   & Pick<AdaptiveTaskRequest, "kind" | "nodeId" | "depth" | "evidenceIds">
@@ -1556,6 +1565,9 @@ export function sentinelAdaptiveTaskId(
       nodeId,
       depth,
       ...(requirement ? [requirement] : []),
+      ...(receipt.passingRecheckId
+        ? [["passing_recheck", receipt.passingRecheckId]]
+        : []),
       ...(receipt.recheckFindingId ? [receipt.recheckFindingId] : []),
       ...(reportFinding ? [reportFinding] : []),
     ]))
@@ -1726,6 +1738,7 @@ function normalizePlannerRound(round: AdaptivePlannerRound | undefined) {
     upstreamCitations,
     workerSources,
     recheckFindingId,
+    passingRecheckId,
     graphFactId,
     graphFactOnly,
     graphRelationship,
@@ -1735,6 +1748,11 @@ function normalizePlannerRound(round: AdaptivePlannerRound | undefined) {
     priorAssignedTargetCitations,
     carriedAssignedTargetCitations,
   } = round;
+  if (
+    passingRecheckId !== undefined &&
+    (!/^worker-recheck:[a-f0-9]{64}$/.test(passingRecheckId) ||
+      graphFactOnly || graphFactId || graphRelationship || recheckFindingId)
+  ) throw new Error("Invalid Sentinel passing recheck requirement");
   const requiredRelationship = graphRelationship && (
     parseSentinelGraphFactRequirement(
       graphRelationship,
@@ -1816,6 +1834,7 @@ function normalizePlannerRound(round: AdaptivePlannerRound | undefined) {
   ) throw new Error("Invalid committed observation citation");
   return {
     identity: revisionKey(identity),
+    ...(passingRecheckId && { passingRecheckId }),
     ...(recheckFindingId && { recheckFindingId }),
     ...(graphFactId && { graphFactId }),
     ...(graphFactOnly === true && (graphFactId || requiredRelationship) &&
@@ -1869,6 +1888,12 @@ function normalizeTask(revision: string, request: AdaptiveTaskRequest) {
   }
   const identity = normalizeIdentity(request);
   const plannerRound = normalizePlannerRound(request.plannerRound);
+  if (
+    (request.passingRecheckId !== undefined &&
+      request.passingRecheckId !== plannerRound?.passingRecheckId) ||
+    (plannerRound?.passingRecheckId &&
+      (identity.kind !== "trace" || identity.depth !== 1))
+  ) throw new Error("Passing recheck prerequisites require a depth-one trace");
   if (
     request.recheckFindingId !== undefined &&
     request.recheckFindingId !== plannerRound?.recheckFindingId
@@ -3389,6 +3414,11 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
       SELECT task.* FROM adaptive_tasks AS task
       WHERE task.revision = ? AND task.status = 'queued'
       AND task.retirementReason IS NULL AND task.dependencyRecommendation IS NULL
+      ${
+      checked
+        ? "AND json_extract(task.plannerRound, '$.passingRecheckId') IS NULL"
+        : ""
+    }
       AND NOT EXISTS (
         SELECT 1 FROM adaptive_dependencies AS dependency
         JOIN adaptive_tasks AS required ON required.id = dependency.dependencyId
@@ -5208,6 +5238,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
                   json_extract(task.plannerRound, '$.graphRelationship'),
                   json_extract(task.plannerRound, '$.graphFactId')
                 )
+                ELSE json_extract(task.plannerRound, '$.passingRecheckId')
               END
               ORDER BY mapping.evidenceNumber DESC, mapping.rowid DESC
             ) AS rank
@@ -6299,6 +6330,75 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
           checkedAt
             ? `Verified current passing control receipt ${fact.id} at ${checkedAt} in evidence revision ${fact.evidenceRevision}.`
             : `Verified the exact relationship receipt ${fact.id} in evidence revision ${fact.evidenceRevision}.`,
+        );
+        return true;
+      });
+    },
+
+    /** Settle a receipt-only prerequisite after the case replay verifies the recheck. */
+    satisfyQueuedFindingRecheck(
+      revision: string,
+      id: string,
+      recheck: SentinelWorkerFindingRecheckRecord,
+      excludedTaskIds: ReadonlySet<string>,
+      checkedAt: string,
+    ): boolean {
+      revision = revisionKey(revision);
+      id = taskId(id);
+      return transaction(db, () => {
+        const mapping = this.forEvidence(recheck.evidenceRevision);
+        if (
+          activeRevision() !== revision || mapping?.revision !== revision ||
+          mapping.goal.id !== recheck.runId || recheck.outcome !== "pass"
+        ) return false;
+        const time = now();
+        recover(revision, time);
+        const row = nextClaimableTask(revision, excludedTaskIds, time);
+        if (!row || row.id !== id || row.attempts !== 0) return false;
+        const task = decodeTask(row);
+        const round = task.plannerRound;
+        const source = lookup.get(recheck.taskId);
+        if (
+          task.kind !== "trace" || task.depth !== 1 ||
+          task.nodeId !== recheck.targetId ||
+          round?.passingRecheckId !== recheck.id ||
+          source?.revision !== revision || source.id === id ||
+          task.evidenceIds.length || taskWorkerSources(task).length ||
+          round.committedObservation || round.githubWorkflowCitation ||
+          round.peerFindingCitations?.length ||
+          round.priorAssignedTargetCitations?.length ||
+          round.carriedAssignedTargetCitations?.length ||
+          round.upstreamCheckId || round.upstreamCitations?.length
+        ) return false;
+        const receipt: AdaptiveFactSatisfaction = {
+          sourceTaskId: recheck.taskId,
+          sourceObservationSha256: createHash("sha256").update(
+            JSON.stringify(recheck),
+          ).digest("hex"),
+          findingRecheckId: recheck.id,
+          evidenceRevision: recheck.evidenceRevision,
+          checkedAt,
+        };
+        if (
+          !settleEvidenceTask({
+            revision,
+            taskId: id,
+            observation: JSON.stringify({
+              findingRecheckId: recheck.id,
+              findingId: recheck.findingId,
+              evidenceId: recheck.evidenceId,
+              outcome: recheck.outcome,
+            }),
+            receipt,
+          })
+        ) return false;
+        event.run(
+          revision,
+          id,
+          "fact_satisfied",
+          0,
+          time,
+          `Verified passing recheck ${recheck.id} for finding ${recheck.findingId} in evidence revision ${recheck.evidenceRevision}.`,
         );
         return true;
       });

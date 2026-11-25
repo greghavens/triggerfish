@@ -819,6 +819,7 @@ export function validateSentinelPlanSuggestions(
     string,
     NonNullable<AdaptivePlannerRound["committedObservation"]>
   > = new Map(),
+  passingRechecks: ReadonlyMap<string, string> = new Map(),
 ):
   | (AdaptiveTaskRequest & {
     sourceKind?: AdaptiveSourceKind;
@@ -937,6 +938,27 @@ export function validateSentinelPlanSuggestions(
       }
     }
     const graphFactOnly = item.graphFactOnly === true;
+    const passingRecheckId = item.passingRecheckId;
+    if (
+      passingRecheckId !== undefined &&
+      (typeof passingRecheckId !== "string" ||
+        passingRechecks.get(passingRecheckId) !== nodeId ||
+        kind !== "trace" || item.depth !== 1 ||
+        [
+          item.graphFactId,
+          item.graphRelationship,
+          item.graphFactOnly,
+          item.recheckFindingId,
+          item.sourceTaskId,
+          item.sourceKind,
+          item.sourceWorkflowResultSha256,
+          item.workerSources,
+          item.peerFinding,
+          item.priorAssignedTargetCitation,
+          item.upstreamCheckId,
+          item.committedObservationId,
+        ].some((value) => value !== undefined))
+    ) continue;
     if (
       item.graphFactOnly !== undefined &&
       (!graphFactOnly || (!graphFact && !graphRelationship) ||
@@ -1103,6 +1125,7 @@ export function validateSentinelPlanSuggestions(
       if (typeof source === "string") task = { ...task, reviewedFrom: source };
       const id = sentinelAdaptiveTaskId(revision, {
         ...task,
+        ...(typeof passingRecheckId === "string" && { passingRecheckId }),
         ...(graphFactOnly &&
           {
             graphFactOnly: true,
@@ -1137,6 +1160,7 @@ export function validateSentinelPlanSuggestions(
       }
       tasks.push({
         ...task,
+        ...(typeof passingRecheckId === "string" && { passingRecheckId }),
         ...(graphFact && typeof graphFactId === "string" && { graphFactId }),
         ...(graphFactOnly && { graphFactOnly: true as const }),
         ...(committed && { committedObservation: committed }),
