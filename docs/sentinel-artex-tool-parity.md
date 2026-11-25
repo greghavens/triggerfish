@@ -73,7 +73,9 @@ The owner can also inspect redacted lifecycle status and request enable or
 disable through the durable inbox. Approval binds the exact action and
 configured connector revision. The gateway fixture exercises policy and
 configuration drift, denial, duplicate decisions, and separate restarts
-that remove and restore the connector's model-callable tools.
+that remove and restore the connector's model-callable tools. The same inbox
+gates removal. The gateway fixture verifies exact removal across restart
+and preserves neighboring connector entries.
 
 The ordinary owner agent can call `mcp_manage tools` for an exact
 configured connector. It lists the tool names in the live registry used
@@ -2335,11 +2337,12 @@ reopens an upstream check match and an exact incident alert page. Coverage
 counts describe retained evidence. Deployment checks remain separate.
 
 The existing CloudTrail feed recognizes successful CloudWatch Logs
-`DeleteLogGroup` and `DeleteSubscriptionFilter` events as separate integrity
+`DeleteLogGroup`, `DeleteLogStream`, and `DeleteSubscriptionFilter` events
+as separate integrity
 signals. The checks preserve the triggering action and normalized event
 reference. Denials stay authorization events, and request parameters stay
 outside the retained projection. The gateway archive fixture ingests
-synthetic CloudTrail records and reopens both exact coverage matches after
+synthetic CloudTrail records and reopens all three exact coverage matches after
 restoring the case. [AWS CloudTrail source documentation](https://docs.aws.amazon.com/AmazonCloudWatch/latest/logs/logging_cw_api_calls_cwl.html).
 
 The same CloudTrail feed reports account-level S3 Block Public Access

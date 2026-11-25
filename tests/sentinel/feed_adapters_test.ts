@@ -1790,6 +1790,7 @@ Deno.test("CloudTrail separates successful CloudWatch Logs deletions from denied
     userIdentity: { principalId: "audit-operator" },
     requestParameters: {
       logGroupName: "private-log-group",
+      logStreamName: "private-log-stream",
       filterName: "private-subscription-filter",
     },
   };
@@ -1800,6 +1801,7 @@ Deno.test("CloudTrail separates successful CloudWatch Logs deletions from denied
       "account-a",
     ).map(normalizeSentinelTelemetryEvent);
   const group = { ...base, eventID: "group", eventName: "DeleteLogGroup" };
+  const stream = { ...base, eventID: "stream", eventName: "DeleteLogStream" };
   const filter = {
     ...base,
     eventID: "filter",
@@ -1809,6 +1811,8 @@ Deno.test("CloudTrail separates successful CloudWatch Logs deletions from denied
     decode([
       { ...group, readOnly: true },
       { ...filter, errorMessage: "Request failed" },
+      { ...stream, errorMessage: "Request failed" },
+      { ...stream, eventSource: "other.amazonaws.com" },
       { ...group, eventSource: "other.amazonaws.com" },
       { ...filter, eventName: "PutSubscriptionFilter" },
     ]),
@@ -1819,16 +1823,18 @@ Deno.test("CloudTrail separates successful CloudWatch Logs deletions from denied
       .map(({ kind }) => kind),
     ["authorization_denied"],
   );
-  const events = decode([group, filter]);
+  const events = decode([group, stream, filter]);
   const alerts = events.flatMap(createTelemetryDetector().ingest);
   assertEquals(alerts.map(({ triggeringAction }) => triggeringAction), [
     "logs.amazonaws.com:DeleteLogGroup",
+    "logs.amazonaws.com:DeleteLogStream",
     "logs.amazonaws.com:DeleteSubscriptionFilter",
   ]);
   const coverage = assessSentinelDefenseCoverage({ alerts });
   for (
     const [index, id] of [
       "cloudtrail_cloudwatch_log_group_deleted",
+      "cloudtrail_cloudwatch_log_stream_deleted",
       "cloudtrail_cloudwatch_subscription_filter_deleted",
     ].entries()
   ) {

@@ -3494,6 +3494,11 @@ async function verifyPlannerArchive(
       },
       {
         source: "logs.amazonaws.com",
+        action: "DeleteLogStream",
+        id: "cloudtrail_cloudwatch_log_stream_deleted",
+      },
+      {
+        source: "logs.amazonaws.com",
         action: "DeleteSubscriptionFilter",
         id: "cloudtrail_cloudwatch_subscription_filter_deleted",
       },
@@ -3518,6 +3523,7 @@ async function verifyPlannerArchive(
               ...(source === "logs.amazonaws.com"
                 ? {
                   logGroupName: "private-fixture-log-group",
+                  logStreamName: "private-fixture-log-stream",
                   filterName: "private-fixture-subscription",
                 }
                 : { accountId: "private-fixture-account" }),

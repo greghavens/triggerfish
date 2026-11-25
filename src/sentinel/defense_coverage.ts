@@ -254,6 +254,14 @@ export const sentinelUpstreamChecks = [
       "CloudTrail reports deletion of a CloudWatch Logs group. Check its former retention, delivery, and any independent copies to determine the affected evidence.",
   },
   {
+    id: "cloudtrail_cloudwatch_log_stream_deleted",
+    sigmaId: "4c0389ca-9e35-42d9-9bb4-e7ba92e33787",
+    type: "integrity_change",
+    actions: ["logs.amazonaws.com:DeleteLogStream"],
+    limitation:
+      "CloudTrail reports deletion of a CloudWatch Logs stream and its retained events. Check independent copies to determine which evidence is still available.",
+  },
+  {
     id: "cloudtrail_cloudwatch_subscription_filter_deleted",
     sigmaId: "529e550f-3ff8-4731-a20f-a4999f1be142",
     type: "integrity_change",
