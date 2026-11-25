@@ -1,3 +1,4 @@
+import { selectSentinelDelegatedObservationRead } from "../../core/config_types.ts";
 import { createWorkflowObservationVerifier } from "../scheduled_observation_tool.ts";
 import { listEffectiveModelProfiles } from "../../agent/llm.ts";
 /**
@@ -156,6 +157,19 @@ export function buildMainChatSession(
         bootstrap.baseDir,
         toolInfra.mainKeychain,
       ),
+      (source) =>
+        selectSentinelDelegatedObservationRead(
+            bootstrap.config.sentinel?.delegated_observation_reads,
+            source,
+          )
+          ? buildWorkflowRecoveryExecutor(
+            bootstrap.config,
+            bootstrap.baseDir,
+            toolInfra.mainKeychain,
+            undefined,
+            source,
+          )
+          : undefined,
     ),
     recoverAgentTurn: buildWorkflowRecoveryExecutor(
       bootstrap.config,

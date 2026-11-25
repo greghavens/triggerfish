@@ -1,5 +1,6 @@
 /** Authenticated owner command adapter for the existing subagent factory. */
 import type { ClassificationLevel } from "../../../core/types/classification.ts";
+import type { DelegatedObservationSource } from "../../../core/config_types.ts";
 import type { SessionState } from "../../../core/types/session.ts";
 import type { AgentRecoveryExecutor } from "../../../core/agent_recovery.ts";
 import type { buildSubagentFactory } from "./subagent.ts";
@@ -13,6 +14,9 @@ const commandPattern =
 export function buildOwnerSubagentRecoveryCommand(
   subagentFactory: ReturnType<typeof buildSubagentFactory>,
   run?: AgentRecoveryExecutor,
+  resolveRun?: (
+    source: DelegatedObservationSource,
+  ) => AgentRecoveryExecutor | undefined,
 ) {
   return async (
     command: string,
@@ -23,10 +27,16 @@ export function buildOwnerSubagentRecoveryCommand(
     if (!/^\/recover-subagent(?:\s|$)/.test(command)) {
       return undefined;
     }
-    if (!run) return "Durable subagent execution is unavailable.";
+    if (!run && !resolveRun) {
+      return "Durable subagent execution is unavailable.";
+    }
     const parsed = commandPattern.exec(command);
     if (!parsed) return usage;
-    const [, resumeFlag, executionId, task] = parsed;
+    const [, resumeFlag, requestedExecutionId, task] = parsed;
+    const executionId = requestedExecutionId.toLowerCase();
+    const recover = resolveRun?.({ parentSessionId: parent.id, executionId }) ??
+      run;
+    if (!recover) return "Durable subagent execution is unavailable.";
     if (!task.trim() || task.length > 8_000 || task.includes("\x00")) {
       return usage;
     }
@@ -35,12 +45,12 @@ export function buildOwnerSubagentRecoveryCommand(
       return await subagentFactory(task, undefined, {
         recovery: {
           parentSessionId: parent.id,
-          executionId: executionId.toLowerCase(),
+          executionId,
           targetClassification,
           run: resumeFlag
             ? (id, orchestrator, options) =>
-              run(id, orchestrator, options, { resumePaused: true })
-            : run,
+              recover(id, orchestrator, options, { resumePaused: true })
+            : recover,
         },
         signal,
       });

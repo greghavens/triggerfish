@@ -20,6 +20,7 @@ export type {
 } from "./config_types.ts";
 import {
   scheduledObservationGrantSource,
+  selectSentinelDelegatedObservationRead,
   selectSentinelScheduledObservationRead,
   sentinelOutputLanguages,
 } from "./config_types.ts";
@@ -139,6 +140,24 @@ export function enforceConfig(
       ok: false,
       error:
         "sentinel.scheduled_observation_reads must contain unique cron, trigger, or webhook source grants to exact saved observations",
+    };
+  }
+
+  const delegatedReads = sentinel?.delegated_observation_reads;
+  if (
+    delegatedReads !== undefined &&
+    (!Array.isArray(delegatedReads) || delegatedReads.length > 64 ||
+      !delegatedReads.every((grant) =>
+        selectSentinelDelegatedObservationRead(delegatedReads, {
+          parentSessionId: grant?.parent_session_id,
+          executionId: grant?.execution_id,
+        })
+      ))
+  ) {
+    return {
+      ok: false,
+      error:
+        "sentinel.delegated_observation_reads must contain unique parent session and execution UUID grants to exact saved observations",
     };
   }
 

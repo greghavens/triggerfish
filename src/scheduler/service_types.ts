@@ -48,6 +48,10 @@ export interface OrchestratorCreateOptions {
   readonly scheduledObservationSource?:
     import("../core/config_types.ts").ScheduledObservationSource;
 
+  /** Identity supplied by the authenticated delegated dispatch entry point. */
+  readonly delegatedObservationSource?:
+    import("../core/config_types.ts").DelegatedObservationSource;
+
   /** Trusted factory caller classification for delegated goal contracts. */
   readonly delegatedKind?:
     import("../core/delegated_goal_config.ts").DelegatedAgentKind;

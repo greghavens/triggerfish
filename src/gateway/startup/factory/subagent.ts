@@ -80,7 +80,13 @@ export function buildSubagentFactory(
         delegatedKind: "subagent",
         maxIterations,
         workspace: opts?.workspace,
-        ...(identity && { recoverySessionId: identity.sessionId }),
+        ...(identity && recovery && {
+          recoverySessionId: identity.sessionId,
+          delegatedObservationSource: {
+            parentSessionId: recovery.parentSessionId,
+            executionId: recovery.executionId,
+          },
+        }),
         ...(recovery?.targetClassification !== undefined && {
           ceiling: recovery.targetClassification,
         }),

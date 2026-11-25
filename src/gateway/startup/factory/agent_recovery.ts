@@ -11,7 +11,9 @@ import { withSentinelAssignmentRecovery } from "../../sentinel_assignment_recove
 import { isSentinelCaseId } from "../../../sentinel/cases.ts";
 import { createHash } from "node:crypto";
 import {
+  type DelegatedObservationSource,
   type ScheduledObservationSource,
+  selectSentinelDelegatedObservationRead,
   selectSentinelScheduledObservationRead,
 } from "../../../core/config_types.ts";
 import {
@@ -222,7 +224,10 @@ export function buildWorkflowRecoveryExecutor(
   baseDir: string,
   secretStore: SecretStore,
   classification?: () => ClassificationLevel,
-  observationSource?: ScheduledObservationSource | string,
+  observationSource?:
+    | ScheduledObservationSource
+    | DelegatedObservationSource
+    | string,
   ownerChat = false,
   recheckSources:
     & Omit<
@@ -273,10 +278,16 @@ export function buildWorkflowRecoveryExecutor(
     fetchGitHubMetadata,
   );
   const path = join(baseDir, "agent-recovery.db");
-  const grant = selectSentinelScheduledObservationRead(
-    config.sentinel?.scheduled_observation_reads,
-    observationSource,
-  );
+  const grant = observationSource && typeof observationSource === "object" &&
+      "parentSessionId" in observationSource
+    ? selectSentinelDelegatedObservationRead(
+      config.sentinel?.delegated_observation_reads,
+      observationSource,
+    )
+    : selectSentinelScheduledObservationRead(
+      config.sentinel?.scheduled_observation_reads,
+      observationSource,
+    );
   const authorizeObservation = grant &&
     buildExecutionTracePayloadAuthorizer(
       config,

@@ -2,6 +2,7 @@ import { assert, assertEquals } from "@std/assert";
 import { dirname, fromFileUrl, join } from "@std/path";
 import { createChatSession } from "../../src/gateway/chat.ts";
 import {
+  selectSentinelDelegatedObservationRead,
   selectSentinelScheduledObservationRead,
   type SentinelScheduledObservationRead,
 } from "../../src/core/config_types.ts";
@@ -10,6 +11,7 @@ import {
   createScheduledObservationRead,
   createWorkflowObservationVerifier,
   scheduledObservationTool,
+  selectAgentObservationRead,
 } from "../../src/gateway/scheduled_observation_tool.ts";
 import { createOrchestrator } from "../../src/agent/orchestrator/mod.ts";
 import {
@@ -17,6 +19,9 @@ import {
   schedulerExecutionIdentity,
   schedulerRecoveryState,
 } from "../../src/scheduler/service_execution.ts";
+import { buildSubagentFactory } from "../../src/gateway/startup/factory/subagent.ts";
+import { buildOwnerSubagentRecoveryCommand } from "../../src/gateway/startup/factory/owner_subagent_recovery.ts";
+import type { OrchestratorFactory } from "../../src/scheduler/service_types.ts";
 import { createGatewayServer } from "../../src/gateway/server/server.ts";
 import {
   type ChannelId,
@@ -25,10 +30,7 @@ import {
   type UserId,
 } from "../../src/core/types/session.ts";
 import { createProviderRegistry } from "../../src/agent/llm.ts";
-import {
-  canFlowTo,
-  type ClassificationLevel,
-} from "../../src/core/types/classification.ts";
+import type { ClassificationLevel } from "../../src/core/types/classification.ts";
 import { createMemorySecretStore } from "../../src/core/secrets/mod.ts";
 import {
   buildExecutionTracePayloadAuthorizer,
@@ -1030,8 +1032,36 @@ async function verifyScheduledObservationSources(
     }),
     undefined,
   );
+  const parent = createSession({
+    channelId: "owner" as ChannelId,
+    userId: "owner" as UserId,
+    bumpersEnabled: false,
+  });
+  const childId = crypto.randomUUID();
+  const delegatedGrant = {
+    ...observation,
+    parent_session_id: parent.id,
+    execution_id: childId,
+  };
+  assertEquals(
+    selectSentinelDelegatedObservationRead([delegatedGrant], {
+      parentSessionId: crypto.randomUUID(),
+      executionId: childId,
+    }),
+    undefined,
+  );
+  assertEquals(
+    selectSentinelDelegatedObservationRead(
+      [delegatedGrant, delegatedGrant],
+      { parentSessionId: parent.id, executionId: childId },
+    ),
+    undefined,
+  );
   const runtimeConfig = {
-    sentinel: { scheduled_observation_reads: grants },
+    sentinel: {
+      scheduled_observation_reads: grants,
+      delegated_observation_reads: [delegatedGrant],
+    },
     agent_recovery: { github_repositories: ["owner/pipeline"] },
   };
   const triggerMdPath = join(baseDir, "TRIGGER.md");
@@ -1061,12 +1091,116 @@ async function verifyScheduledObservationSources(
   );
   assert(authorize);
   const toolName = scheduledObservationTool.name;
-  let denyHook: "PRE_TOOL_CALL" | "POST_TOOL_RESPONSE" | undefined;
+  let denyHook:
+    | "PRE_TOOL_CALL"
+    | "POST_TOOL_RESPONSE"
+    | "PRE_OUTPUT"
+    | undefined;
   let interrupt = true;
   const actualReads = new Map<string, number>();
   const modelReads = new Map<string, number>();
   const sourceTools = new Map<string, boolean>();
   const secret = "scheduled-observation-hmac-fixture";
+  const orchestratorFactory: OrchestratorFactory = {
+    create(channelId, options) {
+      assert(options?.recoverySessionId);
+      const source = options.delegatedObservationSource
+        ? options.delegatedObservationSource.executionId
+        : options.scheduledObservationSource?.sourceId;
+      assert(source);
+      const session = restoreSession({
+        id: options.recoverySessionId,
+        userId: "scheduler-fixture" as UserId,
+        channelId: channelId as ChannelId,
+      });
+      const scoped = selectAgentObservationRead(
+        runtimeConfig.sentinel,
+        options,
+      );
+      const read = scoped &&
+        createScheduledObservationRead(baseDir, scoped, authorize);
+      sourceTools.set(source, !!read);
+      const registry = createProviderRegistry();
+      registry.register({
+        name: "scheduled-commit-fixture",
+        supportsStreaming: false,
+        complete(messages, tools) {
+          assertEquals(
+            tools?.some((tool) =>
+              (tool as { function?: { name: string } }).function?.name ===
+                toolName
+            ) ?? false,
+            !!read,
+          );
+          const last = messages.findLast(({ role }) => role === "tool");
+          const text = String(last?.content ?? "");
+          if (text.startsWith("{")) {
+            const receipt = JSON.parse(text);
+            assertEquals(receipt.caseId, observation.case);
+            assertEquals(receipt.runId, observation.run_id);
+            assertEquals(receipt.observation, expectedObservation);
+            modelReads.set(
+              source,
+              (modelReads.get(source) ?? 0) + 1,
+            );
+            if ((source === "granted" || source === childId) && interrupt) {
+              throw new Error(
+                "Interrupted after committing the approved receipt",
+              );
+            }
+          }
+          const complete = !!last || !read;
+          return Promise.resolve({
+            content: complete ? "Scheduled observation turn complete." : "",
+            usage: { inputTokens: 1, outputTokens: 1 },
+            toolCalls: complete ? [] : [{
+              type: "function",
+              id: toolName,
+              function: { name: toolName, arguments: "{}" },
+            }],
+          });
+        },
+      });
+      registry.setDefault("scheduled-commit-fixture");
+      const toolExecutor = (name: string, args: Record<string, unknown>) => {
+        if (name === "memory_get") return Promise.resolve('{"found":false}');
+        if (name === "memory_save") return Promise.resolve("Saved.");
+        assertEquals(name, toolName);
+        assert(read);
+        actualReads.set(
+          source,
+          (actualReads.get(source) ?? 0) + 1,
+        );
+        return read(args);
+      };
+      return Promise.resolve({
+        session,
+        toolExecutor,
+        getSessionTaint: () => options.ceiling ?? "PUBLIC",
+        orchestrator: createOrchestrator({
+          providerRegistry: registry,
+          enableStreaming: false,
+          getSessionTaint: () => options.ceiling ?? "PUBLIC",
+          tools: read ? [scheduledObservationTool] : [],
+          toolExecutor,
+          hookRunner: {
+            evaluateHook(hook, context) {
+              const blocked = hook === denyHook &&
+                (hook === "PRE_OUTPUT"
+                  ? source === childId
+                  : context.input.tool_name === toolName);
+              return Promise.resolve({
+                allowed: !blocked,
+                action: blocked ? "BLOCK" : "ALLOW",
+                ruleId: null,
+                duration: 0,
+              });
+            },
+          },
+        }),
+      });
+    },
+  };
   const scheduler = createSchedulerService({
     triggerMdPath,
     trigger: {
@@ -1106,108 +1240,47 @@ async function verifyScheduledObservationSources(
         resumePaused: execution.resumePaused,
       });
     },
-    orchestratorFactory: {
-      create(channelId, options) {
-        assert(
-          options?.recoverySessionId && options.scheduledObservationSource,
-        );
-        const source = options.scheduledObservationSource;
-        const session = restoreSession({
-          id: options.recoverySessionId,
-          userId: "scheduler-fixture" as UserId,
-          channelId: channelId as ChannelId,
-        });
-        const scoped = options.ceiling && canFlowTo("INTERNAL", options.ceiling)
-          ? selectSentinelScheduledObservationRead(grants, source)
-          : undefined;
-        const read = scoped &&
-          createScheduledObservationRead(baseDir, scoped, authorize);
-        sourceTools.set(source.sourceId, !!read);
-        const registry = createProviderRegistry();
-        registry.register({
-          name: "scheduled-commit-fixture",
-          supportsStreaming: false,
-          complete(messages, tools) {
-            assertEquals(
-              tools?.some((tool) =>
-                (tool as { function?: { name: string } }).function?.name ===
-                  toolName
-              ) ?? false,
-              !!read,
-            );
-            const last = messages.findLast(({ role }) => role === "tool");
-            const text = String(last?.content ?? "");
-            if (text.startsWith("{")) {
-              const receipt = JSON.parse(text);
-              assertEquals(receipt.caseId, observation.case);
-              assertEquals(receipt.runId, observation.run_id);
-              assertEquals(receipt.observation, expectedObservation);
-              modelReads.set(
-                source.sourceId,
-                (modelReads.get(source.sourceId) ?? 0) + 1,
-              );
-              if (source.sourceId === "granted" && interrupt) {
-                throw new Error(
-                  "Interrupted after committing the approved receipt",
-                );
-              }
-            }
-            const complete = !!last || !read;
-            return Promise.resolve({
-              content: complete ? "Scheduled observation turn complete." : "",
-              usage: { inputTokens: 1, outputTokens: 1 },
-              toolCalls: complete ? [] : [{
-                type: "function",
-                id: toolName,
-                function: { name: toolName, arguments: "{}" },
-              }],
-            });
-          },
-        });
-        registry.setDefault("scheduled-commit-fixture");
-        const toolExecutor = (name: string, args: Record<string, unknown>) => {
-          if (name === "memory_get") return Promise.resolve('{"found":false}');
-          if (name === "memory_save") return Promise.resolve("Saved.");
-          assertEquals(name, toolName);
-          assert(read);
-          actualReads.set(
-            source.sourceId,
-            (actualReads.get(source.sourceId) ?? 0) + 1,
-          );
-          return read(args);
-        };
-        return Promise.resolve({
-          session,
-          toolExecutor,
-          getSessionTaint: () => options.ceiling ?? "PUBLIC",
-          orchestrator: createOrchestrator({
-            providerRegistry: registry,
-            enableStreaming: false,
-            getSessionTaint: () => options.ceiling ?? "PUBLIC",
-            tools: read ? [scheduledObservationTool] : [],
-            toolExecutor,
-            hookRunner: {
-              evaluateHook(hook, context) {
-                const blocked = hook === denyHook &&
-                  context.input.tool_name === toolName;
-                return Promise.resolve({
-                  allowed: !blocked,
-                  action: blocked ? "BLOCK" : "ALLOW",
-                  ruleId: null,
-                  duration: 0,
-                });
-              },
-            },
-          }),
-        });
-      },
-    },
+    orchestratorFactory,
   });
   const token = crypto.randomUUID();
-  const gateway = createGatewayServer({
+  const createOwnerChat = (session = parent) =>
+    createChatSession({
+      session,
+      targetClassification: "INTERNAL",
+      providerRegistry: createProviderRegistry(),
+      hookRunner: {
+        evaluateHook: () =>
+          Promise.resolve({
+            allowed: true,
+            action: "ALLOW",
+            ruleId: null,
+            duration: 0,
+          }),
+      },
+      runSubagentRecoveryCommand: buildOwnerSubagentRecoveryCommand(
+        buildSubagentFactory(orchestratorFactory, {
+          executionTracePath: join(baseDir, "execution-traces.db"),
+        }),
+        buildWorkflowRecoveryExecutor(runtimeConfig, baseDir, keychain),
+        (source) =>
+          selectSentinelDelegatedObservationRead([delegatedGrant], source)
+            ? buildWorkflowRecoveryExecutor(
+              runtimeConfig,
+              baseDir,
+              keychain,
+              undefined,
+              source,
+              false,
+              { githubFetch: fetchMetadata },
+            )
+            : undefined,
+      ),
+    });
+  let gateway = createGatewayServer({
     port: 0,
     token,
     schedulerService: scheduler,
+    chatSession: createOwnerChat(),
   });
   try {
     await Deno.writeTextFile(
@@ -1275,6 +1348,96 @@ async function verifyScheduledObservationSources(
     await resumed.body?.cancel();
     assertEquals(actualReads.get("granted"), 1);
     assertEquals(modelReads.get("granted"), 2);
+
+    const connect = async (port: number) => {
+      const socket = new WebSocket(
+        `ws://127.0.0.1:${port}/chat?token=${token}`,
+      );
+      await new Promise<void>((resolve, reject) => {
+        socket.addEventListener("open", () => resolve(), { once: true });
+        socket.addEventListener("error", reject, { once: true });
+      });
+      return socket;
+    };
+    let socket = await connect(port);
+    try {
+      const child = async (id: string) => {
+        const done = Promise.withResolvers<string>();
+        const timer = setTimeout(
+          () => done.reject(new Error("Delegated observation turn timed out")),
+          3000,
+        );
+        const receive = ({ data }: MessageEvent) => {
+          const frame = JSON.parse(data);
+          if (frame.type === "response") done.resolve(frame.text);
+          if (frame.type === "error") done.reject(new Error(frame.message));
+        };
+        socket.addEventListener("message", receive);
+        socket.send(JSON.stringify({
+          type: "message",
+          content:
+            `/recover-subagent ${id} Read the assigned case observation.`,
+        }));
+        try {
+          return await done.promise;
+        } finally {
+          clearTimeout(timer);
+          socket.removeEventListener("message", receive);
+        }
+      };
+      const unrelated = crypto.randomUUID();
+      assertEquals(
+        await child(unrelated),
+        "Scheduled observation turn complete.",
+      );
+      assertEquals(sourceTools.get(unrelated), false);
+      assert(!actualReads.has(unrelated));
+      interrupt = true;
+      assertEquals(await child(childId), "Durable subagent execution failed.");
+      assertEquals(actualReads.get(childId), 1);
+      assertEquals(modelReads.get(childId), 1);
+      interrupt = false;
+      socket.close();
+      await gateway.stop();
+      gateway = createGatewayServer({
+        port: 0,
+        token,
+        chatSession: createOwnerChat(restoreSession({
+          id: parent.id,
+          channelId: parent.channelId,
+          userId: parent.userId,
+          bumpersEnabled: false,
+        })),
+      });
+      socket = await connect((await gateway.start()).port);
+
+      allowed = false;
+      assert((await child(childId)).startsWith("Sub-agent error:"));
+      assertEquals(actualReads.get(childId), 1);
+      assertEquals(modelReads.get(childId), 1);
+      allowed = true;
+      denyHook = "PRE_TOOL_CALL";
+      assert((await child(childId)).startsWith("Sub-agent error:"));
+      assertEquals(actualReads.get(childId), 1);
+      assertEquals(modelReads.get(childId), 1);
+      denyHook = "POST_TOOL_RESPONSE";
+      assert((await child(childId)).startsWith("Sub-agent error:"));
+      assertEquals(actualReads.get(childId), 1);
+      assertEquals(modelReads.get(childId), 1);
+      denyHook = "PRE_OUTPUT";
+      assert((await child(childId)).startsWith("Sub-agent error:"));
+      assertEquals(actualReads.get(childId), 1);
+      assertEquals(modelReads.get(childId), 2);
+      denyHook = undefined;
+      assertEquals(
+        await child(childId),
+        "Scheduled observation turn complete.",
+      );
+      assertEquals(actualReads.get(childId), 1);
+      assertEquals(modelReads.get(childId), 3);
+    } finally {
+      socket.close();
+    }
   } finally {
     scheduler.stop();
     await gateway.stop();

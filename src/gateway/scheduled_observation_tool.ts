@@ -4,7 +4,7 @@ import {
   readSentinelCaseFindingReceipts,
   readSentinelWorkerFindingHistory,
 } from "../sentinel/worker_finding_store.ts";
-/** A scheduled occurrence can reopen one explicitly granted observation. */
+/** Reopen one observation explicitly granted to a trusted execution. */
 import {
   readSentinelAssessment,
   readSentinelOperatingConstraints,
@@ -17,7 +17,14 @@ import {
 } from "../sentinel/worker_graph_facts.ts";
 import { latestAssignedControlCheck } from "../sentinel/assigned_relationship_facts.ts";
 import { readSentinelPlannerGraphFacts } from "./sentinel_graph_fact_tool.ts";
+import {
+  selectSentinelDelegatedObservationRead,
+  selectSentinelScheduledObservationRead,
+} from "../core/config_types.ts";
+import { canFlowTo } from "../core/types/classification.ts";
+import type { OrchestratorCreateOptions } from "../scheduler/service_types.ts";
 import type {
+  SentinelObservationReference,
   TriggerFishConfig,
   WorkflowEvidenceRequirement,
 } from "../core/config_types.ts";
@@ -27,22 +34,43 @@ import type { ToolDefinition } from "../core/types/tool.ts";
 import { resolveSentinelCasePath } from "../sentinel/cases.ts";
 import { readSentinelIntermediateWorkflowObservations } from "./sentinel_adaptive_runtime.ts";
 
-type Grant = NonNullable<
-  NonNullable<TriggerFishConfig["sentinel"]>["scheduled_observation_reads"]
->[number];
 type Authorize = (
   payload: ExecutionTraceApprovedPayload,
   prior: ClassificationLevel,
 ) => Promise<boolean>;
 
+/** Bind the exact grant only to a trusted execution and sufficient ceiling. */
+export function selectAgentObservationRead(
+  sentinel: TriggerFishConfig["sentinel"],
+  options: OrchestratorCreateOptions | undefined,
+): SentinelObservationReference | undefined {
+  if (!options?.ceiling || !canFlowTo("INTERNAL", options.ceiling)) return;
+  if (options.delegatedKind) {
+    if (options.delegatedKind !== "subagent" || !options.recoverySessionId) {
+      return;
+    }
+    return selectSentinelDelegatedObservationRead(
+      sentinel?.delegated_observation_reads,
+      options.delegatedObservationSource,
+    );
+  }
+  return selectSentinelScheduledObservationRead(
+    sentinel?.scheduled_observation_reads,
+    options.scheduledObservationSource ?? options.cronJobId,
+  );
+}
+
 export const scheduledObservationTool: ToolDefinition = {
   name: "read_committed_observation",
   description:
-    "Open the exact committed observation granted to this scheduled source, with its source assignment and step.",
+    "Open the exact committed observation granted to this scheduled or delegated source, with its source assignment and step.",
   parameters: {},
 };
 
-function exactObservation(baseDir: string, grant: Omit<Grant, "cron_job_id">) {
+function exactObservation(
+  baseDir: string,
+  grant: SentinelObservationReference,
+) {
   const result = readSentinelIntermediateWorkflowObservations(
     resolveSentinelCasePath(baseDir, grant.case),
     grant.revision,
@@ -53,7 +81,7 @@ function exactObservation(baseDir: string, grant: Omit<Grant, "cron_job_id">) {
 }
 
 function project(
-  grant: Omit<Grant, "cron_job_id">,
+  grant: SentinelObservationReference,
   observation: NonNullable<ReturnType<typeof exactObservation>>,
 ) {
   return JSON.stringify({
@@ -66,7 +94,7 @@ function project(
 
 export function matchesScheduledObservationProjection(
   baseDir: string,
-  grant: Omit<Grant, "cron_job_id">,
+  grant: SentinelObservationReference,
   text: string,
 ) {
   try {
@@ -80,7 +108,7 @@ export function matchesScheduledObservationProjection(
 
 export function createScheduledObservationRead(
   baseDir: string,
-  grant: Omit<Grant, "cron_job_id">,
+  grant: SentinelObservationReference,
   authorize: Authorize,
 ) {
   const unavailable =

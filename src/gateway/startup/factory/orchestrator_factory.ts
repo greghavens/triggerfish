@@ -1,7 +1,7 @@
-import { selectSentinelScheduledObservationRead } from "../../../core/config_types.ts";
 import {
   createScheduledObservationRead,
   scheduledObservationTool,
+  selectAgentObservationRead,
 } from "../../scheduled_observation_tool.ts";
 import { buildExecutionTracePayloadAuthorizer } from "./agent_recovery.ts";
 /**
@@ -187,12 +187,10 @@ export function createOrchestratorFactory(
         ? createLineageStore(storage)
         : undefined;
 
-      const observationGrant = ceiling && canFlowTo("INTERNAL", ceiling)
-        ? selectSentinelScheduledObservationRead(
-          config.sentinel?.scheduled_observation_reads,
-          options?.scheduledObservationSource ?? options?.cronJobId,
-        )
-        : undefined;
+      const observationGrant = selectAgentObservationRead(
+        config.sentinel,
+        options,
+      );
       const authorizeObservation = observationGrant &&
         buildExecutionTracePayloadAuthorizer(config, infra.keychain);
       const readObservation = observationGrant && authorizeObservation

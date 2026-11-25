@@ -18,14 +18,28 @@ export interface ScheduledObservationSource {
   readonly sourceId: string;
 }
 
+/** Exact coordinates of a committed Sentinel observation. */
+export interface SentinelObservationReference {
+  readonly case: string;
+  readonly run_id: string;
+  readonly revision: number;
+  readonly observation_id: string;
+}
+
+export interface SentinelDelegatedObservationRead
+  extends SentinelObservationReference {
+  readonly parent_session_id: string;
+  readonly execution_id: string;
+}
+
+export interface DelegatedObservationSource {
+  readonly parentSessionId: string;
+  readonly executionId: string;
+}
+
 /** Exact committed Sentinel observation an explicitly granted source may read. */
 export type SentinelScheduledObservationRead =
-  & {
-    readonly case: string;
-    readonly run_id: string;
-    readonly revision: number;
-    readonly observation_id: string;
-  }
+  & SentinelObservationReference
   & (
     | {
       readonly cron_job_id: string;
@@ -85,7 +99,32 @@ export function selectSentinelScheduledObservationRead(
   });
   if (matching.length !== 1) return;
   const [grant] = matching;
+  return validSentinelObservationReference(grant) ? grant : undefined;
+}
+
+/** Bind one exact grant to the authenticated parent and admitted execution. */
+export function selectSentinelDelegatedObservationRead(
+  grants: readonly SentinelDelegatedObservationRead[] | undefined,
+  source: DelegatedObservationSource | undefined,
+): SentinelDelegatedObservationRead | undefined {
   if (
+    !source || !Array.isArray(grants) ||
+    !observationUuid.test(source.parentSessionId) ||
+    !observationUuid.test(source.executionId)
+  ) return;
+  const matching = grants.filter((grant) =>
+    grant?.parent_session_id === source.parentSessionId &&
+    grant?.execution_id === source.executionId
+  );
+  return matching.length === 1 && validSentinelObservationReference(matching[0])
+    ? matching[0]
+    : undefined;
+}
+
+function validSentinelObservationReference(
+  grant: SentinelObservationReference,
+): boolean {
+  return !(
     typeof grant.case !== "string" ||
     !/^[a-z0-9](?:[a-z0-9-]{0,46}[a-z0-9])?$/.test(grant.case) ||
     /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])$/.test(grant.case) ||
@@ -93,8 +132,7 @@ export function selectSentinelScheduledObservationRead(
     !Number.isSafeInteger(grant.revision) || grant.revision < 1 ||
     typeof grant.observation_id !== "string" ||
     !/^workflow-observation:[a-f0-9]{64}$/.test(grant.observation_id)
-  ) return;
-  return grant;
+  );
 }
 
 /** Generic plugin configuration entry for dynamically loaded plugins. */
@@ -204,6 +242,8 @@ export interface TriggerFishConfig {
     readonly capture_origins?: readonly string[];
     readonly scheduled_observation_reads?:
       readonly SentinelScheduledObservationRead[];
+    readonly delegated_observation_reads?:
+      readonly SentinelDelegatedObservationRead[];
     readonly github_workflow_reads?: readonly {
       readonly case: string;
       readonly asset: string;
