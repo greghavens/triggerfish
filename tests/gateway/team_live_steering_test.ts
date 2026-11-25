@@ -3,6 +3,7 @@ import { join } from "@std/path";
 import { createProviderRegistry } from "../../src/agent/llm.ts";
 import { createOrchestrator } from "../../src/agent/orchestrator/orchestrator.ts";
 import { createMemorySecretStore } from "../../src/core/secrets/mod.ts";
+import { createMessageStore } from "../../src/core/conversation/mod.ts";
 import { createMemoryStorage } from "../../src/core/storage/memory.ts";
 import {
   type ChannelId,
@@ -40,6 +41,7 @@ Deno.test("Owner gateway steers and stops exact admitted team deliveries", async
   const userId = "owner" as UserId;
   const owner = createSession({ userId, channelId: "owner" as ChannelId });
   const entered = Promise.withResolvers<void>();
+  const sideStarted = Promise.withResolvers<AbortSignal>();
   const release = Promise.withResolvers<void>();
   const enteredCancellation = Promise.withResolvers<void>();
   const releaseCancellation = Promise.withResolvers<void>();
@@ -162,6 +164,10 @@ Deno.test("Owner gateway steers and stops exact admitted team deliveries", async
     });
   let manager = makeManager();
   let approvals = 0;
+  let teamMember: string;
+  let sideDelivery: string;
+  const commandText = "Review the local fixture again.";
+  const messages = createMessageStore(storage);
   let rejectControl = false;
   const start = async (session: typeof owner, team = false) => {
     const token = crypto.randomUUID();
@@ -169,7 +175,36 @@ Deno.test("Owner gateway steers and stops exact admitted team deliveries", async
     providers.register({
       name: "team-control-owner",
       supportsStreaming: false,
-      complete(messages) {
+      async complete(messages, tools, options) {
+        if (
+          String(messages[0]?.content).startsWith(
+            "Answer the owner's independent",
+          )
+        ) {
+          assertEquals(tools, []);
+          const prompt = JSON.parse(String(messages.at(-1)?.content));
+          assertEquals(prompt.committedContext.run.scope.sessionId, teamMember);
+          assertEquals(prompt.committedContext.run.scope.runId, sideDelivery);
+          assertEquals(
+            prompt.committedContext.steps.map(({ tool }: { tool: string }) =>
+              tool
+            ),
+            ["todo_read"],
+          );
+          assert(!JSON.stringify(prompt).includes(commandText));
+          if (prompt.question === "hold side") {
+            const signal = options.signal as AbortSignal;
+            sideStarted.resolve(signal);
+            await new Promise<void>((resolve) =>
+              signal.addEventListener("abort", () => resolve(), { once: true })
+            );
+          }
+          return {
+            content: "Reviewed the committed team step.",
+            usage,
+            toolCalls: [],
+          };
+        }
         const last = messages.at(-1);
         return Promise.resolve({
           content: last?.role === "tool" ? String(last.content) : "",
@@ -192,6 +227,8 @@ Deno.test("Owner gateway steers and stops exact admitted team deliveries", async
       chatSession: createChatSession({
         session,
         providerRegistry: providers,
+        messageStore: messages,
+        sideQuestionTracePath: join(baseDir, "execution-traces.db"),
         ...(team && { runTeamRecoveryCommand: manager.runRecoveryCommand }),
         hookRunner: {
           evaluateHook(hook, context) {
@@ -243,6 +280,25 @@ Deno.test("Owner gateway steers and stops exact admitted team deliveries", async
           clearTimeout(timer);
         }
       },
+      async side(content: string, type: string) {
+        const complete = Promise.withResolvers<Record<string, unknown>>();
+        const timer = setTimeout(
+          () => complete.reject(new Error("No " + type)),
+          4_000,
+        );
+        const receive = ({ data }: MessageEvent) => {
+          const frame = JSON.parse(data);
+          if (frame.type === type) complete.resolve(frame);
+        };
+        socket.addEventListener("message", receive);
+        try {
+          socket.send(JSON.stringify({ type: "message", content }));
+          return await complete.promise;
+        } finally {
+          socket.removeEventListener("message", receive);
+          clearTimeout(timer);
+        }
+      },
       async stop() {
         socket.close();
         await server.stop();
@@ -265,6 +321,7 @@ Deno.test("Owner gateway steers and stops exact admitted team deliveries", async
     assert(team.ok);
     manager.stopLifecycleMonitor(team.value.id);
     const member = team.value.members[0].sessionId;
+    teamMember = member;
     const deliveryId = crypto.randomUUID();
     const id = await teamDeliveryExecutionId(owner.id, member, deliveryId);
     const deliveryGateway = await start(owner, true);
@@ -323,13 +380,14 @@ Deno.test("Owner gateway steers and stops exact admitted team deliveries", async
     assert(trace.controls.steering[0].appliedAt);
 
     const stoppedDelivery = crypto.randomUUID();
+    sideDelivery = `${team.value.id}:${member}:${stoppedDelivery}`;
     cancelledDeliveryRunId = await teamDeliveryExecutionId(
       owner.id,
       member,
       stoppedDelivery,
     );
     const command =
-      `/recover-team ${stoppedDelivery} ${team.value.id} ${member} Review the local fixture again.`;
+      `/recover-team ${stoppedDelivery} ${team.value.id} ${member} ${commandText}`;
     const cancel = {
       action: "cancel",
       kind: "delegated",
@@ -343,6 +401,25 @@ Deno.test("Owner gateway steers and stops exact admitted team deliveries", async
       }),
     ]);
     assertEquals(touched, ["todo_read", "todo_read"]);
+    const side = `/btw --run team_delivery ${sideDelivery}`;
+    const answered = await control.side(
+      `${side} inspect committed work`,
+      "side_answer",
+    );
+    await other.side(`${side} inspect committed work`, "side_error");
+    await control.side(
+      `/btw --run team_delivery ${crypto.randomUUID()}:${member}:${stoppedDelivery} inspect`,
+      "side_error",
+    );
+    const pendingSide = control.side(`${side} hold side`, "side_cancelled");
+    const sideSignal = await sideStarted.promise;
+    await control.side("/btw cancel", "side_cancelled");
+    await pendingSide;
+    assert(sideSignal.aborted);
+    assertEquals(cancellationTurns, 2);
+    const sideHistory = await control.side(side, "side_history");
+    assertEquals(sideHistory.entries, [answered.entry]);
+
     assertStringIncludes(
       await other.turn(JSON.stringify(cancel)),
       "unavailable",

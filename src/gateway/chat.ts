@@ -824,12 +824,12 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
             owner,
             ownerTargetClassification,
             ownerTaint,
-            reopen && (async (ordinal) => {
+            reopen && (async (ordinal, role, id) => {
               const result = await reopen(
                 {
                   action: "execution_trace_payload",
-                  traceRole: selection.role,
-                  id: selection.id,
+                  traceRole: role,
+                  id,
                   ordinal,
                 },
                 savedToolAuthorization(

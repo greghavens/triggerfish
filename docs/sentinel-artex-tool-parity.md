@@ -633,6 +633,14 @@ sources, rejects revoked access, and verifies no repeat connector call.
 For a recoverable owner turn, `/btw --run owner_chat <request UUID>`
 uses the active owner's exact session. The fixture verifies exact receipt
 selection, policy revocation, and isolation from a second owner session.
+For a team delivery, use `/btw --run team_delivery <team:member:delivery>`
+with an optional question or receipt selector. Retained trace metadata is
+bound to the originating owner and exact delivery tuple. Approved results
+also require current original-tool and connector authorization. A live
+gateway fixture verifies the committed team context, separate history,
+rejection of a wrong owner or team, and independent cancellation while the
+delivery remains active.
+
 
 
 The owner can search committed execution metadata with

@@ -1,6 +1,9 @@
 import { createOperatorRunToolExecutor } from "../../src/gateway/operator_run_tool.ts";
 import { assignmentRecoveryKey } from "../../src/core/durable_assignment.ts";
-import { teamDeliveryTraceSource } from "../../src/gateway/startup/factory/delegated_agent_recovery.ts";
+import {
+  teamDeliveryExecutionId,
+  teamDeliveryTraceSource,
+} from "../../src/gateway/startup/factory/delegated_agent_recovery.ts";
 import {
   type ExecutionTraceApprovedPayload,
   executionTracePayloadCall,
@@ -25,6 +28,7 @@ import {
   type ChannelId,
   createSession,
   restoreSession,
+  type SessionId,
   type UserId,
 } from "../../src/core/types/session.ts";
 import { createChatSession } from "../../src/gateway/chat.ts";
@@ -691,7 +695,14 @@ for (const origin of ["team", "recoverable delegated"] as const) {
     }
   });
 }
-for (const role of ["delegated", "scheduled", "owner_chat"] as const) {
+for (
+  const role of [
+    "delegated",
+    "scheduled",
+    "owner_chat",
+    "team_delivery",
+  ] as const
+) {
   Deno.test(`Side questions reopen the exact ${role} Actions run and attempt without dispatch`, () =>
     checkApprovedReceipt(role, {
       kind: "github_actions_run_status",
@@ -705,14 +716,23 @@ for (const role of ["delegated", "scheduled", "owner_chat"] as const) {
 }
 
 async function checkApprovedReceipt(
-  role: ExecutionTraceRole,
+  selector: ExecutionTraceRole | "team_delivery",
   payload: ExecutionTraceApprovedPayload,
 ) {
   const base = await Deno.makeTempDir();
   const path = join(base, "execution-traces.db");
   const journal = openExecutionTraces(path);
-  const ownerRun = role === "owner_chat";
-  const publicRunId = ownerRun ? crypto.randomUUID() : "approved-evidence";
+  const ownerRun = selector === "owner_chat";
+  const team = selector === "team_delivery";
+  const role = selector === "team_delivery" ? "delegated" : selector;
+  const teamId = crypto.randomUUID();
+  const member = crypto.randomUUID();
+  const delivery = crypto.randomUUID();
+  const publicRunId = team
+    ? `${teamId}:${member}:${delivery}`
+    : ownerRun
+    ? crypto.randomUUID()
+    : "approved-evidence";
   const originalHooks: string[] = [];
   let allowed = true;
   let deniedHook: string | undefined;
@@ -781,9 +801,13 @@ async function checkApprovedReceipt(
     role,
     runId: ownerRun
       ? assignmentRecoveryKey(owner.id, publicRunId)
+      : team
+      ? await teamDeliveryExecutionId(owner.id, member as SessionId, delivery)
       : publicRunId,
-    sessionId: ownerRun ? owner.id : crypto.randomUUID(),
+    sessionId: ownerRun ? owner.id : team ? member : crypto.randomUUID(),
     ...(ownerRun && { sourceId: publicRunId }),
+    ...(team &&
+      { sourceId: teamDeliveryTraceSource(owner.id, teamId, delivery) }),
   };
   const ws = await connect(chatSession);
   try {
@@ -794,7 +818,7 @@ async function checkApprovedReceipt(
       outcome: "returned",
     }, payload);
     assert(step);
-    const runCommand = `/btw --run ${role} ${publicRunId}`;
+    const runCommand = `/btw --run ${selector} ${publicRunId}`;
     const command = `${runCommand} --receipt 1`;
     for (const hook of ["PRE_TOOL_CALL", "POST_TOOL_RESPONSE"]) {
       deniedHook = hook;
@@ -825,7 +849,7 @@ async function checkApprovedReceipt(
     assertEquals((await ws.send(command, "side_history")).entries, [
       answer.entry,
     ]);
-    if (ownerRun) {
+    if (ownerRun || team) {
       const foreign = await connect(
         fixture(
           () => Promise.reject(new Error("Foreign context reached a model")),

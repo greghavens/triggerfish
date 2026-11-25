@@ -4,6 +4,7 @@ import { assignmentRecoveryKey } from "../core/durable_assignment.ts";
 import {
   executionTraceSourceVisible,
   isOwnerBoundExecutionTraceSource,
+  parseTeamDeliveryTraceSource,
 } from "../core/team_delivery_trace_source.ts";
 import {
   type ExecutionTraceRole,
@@ -17,6 +18,8 @@ import {
   maxClassification,
 } from "../core/types/classification.ts";
 import type { LlmProviderRegistry } from "../core/types/llm.ts";
+import type { SessionId } from "../core/types/session.ts";
+import { teamDeliveryExecutionId } from "./startup/factory/delegated_agent_recovery.ts";
 import type { MessageContent } from "../core/image/content.ts";
 
 export type SideQuestionWorker = {
@@ -36,7 +39,7 @@ export type SideQuestionSelection =
 
 type SideQuestionRun = {
   readonly kind: "run";
-  readonly role: ExecutionTraceRole;
+  readonly role: ExecutionTraceRole | "team_delivery";
   readonly id: string;
   readonly ordinal?: number;
   readonly latestReceipt?: true;
@@ -117,22 +120,38 @@ export async function loadCommittedSideRunContext(
   ownerTaint: ClassificationLevel,
   reopen?: (
     ordinal: number,
+    role: ExecutionTraceRole,
+    id: string,
   ) => Promise<{ id: string; payload: unknown } | undefined>,
 ): Promise<SideQuestionContext | undefined> {
   const ownerRun = selection.role === "owner_chat";
-  const requestedId = ownerRun ? selection.id.toLowerCase() : selection.id;
+  const teamRun = selection.role === "team_delivery";
+  const requestedId = ownerRun || teamRun
+    ? selection.id.toLowerCase()
+    : selection.id;
+  const parts = teamRun ? requestedId.split(":") : [requestedId];
+  const uuid = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/;
   if (
-    ownerRun &&
-    !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(requestedId)
-  ) {
-    return;
-  }
+    (ownerRun || teamRun) &&
+    (parts.length !== (teamRun ? 3 : 1) ||
+      !parts.every((part) => uuid.test(part)))
+  ) return;
+  const [teamId, memberId, deliveryId] = parts;
+  const role = selection.role === "team_delivery"
+    ? "delegated"
+    : selection.role;
   const runKey = ownerRun
     ? assignmentRecoveryKey(owner, requestedId)
+    : teamRun
+    ? await teamDeliveryExecutionId(
+      owner as SessionId,
+      memberId as SessionId,
+      deliveryId,
+    )
     : requestedId;
   const journal = openExecutionTraces(path);
   try {
-    const selected = journal.recent(selection.role, runKey, ceiling);
+    const selected = journal.recent(role, runKey, ceiling);
     if (!selected) return;
     const { run, steps } = selected;
     if (
@@ -148,7 +167,15 @@ export async function loadCommittedSideRunContext(
       ownerRun &&
       (run.scope.sessionId !== owner || run.scope.sourceId !== requestedId)
     ) return;
-    const visibleScope = ownerRun
+    if (teamRun) {
+      const source = parseTeamDeliveryTraceSource(run.scope.sourceId);
+      if (
+        !source || source.sender !== owner || source.teamId !== teamId ||
+        source.delivery !== deliveryId || run.scope.sessionId !== memberId ||
+        !canFlowTo("INTERNAL", ceiling)
+      ) return;
+    }
+    const visibleScope = ownerRun || teamRun
       ? { ...run.scope, runId: requestedId }
       : run.scope;
     let evidence;
@@ -157,8 +184,12 @@ export async function loadCommittedSideRunContext(
         ? journal.inspect(run.scope, selection.ordinal, ceiling)
         : journal.latestApprovedStep(run.scope, ceiling);
       if (!step || !reopen) return;
-      const approved = await reopen(step.ordinal);
-      const current = journal.readRun(selection.role, runKey, ceiling);
+      const approved = await reopen(
+        step.ordinal,
+        role,
+        ownerRun ? requestedId : runKey,
+      );
+      const current = journal.readRun(role, runKey, ceiling);
       if (
         !approved || approved.id !== step.id || !current ||
         current.scope.sessionId !== run.scope.sessionId ||
@@ -448,7 +479,7 @@ export function createSideQuestionSocket(
       return true;
     }
     const run =
-      /^--run\s+(delegated|scheduled|owner_chat)\s+([A-Za-z0-9][A-Za-z0-9._:@/-]{0,255})(?:\s+([\s\S]*))?$/
+      /^--run\s+(delegated|scheduled|owner_chat|team_delivery)\s+([A-Za-z0-9][A-Za-z0-9._:@/-]{0,255})(?:\s+([\s\S]*))?$/
         .exec(question ?? "");
     if (run) {
       question = run[3]?.trim();
@@ -470,7 +501,7 @@ export function createSideQuestionSocket(
       }
       selectedRun = {
         kind: "run",
-        role: run[1] as ExecutionTraceRole,
+        role: run[1] as SideQuestionRun["role"],
         id: run[2],
         ...(receipt?.[1] && { ordinal: Number(receipt[1]) }),
         ...(receipt?.[2] && { latestReceipt: true }),
@@ -481,7 +512,7 @@ export function createSideQuestionSocket(
       send({
         type: "side_error",
         message:
-          "Enter /btw --run <delegated, scheduled, or owner_chat> <run ID> [question].",
+          "Enter /btw --run <delegated, scheduled, owner_chat, or team_delivery> <run ID> [question]. Team deliveries use team:member:delivery IDs.",
       });
       return true;
     }
