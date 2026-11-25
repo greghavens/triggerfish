@@ -14,6 +14,7 @@ import { isDeepStrictEqual } from "node:util";
 import { computeContentHash } from "../../core/session/lineage_serde.ts";
 import { canFlowTo } from "../../core/types/classification.ts";
 import type { SessionState } from "../../core/types/session.ts";
+import { executeSleep, sleepTool } from "./sleep_tool.ts";
 import type { ToolExecutionContext } from "../../core/types/tool.ts";
 import type {
   HistoryEntry,
@@ -263,7 +264,24 @@ export async function dispatchApprovedToolCall(
     canFlowTo(taint, "INTERNAL") &&
     (secCtx.resourceClassification === null ||
       canFlowTo(secCtx.resourceClassification, "INTERNAL"));
+  const sleeping = call.name === sleepTool.name;
+  if (
+    sleeping &&
+    ((config.isOwnerSession && !secCtx.isOwner && !secCtx.isTrigger) ||
+      !config.tools?.some(({ name }) => name === sleepTool.name))
+  ) {
+    return {
+      resultText: "Error: Sleep is unavailable in this role.",
+      blocked: true,
+    };
+  }
   if (beforeAuthorizedDispatch) await beforeAuthorizedDispatch();
+  if (sleeping) {
+    return {
+      resultText: await executeSleep(call.args, signal),
+      blocked: false,
+    };
+  }
   const ownerAdministration = call.name === "list_skills" ||
     call.name === "inspect_skill_draft" || call.name === "approve_skill" ||
     call.name === "inspect_skill_creation" || call.name === "create_skill" ||

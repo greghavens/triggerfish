@@ -8,6 +8,7 @@
  * @module
  */
 
+import { sleepTool } from "../../../agent/dispatch/sleep_tool.ts";
 import { getTodoToolDefinitions } from "../../../tools/mod.ts";
 import { getMemoryToolDefinitions } from "../../../tools/memory/mod.ts";
 import { getSecretToolDefinitions } from "../../../tools/secrets.ts";
@@ -63,6 +64,7 @@ export const TOOL_GROUPS = {
   exec_file: buildExecFileDefinitions,
   exec_command: buildExecCommandDefinitions,
   todo: () => getTodoToolDefinitions({ revisioned: true }),
+  sleep: () => [sleepTool],
   memory: getMemoryToolDefinitions,
   secrets: getSecretToolDefinitions,
   web: getWebToolDefinitions,

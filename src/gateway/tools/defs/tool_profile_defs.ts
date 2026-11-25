@@ -52,6 +52,7 @@ export const TOOL_PROFILES: Readonly<Record<string, ToolProfile>> = {
     "exec_file",
     "exec_command",
     "todo",
+    "sleep",
     "memory",
     "secrets",
     "web",
@@ -94,6 +95,7 @@ export const TOOL_PROFILES: Readonly<Record<string, ToolProfile>> = {
     "exec_file",
     "exec_command",
     "todo",
+    "sleep",
     "memory",
     "secrets",
     "web",
@@ -134,6 +136,7 @@ export const TOOL_PROFILES: Readonly<Record<string, ToolProfile>> = {
   triggerSession: [
     "exec_file",
     "todo",
+    "sleep",
     "memory",
     "web",
     "google",
@@ -154,6 +157,7 @@ export const TOOL_PROFILES: Readonly<Record<string, ToolProfile>> = {
   cronJob: [
     "exec_file",
     "todo",
+    "sleep",
     "memory",
     "web",
     "google",
@@ -173,6 +177,7 @@ export const TOOL_PROFILES: Readonly<Record<string, ToolProfile>> = {
   subagent: [
     "exec_file",
     "todo",
+    "sleep",
     "memory",
     "web",
     "google",

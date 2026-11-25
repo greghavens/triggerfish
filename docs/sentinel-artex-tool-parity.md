@@ -118,6 +118,15 @@ replacement leaves the original file intact and exercises pre-call,
 response, and output policy through the same root tool.
 [Owner file-edit gateway fixture](../tests/gateway/edit_file_gateway_test.ts).
 
+The registered `sleep` tool lets ordinary owner chat and configured
+delegated and scheduled model profiles wait for 1–3600 integer seconds
+within an active turn. Cancellation interrupts the timer. Gateway tests
+verify root pre-call, response, and output policy in owner chat, cancellation
+through the socket, and model calls in a subagent and signed webhook.
+The strict durable recovery allowlist has a separate acceptance gap for
+saved waits. [Pinned SDK source](https://github.com/Autumn-27/norma/blob/70d12d96de11030137b968e7637385fb09529109/tool/sleep.go),
+[Gateway fixture](../tests/gateway/sleep_tool_test.ts).
+
 The ordinary owner agent can update two settings on one configured
 MCP connector through `mcp_manage update`, the tool-call timeout and
 retry count. Root dispatch checks the owner session, shows the exact

@@ -46,6 +46,8 @@ export const OWNER_ONLY_TOOLS: ReadonlySet<string> = new Set([
   "secret_save_credential",
   "secret_list",
   "secret_delete",
+  // Owner chat can wait. Isolated machine profiles declare this explicitly.
+  "sleep",
   // Scheduling
   "cron",
   // Trigger management
