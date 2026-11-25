@@ -29,6 +29,39 @@ const digest = /^[a-f0-9]{64}$/;
 const unavailable =
   "Error: The exact verified finding publication is unavailable.";
 
+const approvedFindingLabels = {
+  github_repository_status: [
+    "Repository visibility control failed",
+    "Retained repository visibility verification",
+  ],
+  github_actions_status: [
+    "Workflow run control failed",
+    "Retained workflow control verification",
+  ],
+  github_actions_run_status: [
+    "Workflow attempt control failed",
+    "Retained workflow attempt verification",
+  ],
+} as const;
+type PublicationSource = "local" | keyof typeof approvedFindingLabels;
+type PublicationDraft = Omit<
+  SentinelWorkerFindingPublication,
+  "approvedAt" | "requestId"
+>;
+
+function projectApprovedSource(
+  record: PublicationDraft,
+  source: PublicationSource,
+): PublicationDraft {
+  if (source === "local") return record;
+  const [findingLabel, evidenceLabel] = approvedFindingLabels[source];
+  return {
+    ...record,
+    finding: { ...record.finding, label: findingLabel },
+    evidence: { ...record.evidence, label: evidenceLabel },
+  };
+}
+
 export async function executeOperatorFindingPublication(
   baseDir: string,
   caseId: string,
@@ -69,10 +102,8 @@ export async function executeOperatorFindingPublication(
 
   function inspect(approved?: {
     readonly runId: string;
-    readonly record: Omit<
-      SentinelWorkerFindingPublication,
-      "approvedAt" | "requestId"
-    >;
+    readonly record: PublicationDraft;
+    readonly source: PublicationSource;
   }) {
     return withSentinelAssessmentWriteLock(path, (state) => {
       const rows = readSentinelWorkerFindingPublications(path, caseId);
@@ -173,26 +204,20 @@ export async function executeOperatorFindingPublication(
             nodeId: finding.targetId,
           }, snapshot)
         ) return;
-        const sourceKind = evidence.nativeWorkflowSource
-          ? "github_actions_status"
-          : evidence.executionSource
-          ? "github_repository_status"
-          : undefined;
-        const execution = sourceKind && {
+        const native = evidence.nativeWorkflowSource !== undefined;
+        const execution = (native || evidence.executionSource) && {
           node: evidence,
           asset: finding.targetId,
           control: finding.controlId,
-          sourceKind,
+          native,
         };
         const record = {
           targetId: finding.targetId,
           finding: {
             kind: "finding" as const,
             id: finding.id,
-            label: sourceKind === "github_actions_status"
-              ? "Workflow run control failed"
-              : sourceKind === "github_repository_status"
-              ? "Repository visibility control failed"
+            label: execution
+              ? "Verified control failed"
               : redactCredentialText(report.title).slice(0, 256),
             severity: original.severity,
             workerFindingSource: {
@@ -211,10 +236,8 @@ export async function executeOperatorFindingPublication(
             id: `published-finding-evidence:${
               finding.id.slice("worker-finding:".length)
             }`,
-            label: sourceKind === "github_actions_status"
-              ? "Retained workflow control verification"
-              : sourceKind === "github_repository_status"
-              ? "Retained repository visibility verification"
+            label: execution
+              ? "Retained control verification"
               : redactCredentialText(evidence.label).slice(0, 512),
           },
           evidenceVersion: verifiedVersion,
@@ -224,7 +247,7 @@ export async function executeOperatorFindingPublication(
         if (!approved) return { record, runId, execution };
         if (!request || !isDeepStrictEqual(record, approved.record)) return;
         const publication = {
-          ...record,
+          ...projectApprovedSource(record, approved.source),
           requestId: request,
           approvedAt: new Date().toISOString(),
         };
@@ -245,8 +268,8 @@ export async function executeOperatorFindingPublication(
     if (candidate.publication) return { publication: candidate.publication };
     if (!candidate.record || !candidate.runId) return unavailable;
     const { execution, record, runId } = candidate;
-    const authorized = async () => {
-      if (!execution) return true;
+    const authorized = async (): Promise<PublicationSource | undefined> => {
+      if (!execution) return "local";
       const isCurrent = () => {
         const current = inspect();
         return current?.runId === runId &&
@@ -254,32 +277,40 @@ export async function executeOperatorFindingPublication(
           isDeepStrictEqual(current.execution, execution);
       };
       const saved = await reopenSource?.(execution.node.id, isCurrent);
-      return saved?.payload.kind === execution.sourceKind &&
-        isCurrent() &&
-        executionReceiptSupportsCheck(
+      if (!saved || !isCurrent()) return;
+      const kind = saved.payload.kind;
+      if (
+        (kind !== "github_repository_status" &&
+          kind !== "github_actions_run_status" &&
+          kind !== "github_actions_status") ||
+        execution.native !== (kind === "github_actions_status")
+      ) return;
+      return executionReceiptSupportsCheck(
           execution.node,
           runId,
           execution.asset,
           execution.control,
           "fail",
           executionControlReceipt(saved.payload),
-        );
+        )
+        ? kind
+        : undefined;
     };
-    if (!await authorized()) return unavailable;
-    if (preview) return { preview: record };
+    const source = await authorized();
+    if (!source) return unavailable;
+    const projected = projectApprovedSource(record, source);
+    if (preview) return { preview: projected };
     if (
       !await confirm(
         `${
           withdraw ? "Withdraw" : "Publish"
-        } this exact verified Sentinel finding?\n${
-          JSON.stringify(candidate.record)
-        }`,
+        } this exact verified Sentinel finding?\n${JSON.stringify(projected)}`,
       )
     ) {
       return "Error: The operator declined the run action.";
     }
-    if (execution && !await authorized()) return unavailable;
-    const committed = inspect({ runId, record });
+    if (execution && await authorized() !== source) return unavailable;
+    const committed = inspect({ runId, record, source });
     return committed?.publication
       ? { publication: committed.publication }
       : unavailable;

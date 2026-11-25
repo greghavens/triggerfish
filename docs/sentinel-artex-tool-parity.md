@@ -302,6 +302,32 @@ take effect, and reload activates the revised operation.
 [task delegation and report update](https://github.com/jiwoochris/artex-global/blob/06b36d72/server/orchestration.go),
 [retest workflow](https://github.com/jiwoochris/artex-global/blob/06b36d72/server/finding_retests.go).
 
+### Approved worker finding publication
+
+Authenticated owner agents use `operator_runs preview_finding_publication`,
+`publish_finding`, and `withdraw_published_finding` through root dispatch.
+Approval is bound to the source case, worker assignment, evidence revision,
+receipt, report version, and evidence version. Leased workers and Sentinel
+planners discover approved findings on an authorized matching asset through
+`sentinel_shared_asset_links` and reopen the exact published source with
+`sentinel_shared_finding_source`. A run link grants no access by itself.
+
+| Verified evidence family | Publication support and acceptance |
+| ------------------------ | ---------------------------------- |
+| Case-local graph control check | Go through the owner approval and share a bounded finding and evidence projection. The planner gateway fixture establishes that the exact worker report produces a cited follow-up in another case. [Two-case gateway fixture](../tests/sentinel/planner_cold_digest_test.ts). |
+| Imported GitHub repository visibility | A completed visibility check can publish a fixed defensive conclusion. The original repository-status policy and current repository identity and access are rechecked before and after approval. [Worker finding gateway fixture](../tests/gateway/sentinel_worker_findings_test.ts). |
+| Native GitHub Actions workflow result | A retained workflow failure can publish a fixed conclusion. The source is reopened in resume-only mode under the exact case, repository, workflow, and original assignment grant. The fixture forbids relisting. [Worker finding gateway fixture](../tests/gateway/sentinel_worker_findings_test.ts). |
+| Imported exact GitHub Actions run attempt | A saved failure on the exact repository, run, and attempt can publish a fixed conclusion. Root policy rechecks the original exact `get_run` request. Current identity and Actions access use the existing metadata probe. A different attempt or evidence revision cannot support the publication. [Workflow-attempt gateway fixture](../tests/gateway/sentinel_worker_findings_test.ts). |
+| Imported branch checks and imported workflow listings | Their approved projections support existing case-local checks. Cross-case publication is still unavailable. A branch publication needs a verified binding to one specific branch within its retained projection. An imported listing needs an approved fixed publication projection and a gateway test of current source authorization and exact receipt matching. |
+| Pull request and release projections | Approved historical tool results can be reopened under their own policy. They lack a matching verified finding publication contract. |
+
+Connector permission revocation prevents publishing or reopening the original
+connector receipt. Previously approved shares retain their fixed conclusion.
+Explicit withdrawal removes a share from future discovery, and authorized
+archived citations retain the original approved projection and source IDs.
+The connector approval checks and cross-case flows above use local gateway
+fixtures with stubbed connector transport.
+
 ## Captured traffic and finding evidence
 
 | ARTEX tool                                    | ARTEX binding and runtime path                                                                                    | Sentinel equivalent and boundary                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |

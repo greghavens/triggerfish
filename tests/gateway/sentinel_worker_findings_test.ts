@@ -16,6 +16,7 @@ import {
   executionEvidenceDigest,
   repositoryVisibilityEvidenceId,
   sentinelExecutionEvidenceFile,
+  workflowAttemptEvidenceId,
   workflowControlEvidenceId,
 } from "../../src/sentinel/case_execution_evidence.ts";
 import {
@@ -1663,8 +1664,10 @@ async function verifyConnectorFindingPublication(
   path: string,
   state: State,
   finding: SentinelWorkerFindingRecord,
-  native: boolean,
+  sourceFamily: "repository" | "native" | "attempt",
 ) {
+  const native = sourceFamily === "native";
+  const attempt = sourceFamily === "attempt";
   const credential = "synthetic-visibility-credential";
   const secrets = createMemorySecretStore();
   assert((await secrets.setSecret("github-pat", credential)).ok);
@@ -1679,16 +1682,25 @@ async function verifyConnectorFindingPublication(
       agent_recovery: {
         github_repositories: ["owner/repo"],
         github_repository_status: true,
+        github_run_status: attempt,
       },
     },
     secrets,
     (request, options) => {
       checks++;
-      assertEquals(String(request), "https://api.github.com/repos/owner/repo");
+      const url = new URL(String(request));
+      assertEquals(url.origin, "https://api.github.com");
       assertEquals(
         new Headers(options?.headers).get("Authorization"),
         `Bearer ${credential}`,
       );
+      if (attempt && url.pathname === "/repos/owner/repo/actions/workflows") {
+        assertEquals(url.searchParams.get("per_page"), "1");
+        return Promise.resolve(
+          new Response("", { status: access ? 200 : 403 }),
+        );
+      }
+      assertEquals(url.pathname, "/repos/owner/repo");
       // Current metadata checks permission. The saved result still reported "public".
       return Promise.resolve(
         new Response(
@@ -1703,7 +1715,11 @@ async function verifyConnectorFindingPublication(
     },
   );
   assert(authorize);
-  const sourceTool = native ? "sentinel_live_workflow_status" : "github_repos";
+  const sourceTool = native
+    ? "sentinel_live_workflow_status"
+    : attempt
+    ? "github_actions"
+    : "github_repos";
   const evidenceNode = state.result?.sharedGraph.snapshot?.nodes.find((
     { id },
   ) => id === finding.evidenceId);
@@ -1753,8 +1769,8 @@ async function verifyConnectorFindingPublication(
       providerRegistry: registry,
       enableStreaming: false,
       tools: [{
-        name: "github_repos",
-        description: "Fixture repository status",
+        name: sourceTool,
+        description: "Fixture retained source",
         parameters: {},
       }],
       toolExecutor() {
@@ -1778,6 +1794,15 @@ async function verifyConnectorFindingPublication(
       hookRunner: {
         evaluateHook(hook, { input }) {
           const source = input.tool_name === sourceTool;
+          if (source && attempt && hook === "PRE_TOOL_CALL") {
+            const call = input.tool_call as { args?: Record<string, unknown> };
+            assertEquals(call.args, {
+              action: "get_run",
+              repo: "owner/repo",
+              run_id: 91,
+              attempt: 2,
+            });
+          }
           if (source && native && hook === "PRE_TOOL_CALL") {
             assertEquals(input.sentinel_case_id, "main");
             assertEquals(input.repository, "owner/repo");
@@ -1850,11 +1875,38 @@ async function verifyConnectorFindingPublication(
     assertEquals(checks, 0);
     blockSource = "POST_TOOL_RESPONSE";
     assertStringIncludes(await turn(preview), "unavailable");
-    assertEquals(checks, 1);
+    assertEquals(checks, attempt ? 2 : 1);
     blockSource = undefined;
     access = false;
     assertStringIncludes(await turn(preview), "unavailable");
     access = true;
+    if (attempt) {
+      assertStringIncludes(
+        await turn({ ...preview, revision: state.revision - 1 }),
+        "unavailable",
+      );
+      const bundle = join(dirname(path), sentinelExecutionEvidenceFile);
+      const original = await Deno.readTextFile(bundle);
+      const records = JSON.parse(original);
+      const otherAttempt = { ...records[0].payload, attempt: 3 };
+      await Deno.writeTextFile(
+        bundle,
+        JSON.stringify([{
+          ...records[0],
+          payload: otherAttempt,
+          resultSha256: executionEvidenceDigest(otherAttempt),
+        }]),
+      );
+      try {
+        const checksBeforeConflict = checks;
+        assertStringIncludes(await turn(preview), "unavailable");
+        assertEquals(checks, checksBeforeConflict);
+        assertEquals(approvals, 0);
+        assertEquals(readSentinelWorkerFindingPublications(path, "main"), []);
+      } finally {
+        await Deno.writeTextFile(bundle, original);
+      }
+    }
     const approved = JSON.parse(await turn(preview)).preview;
     const publish = {
       ...selection,
@@ -1874,6 +1926,8 @@ async function verifyConnectorFindingPublication(
       publication.finding.label,
       native
         ? "Workflow run control failed"
+        : attempt
+        ? "Workflow attempt control failed"
         : "Repository visibility control failed",
     );
     assertEquals(
@@ -1983,6 +2037,7 @@ async function verifyConnectorFindingPublication(
 async function verifyReceiptFamily(
   family:
     | "branch protection"
+    | "workflow attempt"
     | "repository visibility"
     | "workflow result"
     | "workflow result with repeated run"
@@ -2025,6 +2080,16 @@ async function verifyReceiptFamily(
       created_at: "2025-01-02T00:00:00.000Z",
     }],
   };
+  const attempt = family === "workflow attempt";
+  const attemptPayload = {
+    kind: "github_actions_run_status" as const,
+    repo,
+    repositoryId: 42,
+    id: 91,
+    attempt: 2,
+    status: "completed",
+    conclusion: "failure",
+  };
   const visibility = family === "repository visibility";
   const repeatedRun = family === "workflow result with repeated run";
   const olderRun = family === "workflow result with older run";
@@ -2063,7 +2128,9 @@ async function verifyReceiptFamily(
     workflowRunNumber: number;
     resultSha256: string;
   }[] = [];
-  const payload = workflow
+  const payload = attempt
+    ? attemptPayload
+    : workflow
     ? workflowPayload
     : visibility
     ? visibilityPayload
@@ -2073,7 +2140,18 @@ async function verifyReceiptFamily(
     source: Parameters<typeof branchExecutionEvidenceId>[3],
     foreign = false,
   ) =>
-    workflow
+    attempt
+      ? workflowAttemptEvidenceId(
+        runId,
+        "app",
+        "control",
+        source,
+        42,
+        91,
+        2,
+        validUntil,
+      )
+      : workflow
       ? workflowControlEvidenceId(
         runId,
         "app",
@@ -2253,15 +2331,16 @@ async function verifyReceiptFamily(
     assertEquals(finding.evidenceId, node);
     assertEquals(finding.taskId, lease.assignedTaskId);
     assertEquals(JSON.parse(outcome.results[3][1]).record, finding);
-    if (visibility || (native && !manual)) {
+    if (visibility || attempt || (native && !manual)) {
       await verifyConnectorFindingPublication(
         baseDir,
         path,
         state,
         finding,
-        native,
+        native ? "native" : attempt ? "attempt" : "repository",
       );
     }
+    if (attempt) return;
     await withTidepool(baseDir, async (list) => {
       assertEquals(await list(state.revision), [finding]);
     });
@@ -2750,6 +2829,9 @@ for (
     () => verifyReceiptFamily(family),
   );
 }
+
+Deno.test("Gateway publication requires the exact saved workflow attempt and evidence revision", () =>
+  verifyReceiptFamily("workflow attempt"));
 
 Deno.test("Gateway operator discovers and queues one exact native remediation recheck", () =>
   verifyReceiptFamily("native workflow result", true));
