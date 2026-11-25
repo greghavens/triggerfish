@@ -1,5 +1,8 @@
 import { isDeepStrictEqual } from "node:util";
-import { readNativeWorkflowGraphEvidence } from "../sentinel/native_workflow_evidence.ts";
+import {
+  projectNativeWorkflowEvidence,
+  readNativeWorkflowGraphEvidence,
+} from "../sentinel/native_workflow_evidence.ts";
 import { openSentinelAssetDiscoveryStore } from "../sentinel/asset_discovery_store.ts";
 import { verifySentinelAssetDiscovery } from "../sentinel/asset_discovery_evidence.ts";
 import { loadSentinelGraph } from "../sentinel/graph.ts";
@@ -797,7 +800,7 @@ export function createOperatorRunToolExecutor(options: {
           "INTERNAL",
         ) || !isCurrent()
       ) return;
-      return { ...source, payload, classification: "INTERNAL" as const };
+      return projectNativeWorkflowEvidence(citation);
     }
     const authorizeSource = options.authorizeExecutionTracePayload;
     if (!authorizeSource) return;
@@ -2780,21 +2783,36 @@ export function createOperatorRunToolExecutor(options: {
             }
             if (
               step?.tool !== "sentinel_assigned_execution_evidence" ||
-              step.outcome !== "returned" || !step.target ||
-              !options.authorizeExecutionTracePayload
-            ) {
-              return unavailable;
-            }
+              step.outcome !== "returned" || !step.target
+            ) return unavailable;
             const node = step.target;
-            const evidence = await readCaseExecutionEvidence(
-              options.baseDir,
+            const responseDigest = (trace: SentinelReadTrace | undefined) =>
+              trace?.goalReceiptRead?.sha256 ??
+                (trace as
+                  | (SentinelReadTrace & { resultSha256?: string })
+                  | undefined)
+                  ?.resultSha256;
+            const digest = responseDigest(step);
+            if (!digest) return unavailable;
+            const isCurrent = () => {
+              const current = readHistoricalAdaptiveSentinel(
+                path,
+                ref.revision!,
+              );
+              const trace = savedStep(current);
+              return current?.goal.id === runId && trace?.tool === step.tool &&
+                trace.target === node && trace.outcome === "returned" &&
+                responseDigest(trace) === digest;
+            };
+            const evidence = await readAuthorizedCaseEvidence(
+              ref.id,
               path,
               ref.revision,
               node,
+              context,
+              isCurrent,
             );
-            if (!evidence) {
-              return unavailable;
-            }
+            if (!evidence) return unavailable;
             const retained = {
               evidenceId: node,
               evidenceRevision: ref.revision,
@@ -2802,26 +2820,7 @@ export function createOperatorRunToolExecutor(options: {
             };
             const hash = createHash("sha256").update(JSON.stringify(retained))
               .digest("hex");
-            const matches = (current: SentinelReadTrace | undefined) =>
-              current?.tool === step.tool && current.target === node &&
-              current.outcome === "returned" &&
-              (current.goalReceiptRead?.sha256 ??
-                  (current as typeof current & { resultSha256?: string })
-                    .resultSha256) === hash;
-            if (
-              !matches(step) || !await authorizeTracePayload(
-                context,
-                options.authorizeExecutionTracePayload,
-                evidence.payload,
-                evidence.classification,
-              )
-            ) {
-              return unavailable;
-            }
-            const current = readHistoricalAdaptiveSentinel(path, ref.revision);
-            if (current?.goal.id !== runId || !matches(savedStep(current))) {
-              return unavailable;
-            }
+            if (hash !== digest || !isCurrent()) return unavailable;
             return safeProjection({
               run: ref,
               runId,

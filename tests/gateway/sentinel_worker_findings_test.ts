@@ -136,6 +136,12 @@ async function workerTurn(
   deny?: "report" | "output" | "receipt-pre" | "receipt-post",
   executionSourceScope?: string,
   readRetainedWorkflow?: ReturnType<typeof nativeWorkflowReader>,
+  execution?: {
+    prompt: Parameters<ReturnType<typeof createSentinelSubagent>["execute"]>[0];
+    options:
+      Parameters<ReturnType<typeof createSentinelSubagent>["execute"]> extends
+        [unknown, unknown, ...infer Rest] ? Rest : never;
+  },
 ) {
   const receiptHooks: string[] = [];
   let reportPre = 0;
@@ -231,8 +237,9 @@ async function workerTurn(
   const events: ChatEvent[] = [];
   try {
     await worker.execute(
-      "Review the exact assigned control evidence.",
+      execution?.prompt ?? "Review the exact assigned control evidence.",
       (event) => events.push(event),
+      ...execution?.options ?? [],
     );
     assertEquals(results.length, batches.length);
     return {
@@ -806,6 +813,7 @@ async function verifyOperatorNativeRecheck(options: {
   findingId: string;
   evidenceId: string;
   digest: string;
+  trace?: { taskId: string; result: unknown };
 }) {
   let blocked = false;
   let blockOutput = false;
@@ -816,7 +824,9 @@ async function verifyOperatorNativeRecheck(options: {
     name: "operator-evidence-fixture",
     supportsStreaming: false,
     complete(messages) {
-      const response = messages.findLast(({ role }) => role === "tool");
+      const response = messages.at(-1)?.role === "tool"
+        ? messages.at(-1)
+        : undefined;
       if (response) modelResult = String(response.content);
       return Promise.resolve({
         content: response ? "Review complete." : "",
@@ -827,11 +837,19 @@ async function verifyOperatorNativeRecheck(options: {
           function: {
             name: "operator_runs",
             arguments: JSON.stringify({
-              action: "case_execution_evidence",
               kind: "sentinel",
               id: "main",
               revision: options.state.revision,
-              node: options.evidenceId,
+              ...(options.trace
+                ? {
+                  action: "worker_trace_result",
+                  taskId: options.trace.taskId,
+                  stepIndices: [0],
+                }
+                : {
+                  action: "case_execution_evidence",
+                  node: options.evidenceId,
+                }),
             }),
           },
         }],
@@ -880,6 +898,13 @@ async function verifyOperatorNativeRecheck(options: {
   const command =
     `/sentinel-recheck main ${options.state.revision} ${options.findingId}`;
   await run("Review the exact saved workflow evidence.");
+  if (options.trace) {
+    assertEquals(JSON.parse(modelResult ?? "").result, options.trace.result);
+    blocked = true;
+    await run("Review that exact worker exchange again.");
+    assertStringIncludes(modelResult ?? "", "unavailable");
+    return;
+  }
   assertEquals(
     JSON.parse(modelResult ?? "").evidence.resultSha256,
     options.digest,
@@ -1241,6 +1266,7 @@ async function verifyReceiptFamily(
     });
     planningRegistry.setDefault("receipt-candidate-planner");
     let scheduledResult: unknown;
+    let scheduledRead: unknown;
     const clock = Date.now();
     receiptPlanner = createSentinelModelPlanner(
       path,
@@ -1267,7 +1293,14 @@ async function verifyReceiptFamily(
             },
           })
           : {
-            execute: async (message, send) => {
+            execute: async (
+              message,
+              send,
+              signal,
+              onStep,
+              digests,
+              checkpoint,
+            ) => {
               const input = JSON.parse(String(message).split("\n").at(-1)!);
               if (input.recheckFindingId) {
                 workerFinding = input.recheckFindingId;
@@ -1296,7 +1329,12 @@ async function verifyReceiptFamily(
                     undefined,
                     baseDir,
                     reader,
+                    {
+                      prompt: message,
+                      options: [signal, onStep, digests, checkpoint],
+                    },
                   );
+                  scheduledRead = JSON.parse(review.results[0][0]);
                   assertEquals(
                     JSON.parse(review.results[1][0]).current.evidenceId,
                     check.evidenceId,
@@ -1490,6 +1528,15 @@ async function verifyReceiptFamily(
         "completed",
       );
       assert(scheduledResult);
+      assert(scheduledRead);
+      await verifyOperatorNativeRecheck({
+        baseDir,
+        state: updated,
+        findingId: finding.id,
+        evidenceId: passingNode,
+        digest: nativeSources[1].resultSha256,
+        trace: { taskId, result: scheduledRead },
+      });
       await withTidepool(baseDir, async (_list, _provenance, request) => {
         const lineage = await request("worker_recheck_lineage", {
           revision: updated.revision,

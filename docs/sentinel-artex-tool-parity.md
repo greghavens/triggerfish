@@ -1527,3 +1527,10 @@ Restoration verifies native workflow graph citations against the retained
 worker exchange. The gateway round trip resolves the exact cited run after
 restart. A package with valid checksums and a removed source trace is
 rejected before case publication.
+
+The owner can reopen the exact saved native workflow response from a
+completed remediation worker with `operator_runs worker_trace_result`.
+The gateway checks the committed response digest and reauthorizes the
+connector and response before returning the reconstructed record. The
+worker findings fixture compares the operator result with the worker's
+original tool response and verifies that a later policy denial withholds it.

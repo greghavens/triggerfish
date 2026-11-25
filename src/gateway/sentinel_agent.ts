@@ -1,4 +1,7 @@
-import { readNativeWorkflowGraphEvidence } from "../sentinel/native_workflow_evidence.ts";
+import {
+  projectNativeWorkflowEvidence,
+  readNativeWorkflowGraphEvidence,
+} from "../sentinel/native_workflow_evidence.ts";
 import type { createSentinelLiveWorkflowReader } from "./sentinel_live_workflow.ts";
 import {
   type ExecutionControlReceipt,
@@ -1384,12 +1387,7 @@ async function readNativeExecutionEvidence(
     },
   });
   if (!isDeepStrictEqual(saved, citation.saved) || !current()) return;
-  return {
-    ...source,
-    classification: "INTERNAL" as const,
-    recordedAt: citation.saved.observedAt,
-    payload: citation.candidate.payload,
-  };
+  return projectNativeWorkflowEvidence(citation);
 }
 
 async function readLiveWorkflowStatus(

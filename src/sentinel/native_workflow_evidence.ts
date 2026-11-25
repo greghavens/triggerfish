@@ -80,3 +80,15 @@ export function readNativeWorkflowGraphEvidence(
     store.close();
   }
 }
+
+/** Keep the live and reconstructed tool result byte-identical for trace checks. */
+export function projectNativeWorkflowEvidence(
+  citation: NonNullable<ReturnType<typeof readNativeWorkflowGraphEvidence>>,
+) {
+  return {
+    ...citation.source,
+    classification: "INTERNAL" as const,
+    recordedAt: citation.saved.observedAt,
+    payload: citation.candidate.payload,
+  };
+}
