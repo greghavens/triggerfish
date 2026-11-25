@@ -216,3 +216,19 @@ Deno.test("Sentinel validates the background model worker limit", () => {
     );
   }
 });
+
+Deno.test("Sentinel validates the opt-in idle planner heartbeat interval", () => {
+  const models = { primary: "test-model" };
+  for (const planner_heartbeat_seconds of [600, 900, 86_400]) {
+    assertEquals(
+      enforceConfig({ models, sentinel: { planner_heartbeat_seconds } }).ok,
+      true,
+    );
+  }
+  for (const planner_heartbeat_seconds of [0, 599, 600.5, "600", 86_401]) {
+    assertEquals(
+      enforceConfig({ models, sentinel: { planner_heartbeat_seconds } }).ok,
+      false,
+    );
+  }
+});

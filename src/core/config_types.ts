@@ -287,6 +287,7 @@ export interface TriggerFishConfig {
     readonly notify_incident_increases?: boolean;
     readonly output_language?: SentinelOutputLanguage;
     readonly model_worker_limit?: number;
+    readonly planner_heartbeat_seconds?: number;
     readonly capture_origins?: readonly string[];
     readonly scheduled_observation_reads?:
       readonly SentinelScheduledObservationRead[];

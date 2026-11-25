@@ -596,6 +596,7 @@ export async function startServicesAndChannels(
       reserveMainWorker,
       Date.now,
       webContainmentConfigured,
+      bootstrap.config.sentinel?.planner_heartbeat_seconds,
     )
     : undefined;
   const stopMainAdaptive = () => {
@@ -647,6 +648,7 @@ export async function startServicesAndChannels(
           reserveCaseWorker,
           Date.now,
           webContainmentConfigured,
+          bootstrap.config.sentinel?.planner_heartbeat_seconds,
         )
         : undefined;
       const stopCaseAdaptive = () => {

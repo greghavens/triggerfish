@@ -52,6 +52,12 @@ fields and recorded evidence.
 `model_worker_limit` caps concurrent background model calls across all
 Sentinel cases, including planning and reviews. It defaults to 2. Interactive
 Sentinel chat uses the gateway's chat execution limits.
+Set `planner_heartbeat_seconds` to an integer from 600 through 86400 to
+enable idle planner rounds for active assessments when model access is
+enabled. After a planning round settles, the planner checks the same case
+and evidence again at the next interval if no new input has triggered a
+round. The saved round history preserves the interval across gateway
+restarts. Paused, stopped, and completed assessments skip idle rounds.
 Sentinel workers use an allowlist of read-only evidence tools. This registry
 excludes HTTP clients, shells, target connections, and credential tools.
 Background workers read their assigned case and evidence revision. Shared

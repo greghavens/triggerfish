@@ -3544,6 +3544,7 @@ export function createSentinelModelPlanner(
   reserve?: () => (() => void) | undefined,
   now: () => number = Date.now,
   webContainmentConfigured?: boolean,
+  heartbeatSeconds?: number,
 ) {
   const superseded = Symbol("Sentinel plan superseded");
   let permitPlannerWake = true;
@@ -3565,7 +3566,7 @@ export function createSentinelModelPlanner(
   let reviewedSincePlan = false;
   let activePlan: {
     identity: string;
-    roundIdentity: string;
+    baseIdentity: string;
     controller: AbortController;
   } | undefined;
   const activeReviews = new Map<AbortController, {
@@ -4822,7 +4823,7 @@ export function createSentinelModelPlanner(
       const graphFacts = plannerGraphFacts(snapshotPath, state);
       const findingRechecks = plannerFindingRechecks(snapshotPath, state);
       const recheckFindings = pendingRecheckFindings(snapshotPath, state);
-      const roundIdentity = modelRoundIdentity(
+      const baseIdentity = modelRoundIdentity(
         identity,
         hints[0]?.id,
         decisions,
@@ -4839,7 +4840,7 @@ export function createSentinelModelPlanner(
       if (
         activePlan &&
         (activePlan.identity !== identity ||
-          activePlan.roundIdentity !== roundIdentity)
+          activePlan.baseIdentity !== baseIdentity)
       ) {
         activePlan.controller.abort(superseded);
       }
@@ -4856,6 +4857,21 @@ export function createSentinelModelPlanner(
         draining ||= controller.signal.aborted;
       }
       if (activePlan || draining) return;
+      let roundIdentity = baseIdentity;
+      if (
+        heartbeatSeconds !== undefined && goalCompletion?.status !== "completed"
+      ) {
+        const store = openSentinelAdaptiveStore(storePath(snapshotPath), now);
+        try {
+          roundIdentity = store.modelPlannerHeartbeat(
+            baseIdentity,
+            heartbeatSeconds * 1_000,
+          ) ?? baseIdentity;
+        } finally {
+          store.close();
+        }
+      }
+      const heartbeat = roundIdentity !== baseIdentity;
       const formalGoalSet = state.plan.activeFormalGoalIds?.length
         ? JSON.stringify([state.plan.runId, state.plan.activeFormalGoalIds])
         : undefined;
@@ -4892,10 +4908,16 @@ export function createSentinelModelPlanner(
         return;
       }
       // A committed observation is available before the producing review ends.
-      if (activeReviews.size && (!reserve || !committedObservations.length)) {
+      if (
+        activeReviews.size &&
+        (!reserve || (!heartbeat && !committedObservations.length))
+      ) {
         return;
       }
-      if (!reviewedSincePlan && startReview(state, identity) !== "empty") {
+      if (
+        !heartbeat && !reviewedSincePlan &&
+        startReview(state, identity) !== "empty"
+      ) {
         return;
       }
       const findingInputs = [
@@ -5036,7 +5058,7 @@ export function createSentinelModelPlanner(
       lastConstraintVersion = constraintVersion;
       reviewedSincePlan = false;
       const controller = new AbortController();
-      activePlan = { identity, roundIdentity, controller };
+      activePlan = { identity, baseIdentity, controller };
       const signal = AbortSignal.any([
         controller.signal,
         AbortSignal.timeout(30_000),
@@ -5097,7 +5119,7 @@ export function createSentinelModelPlanner(
               ],
               readSentinelGoalCompletionForState(snapshotPath, current),
               operatingConstraints(snapshotPath, current),
-            ) === roundIdentity;
+            ) === baseIdentity;
       };
       void Promise.resolve().then(() => {
         if (signal.aborted) return;
@@ -5210,6 +5232,7 @@ export function createSentinelModelPlanner(
           goalCompletion?.observations.map(({ criterionId }) => criterionId),
         );
         const inputs = {
+          ...(heartbeat && { wakeReason: "idle_planner_check" }),
           goal: state.plan.goal ??
             "Investigate high-priority evidence gaps",
           goalCompletion: goalCompletion && {

@@ -601,3 +601,140 @@ Deno.test("Owner socket steers and stops one exact leased worker with a shared T
     await Deno.remove(baseDir, { recursive: true });
   }
 });
+
+Deno.test("An enabled idle planner heartbeat resumes from durable case history and respects gateway pause", async () => {
+  const baseDir = await Deno.makeTempDir();
+  const path = resolveSentinelCasePath(baseDir);
+  const intervalSeconds = 600;
+  const interval = intervalSeconds * 1_000;
+  let time = Date.now();
+  const prompts: string[] = [];
+  const registry = createProviderRegistry();
+  registry.register({
+    name: "idle-planner-fixture",
+    supportsStreaming: false,
+    complete(messages) {
+      prompts.push(messages.map(({ content }) => String(content)).join("\n"));
+      return Promise.resolve({
+        content: "[]",
+        usage: { inputTokens: 1, outputTokens: 1 },
+        toolCalls: [],
+      });
+    },
+  });
+  registry.setDefault("idle-planner-fixture");
+  const hookRunner: HookRunner = {
+    evaluateHook: () =>
+      Promise.resolve({
+        allowed: true,
+        action: "ALLOW",
+        ruleId: null,
+        duration: 0,
+      }),
+  };
+  const makePlanner = () =>
+    createSentinelModelPlanner(
+      path,
+      (state) =>
+        createSentinelSubagent({
+          snapshotPath: path,
+          assessmentRevision: state.revision,
+          plannerExecutionEvidenceRunId: state.plan.runId,
+          hookRunner,
+          providerRegistry: registry,
+          allowModelAccess: true,
+        }),
+      undefined,
+      () => time,
+      false,
+      intervalSeconds,
+    );
+  let planner = makePlanner();
+  function tick() {
+    const state = readSentinelAssessment(path);
+    assert(state);
+    planner.advance(state);
+  }
+  function history() {
+    const state = readSentinelAssessment(path);
+    assert(state);
+    return readAdaptiveSentinel(path, state, "revision")?.modelPlannerHistory ??
+      [];
+  }
+  try {
+    await Deno.mkdir(dirname(path), { recursive: true });
+    await Deno.writeTextFile(
+      path,
+      JSON.stringify({ version: 1, nodes: [], edges: [] }),
+    );
+    await withTidepoolSocket(baseDir, async (request) => {
+      assertEquals(
+        (await request("start", { goal: "Review approved inventory." })).type,
+        "sentinel_state",
+      );
+    });
+    tick();
+    await until(() => prompts.length === 1 && !planner.hasInFlightWork());
+    const initial = history();
+    assertEquals(initial.length, 1);
+    assert(initial[0].finished);
+    assertFalse(prompts[0].includes("idle_planner_check"));
+
+    planner.stop();
+    planner = makePlanner();
+    time += interval - 1;
+    tick();
+    assertFalse(planner.hasInFlightWork());
+    assertEquals(history(), initial);
+
+    time += 1;
+    tick();
+    tick();
+    await until(() => prompts.length === 2 && !planner.hasInFlightWork());
+    const repeated = history();
+    assertEquals(repeated.length, 2);
+    assert(
+      repeated[1].identity.startsWith(initial[0].identity + ":heartbeat:"),
+    );
+    assertEquals(repeated[1].outcome, "no_new_assignments");
+    assert(prompts[1].includes("idle_planner_check"));
+    planner.stop();
+    planner = makePlanner();
+    tick();
+    assertFalse(planner.hasInFlightWork());
+
+    const state = readSentinelAssessment(path);
+    assert(state);
+    const target = { kind: "sentinel", id: "main", revision: state.revision };
+    await withOwnerControl(baseDir, async (request) => {
+      assertEquals(
+        JSON.parse(await request({ ...target, action: "pause" })).run.status,
+        "paused",
+      );
+      time += 2 * interval;
+      tick();
+      assertFalse(planner.hasInFlightWork());
+      assertEquals(history(), repeated);
+      assertEquals(
+        JSON.parse(await request({ ...target, action: "resume" })).run.status,
+        "running",
+      );
+      tick();
+      await until(() => prompts.length === 3 && !planner.hasInFlightWork());
+      const resumed = readSentinelAssessment(path);
+      assert(resumed);
+      assert(resumed.revision > target.revision);
+      assertEquals(history().length, 1);
+      assertFalse(prompts[2].includes("idle_planner_check"));
+      time += interval;
+      tick();
+      await until(() => prompts.length === 4 && !planner.hasInFlightWork());
+      assertEquals(history().length, 2);
+      assert(prompts[3].includes("idle_planner_check"));
+    });
+  } finally {
+    planner.stop();
+    await until(() => !planner.hasInFlightWork());
+    await Deno.remove(baseDir, { recursive: true });
+  }
+});

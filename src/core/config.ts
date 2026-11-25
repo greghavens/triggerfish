@@ -116,6 +116,19 @@ export function enforceConfig(
       error: "sentinel.model_worker_limit must be a positive safe integer",
     };
   }
+  const plannerHeartbeat = sentinel?.planner_heartbeat_seconds;
+  if (
+    plannerHeartbeat !== undefined &&
+    (typeof plannerHeartbeat !== "number" ||
+      !Number.isSafeInteger(plannerHeartbeat) || plannerHeartbeat < 600 ||
+      plannerHeartbeat > 86_400)
+  ) {
+    return {
+      ok: false,
+      error:
+        "sentinel.planner_heartbeat_seconds must be an integer from 600 to 86400",
+    };
+  }
   const workflowReads = sentinel?.github_workflow_reads;
   if (
     workflowReads !== undefined && !validSentinelWorkflowReads(workflowReads)

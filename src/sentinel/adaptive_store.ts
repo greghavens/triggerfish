@@ -5108,6 +5108,35 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
         : 1;
     },
 
+    /** Derive each idle wake from the last durable round for the same planning inputs. */
+    modelPlannerHeartbeat(identity: string, intervalMs: number) {
+      const base = revisionKey(identity);
+      const prefix = `${base}:heartbeat:`;
+      if (
+        !db.prepare(
+          "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'adaptive_model_history'",
+        ).get()
+      ) return undefined;
+      const row = db.prepare(`
+        SELECT identity, attempt, outcome, finished FROM adaptive_model_history
+        WHERE identity = ? OR identity GLOB ?
+        ORDER BY started DESC, identity DESC, attempt DESC LIMIT 1
+      `).get(base, `${prefix}*`);
+      if (!row) return undefined;
+      if (row.outcome === 0 || (Number(row.outcome) < 0 && row.attempt === 1)) {
+        return typeof row.identity === "string" &&
+            row.identity.startsWith(prefix)
+          ? row.identity
+          : undefined;
+      }
+      if (
+        typeof row.finished !== "number" || now() - row.finished < intervalMs
+      ) {
+        return undefined;
+      }
+      return `${prefix}${row.finished}`;
+    },
+
     claimModelPlan(
       identity: string,
       context?: {
@@ -5507,7 +5536,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
       }
         WHERE identity = ? OR (? = 1 AND (
           identity GLOB ? OR identity GLOB ? OR identity GLOB ?
-          OR identity GLOB ? OR identity GLOB ?
+          OR identity GLOB ? OR identity GLOB ? OR identity GLOB ?
         ))
           OR identity IN (SELECT value FROM json_each(?))
         ORDER BY started, identity, attempt`)
@@ -5519,6 +5548,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
           `${base}:obs:*`,
           `${base}:goal:*`,
           `${base}:constraints:*`,
+          `${base}:heartbeat:*`,
           JSON.stringify(referencedRounds.map(revisionKey)),
         ).map((row) => {
           const hint = /:hint:(\d+)(?:$|:review:|:goal:|:constraints:|:obs:)/
@@ -7488,8 +7518,16 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
         const stale = db.prepare(`
           SELECT id, attempts FROM adaptive_tasks
           WHERE revision = ? AND status = 'queued' AND dependencyRecommendation IS NOT NULL
-          AND COALESCE(json_extract(dependencyRecommendation, '$.planningIdentity') != ?, ?)
-        `).all(revision, planningIdentity, Number(hasDecisions));
+          AND COALESCE(
+            json_extract(dependencyRecommendation, '$.planningIdentity') != ?
+            AND json_extract(dependencyRecommendation, '$.planningIdentity') NOT GLOB ?,
+            ?)
+        `).all(
+          revision,
+          planningIdentity,
+          `${planningIdentity}:heartbeat:*`,
+          Number(hasDecisions),
+        );
         const clear = db.prepare(
           "UPDATE adaptive_tasks SET dependencyRecommendation = NULL WHERE id = ?",
         );
