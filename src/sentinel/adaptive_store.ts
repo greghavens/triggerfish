@@ -50,6 +50,7 @@ import type { AgentTurnCheckpoint } from "../core/types/orchestrator.ts";
 
 import {
   normalizeSentinelWorkflowReviewStep,
+  projectSentinelTraceMetadata,
   readSentinelAssessmentRevision,
   readSentinelAssignedTargetReceipt,
   readSentinelGitHubWorkflowReadReceipt,
@@ -7634,7 +7635,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
         ...(typeof row.steps === "string" &&
           {
             steps: (JSON.parse(row.steps) as SentinelReviewStep[]).map(
-              ({ sharedAssetLinksPage: _page, ...step }) => step,
+              (step) => projectSentinelTraceMetadata(step),
             ),
           }),
       }));

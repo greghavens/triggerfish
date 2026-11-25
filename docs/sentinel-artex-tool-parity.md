@@ -1786,3 +1786,8 @@ Worker history, review notes, trace search, and provenance detail expose
 asset-link receipts and source references. The full saved page is available
 through explicit, policy-checked result readback. The restart fixture checks
 these projections and verifies that response denial withholds the exact page.
+
+Sentinel history and provenance projections retain response digests while
+withholding saved excerpts. Trace search matches step metadata and source
+references. The worker provenance fixture verifies that an assigned-target
+receipt remains citable without returning its saved excerpt.

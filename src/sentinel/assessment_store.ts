@@ -256,6 +256,21 @@ export interface SentinelReviewStep {
   }[];
 }
 
+/** Publish trace metadata while keeping saved response bodies private. */
+export function projectSentinelTraceMetadata<T extends SentinelReviewStep>(
+  step: T,
+  includeAssetLinkPage = false,
+) {
+  const { sharedAssetLinksPage, resultSnapshot, ...metadata } = step;
+  const resultSha256 = step.resultSha256 ?? resultSnapshot?.sha256;
+  return {
+    ...metadata,
+    ...(resultSha256 && { resultSha256 }),
+    ...(includeAssetLinkPage && sharedAssetLinksPage !== undefined &&
+      { sharedAssetLinksPage }),
+  };
+}
+
 export function readSentinelGitHubWorkflowReadReceipt(
   value: unknown,
   evidenceRevision: number,

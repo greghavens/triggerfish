@@ -1114,6 +1114,7 @@ Deno.test("Sentinel workers can trace generated provenance within their assigned
     let reviewingTask: string;
     let observation: unknown;
     let pathOutput = "";
+    let observationOutput = "";
     const reviewOutput = '{"finding":"F-1"}';
     const reviewSnapshot = {
       sha256: createHash("sha256").update(reviewOutput).digest("hex"),
@@ -1270,7 +1271,9 @@ Deno.test("Sentinel workers can trace generated provenance within their assigned
         );
         assertEquals(trace.steps[0].index, 0);
         assertEquals(trace.steps[0].tool, "sentinel_assigned_target");
-        assertEquals(trace.steps[0].resultSnapshot, reviewSnapshot);
+        assertEquals(trace.steps[0].resultSnapshot, undefined);
+        assertEquals(trace.steps[0].resultSha256, reviewSnapshot.sha256);
+        assert(!String(results[5]).includes("resultSnapshot"));
         assertEquals(trace.steps[0].assignedTarget, {
           targetId: "F-1",
           linkedNodeIds: ["log-1"],
@@ -1279,7 +1282,8 @@ Deno.test("Sentinel workers can trace generated provenance within their assigned
           JSON.parse(String(results[8])).hints[0].text,
           "Review the patch evidence.",
         );
-        const saved = JSON.parse(String(results[9]));
+        observationOutput = String(results[9]);
+        const saved = JSON.parse(observationOutput);
         assertEquals(saved.revision, state.revision);
         assertEquals(saved.task, reviewingTask);
         assertEquals(JSON.parse(saved.observationJson), observation);
@@ -1353,6 +1357,11 @@ Deno.test("Sentinel workers can trace generated provenance within their assigned
         tool: "sentinel_worker_observation",
         target: reviewingTask,
         outcome: "returned",
+        taskObservationPage: {
+          task: reviewingTask,
+          offset: 0,
+          sha256: createHash("sha256").update(observationOutput).digest("hex"),
+        },
       },
       { tool: "sentinel_worker_observation", outcome: "error" },
       { tool: "sentinel_worker_observation", outcome: "error" },

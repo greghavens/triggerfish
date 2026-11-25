@@ -83,6 +83,7 @@ import {
   workerSteeringCheckpointIds,
 } from "../sentinel/adaptive_store.ts";
 import {
+  projectSentinelTraceMetadata,
   readSentinelAssessment,
   readSentinelAssessmentAlerts,
   readSentinelAssessmentRevision,
@@ -600,12 +601,6 @@ export function readSentinelIntermediateWorkflowObservations(
   }
 }
 
-function omitWorkerAssetLinkPage<T extends { sharedAssetLinksPage?: string }>(
-  { sharedAssetLinksPage: _page, ...step }: T,
-) {
-  return step;
-}
-
 export function readHistoricalAdaptiveSentinel(
   snapshotPath: string,
   evidenceNumber: number,
@@ -628,12 +623,12 @@ export function readHistoricalAdaptiveSentinel(
       : [];
     const tasks = mapping ? store.list(mapping.revision) : [];
     const modelReviews = mapping
-      ? store.modelReviewNotes(mapping.revision).map((review) =>
-        includeWorkerReadResults ? review : {
-          ...review,
-          steps: review.steps.map(omitWorkerAssetLinkPage),
-        }
-      )
+      ? store.modelReviewNotes(mapping.revision).map((review) => ({
+        ...review,
+        steps: review.steps.map((step) =>
+          projectSentinelTraceMetadata(step, includeWorkerReadResults)
+        ),
+      }))
       : [];
     const result = mapping
       ? readSentinelAssessmentRevision(snapshotPath, evidenceNumber)?.result ??
@@ -1025,7 +1020,7 @@ export function readAdaptiveSentinel(
     const tasks = store.list(revision);
     const modelReviews = store.modelReviewNotes(revision).map((review) => ({
       ...review,
-      steps: review.steps.map(omitWorkerAssetLinkPage),
+      steps: review.steps.map((step) => projectSentinelTraceMetadata(step)),
     }));
     return {
       revision,
@@ -1714,10 +1709,12 @@ function modelReviewStates(
   includeWorkerReadResults = false,
 ) {
   const reviews = store.modelReviewStates(revision).map((review) =>
-    !includeWorkerReadResults && review.progressSteps
+    review.progressSteps
       ? {
         ...review,
-        progressSteps: review.progressSteps.map(omitWorkerAssetLinkPage),
+        progressSteps: review.progressSteps.map((step) =>
+          projectSentinelTraceMetadata(step, includeWorkerReadResults)
+        ),
       }
       : review
   );

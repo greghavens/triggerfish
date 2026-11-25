@@ -21,6 +21,7 @@ import {
 } from "./telemetry.ts";
 import {
   normalizeSentinelWorkflowReviewStep,
+  projectSentinelTraceMetadata,
   readSentinelAssignedTargetReceipt,
   readSentinelGitHubWorkflowReadReceipt,
   type SentinelFindingReview,
@@ -399,7 +400,6 @@ function indexProvenance() {
             step.tool,
             step.target,
             step.outcome,
-            step.resultSnapshot?.excerpt,
             ...step.sourceSnapshots?.flatMap((
               { caseId, assetId, snapshotDigest },
             ) => [caseId, assetId, snapshotDigest]) ?? [],
@@ -1179,11 +1179,12 @@ function addAdaptive(
     const modelReview = savedReview && {
       ...savedReview,
       steps: savedReview.steps.map((raw): ModelReview["steps"][number] => {
-        const { sharedAssetLinksPage: _page, ...step } =
+        const step = projectSentinelTraceMetadata(
           normalizeSentinelWorkflowReviewStep(
             raw,
             view.evidenceRevision ?? NaN,
-          ) as ModelReview["steps"][number];
+          ) as ModelReview["steps"][number],
+        );
         if (step.sharedAssetDiscovery !== undefined) {
           const { sharedAssetDiscovery: _raw, targetRef: _savedRef, ...saved } =
             step;
