@@ -188,17 +188,40 @@ Deno.test("mcp_manage: status returns error for unknown server", async () => {
 
 // --- enable/disable ---
 
-Deno.test("mcp_manage: disable toggles enabled to false", async () => {
+Deno.test("mcp_manage: lifecycle revision alone cannot authorize a change", async () => {
   const { configPath, cleanup } = await setupTempConfig();
   try {
     const executor = createMcpManageExecutor({ configPath });
-    const result = await executor("mcp_manage", {
-      action: "disable",
+    const original = await Deno.readTextFile(configPath);
+    const context = { isCurrentInteractiveOwner: () => true };
+    const status = JSON.parse(
+      (await executor("mcp_manage", {
+        action: "lifecycle_status",
+        server_id: "existing",
+      }, context))!,
+    );
+    assertEquals(Object.keys(status).sort(), [
+      "_classification",
+      "enabled",
+      "lifecycle_revision",
+      "server_id",
+    ]);
+    for (const action of ["enable", "disable"]) {
+      const result = await executor("mcp_manage", {
+        action,
+        server_id: "existing",
+        lifecycle_revision: status.lifecycle_revision,
+      }, context);
+      assertStringIncludes(result!, "owner inbox approval");
+      assertEquals(await Deno.readTextFile(configPath), original);
+    }
+    const overwrite = await executor("mcp_manage", {
+      action: "add",
       server_id: "existing",
+      command: "node",
     });
-    const parsed = JSON.parse(result!);
-    assertEquals(parsed.success, true);
-    assertEquals(parsed.restart_needed, true);
+    assertStringIncludes(overwrite!, "existing MCP server");
+    assertEquals(await Deno.readTextFile(configPath), original);
   } finally {
     await cleanup();
   }

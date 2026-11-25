@@ -15,26 +15,32 @@ function buildMcpManageDef(): ToolDefinition {
     name: "mcp_manage",
     description:
       "MCP server configuration management. All writes require daemon restart.\n" +
-      "Actions: list, add, update, remove, enable, disable, status, tools.\n" +
+      "Actions: list, add, update, remove, enable, disable, status, lifecycle_status, tools.\n" +
       "- list: list all configured MCP servers from config file\n" +
       "- add: add a new MCP server. Params: server_id (required), command or url (required), args?, classification?, env?\n" +
       "- update: change an existing server's tool-call timeout or retry limit with owner confirmation. Params: server_id, tool_call_timeout_ms?, max_retries?\n" +
       "- remove: remove an MCP server. Params: server_id (required)\n" +
-      "- enable: enable a disabled MCP server. Params: server_id (required)\n" +
-      "- disable: disable an MCP server without removing it. Params: server_id (required)\n" +
+      "- enable: request owner inbox approval to enable a configured MCP server. Params: server_id and lifecycle_revision from lifecycle_status\n" +
+      "- disable: request owner inbox approval to disable a configured MCP server. Params: server_id and lifecycle_revision from lifecycle_status\n" +
       "- status: show config details for one server. Params: server_id (required)\n" +
+      "- lifecycle_status: read enabled state and an exact owner revision without revealing transport or credentials. Params: server_id (required)\n" +
       "- tools: list currently registered tools for one connected server in the owner session. Params: server_id (required)",
     parameters: {
       action: {
         type: "string",
         description:
-          "The operation: list, add, update, remove, enable, disable, status, tools",
+          "The operation: list, add, update, remove, enable, disable, status, lifecycle_status, tools",
         required: true,
       },
       server_id: {
         type: "string",
         description: "Server identifier (required for all actions except list)",
         required: false,
+      },
+      lifecycle_revision: {
+        type: "string",
+        description:
+          "Exact current owner revision from lifecycle_status, required for enable and disable.",
       },
       command: {
         type: "string",
@@ -94,8 +100,8 @@ Use \`mcp_manage\` to manage MCP server configuration. All writes modify trigger
 - \`action: "add", server_id: "...", url: "http://..."\` — add an SSE server
 - \`action: "update", server_id: "...", tool_call_timeout_ms: 15000, max_retries: 3\` — update runtime settings for an existing server after owner confirmation
 - \`action: "remove", server_id: "..."\` — remove a server from config
-- \`action: "enable", server_id: "..."\` — enable a disabled server
-- \`action: "disable", server_id: "..."\` — disable without removing
+- \`action: "enable", server_id: "..."\` — use the current lifecycle_revision from lifecycle_status and wait for the owner inbox decision
+- \`action: "disable", server_id: "..."\` — use the current lifecycle_revision from lifecycle_status and wait for the owner inbox decision
 - \`action: "status", server_id: "..."\` — show config details for one server
 - \`action: "tools", server_id: "..."\` — list tools currently registered for that server in owner chat
 

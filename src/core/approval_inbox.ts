@@ -3,6 +3,10 @@
 
 import { dirname, resolve } from "@std/path";
 import { DatabaseSync } from "node:sqlite";
+import {
+  type McpLifecycleReview,
+  parseMcpLifecycleReview,
+} from "./mcp_lifecycle_intent.ts";
 
 export type ApprovalInboxStatus =
   | "pending"
@@ -21,6 +25,7 @@ export interface ApprovalInboxRequest {
   readonly runId?: string;
   readonly assignmentId?: string;
   readonly tool: string;
+  readonly mcpLifecycle?: McpLifecycleReview;
   /** Trusted context fingerprint. Never projected from the journal. */
   readonly binding: string;
   readonly expiresAt: number;
@@ -34,6 +39,7 @@ export interface ApprovalInboxRecord {
   readonly assignmentId?: string;
   readonly tool: string;
   readonly description: string;
+  readonly mcpLifecycle?: McpLifecycleReview;
   readonly status: ApprovalInboxStatus;
   readonly decision?: ApprovalInboxDecision;
   readonly dispatchOutcome?: ApprovalInboxDispatchOutcome;
@@ -101,6 +107,9 @@ function openPrivateDatabase(path: string) {
 function project(row: Row | undefined): ApprovalInboxRecord | undefined {
   if (!row) return undefined;
   const tool = String(row.tool);
+  const review = tool === "mcp_manage"
+    ? parseMcpLifecycleReview(row.mcpLifecycleAction, row.mcpConnectorId)
+    : undefined;
   return {
     id: String(row.id),
     scope: String(row.scope),
@@ -109,7 +118,10 @@ function project(row: Row | undefined): ApprovalInboxRecord | undefined {
     ...(typeof row.assignmentId === "string" &&
       { assignmentId: row.assignmentId }),
     tool,
-    description: `Approval required for tool ${tool}.`,
+    description: review
+      ? `Approve ${review.action} for configured MCP connector '${review.connectorId}'.`
+      : `Approval required for tool ${tool}.`,
+    ...(review && { mcpLifecycle: review }),
     status: row.status as ApprovalInboxStatus,
     ...((row.decision === "approved" || row.decision === "denied") && {
       decision: row.decision,
@@ -136,11 +148,21 @@ export function openApprovalInbox(path: string, now = Date.now) {
     transaction(db, () => {
       const id = db.prepare("PRAGMA application_id").get()?.application_id;
       const version = db.prepare("PRAGMA user_version").get()?.user_version;
-      if (id === applicationId && version === 3) return;
+      if (id === applicationId && version === 4) return;
+      if (id === applicationId && version === 3) {
+        db.exec(`
+          ALTER TABLE approval_requests ADD COLUMN mcpLifecycleAction TEXT;
+          ALTER TABLE approval_requests ADD COLUMN mcpConnectorId TEXT;
+          PRAGMA user_version = 4;
+        `);
+        return;
+      }
       if (id === applicationId && version === 2) {
         db.exec(`
           ALTER TABLE approval_requests ADD COLUMN handlerReturnedAt INTEGER;
-          PRAGMA user_version = 3;
+          ALTER TABLE approval_requests ADD COLUMN mcpLifecycleAction TEXT;
+          ALTER TABLE approval_requests ADD COLUMN mcpConnectorId TEXT;
+          PRAGMA user_version = 4;
         `);
         return;
       }
@@ -155,7 +177,9 @@ export function openApprovalInbox(path: string, now = Date.now) {
           UPDATE approval_requests SET decision = 'denied'
             WHERE status = 'denied';
           ALTER TABLE approval_requests ADD COLUMN handlerReturnedAt INTEGER;
-          PRAGMA user_version = 3;
+          ALTER TABLE approval_requests ADD COLUMN mcpLifecycleAction TEXT;
+          ALTER TABLE approval_requests ADD COLUMN mcpConnectorId TEXT;
+          PRAGMA user_version = 4;
         `);
         return;
       }
@@ -174,6 +198,8 @@ export function openApprovalInbox(path: string, now = Date.now) {
           runId TEXT,
           assignmentId TEXT,
           tool TEXT NOT NULL,
+          mcpLifecycleAction TEXT,
+          mcpConnectorId TEXT,
           binding TEXT NOT NULL,
           status TEXT NOT NULL CHECK (status IN ('pending','approved','denied','claimed','completed','stale')),
           decision TEXT CHECK (decision IN ('approved','denied')),
@@ -186,7 +212,7 @@ export function openApprovalInbox(path: string, now = Date.now) {
         );
         CREATE INDEX approval_by_scope ON approval_requests(scope, sequence DESC);
         PRAGMA application_id = ${applicationId};
-        PRAGMA user_version = 3;
+        PRAGMA user_version = 4;
       `);
     });
   } catch (error) {
@@ -211,6 +237,7 @@ export function openApprovalInbox(path: string, now = Date.now) {
         runId,
         assignmentId,
         tool,
+        mcpLifecycle,
         binding,
         expiresAt,
       } = raw;
@@ -219,6 +246,12 @@ export function openApprovalInbox(path: string, now = Date.now) {
         runId !== undefined && !exactReference(runId) ||
         assignmentId !== undefined && !exactReference(assignmentId) ||
         typeof tool !== "string" || !toolPattern.test(tool) ||
+        mcpLifecycle !== undefined &&
+          (!mcpLifecycle || tool !== "mcp_manage" ||
+            !parseMcpLifecycleReview(
+              mcpLifecycle.action,
+              mcpLifecycle.connectorId,
+            )) ||
         typeof binding !== "string" || !tokenPattern.test(binding) ||
         !Number.isSafeInteger(expiresAt) || expiresAt < 1
       ) return undefined;
@@ -231,14 +264,16 @@ export function openApprovalInbox(path: string, now = Date.now) {
               previous.runId === (runId ?? null) &&
               previous.assignmentId === (assignmentId ?? null) &&
               previous.tool === tool &&
+              previous.mcpLifecycleAction === (mcpLifecycle?.action ?? null) &&
+              previous.mcpConnectorId === (mcpLifecycle?.connectorId ?? null) &&
               previous.binding === binding && previous.expiresAt === expiresAt
             ? project(previous)
             : undefined;
         }
         if (expiresAt <= at) return undefined;
         const row = db.prepare(`
-          INSERT INTO approval_requests (id,scope,sessionId,runId,assignmentId,tool,binding,status,createdAt,updatedAt,expiresAt)
-          VALUES (?,?,?,?,?,?,?,'pending',?,?,?)
+          INSERT INTO approval_requests (id,scope,sessionId,runId,assignmentId,tool,mcpLifecycleAction,mcpConnectorId,binding,status,createdAt,updatedAt,expiresAt)
+          VALUES (?,?,?,?,?,?,?,?,?,'pending',?,?,?)
           ON CONFLICT(id) DO NOTHING RETURNING *
         `).get(
           id,
@@ -247,6 +282,8 @@ export function openApprovalInbox(path: string, now = Date.now) {
           runId ?? null,
           assignmentId ?? null,
           tool,
+          mcpLifecycle?.action ?? null,
+          mcpLifecycle?.connectorId ?? null,
           binding,
           at,
           at,

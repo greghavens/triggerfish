@@ -141,6 +141,22 @@ export function createDefaultRules(): PolicyRule[] {
     buildToolFloorRule(),
     buildResourceWriteDownRule(),
     buildResourceReadCeilingRule(),
+    {
+      id: "configured-mcp-lifecycle-approval",
+      priority: 760,
+      hook: "PRE_TOOL_CALL",
+      conditions: [
+        { field: "tool_name", operator: "equals", value: "mcp_manage" },
+        {
+          field: "mcp_lifecycle_action",
+          operator: "matches",
+          value: "^(enable|disable)$",
+        },
+        { field: "is_owner", operator: "equals", value: "true" },
+        { field: "is_trigger", operator: "equals", value: "false" },
+      ],
+      action: "REQUIRE_APPROVAL",
+    },
     buildRateLimitBaseRule(),
     buildLogFileRedactRule(),
   ];

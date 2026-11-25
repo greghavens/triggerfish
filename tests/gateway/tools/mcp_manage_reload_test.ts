@@ -1,5 +1,6 @@
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { fromFileUrl, join } from "@std/path";
+import type { ApprovalInboxRecord } from "../../../src/core/approval_inbox.ts";
 import { readConfigYaml } from "../../../src/core/config_io.ts";
 
 const gatewayFixture = fromFileUrl(
@@ -39,9 +40,33 @@ async function stopGatewayProcess(process: Deno.ChildProcess): Promise<void> {
   }
 }
 
+interface ApprovalControls {
+  list(): Promise<readonly ApprovalInboxRecord[]>;
+  decide(
+    id: string,
+    approved: boolean,
+  ): Promise<{ readonly ok: boolean; readonly result?: unknown }>;
+}
+
+async function nextApproval(
+  controls: ApprovalControls,
+  accept: (record: ApprovalInboxRecord) => boolean,
+): Promise<ApprovalInboxRecord> {
+  const deadline = Date.now() + 2_500;
+  do {
+    const found = (await controls.list()).find(accept);
+    if (found) return found;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  } while (Date.now() < deadline);
+  throw new Error("MCP lifecycle approval did not reach the expected state.");
+}
+
 async function withConfiguredGateway(
   dir: string,
-  fixture: (turn: (content: string) => Promise<string>) => Promise<void>,
+  fixture: (
+    turn: (content: string) => Promise<string>,
+    controls: ApprovalControls,
+  ) => Promise<void>,
 ): Promise<void> {
   const token = crypto.randomUUID();
   const process = new Deno.Command(Deno.execPath(), {
@@ -87,6 +112,45 @@ async function withConfiguredGateway(
       }),
       "Could not connect to the MCP gateway.",
     );
+    const approvalRequest = async (body: Record<string, unknown>) => {
+      const requestId = crypto.randomUUID();
+      const accepted = Promise.withResolvers<
+        { ok: boolean; result?: unknown }
+      >();
+      const receive = ({ data }: MessageEvent) => {
+        const event = JSON.parse(data);
+        if (
+          event.type === "approval_inbox_result" &&
+          event.requestId === requestId
+        ) {
+          accepted.resolve(event);
+        }
+      };
+      connected.addEventListener("message", receive);
+      try {
+        connected.send(JSON.stringify({ ...body, requestId }));
+        return await within(
+          accepted.promise,
+          "MCP approval inbox did not respond.",
+        );
+      } finally {
+        connected.removeEventListener("message", receive);
+      }
+    };
+    const controls: ApprovalControls = {
+      async list() {
+        const reply = await approvalRequest({ type: "approval_inbox_list" });
+        assert(reply.ok);
+        return (reply.result as { records: readonly ApprovalInboxRecord[] })
+          .records;
+      },
+      decide: (approvalId, approved) =>
+        approvalRequest({
+          type: "approval_inbox_decide",
+          approvalId,
+          approved,
+        }),
+    };
     await fixture(async (content) => {
       let response: string | undefined;
       const end = Promise.withResolvers<void>();
@@ -108,7 +172,7 @@ async function withConfiguredGateway(
       } finally {
         connected.removeEventListener("message", receive);
       }
-    });
+    }, controls);
   } finally {
     try {
       if (socket && socket.readyState < WebSocket.CLOSING) {
@@ -129,7 +193,7 @@ async function withConfiguredGateway(
 
 Deno.test({
   name:
-    "Configured MCP calls use approved timeout and retry settings after gateway restart",
+    "Configured MCP updates and reviewed lifecycle decisions take effect after gateway restart",
   ignore: Deno.build.os === "windows",
   async fn() {
     const dir = await Deno.makeTempDir();
@@ -211,7 +275,8 @@ mcp_servers:
         !JSON.stringify(saved.value).includes("fixture-mcp-private-value"),
       );
 
-      await withConfiguredGateway(dir, async (turn) => {
+      let disabledId = "";
+      await withConfiguredGateway(dir, async (turn, inbox) => {
         assertEquals(
           await Deno.readTextFile(probe),
           "attempt\nattempt\nattempt\n",
@@ -223,6 +288,147 @@ mcp_servers:
           "MCP request timed out after 1000ms: tools/call",
         );
         assert(!expired.includes("fixture-mcp-private-value"));
+        const before = await Deno.readTextFile(configPath);
+        const review = JSON.parse(await turn("Review inventory lifecycle"));
+        assertEquals(review.enabled, true);
+        assertEquals(Object.keys(review).sort(), [
+          "_classification",
+          "enabled",
+          "lifecycle_revision",
+          "server_id",
+        ]);
+        const request = `Disable inventory ${review.lifecycle_revision}`;
+
+        const declinedTurn = turn(request);
+        const declined = await nextApproval(
+          inbox,
+          ({ status }) => status === "pending",
+        );
+        assertEquals(declined.mcpLifecycle, {
+          action: "disable",
+          connectorId: "inventory",
+        });
+        assertStringIncludes(
+          declined.description,
+          "configured MCP connector 'inventory'",
+        );
+        assert(!JSON.stringify(declined).includes(review.lifecycle_revision));
+        assert(!JSON.stringify(declined).includes("fixture-mcp-key"));
+        assertEquals(await Deno.readTextFile(configPath), before);
+        assertEquals((await inbox.decide(declined.id, false)).ok, true);
+        assertStringIncludes(await declinedTurn, "approval was denied");
+        assertEquals(await Deno.readTextFile(configPath), before);
+
+        const revokedTurn = turn(request);
+        const pending = await nextApproval(
+          inbox,
+          ({ status }) => status === "pending",
+        );
+        const revocation = join(dir, "deny-lifecycle");
+        await Deno.writeTextFile(revocation, "");
+        assertEquals((await inbox.decide(pending.id, true)).ok, true);
+        assertStringIncludes(await revokedTurn, "approval was denied");
+        const revoked = await nextApproval(
+          inbox,
+          ({ id, status }) => id === pending.id && status === "stale",
+        );
+        assertEquals(revoked.handlerReturnedAt, undefined);
+        assertEquals(await Deno.readTextFile(configPath), before);
+        await Deno.remove(revocation);
+
+        const changedTurn = turn(request);
+        const changed = await nextApproval(
+          inbox,
+          ({ status }) => status === "pending",
+        );
+        const external = before + "\ndebug: true\n";
+        await Deno.writeTextFile(configPath, external);
+        assertEquals((await inbox.decide(changed.id, true)).ok, true);
+        assertStringIncludes(await changedTurn, "configuration changed");
+        assertEquals(await Deno.readTextFile(configPath), external);
+        await Deno.writeTextFile(configPath, before);
+
+        const apply = turn(request);
+        const approved = await nextApproval(
+          inbox,
+          ({ status }) => status === "pending",
+        );
+        assertEquals((await inbox.decide(approved.id, true)).ok, true);
+        const result = JSON.parse(await apply);
+        disabledId = approved.id;
+        assertEquals(result, {
+          success: true,
+          server_id: "inventory",
+          enabled: false,
+          changed: true,
+          approval_request_id: disabledId,
+          restart_needed: true,
+          _classification: "INTERNAL",
+        });
+        const completed = await nextApproval(
+          inbox,
+          ({ id, status }) => id === disabledId && status === "completed",
+        );
+        assertEquals(completed.dispatchOutcome, "returned");
+        const savedDisabled = await Deno.readTextFile(configPath);
+        assertEquals((await inbox.decide(disabledId, true)).result, completed);
+        assertEquals(await Deno.readTextFile(configPath), savedDisabled);
+        const original = readConfigYaml(configPath);
+        assert(original.ok);
+        const inventory = (original.value.mcp_servers as Record<
+          string,
+          Record<string, unknown>
+        >).inventory;
+        assertEquals(inventory.enabled, false);
+        assertEquals(inventory.classification, "CONFIDENTIAL");
+        assertEquals(inventory.env, {
+          MCP_FIXTURE_CREDENTIAL: "secret:fixture-mcp-key",
+        });
+        assertEquals(inventory.tool_call_timeout_ms, 1000);
+      });
+      await withConfiguredGateway(dir, async (turn, inbox) => {
+        assertEquals(JSON.parse(await turn("List inventory tools")).tools, []);
+        assertEquals(
+          JSON.parse(await turn("List inventory tools")).connected,
+          false,
+        );
+        const persisted = await nextApproval(
+          inbox,
+          ({ id }) => id === disabledId,
+        );
+        assertEquals(persisted.decision, "approved");
+        assertEquals(persisted.mcpLifecycle, {
+          action: "disable",
+          connectorId: "inventory",
+        });
+        assertEquals(persisted.dispatchOutcome, "returned");
+        assertEquals((await inbox.decide(disabledId, true)).result, persisted);
+        const status = JSON.parse(await turn("Review inventory lifecycle"));
+        assertEquals(status.enabled, false);
+        const enabling = turn(`Enable inventory ${status.lifecycle_revision}`);
+        const pending = await nextApproval(
+          inbox,
+          ({ status }) => status === "pending",
+        );
+        assertEquals(pending.mcpLifecycle, {
+          action: "enable",
+          connectorId: "inventory",
+        });
+        assertEquals((await inbox.decide(pending.id, true)).ok, true);
+        const enabled = JSON.parse(await enabling);
+        assertEquals(enabled.enabled, true);
+        assertEquals(enabled.approval_request_id, pending.id);
+        assertEquals(enabled.restart_needed, true);
+        assertEquals(
+          JSON.parse(await turn("List inventory tools")).connected,
+          false,
+        );
+      });
+      await withConfiguredGateway(dir, async (turn) => {
+        assertEquals(JSON.parse(await turn("List inventory tools")).tools, [
+          "mcp_inventory_check",
+        ]);
+        assertEquals(await turn("Read fast inventory"), expectedInventory);
       });
     } finally {
       await Deno.remove(dir, { recursive: true });

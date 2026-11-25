@@ -8,6 +8,7 @@
  * @module
  */
 
+import { parseMcpLifecycleIntent } from "../../core/mcp_lifecycle_intent.ts";
 import type { ClassificationLevel } from "../../core/types/classification.ts";
 import {
   FILESYSTEM_READ_TOOLS,
@@ -212,9 +213,11 @@ export function assembleSecurityContext(
   call: ParsedToolCall,
   config: SecurityContextConfig,
 ): { input: Record<string, unknown>; ctx: SecurityContext } {
+  const lifecycle = parseMcpLifecycleIntent(call.name, call.args);
   const hookInput: Record<string, unknown> = {
     tool_call: call,
     tool_name: call.name,
+    ...(lifecycle && { mcp_lifecycle_action: lifecycle.action }),
   };
   const toolName = call.name;
   const toolFloor = config.toolFloorRegistry?.getFloor(toolName) ?? null;

@@ -26,6 +26,7 @@ export interface ToolExecutionContext {
   readonly allowSentinelCapture?: boolean;
   readonly isCurrentInteractiveOwner?: () => boolean;
   readonly ownerSessionId?: string;
+  readonly toolApprovalRequestId?: string;
   readonly reauthorizeOwnerApproval?: () => Promise<boolean>;
 }
 

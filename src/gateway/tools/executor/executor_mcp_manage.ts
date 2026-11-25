@@ -8,6 +8,7 @@
  * @module
  */
 
+import { createHmac, randomBytes } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import type { ToolExecutionContext } from "../../../core/types/tool.ts";
 import {
@@ -18,10 +19,10 @@ import {
 import {
   deleteConfigValue,
   readConfigYaml,
-  writeConfigValue,
   writeConfigYaml,
 } from "../../../core/config_io.ts";
 import { createLogger } from "../../../core/logger/mod.ts";
+import { parseMcpLifecycleIntent } from "../../../core/mcp_lifecycle_intent.ts";
 
 const log = createLogger("mcp-manage");
 const serverIdPattern = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/;
@@ -120,7 +121,17 @@ async function executeAdd(
   ctx: McpManageContext,
   input: Record<string, unknown>,
 ): Promise<string> {
-  const serverId = input.server_id as string;
+  const serverId = input.server_id;
+  if (
+    typeof serverId !== "string" ||
+    !/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(serverId)
+  ) {
+    return "Error: Select a valid new MCP server ID.";
+  }
+  const config = readConfigYaml(ctx.configPath);
+  if (!config.ok || Object.hasOwn(configServers(config.value), serverId)) {
+    return "Error: Use the existing MCP server's administrative operations.";
+  }
   const command = input.command as string | undefined;
   const url = input.url as string | undefined;
 
@@ -144,11 +155,17 @@ async function executeAdd(
     ...(env ? { env } : {}),
   };
 
-  const writeResult = await writeConfigValue(
-    ctx.configPath,
-    `mcp.servers.${serverId}`,
-    configData,
-  );
+  const updated = structuredClone(config.value);
+  const servers = configServers(updated);
+  const mcp = updated.mcp as Record<string, unknown> | undefined;
+  if ((mcp?.servers ?? updated.mcp_servers) == null) {
+    updated.mcp = { ...mcp, servers };
+  }
+  servers[serverId] = configData;
+  const writeResult = await writeConfigYaml(ctx.configPath, updated, () => {
+    const current = readConfigYaml(ctx.configPath);
+    return current.ok && isDeepStrictEqual(current.value, config.value);
+  });
   if (!writeResult.ok) return `Error: ${writeResult.error}`;
 
   log.info("MCP server added via mcp_manage", {
@@ -278,38 +295,65 @@ async function executeRemove(
   });
 }
 
-/** Handle enable/disable actions — toggles enabled flag in config. */
+type LifecycleRevision = (
+  config: Record<string, unknown>,
+  serverId: string,
+) => string;
+
+/** Enable or disable only the exact saved connector reviewed by the owner. */
 async function executeToggleEnabled(
   ctx: McpManageContext,
-  serverId: string,
-  enable: boolean,
+  input: Record<string, unknown>,
+  revisionFor: LifecycleRevision,
+  dispatch?: ToolExecutionContext,
 ): Promise<string> {
-  // Check both config paths for the server
-  const configServers = readConfigServers(ctx.configPath);
-  if (!configServers[serverId]) {
-    return JSON.stringify({
-      error: `MCP server '${serverId}' not found in config.`,
-      available: Object.keys(configServers),
+  const intent = parseMcpLifecycleIntent("mcp_manage", input);
+  const owner = dispatch?.isCurrentInteractiveOwner;
+  const request = dispatch?.toolApprovalRequestId;
+  if (!intent || !owner?.() || !request) {
+    return "Error: Connector lifecycle changes require the current revision and owner inbox approval.";
+  }
+  const config = readConfigYaml(ctx.configPath);
+  if (!config.ok) {
+    return "Error: The approved connector configuration is unavailable.";
+  }
+  const servers = configServers(config.value);
+  const cfg = Object.hasOwn(servers, intent.connectorId)
+    ? servers[intent.connectorId]
+    : undefined;
+  if (
+    !cfg || typeof cfg !== "object" || Array.isArray(cfg) ||
+    revisionFor(config.value, intent.connectorId) !== intent.revision
+  ) {
+    return "Error: The connector configuration changed before the approved lifecycle action.";
+  }
+  const enable = intent.action === "enable";
+  const changed = (cfg.enabled !== false) !== enable;
+  if (changed) {
+    const updated = structuredClone(config.value);
+    configServers(updated)[intent.connectorId] = { ...cfg, enabled: enable };
+    const written = await writeConfigYaml(ctx.configPath, updated, () => {
+      const current = readConfigYaml(ctx.configPath);
+      return owner() && current.ok &&
+        revisionFor(current.value, intent.connectorId) === intent.revision;
+    });
+    if (!written.ok) return `Error: ${written.error}`;
+    log.info("MCP connector lifecycle action saved", {
+      operation: "mcpManageLifecycle",
+      serverId: intent.connectorId,
+      action: intent.action,
+      approvalRequestId: request,
     });
   }
 
-  const path = `mcp.servers.${serverId}.enabled`;
-
-  const writeResult = await writeConfigValue(ctx.configPath, path, enable);
-  if (!writeResult.ok) return `Error: ${writeResult.error}`;
-
-  const action = enable ? "enabled" : "disabled";
-  log.info(`MCP server ${action} via mcp_manage`, {
-    operation: `mcpManage${enable ? "Enable" : "Disable"}`,
-    serverId,
-  });
-
   return JSON.stringify({
     success: true,
-    server_id: serverId,
-    message:
-      `MCP server '${serverId}' ${action}. Use daemon_manage(action: "restart") to apply.`,
-    restart_needed: true,
+    server_id: intent.connectorId,
+    enabled: enable,
+    changed,
+    approval_request_id: request,
+    restart_needed: changed,
+    _classification: "INTERNAL",
   });
 }
 
@@ -318,12 +362,13 @@ function executeStatus(
   ctx: McpManageContext,
   serverId: string,
 ): string {
-  const configServers = readConfigServers(ctx.configPath);
-  const cfg = configServers[serverId];
+  const config = readConfigYaml(ctx.configPath);
+  const servers = config.ok ? configServers(config.value) : {};
+  const cfg = Object.hasOwn(servers, serverId) ? servers[serverId] : undefined;
   if (!cfg) {
     return JSON.stringify({
       error: `MCP server '${serverId}' not found in config.`,
-      available: Object.keys(configServers),
+      available: Object.keys(servers),
     });
   }
   return JSON.stringify({
@@ -337,6 +382,34 @@ function executeStatus(
     tool_call_timeout_ms: cfg.tool_call_timeout_ms,
     max_retries: cfg.max_retries,
     env_keys: cfg.env ? Object.keys(cfg.env as Record<string, unknown>) : [],
+  });
+}
+
+/** Return a review token without exposing the configured transport or credentials. */
+function executeLifecycleStatus(
+  ctx: McpManageContext,
+  input: Record<string, unknown>,
+  revisionFor: LifecycleRevision,
+  dispatch?: ToolExecutionContext,
+): string {
+  const id = input.server_id;
+  if (
+    !dispatch?.isCurrentInteractiveOwner?.() ||
+    typeof id !== "string" || !serverIdPattern.test(id) ||
+    Object.keys(input).some((key) => key !== "action" && key !== "server_id")
+  ) return "Error: Select one exact connector in the active owner session.";
+  const config = readConfigYaml(ctx.configPath);
+  if (!config.ok) return "Error: The connector configuration is unavailable.";
+  const servers = configServers(config.value);
+  const cfg = Object.hasOwn(servers, id) ? servers[id] : undefined;
+  if (!cfg || typeof cfg !== "object" || Array.isArray(cfg)) {
+    return "Error: The connector configuration is unavailable.";
+  }
+  return JSON.stringify({
+    server_id: id,
+    enabled: cfg.enabled !== false,
+    lifecycle_revision: revisionFor(config.value, id),
+    _classification: "INTERNAL",
   });
 }
 
@@ -383,6 +456,11 @@ export function createMcpManageExecutor(
   input: Record<string, unknown>,
   context?: ToolExecutionContext,
 ) => Promise<string | null> {
+  const key = randomBytes(32);
+  const revisionFor: LifecycleRevision = (config, serverId) =>
+    createHmac("sha256", key).update(JSON.stringify([serverId, config])).digest(
+      "hex",
+    );
   return async (
     name: string,
     input: Record<string, unknown>,
@@ -392,7 +470,7 @@ export function createMcpManageExecutor(
 
     const action = input.action as string | undefined;
     if (!action) {
-      return "Error: mcp_manage requires an 'action' parameter (list, add, update, remove, enable, disable, status, tools).";
+      return "Error: mcp_manage requires an 'action' parameter (list, add, update, remove, enable, disable, status, lifecycle_status, tools).";
     }
 
     const serverId = input.server_id as string | undefined;
@@ -414,11 +492,12 @@ export function createMcpManageExecutor(
       case "remove":
         return await executeRemove(ctx, serverId!);
       case "enable":
-        return await executeToggleEnabled(ctx, serverId!, true);
       case "disable":
-        return await executeToggleEnabled(ctx, serverId!, false);
+        return await executeToggleEnabled(ctx, input, revisionFor, context);
       case "status":
         return executeStatus(ctx, serverId!);
+      case "lifecycle_status":
+        return executeLifecycleStatus(ctx, input, revisionFor, context);
       case "tools":
         return executeTools(
           ctx,
@@ -426,7 +505,7 @@ export function createMcpManageExecutor(
           context?.isCurrentInteractiveOwner,
         );
       default:
-        return `Error: Unknown action "${action}". Valid actions: list, add, update, remove, enable, disable, status, tools.`;
+        return `Error: Unknown action "${action}". Valid actions: list, add, update, remove, enable, disable, status, lifecycle_status, tools.`;
     }
   };
 }

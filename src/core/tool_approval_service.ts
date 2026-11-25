@@ -1,6 +1,7 @@
 /** Hold an exact live tool call while an operator reviews metadata in the inbox. */
 import { createHmac, randomBytes } from "node:crypto";
 import { resolve } from "@std/path";
+import { parseMcpLifecycleIntent } from "./mcp_lifecycle_intent.ts";
 import { openApprovalInbox } from "./approval_inbox.ts";
 
 export interface ToolApprovalContext {
@@ -74,6 +75,7 @@ function buildToolApprovalService(path: string) {
           ]),
         ).digest("hex");
       const binding = bind(args);
+      const lifecycle = parseMcpLifecycleIntent(tool, args);
       const request = use((db) =>
         db.submit({
           id,
@@ -82,6 +84,12 @@ function buildToolApprovalService(path: string) {
           runId,
           assignmentId,
           tool,
+          ...(lifecycle && {
+            mcpLifecycle: {
+              action: lifecycle.action,
+              connectorId: lifecycle.connectorId,
+            },
+          }),
           binding,
           expiresAt: Date.now() + 120_000,
         })
@@ -111,6 +119,7 @@ function buildToolApprovalService(path: string) {
             }
             const claim = use((db) => db.claim(ownerScope, id, binding));
             return claim && {
+              requestId: id,
               recordHandlerReturn: () =>
                 use((db) =>
                   db.recordHandlerReturn(ownerScope, id, claim.token)

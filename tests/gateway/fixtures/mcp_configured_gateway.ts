@@ -3,7 +3,11 @@ import { createProviderRegistry } from "../../../src/agent/llm.ts";
 import { loadConfigWithSecrets } from "../../../src/core/config.ts";
 import { initLogger } from "../../../src/core/logger/mod.ts";
 import { createPolicyEngine } from "../../../src/core/policy/engine.ts";
-import { createHookRunner } from "../../../src/core/policy/hooks/hooks.ts";
+import {
+  createDefaultRules,
+  createHookRunner,
+} from "../../../src/core/policy/hooks/hooks.ts";
+import { createToolApprovalService } from "../../../src/core/tool_approval_service.ts";
 import { createMemorySecretStore } from "../../../src/core/secrets/mod.ts";
 import { createLineageStore } from "../../../src/core/session/mod.ts";
 import { createMemoryStorage } from "../../../src/core/storage/memory.ts";
@@ -32,7 +36,30 @@ const config = await loadConfigWithSecrets(configPath, secretStore);
 if (!config.ok) throw new Error(config.error);
 const servers = config.value.mcp?.servers ?? config.value.mcp_servers;
 if (!servers) throw new Error("The MCP fixture configuration has no servers.");
-const hookRunner = createHookRunner(createPolicyEngine());
+const engine = createPolicyEngine();
+for (const rule of createDefaultRules()) engine.addRule(rule);
+const baseHooks = createHookRunner(engine);
+const hookRunner: typeof baseHooks = {
+  ...baseHooks,
+  toolApprovalInbox: createToolApprovalService(join(dir, "tool-approvals.db")),
+  evaluateHook(hook, context) {
+    if (hook === "PRE_TOOL_CALL" && context.input.mcp_lifecycle_action) {
+      try {
+        if (Deno.lstatSync(join(dir, "deny-lifecycle")).isFile) {
+          return Promise.resolve({
+            allowed: false,
+            action: "BLOCK",
+            ruleId: "fixture.revoked",
+            duration: 0,
+          });
+        }
+      } catch (error) {
+        if (!(error instanceof Deno.errors.NotFound)) throw error;
+      }
+    }
+    return baseHooks.evaluateHook(hook, context);
+  },
+};
 const toolClassifications = new Map<string, ClassificationLevel>();
 const integrationClassifications = new Map<string, ClassificationLevel>();
 const wiring = wireMcpServers(
@@ -47,9 +74,10 @@ const wiring = wireMcpServers(
 );
 const deadline = performance.now() + 8_000;
 while (
-  !wiring.getToolDefinitions().some(({ name }) =>
-    name === "mcp_inventory_check"
-  ) ||
+  (servers.inventory?.enabled !== false &&
+    !wiring.getToolDefinitions().some(({ name }) =>
+      name === "mcp_inventory_check"
+    )) ||
   !wiring.manager.getStatus().some(({ id, state }) =>
     id === "retry_probe" && state === "failed"
   )
@@ -81,8 +109,12 @@ registry.register({
       : request === "List retry probe tools"
       ? "retry_probe"
       : undefined;
+    const lifecycle = /^(Disable|Enable) inventory ([a-f0-9]{64})$/.exec(
+      request,
+    );
     const manage = request === "Update inventory timeout" ||
-      request === "Update retry limit" || toolsServer !== undefined;
+      request === "Update retry limit" || toolsServer !== undefined ||
+      request === "Review inventory lifecycle" || lifecycle !== null;
     const name = manage ? "mcp_manage" : "mcp_inventory_check";
     if (
       !definitions?.some((definition) =>
@@ -99,6 +131,14 @@ registry.register({
       ? { action: "update", server_id: "retry_probe", max_retries: 1 }
       : toolsServer
       ? { action: "tools", server_id: toolsServer }
+      : request === "Review inventory lifecycle"
+      ? { action: "lifecycle_status", server_id: "inventory" }
+      : lifecycle
+      ? {
+        action: lifecycle[1].toLowerCase(),
+        server_id: "inventory",
+        lifecycle_revision: lifecycle[2],
+      }
       : { slow: request === "Read slow inventory" };
     return Promise.resolve({
       content: "",

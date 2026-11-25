@@ -9,6 +9,7 @@
  * @module
  */
 
+import { parseMcpLifecycleIntent } from "../../core/mcp_lifecycle_intent.ts";
 import { isDeepStrictEqual } from "node:util";
 import { computeContentHash } from "../../core/session/lineage_serde.ts";
 import { canFlowTo } from "../../core/types/classification.ts";
@@ -247,7 +248,7 @@ export async function dispatchApprovedToolCall(
   signal?: AbortSignal,
   ownerApproval?: Pick<
     ToolExecutionContext,
-    "ownerSessionId" | "reauthorizeOwnerApproval"
+    "ownerSessionId" | "reauthorizeOwnerApproval" | "toolApprovalRequestId"
   >,
 ): Promise<{ resultText: string; blocked: boolean }> {
   const writeDown = enforceIntegrationWriteDownPolicy(call, config);
@@ -269,7 +270,9 @@ export async function dispatchApprovedToolCall(
     call.name === "inspect_skill_revision" ||
     call.name === "stage_skill_revision" ||
     (call.name === "mcp_manage" &&
-      (call.args.action === "update" || call.args.action === "tools"));
+      (call.args.action === "update" || call.args.action === "tools" ||
+        call.args.action === "lifecycle_status" ||
+        parseMcpLifecycleIntent(call.name, call.args)));
   const interactiveOwner = () =>
     !signal?.aborted && config.isOwnerSession?.() === true;
   return {
@@ -339,6 +342,7 @@ export async function dispatchSecurityEnforcedToolCall(
 
   let currentContext = secCtx;
   let approval: {
+    requestId: string;
     recordHandlerReturn(): unknown;
     finish(outcome: "returned" | "blocked" | "failed"): unknown;
   } | undefined;
@@ -470,6 +474,8 @@ export async function dispatchSecurityEnforcedToolCall(
               !enforceIntegrationWriteDownPolicy(call, config).blocked;
           },
         }
+        : approval && parseMcpLifecycleIntent(call.name, call.args)
+        ? { toolApprovalRequestId: approval.requestId }
         : undefined,
     );
     if (!response.blocked) approval?.recordHandlerReturn();
