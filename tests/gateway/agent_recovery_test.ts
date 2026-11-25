@@ -901,6 +901,18 @@ Deno.test("gateway resumes a saved credential-backed result and blocks revoked o
       traceRole: "owner_chat",
       id: exactReadId,
     });
+    const traceSearch = archiveRequest({
+      action: "execution_traces",
+      traceRole: "owner_chat",
+      id: exactReadId,
+      query: "github_actions",
+    });
+    const payloadSearch = archiveRequest({
+      action: "execution_trace_payload",
+      traceRole: "owner_chat",
+      id: exactReadId,
+      query: repo,
+    });
     await withGateway("exact_resume", async (socket) => {
       const reopened = JSON.parse(await turn(socket, trace));
       assertEquals(reopened.run.scope.runId, exactReadId);
@@ -915,17 +927,36 @@ Deno.test("gateway resumes a saved credential-backed result and blocks revoked o
       assertEquals(retained.page.steps.map(({ id }: { id: string }) => id), [
         reopened.step.id,
       ]);
+      for (const search of [traceSearch, payloadSearch]) {
+        const found = JSON.parse(await turn(socket, search));
+        assertEquals(
+          found.page.matches.map((
+            { runId, id }: { runId: string; id: string },
+          ) => [runId, id]),
+          [[exactReadId, reopened.step.id]],
+        );
+      }
       const all = JSON.parse(
         await turn(socket, archiveRequest({ action: "execution_traces" })),
       );
       assertEquals(all.page.runs, []);
       await keychain.deleteSecret("github-pat");
       assertStringIncludes(await turn(socket, trace), "unavailable");
+      assertEquals(
+        JSON.parse(await turn(socket, payloadSearch)).page.matches,
+        [],
+      );
+      assertEquals(
+        JSON.parse(await turn(socket, traceSearch)).page.matches.length,
+        1,
+      );
       await keychain.setSecret("github-pat", secret);
     });
     await withGateway("exact_resume", async (socket) => {
       assertStringIncludes(await turn(socket, trace), "unavailable");
       assertStringIncludes(await turn(socket, traceList), "unavailable");
+      assertStringIncludes(await turn(socket, traceSearch), "unavailable");
+      assertStringIncludes(await turn(socket, payloadSearch), "unavailable");
     }, createSession({ userId: session.userId, channelId: session.channelId }));
     assertEquals(exactReads, 1);
 

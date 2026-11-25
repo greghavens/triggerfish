@@ -1848,8 +1848,7 @@ export function createOperatorRunToolExecutor(options: {
           !ownerTrace) ||
         (ownerTrace &&
           (!owner || typeof id !== "string" || !digestPattern.test(id) ||
-            !canFlowTo("INTERNAL", context?.ceiling ?? "PUBLIC") ||
-            query !== undefined)) ||
+            !canFlowTo("INTERNAL", context?.ceiling ?? "PUBLIC"))) ||
         (id !== undefined &&
           (typeof id !== "string" || role === undefined || id.length > 255)) ||
         (ordinal !== undefined && (id === undefined || cursor !== undefined ||
@@ -1864,16 +1863,35 @@ export function createOperatorRunToolExecutor(options: {
           join(options.baseDir, "execution-traces.db"),
         );
         try {
+          const requestedId = typeof id === "string"
+            ? ownerTrace ? id.toLowerCase() : id
+            : undefined;
+          const runKey = ownerTrace
+            ? assignmentRecoveryKey(owner!, requestedId!)
+            : requestedId;
+          const run = role && runKey
+            ? journal.readRun(role, runKey, "INTERNAL")
+            : undefined;
+          if (
+            ownerTrace && (!run || run.scope.sessionId !== owner ||
+              run.scope.sourceId !== requestedId)
+          ) return unavailable;
+          const outputMatch = <T extends { runId: string }>(match: T): T =>
+            ownerTrace ? { ...match, runId: requestedId! } : match;
           if (!reopen && typeof query === "string") {
             const page = journal.search({
               query,
               role,
-              runId: id,
+              runId: runKey,
               cursor,
               limit,
               ceiling: "INTERNAL",
             });
-            return page ? safeProjection({ page }) : unavailable;
+            return page
+              ? safeProjection({
+                page: { ...page, matches: page.matches.map(outputMatch) },
+              })
+              : unavailable;
           }
           if (
             searchPayload && typeof query === "string" && context &&
@@ -1885,7 +1903,7 @@ export function createOperatorRunToolExecutor(options: {
               query,
               approvedResults: true,
               role,
-              runId: id,
+              runId: runKey,
               cursor,
               limit,
               ceiling: "INTERNAL",
@@ -1917,14 +1935,16 @@ export function createOperatorRunToolExecutor(options: {
                 matches.push(candidate);
               }
             }
-            if (role && id && !journal.readRun(role, id, "INTERNAL")) {
+            if (role && runKey && !journal.readRun(role, runKey, "INTERNAL")) {
               return unavailable;
             }
             return safeProjection({
               page: {
-                matches: matches.filter(({ role, runId }) =>
-                  journal.readRun(role, runId, "INTERNAL")
-                ),
+                matches: matches
+                  .filter(({ role, runId }) =>
+                    journal.readRun(role, runId, "INTERNAL")
+                  )
+                  .map(outputMatch),
                 nextCursor: page.nextCursor,
               },
             });
@@ -1938,18 +1958,7 @@ export function createOperatorRunToolExecutor(options: {
             });
             return page ? safeProjection({ page }) : unavailable;
           }
-          if (!role) return unavailable;
-          const runKey = ownerTrace
-            ? assignmentRecoveryKey(owner!, id.toLowerCase())
-            : id;
-          const run = journal.readRun(role, runKey, "INTERNAL");
-          if (
-            !run || (ownerTrace &&
-              (run.scope.sessionId !== owner ||
-                run.scope.sourceId !== id.toLowerCase()))
-          ) {
-            return unavailable;
-          }
+          if (!role || !runKey || !run) return unavailable;
           const outputRun = ownerTrace
             ? { ...run, scope: { ...run.scope, runId: id.toLowerCase() } }
             : run;
