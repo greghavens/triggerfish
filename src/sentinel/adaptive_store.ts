@@ -638,6 +638,7 @@ export interface AdaptivePlannerInputManifest {
 
 /** Metadata from one completed tool call in a dispatched planner attempt. */
 export interface AdaptivePlannerRead {
+  readonly goalReceiptRead?: SentinelReviewStep["goalReceiptRead"];
   readonly recheckFindingIds?: readonly string[];
   readonly tool: string;
   readonly outcome: "returned" | "error";
@@ -860,10 +861,22 @@ function normalizePlannerRead(read: AdaptivePlannerRead): AdaptivePlannerRead {
       ...(assetId !== undefined && { assetId }),
     };
   });
+  const receipt = read.goalReceiptRead;
+  const args = receipt &&
+    sentinelGoalReceiptReadArguments(read.tool, receipt.args);
+  if (
+    receipt && (!args || !/^[a-f0-9]{64}$/.test(receipt.sha256) ||
+      ![
+        "sentinel_shared_asset_links",
+        "sentinel_shared_topology_source",
+        "sentinel_shared_finding_source",
+      ].includes(read.tool))
+  ) throw new Error("Invalid Sentinel planner source receipt");
   const aliasMapping = read.aliasMapping;
   if (
     aliasMapping !== undefined &&
-    (read.tool !== "sentinel_shared_asset" ||
+    ((read.tool !== "sentinel_shared_asset" &&
+      read.tool !== "sentinel_shared_asset_links") ||
       !/^[a-f0-9]{64}$/.test(aliasMapping.proof) ||
       !validSharedMappingSources(aliasMapping.sources))
   ) throw new Error("Invalid Sentinel planner alias mapping");
@@ -882,6 +895,8 @@ function normalizePlannerRead(read: AdaptivePlannerRead): AdaptivePlannerRead {
     ...(target !== undefined && { target }),
     ...(read.resultSha256 !== undefined && { resultSha256: read.resultSha256 }),
     ...(sourceSnapshots?.length && { sourceSnapshots }),
+    ...(args && receipt &&
+      { goalReceiptRead: { args, sha256: receipt.sha256 } }),
     ...(aliasMapping && {
       aliasMapping: {
         proof: aliasMapping.proof,

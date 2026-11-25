@@ -301,7 +301,12 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
           tool_name: tool,
           case_id: scope.caseId,
           evidence_revision: scope.revision,
-          assignment_id: scope.taskId,
+          ...(scope.taskId === undefined
+            ? {
+              planner_identity: scope.plannerIdentity,
+              planner_attempt: scope.attempt,
+            }
+            : { assignment_id: scope.taskId }),
           resource_classification: "INTERNAL",
           operation_type: "read",
         };

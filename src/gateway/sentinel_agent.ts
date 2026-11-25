@@ -4534,7 +4534,10 @@ function createAgent(
               options.assessmentRevision,
             )
               ?.resultSha256 === savedWorkflowCitation.resultSha256;
-        const goalReceiptRead = turn.requiresLiveAssignment && goalArgs &&
+        const goalReceiptRead = (turn.requiresLiveAssignment ||
+          isSentinelPinnedSourceRead(name) ||
+          name === SENTINEL_SHARED_ASSET_LINKS_READ) &&
+          goalArgs &&
           (isSentinelPinnedSourceRead(name)
             ? sourceSnapshots?.length &&
               redactCredentialText(result) === result &&
@@ -4836,7 +4839,8 @@ function createAgent(
           ...(trafficSearchPage && { trafficSearchPage }),
           ...(trafficLinks && { trafficLinks }),
           ...(goalReceiptRead && { goalReceiptRead }),
-          ...(goalReceiptRead && assetLinksPage && {
+          ...(turn.requiresLiveAssignment && goalReceiptRead &&
+            assetLinksPage && {
             sharedAssetLinksPage: result,
           }),
           ...(goalStateProjection && { goalStateProjection }),

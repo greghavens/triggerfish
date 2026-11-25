@@ -165,7 +165,8 @@ async function withGateway(
       const call = input.tool_call as
         | { args?: { action?: string } }
         | undefined;
-      const workerSource = input.tool_name === "sentinel_shared_asset";
+      const workerSource = input.tool_name === "sentinel_shared_asset" ||
+        input.tool_name === "sentinel_shared_asset_links";
       if (workerSource) policy.workerSourceHooks.push(hook);
       const allowed = !(policy.denyArchive && hook === "PRE_TOOL_CALL" &&
         call?.args?.action === "archive") &&
@@ -553,7 +554,12 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
     };
     const plannerRead = {
       aliasMapping: plannerAliasMapping,
-      tool: "sentinel_shared_asset",
+      tool: "sentinel_shared_asset_links",
+      goalReceiptRead: {
+        args: { asset: "app", limit: 5 },
+        sha256: "d".repeat(64),
+      },
+      target: "app",
       outcome: "returned" as const,
       sourceSnapshots: [{
         caseId: sourceCase,
@@ -620,6 +626,7 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
       "Saved assessment review.",
       [{
         tool: "sentinel_shared_asset",
+        target: "app",
         outcome: "returned",
         aliasMapping: {
           proof: "c".repeat(64),
@@ -1964,6 +1971,20 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
           await turn({ ...followPlannerSource, ...mismatch }),
           "unavailable",
         );
+      }
+      for (const sourceRead of [followReview, followPlannerSource]) {
+        policy.workerSourceHooks.length = 0;
+        policy.denyWorkerSourceBefore = true;
+        assertStringIncludes(await turn(sourceRead), "unavailable");
+        assertEquals(policy.workerSourceHooks.splice(0), ["PRE_TOOL_CALL"]);
+        policy.denyWorkerSourceBefore = false;
+        policy.denyWorkerSourceAfter = true;
+        assertStringIncludes(await turn(sourceRead), "unavailable");
+        assertEquals(policy.workerSourceHooks.splice(0), [
+          "PRE_TOOL_CALL",
+          "POST_TOOL_RESPONSE",
+        ]);
+        policy.denyWorkerSourceAfter = false;
       }
       policy.denyRunResponse = true;
       assertEquals(await turn(exactRead), "Tool response withheld by policy.");

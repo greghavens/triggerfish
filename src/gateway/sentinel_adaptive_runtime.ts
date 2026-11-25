@@ -4563,6 +4563,7 @@ export function createSentinelModelPlanner(
               resultSha256,
               sourceSnapshots,
               aliasMapping,
+              goalReceiptRead,
               recheckFindingIds,
               peerFinding,
             },
@@ -4585,6 +4586,8 @@ export function createSentinelModelPlanner(
                     resultSha256,
                     sourceSnapshots,
                     aliasMapping,
+                    ...((sourceSnapshots?.length || aliasMapping) &&
+                      { goalReceiptRead }),
                     recheckFindingIds,
                   },
                 );

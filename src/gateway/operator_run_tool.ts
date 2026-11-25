@@ -581,7 +581,12 @@ export const operatorRunTool: ToolDefinition = {
 export interface OperatorRunToolContext {
   readonly ceiling?: ClassificationLevel;
   readonly authorizeSentinelTraceRead?: (
-    scope: { caseId: string; revision: number; taskId: string },
+    scope:
+      & { caseId: string; revision: number }
+      & (
+        | { taskId: string; plannerIdentity?: never; attempt?: never }
+        | { taskId?: never; plannerIdentity: string; attempt: number }
+      ),
     tool: string,
     call: Record<string, unknown>,
     result?: string,
@@ -632,6 +637,16 @@ function safeProjection(
   return text.length <= 8000
     ? text
     : "Error: Select a run type or exact run to narrow the response.";
+}
+
+function sentinelTraceSourceSelector(
+  step: Pick<SentinelReviewStep, "tool" | "target" | "goalReceiptRead">,
+) {
+  return step.goalReceiptRead
+    ? sentinelGoalReceiptReadArguments(step.tool, step.goalReceiptRead.args)
+    : step.tool === "sentinel_shared_asset" && step.target
+    ? sentinelSharedAssetLinksArgs({ asset: step.target })
+    : undefined;
 }
 
 async function resolveCitedTraceSource(
@@ -4072,13 +4087,39 @@ export function createOperatorRunToolExecutor(options: {
             read,
           };
           if (!sourceRequested) return safeProjection(selected);
+          const authorize = context?.authorizeSentinelTraceRead;
+          const selector = sentinelTraceSourceSelector(read);
+          const scope = {
+            caseId: ref.id,
+            revision: ref.revision,
+            plannerIdentity: plannerIdentity as string,
+            attempt: attempt as number,
+          };
+          if (
+            !authorize || !selector ||
+            !await authorize(scope, read.tool, selector)
+          ) {
+            return unavailable;
+          }
           const source = await resolveCitedTraceSource(
             options.baseDir,
             path,
             read,
             args,
           );
-          return source ? safeProjection({ ...selected, source }) : unavailable;
+          if (
+            !source ||
+            !await authorize(scope, read.tool, selector, JSON.stringify(source))
+          ) {
+            return unavailable;
+          }
+          const current = readHistoricalAdaptiveSentinel(path, ref.revision);
+          const saved = current?.modelPlannerHistory.find((entry) =>
+            entry.identity === plannerIdentity && entry.attempt === attempt
+          )?.reads?.[(ordinal as number) - 1];
+          return current?.goal.id === runId && isDeepStrictEqual(saved, read)
+            ? safeProjection({ ...selected, source })
+            : unavailable;
         }
         const end = (offset as number) + (limit as number);
         const page = rounds.slice(offset as number, end).map((
@@ -4421,13 +4462,32 @@ export function createOperatorRunToolExecutor(options: {
         const step = review.steps?.[stepIndex];
         if (!step) return unavailable;
         if (followSource) {
+          const authorize = context?.authorizeSentinelTraceRead;
+          const selector = sentinelTraceSourceSelector(step);
+          const runId = readSentinelRunIdForRevision(path, ref.revision);
+          const scope = { caseId: ref.id, revision: ref.revision, taskId };
+          if (
+            !authorize || !selector || !runId ||
+            !await authorize(scope, step.tool, selector)
+          ) {
+            return unavailable;
+          }
           const source = await resolveCitedTraceSource(
             options.baseDir,
             path,
             step,
             args,
           );
-          return source
+          if (
+            !source ||
+            !await authorize(scope, step.tool, selector, JSON.stringify(source))
+          ) {
+            return unavailable;
+          }
+          const latest = readSentinelAssessmentRevision(path, ref.revision)
+            ?.reviews.find(({ task }) => task === taskId)?.steps?.[stepIndex];
+          return readSentinelRunIdForRevision(path, ref.revision) === runId &&
+              isDeepStrictEqual(latest, step)
             ? safeProjection({ run: ref, taskId, stepIndex, source })
             : unavailable;
         }
@@ -4481,14 +4541,7 @@ export function createOperatorRunToolExecutor(options: {
         if (!runId || !task || !authorize || step?.outcome !== "returned") {
           return unavailable;
         }
-        const receipt = step.goalReceiptRead;
-        // Older shared inventory traces recorded the asset target without a receipt.
-        const asset = step.target;
-        const selector = receipt
-          ? sentinelGoalReceiptReadArguments(step.tool, receipt.args)
-          : step.tool === "sentinel_shared_asset" && asset
-          ? sentinelSharedAssetLinksArgs({ asset })
-          : undefined;
+        const selector = sentinelTraceSourceSelector(step);
         const scope = { caseId: ref.id, revision: ref.revision, taskId };
         if (!selector || !await authorize(scope, step.tool, selector)) {
           return unavailable;

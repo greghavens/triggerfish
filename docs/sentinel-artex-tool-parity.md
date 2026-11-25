@@ -1755,3 +1755,10 @@ assignment. The archive gateway fixture denies each hook for a completed
 trace and verifies that pre-call denial skips response classification.
 Historical source drill-down requires saved arguments or a legacy shared
 inventory trace with its original asset target.
+
+Operator chat also reapplies source-tool policy when following archived
+planner or assessment review citations. Planner calls retain normalized
+source selectors, and the gateway supplies the exact planner round and
+attempt to the hooks. The archive fixture verifies pre-call and response
+denial for both paths after restore. It uses a saved planner receipt and a
+legacy assessment trace with an explicit asset target.
