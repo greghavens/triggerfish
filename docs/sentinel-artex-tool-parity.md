@@ -1092,3 +1092,10 @@ Removing an approval denies replay or exact historical retrieval of the
 previously named projection. The delegated fixture exercises approval
 withdrawal, the access fixture checks historical retrieval policy, and
 the owner gateway verifies archive restoration of the named receipt.
+
+Shared result search now scans approved GitHub Actions, repository, and pull
+request tool steps. It reauthorizes each candidate before matching the
+projection, including retained branch names. Continuation uses visible
+step metadata and is bound to the query, so denied results do not change
+the cursor. The owner gateway fixture searches the named branch after
+archive restore and verifies denial with the same continuation cursor.

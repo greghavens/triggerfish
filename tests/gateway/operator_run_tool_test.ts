@@ -2382,21 +2382,29 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
       ).page;
       assertEquals(next.matches[0]?.ordinal, 2);
       assertEquals(next.nextCursor, null);
-      const allResults = JSON.parse(
-        (await turn({
-          action: resultSearch.action,
-          query: resultSearch.query,
-        })).result,
-      ).page;
-      assertEquals(
-        allResults.matches.map(({ runId }: { runId: string }) => runId),
-        [
-          scheduled.runId,
-          scheduled.runId,
-          interruptedScope.runId,
-          traceScope.runId,
-        ],
-      );
+      const allMatches: string[] = [];
+      let allCursor: string | undefined;
+      for (let index = 0; index < 5; index++) {
+        const page = JSON.parse(
+          (await turn({
+            action: resultSearch.action,
+            query: resultSearch.query,
+            ...(allCursor && { cursor: allCursor }),
+          })).result,
+        ).page;
+        allMatches.push(
+          ...page.matches.map(({ runId }: { runId: string }) => runId),
+        );
+        allCursor = page.nextCursor ?? undefined;
+        if (!allCursor) break;
+      }
+      assertEquals(allCursor, undefined);
+      assertEquals(allMatches, [
+        scheduled.runId,
+        scheduled.runId,
+        interruptedScope.runId,
+        traceScope.runId,
+      ]);
       assertEquals(
         JSON.parse((await turn(hiddenArchive)).result).receipt.status,
         "failed",
@@ -2528,6 +2536,28 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
             "unavailable",
           );
         }
+        denyTraceSource = undefined;
+        const namedSearch = {
+          action: "execution_trace_payload",
+          traceRole: "delegated",
+          id: traceScope.runId,
+          query: "main",
+          limit: 1,
+        };
+        const allowedPage =
+          JSON.parse((await restoreTurn(namedSearch)).result).page;
+        assertEquals(
+          allowedPage.matches.map(({ ordinal }: { ordinal: number }) =>
+            ordinal
+          ),
+          [6],
+        );
+        allowTracePayload = false;
+        const unavailablePage =
+          JSON.parse((await restoreTurn(namedSearch)).result).page;
+        assertEquals(unavailablePage.matches, []);
+        assertEquals(unavailablePage.nextCursor, allowedPage.nextCursor);
+        allowTracePayload = true;
         denyTraceSource = undefined;
         assertEquals(originalToolInvocations, 0);
       }, restarted);

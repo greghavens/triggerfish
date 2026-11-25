@@ -975,6 +975,7 @@ export function openExecutionTraces(path: string, now = Date.now) {
       runId,
       limit = 10,
       cursor,
+      approvedResults = false,
     }: {
       readonly query: string;
       readonly ceiling: ClassificationLevel;
@@ -982,19 +983,28 @@ export function openExecutionTraces(path: string, now = Date.now) {
       readonly runId?: string;
       readonly limit?: number;
       readonly cursor?: string;
+      readonly approvedResults?: boolean;
     }) {
+      const queryPattern = approvedResults
+        ? /^[A-Za-z0-9_.:/-]{1,128}$/
+        : /^[A-Za-z0-9_.:-]{1,128}$/;
       if (
-        typeof query !== "string" || !/^[A-Za-z0-9_.:-]{1,128}$/.test(query) ||
+        typeof query !== "string" || !queryPattern.test(query) ||
         !levelOf(ceiling) || !pageSize(limit) ||
         (role !== undefined && !roleOf(role)) ||
         (runId !== undefined && (!role || !reference(runId)))
       ) return;
       const term = query.toLowerCase();
+      const matchStep = approvedResults
+        ? "step.outcome = 'returned' AND step.tool IN ('github_actions', 'github_repos', 'github_pulls')"
+        : "(instr(lower(step.tool), ?) > 0 OR step.outcome = ?)";
+      const matchArgs = approvedResults ? [] : [term, term];
       const filter = hashId("execution-trace-search", [
         role ?? null,
         runId ?? null,
         term,
         ceiling,
+        ...(approvedResults ? ["approved-results"] : []),
       ]);
       return transaction(db, () => {
         if (runId !== undefined) {
@@ -1018,7 +1028,7 @@ export function openExecutionTraces(path: string, now = Date.now) {
             JOIN execution_trace_runs AS run ON run.sequence = step.runSequence
             WHERE step.id = ? AND run.maxLevel <= ?
               AND (? IS NULL OR run.role = ?) AND (? IS NULL OR run.runId = ?)
-              AND (instr(lower(step.tool), ?) > 0 OR step.outcome = ?)
+              AND ${matchStep}
           `).get(
             receipt,
             CLASSIFICATION_ORDER[ceiling],
@@ -1026,8 +1036,7 @@ export function openExecutionTraces(path: string, now = Date.now) {
             role ?? null,
             runId ?? null,
             runId ?? null,
-            term,
-            term,
+            ...matchArgs,
           );
           if (!anchor) return;
           sequence = Number(anchor.runSequence);
@@ -1038,7 +1047,7 @@ export function openExecutionTraces(path: string, now = Date.now) {
           JOIN execution_trace_runs AS run ON run.sequence = step.runSequence
           WHERE run.maxLevel <= ?
             AND (? IS NULL OR run.role = ?) AND (? IS NULL OR run.runId = ?)
-            AND (instr(lower(step.tool), ?) > 0 OR step.outcome = ?)
+            AND ${matchStep}
             AND (step.runSequence, step.ordinal) < (?, ?)
           ORDER BY step.runSequence DESC, step.ordinal DESC LIMIT ?
         `).all(
@@ -1047,8 +1056,7 @@ export function openExecutionTraces(path: string, now = Date.now) {
           role ?? null,
           runId ?? null,
           runId ?? null,
-          term,
-          term,
+          ...matchArgs,
           sequence,
           ordinal,
           limit + 1,

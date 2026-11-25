@@ -612,7 +612,9 @@ function matchesTracePayload(
     return matches(payload.visibility);
   }
   if (payload.kind === "github_branch_protection") {
-    return matches(payload.protectedCount) || matches(payload.unprotectedCount);
+    return matches(payload.protectedCount) ||
+      matches(payload.unprotectedCount) ||
+      payload.approvedBranches?.some(({ name }) => matches(name)) === true;
   }
   if (payload.kind === "github_release_status") {
     return payload.releases.some(({ id, published_at }) =>
@@ -715,7 +717,8 @@ export function createOperatorRunToolExecutor(options: {
             // Page over visible metadata so continuation is independent of
             // whether an approved result exists or is currently authorized.
             const page = journal.search({
-              query: "github_actions",
+              query,
+              approvedResults: true,
               role,
               runId: id,
               cursor,
