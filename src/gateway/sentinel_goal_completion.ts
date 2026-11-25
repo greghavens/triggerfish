@@ -5,6 +5,11 @@ import { GoalCompletionStore } from "../core/goal_completion.ts";
 import { adaptiveRevision } from "../sentinel/adaptive_planner.ts";
 import { openSentinelAdaptiveStore } from "../sentinel/adaptive_store.ts";
 import { locateSentinelCase } from "../sentinel/cases.ts";
+import { verifyWorkerFindingRecheck } from "../sentinel/worker_finding_evidence.ts";
+import {
+  hasSentinelWorkerFindingJournal,
+  openSentinelWorkerFindingStore,
+} from "../sentinel/worker_finding_store.ts";
 import { parseSentinelGoalTaskReference } from "../sentinel/formal_goals.ts";
 import {
   completeSentinelAssessmentGoal,
@@ -17,7 +22,7 @@ type State = NonNullable<ReturnType<typeof readSentinelAssessment>>;
 type GoalRecord = NonNullable<ReturnType<GoalCompletionStore["read"]>>;
 type Observation = Parameters<GoalCompletionStore["report"]>[1][number];
 type Evidence = Observation["evidence"][number];
-type EvidenceSource = "graph_evidence" | "adaptive_task";
+type EvidenceSource = "graph_evidence" | "adaptive_task" | "finding_recheck";
 
 export function digestSentinelGoalProof(record: GoalRecord): string {
   return createHash("sha256").update(JSON.stringify([
@@ -159,6 +164,8 @@ function requirement(
   if (
     source === "adaptive_task" && (/^adaptive:[a-f0-9]{64}$/.test(reference) ||
         (allowTaskShape && parseSentinelGoalTaskReference(reference))) ||
+    source === "finding_recheck" &&
+      /^pass:worker-finding:[a-f0-9]{64}$/.test(reference) ||
     source === "graph_evidence" && reference.trim().length > 0 &&
       reference.length <= 800 && !reference.includes("\x00")
   ) return JSON.stringify([source, reference]);
@@ -189,7 +196,7 @@ function registerSentinelGoalRules(
       : undefined;
     if (!binding || binding.length > 1024) {
       throw new Error(
-        "Goal criteria need an exact evidence node or adaptive task.",
+        "Goal criteria need an exact evidence node, adaptive task, or remediation recheck requirement.",
       );
     }
     return {
@@ -321,14 +328,64 @@ function goalEvidenceVerifier(
     }
   };
   let completedTasks: ReturnType<typeof loadCompletedTasks> | undefined;
+  const verifyRecheck = (rule: string, reference: string) => {
+    const location = locateSentinelCase(snapshotPath);
+    if (
+      !/^worker-recheck:[a-f0-9]{64}$/.test(reference) ||
+      !location || !state.plan.runId || !state.result?.sharedGraph.snapshot ||
+      !hasSentinelWorkerFindingJournal(snapshotPath)
+    ) return false;
+    const store = openSentinelWorkerFindingStore(snapshotPath);
+    try {
+      const recheck = store.read(reference);
+      if (
+        recheck?.kind !== "recheck" || recheck.outcome !== "pass" ||
+        recheck.caseId !== location.caseId ||
+        recheck.runId !== state.plan.runId ||
+        recheck.evidenceRevision !== state.revision ||
+        rule !== requirement("finding_recheck", `pass:${recheck.findingId}`)
+      ) return false;
+      const original = store.readFinding(recheck.findingId);
+      if (
+        original?.caseId !== recheck.caseId ||
+        original.runId !== recheck.runId ||
+        original.targetId !== recheck.targetId ||
+        original.graphFindingId !== recheck.graphFindingId ||
+        original.controlId !== recheck.controlId ||
+        original.evidenceRevision > recheck.evidenceRevision
+      ) return false;
+      const receipt = verifyWorkerFindingRecheck(
+        state.result.sharedGraph.snapshot,
+        {
+          caseId: recheck.caseId,
+          evidenceRevision: state.revision,
+          evaluatedAt: state.result.controlEvaluationAt ?? state.updatedAt,
+        },
+        {
+          findingId: recheck.graphFindingId,
+          assetId: recheck.targetId,
+          controlId: recheck.controlId,
+          evidenceId: recheck.evidenceId,
+        },
+      );
+      return receipt?.outcome === "pass" &&
+        receipt.snapshotDigest === recheck.snapshotDigest &&
+        receipt.observedAt === recheck.observedAt &&
+        receipt.validUntil === recheck.validUntil;
+    } finally {
+      store.close();
+    }
+  };
   return (
     criterionId: string,
     { source, reference, detail }: Evidence,
     assignment?: { target: string; digest: string },
   ) => {
-    const binding = requirement(source, reference);
     const rule = rules.get(criterionId);
-    if (!binding || !rule) return false;
+    if (!rule) return false;
+    if (source === "finding_recheck") return verifyRecheck(rule, reference);
+    const binding = requirement(source, reference);
+    if (!binding) return false;
     if (source === "graph_evidence") {
       return rule === binding && graphEvidence.has(reference);
     }
@@ -366,6 +423,8 @@ function normalizedEvidence(observations: readonly Observation[]) {
         detail: typeof detail === "string"
           ? source === "graph_evidence"
             ? "Exact evidence node in the pinned Sentinel inventory."
+            : source === "finding_recheck"
+            ? "Verified passing remediation recheck for the original Sentinel finding."
             : "Committed result from an exact Sentinel adaptive task."
           : detail,
       })),

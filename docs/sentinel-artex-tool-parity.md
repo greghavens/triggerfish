@@ -318,3 +318,13 @@ the deterministic coverage outcome at the assessment revision's evaluation
 time. The [control verification fixture](../tests/sentinel/control_verification_test.ts)
 checks that failed, stale, unverified, and wrong-finding results leave the
 criterion open even when their tasks completed.
+
+A Sentinel goal can require a passing remediation recheck using the
+`finding_recheck` source and `pass:WORKER_FINDING_ID` requirement. The
+planner can cite the exact current-revision recheck receipt. The verifier
+reopens the original finding, checks its run, target and control binding,
+and replays the retained evidence against the pinned graph. The
+[findings fixture](../tests/gateway/sentinel_worker_findings_test.ts) verifies
+that the original finding and an unknown receipt cannot satisfy the
+criterion, duplicate proof is idempotent, and the accepted citation and both
+finding records survive reopening.

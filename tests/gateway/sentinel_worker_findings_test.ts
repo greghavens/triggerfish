@@ -9,6 +9,11 @@ import { createProviderRegistry } from "../../src/agent/llm.ts";
 import type { HookRunner } from "../../src/core/policy/hooks/hooks.ts";
 import type { ChatEvent } from "../../src/core/types/chat_event.ts";
 import { advanceAdaptiveSentinel } from "../../src/gateway/sentinel_adaptive_runtime.ts";
+import {
+  readSentinelGoalCompletionAtRevision,
+  registerSentinelGoalCompletion,
+  reportSentinelGoalCompletion,
+} from "../../src/gateway/sentinel_goal_completion.ts";
 import { createSentinelSubagent } from "../../src/gateway/sentinel_agent.ts";
 import type { BootstrapResult } from "../../src/gateway/startup/bootstrap.ts";
 import { createTidepoolSentinelHandler } from "../../src/gateway/startup/services/tidepool_sentinel.ts";
@@ -420,6 +425,37 @@ Deno.test("Leased Sentinel workers report, recheck, and amend findings visible i
       assert(!decision.events.some(({ type }) => type === "response"));
       assert(decision.events.some(({ type }) => type === "error"));
       check = verified;
+      const goal = registerSentinelGoalCompletion(path, [{
+        id: "remediated",
+        description:
+          "The original control failure has a verified passing recheck",
+        source: "finding_recheck",
+        reference: `pass:${original.id}`,
+      }], "operator");
+      const submit = (reference: string) =>
+        reportSentinelGoalCompletion(
+          path,
+          goal.scope,
+          [{
+            criterionId: "remediated",
+            evidence: [{ source: "finding_recheck", reference, detail: "" }],
+          }],
+        );
+      assertEquals(submit(original.id).record.status, "open");
+      assertEquals(
+        submit(`worker-recheck:${"0".repeat(64)}`).record.status,
+        "open",
+      );
+      const verifiedGoal = submit(verified.id).record;
+      assertEquals(verifiedGoal.status, "awaiting_confirmation");
+      assertEquals(
+        verifiedGoal.observations[0].evidence[0].reference,
+        verified.id,
+      );
+      assertEquals(
+        submit(verified.id).record.observations,
+        verifiedGoal.observations,
+      );
       const draft = {
         findingId: original.id,
         requestId: crypto.randomUUID(),
@@ -482,6 +518,11 @@ Deno.test("Leased Sentinel workers report, recheck, and amend findings visible i
     });
 
     assert(finding && check && secondRevision && amendment);
+    assertEquals(
+      readSentinelGoalCompletionAtRevision(path, secondRevision)
+        ?.observations[0].evidence[0].reference,
+      check.id,
+    );
     await withTidepool(baseDir, async (list, provenance) => {
       assertEquals(await list(first.revision), [finding!]);
       assertEquals(await list(secondRevision), [check!]);

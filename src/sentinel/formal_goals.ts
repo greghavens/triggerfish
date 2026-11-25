@@ -4,7 +4,7 @@ import { createHash } from "node:crypto";
 export interface SentinelFormalGoalCriterion {
   readonly id: string;
   readonly description: string;
-  readonly source: "graph_evidence" | "adaptive_task";
+  readonly source: "graph_evidence" | "adaptive_task" | "finding_recheck";
   readonly reference: string;
 }
 
@@ -73,7 +73,9 @@ function readCriteria(raw: unknown): readonly SentinelFormalGoalCriterion[] {
           reference.length <= 800 && !reference.includes("\x00") ||
         source === "adaptive_task" &&
           (/^adaptive:[a-f0-9]{64}$/.test(reference) ||
-            parseSentinelGoalTaskReference(reference)))
+            parseSentinelGoalTaskReference(reference)) ||
+        source === "finding_recheck" &&
+          /^pass:worker-finding:[a-f0-9]{64}$/.test(reference))
     ) {
       throw new Error(
         "A Sentinel goal criterion requires exact saved evidence",
