@@ -1,3 +1,4 @@
+import { openOperatorRunLinkStore } from "../../src/core/operator_runs.ts";
 import {
   assert,
   assertEquals,
@@ -23,6 +24,7 @@ import {
   readSentinelAssessment,
   readSentinelFindingReviews,
   recordSentinelFindingReview,
+  startSentinelAssessment,
   stopSentinelAssessment,
 } from "../../src/sentinel/assessment_store.ts";
 import { resolveSentinelCasePath } from "../../src/sentinel/cases.ts";
@@ -267,16 +269,34 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
       archiveId,
       requestId: crypto.randomUUID(),
     };
+    const peerPath = resolveSentinelCasePath(baseDir, "archive-peer");
+    await Deno.mkdir(dirname(peerPath), { recursive: true });
+    await Deno.copyFile(path, peerPath);
+    const peer = startSentinelAssessment(peerPath);
+    const linkRequest = {
+      action: "link",
+      kind: "sentinel",
+      id: exact.id,
+      revision: exact.revision,
+      targetKind: "sentinel",
+      targetId: "archive-peer",
+      targetRevision: peer.revision,
+      requestId: crypto.randomUUID(),
+    };
+    const linkPath = join(baseDir, "operator-run-links.db");
+    let exactLink: unknown;
     let archiveReceipt: unknown;
     await withGateway(baseDir, async (turn, approvals, policy) => {
       policy.denyArchive = true;
       assert((await turn(request)).length);
       assertEquals(approvals, []);
       policy.denyArchive = false;
+      exactLink = JSON.parse(await turn(linkRequest)).link;
+      assert(exactLink);
       archiveReceipt = JSON.parse(await turn(request)).receipt;
       assertEquals((archiveReceipt as { status: string }).status, "succeeded");
       assertEquals(JSON.parse(await turn(request)).receipt, archiveReceipt);
-      assertEquals(approvals.length, 1);
+      assertEquals(approvals.length, 2);
       const collision =
         JSON.parse(await turn({ ...restore, requestId: crypto.randomUUID() }))
           .receipt;
@@ -285,6 +305,7 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
     });
 
     await Deno.rename(dirname(path), join(baseDir, "original-fixture"));
+    await Deno.rename(linkPath, join(baseDir, "old-links.db"));
     const packageFile = join(
       baseDir,
       "data",
@@ -316,6 +337,30 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
         Deno.errors.NotFound,
       );
       await Deno.rename(savedArtifact, adaptiveArtifact);
+      const conflictingLinks = openOperatorRunLinkStore(linkPath);
+      try {
+        conflictingLinks.record({
+          scope: "workspace-operator",
+          operatorId: "owner",
+          requestId: linkRequest.requestId,
+          left: { kind: "sentinel", id: exact.id, revision: exact.revision },
+          right: { kind: "workflow", id: crypto.randomUUID() },
+        });
+      } finally {
+        conflictingLinks.close();
+      }
+      const linkCollision = JSON.parse(
+        await turn({
+          ...restore,
+          requestId: crypto.randomUUID(),
+        }),
+      ).receipt;
+      assertEquals(linkCollision.status, "failed");
+      await assertRejects(
+        () => Deno.lstat(dirname(path)),
+        Deno.errors.NotFound,
+      );
+      await Deno.rename(linkPath, join(baseDir, "conflicting-links.db"));
       const first = JSON.parse(await turn(restore)).receipt;
       assertEquals(first.status, "succeeded");
       assertEquals(JSON.parse(await turn(restore)).receipt, first);
@@ -347,12 +392,22 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
         }),
       );
       assertEquals(graph.page.node.id, `evidence:${evidenceId}`);
+      const reopened = JSON.parse(
+        await turn({
+          action: "inspect",
+          kind: "sentinel",
+          id: exact.id,
+          revision: exact.revision,
+        }),
+      );
+      assertEquals(reopened.links, [exactLink]);
+      assertEquals(JSON.parse(await turn(linkRequest)).link, exactLink);
       const history = JSON.parse(
         await turn({ action: "archive_history", ...exact }),
       );
       assertEquals(
         history.records.map(({ status }: { status: string }) => status),
-        ["succeeded", "failed", "failed", "failed", "succeeded"],
+        ["succeeded", "failed", "failed", "failed", "failed", "succeeded"],
       );
       assertStringIncludes(
         await turn({

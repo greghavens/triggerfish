@@ -44,7 +44,7 @@ export async function assertOperatorSourceSnapshot(
 export async function withSentinelSourceSnapshotLock<T>(
   baseDir: string,
   exclusive: boolean,
-  operation: () => Promise<T>,
+  operation: () => T | Promise<T>,
 ): Promise<T> {
   const path = join(baseDir, "data", "sentinel-source-snapshots.lock");
   await Deno.mkdir(dirname(path), { mode: 0o700, recursive: true });

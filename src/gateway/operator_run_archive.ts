@@ -24,7 +24,6 @@ import {
 } from "../core/operator_runs.ts";
 import {
   captureStoppedSentinelCaseArtifacts,
-  sentinelCaseArchiveArtifactNames,
 } from "../sentinel/case_archive_capture.ts";
 import { readSentinelAssessment } from "../sentinel/assessment_store.ts";
 import {
@@ -32,8 +31,10 @@ import {
   resolveSentinelCasePath,
 } from "../sentinel/cases.ts";
 import {
+  permittedSentinelRestoreArtifacts,
   requiredSentinelRestoreArtifacts,
   restoreVerifiedSentinelCaseArchive,
+  sentinelArchivedLinksFile,
 } from "../sentinel/sentinel_archive_restore.ts";
 import type { OperatorWorkflowRuns } from "./operator_workflow_runs.ts";
 
@@ -181,14 +182,29 @@ export async function executeOperatorRunArchive(
           evidenceRevision: ref.revision!,
         }, directory);
         try {
+          const journal = openOperatorRunLinkStore(linkPath);
+          const links = (() => {
+            try {
+              return journal.archive("workspace-operator", ref);
+            } finally {
+              journal.close();
+            }
+          })();
+          const sourcePath = join(staged.directory, sentinelArchivedLinksFile);
+          await Deno.writeTextFile(sourcePath, JSON.stringify(links), {
+            mode: 0o600,
+          });
           const manifest = await writeRunArchive(
             archivePath,
             identity,
-            staged.artifacts.map(({ name, path }) => ({
-              name,
-              sourcePath: path,
-            })),
-            sentinelCaseArchiveArtifactNames,
+            [
+              ...staged.artifacts.map(({ name, path }) => ({
+                name,
+                sourcePath: path,
+              })),
+              { name: sentinelArchivedLinksFile, sourcePath },
+            ],
+            permittedSentinelRestoreArtifacts,
           );
           archiveDigest = digestManifest(manifest);
         } finally {
@@ -280,7 +296,7 @@ export async function executeOperatorRunArchive(
         await withVerifiedRunArchive(archivePath, directory, {
           expectedKind: ref.kind,
           permittedNames: sentinel
-            ? sentinelCaseArchiveArtifactNames
+            ? permittedSentinelRestoreArtifacts
             : artifacts,
           requiredNames: sentinel
             ? requiredSentinelRestoreArtifacts

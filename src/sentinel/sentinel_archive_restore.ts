@@ -1,3 +1,4 @@
+import { openOperatorRunLinkStore } from "../core/operator_runs.ts";
 /** Validate, deactivate, and install a verified named Sentinel case archive. */
 /// <reference path="./sqlite_types.d.ts" />
 
@@ -17,6 +18,7 @@ import {
   withSentinelSourceSnapshotLock,
 } from "./source_snapshot_lock.ts";
 
+export const sentinelArchivedLinksFile = "operator-run-links.json";
 const snapshotFile = "sentinel.json";
 const assessmentFile = "sentinel-assessment.db";
 const adaptiveFile = "sentinel-adaptive.db";
@@ -83,6 +85,7 @@ export const requiredSentinelRestoreArtifacts = [
 export const permittedSentinelRestoreArtifacts = [
   ...requiredSentinelRestoreArtifacts,
   adaptiveFile,
+  sentinelArchivedLinksFile,
   ...auxiliaryArtifacts,
 ] as const;
 
@@ -473,30 +476,39 @@ function rejectDuplicateRun(baseDir: string, caseId: string, runId: string) {
   }
 }
 
-async function install(
+function install(
   destination: string,
   files: readonly { name: Artifact; source: string }[],
+  publish: (installFiles: () => void) => void,
 ) {
   const directory = dirname(destination);
   const parent = dirname(directory);
-  await Deno.mkdir(parent, { mode: 0o700, recursive: true });
-  assertOperatorSourceDirectoryInfo(await Deno.lstat(parent));
-  // This exclusive directory creation is the collision gate for the exact case ID.
-  await Deno.mkdir(directory, { mode: 0o700 });
+  Deno.mkdirSync(parent, { mode: 0o700, recursive: true });
+  assertOperatorSourceDirectoryInfo(Deno.lstatSync(parent));
   const installed: string[] = [];
+  let reserved = false;
   try {
-    for (const { name, source } of files) {
-      const target = join(directory, name);
-      // Link the already complete private file without ever overwriting a destination.
-      await Deno.link(source, target);
-      installed.push(target);
-      await Deno.remove(source);
-    }
+    publish(() => {
+      Deno.mkdirSync(directory, { mode: 0o700 });
+      reserved = true;
+      for (const { name, source } of files) {
+        const target = join(directory, name);
+        Deno.linkSync(source, target);
+        installed.push(target);
+        Deno.removeSync(source);
+      }
+    });
   } catch (error) {
     for (const path of installed.reverse()) {
-      await Deno.remove(path).catch(() => {});
+      try {
+        Deno.removeSync(path);
+      } catch { /* Retain the original failure. */ }
     }
-    await Deno.remove(directory).catch(() => {});
+    if (reserved) {
+      try {
+        Deno.removeSync(directory);
+      } catch { /* Retain the original failure. */ }
+    }
     throw error;
   }
 }
@@ -546,14 +558,32 @@ export async function restoreVerifiedSentinelCaseArchive(
     validateAuxiliary(source, name, caseId, runId, revision);
     return [{ name, source }];
   });
-  await withSentinelSourceSnapshotLock(baseDir, true, async () => {
+  const archivedLinks = stagedPath(archive, sentinelArchivedLinksFile);
+  const links = archivedLinks === undefined
+    ? undefined
+    : JSON.parse(await Deno.readTextFile(archivedLinks));
+  await withSentinelSourceSnapshotLock(baseDir, true, () => {
     rejectDuplicateRun(baseDir, caseId, runId);
-    await install(destination, [
+    install(destination, [
       { name: assessmentFile, source: assessment },
       ...(adaptive ? [{ name: adaptiveFile, source: adaptive }] as const : []),
       ...auxiliary,
       { name: snapshotFile, source: snapshot },
-    ]);
+    ], (installFiles) => {
+      if (links === undefined) return installFiles();
+      const journal = openOperatorRunLinkStore(
+        join(baseDir, "operator-run-links.db"),
+      );
+      try {
+        journal.installWithArchive(
+          { kind: "sentinel", id: caseId, revision },
+          links,
+          installFiles,
+        );
+      } finally {
+        journal.close();
+      }
+    });
   });
   return {
     caseId,

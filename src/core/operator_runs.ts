@@ -387,6 +387,7 @@ export function restoreOperatorRunLinks(
   db: DatabaseSync,
   ref: OperatorRunRef,
   archived: readonly ArchivedOperatorRunLink[],
+  schema: "main" | "run_links" = "run_links",
 ) {
   if (!Array.isArray(archived) || archived.length > MAX_LINKS) {
     throw new Error("Invalid archived run links");
@@ -400,7 +401,7 @@ export function restoreOperatorRunLinks(
       !Number.isFinite(at) || !Array.isArray(requests) ||
       requests.length > MAX_REQUESTS
     ) throw new Error("Invalid archived run link");
-    const restored = recordOperatorRunLink(db, link, "run_links", () => at);
+    const restored = recordOperatorRunLink(db, link, schema, () => at);
     if (JSON.stringify(restored) !== JSON.stringify(link)) {
       throw new Error("Archived run link collision");
     }
@@ -408,7 +409,7 @@ export function restoreOperatorRunLinks(
       recordOperatorRunLink(
         db,
         { ...link, operatorId, requestId },
-        "run_links",
+        schema,
       );
     }
   }
@@ -474,6 +475,16 @@ export function openOperatorRunLinkStore(path: string, now = Date.now) {
         )
           .all(scope, key, key);
       return rows.map(decode);
+    },
+    installWithArchive(
+      ref: OperatorRunRef,
+      archived: readonly ArchivedOperatorRunLink[],
+      install: () => void,
+    ) {
+      transaction(db, () => {
+        restoreOperatorRunLinks(db, ref, archived, "main");
+        install();
+      });
     },
     archive(
       scope: string,
