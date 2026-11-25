@@ -1,11 +1,14 @@
+import { resolveSentinelCasePath } from "../../src/sentinel/cases.ts";
+import { assessSentinelDefenseCoverage } from "../../src/sentinel/defense_coverage.ts";
 import { createHash } from "node:crypto";
 import {
   advanceAdaptiveSentinel,
+  createSentinelModelPlanner,
   readAdaptiveSentinel,
 } from "../../src/gateway/sentinel_adaptive_runtime.ts";
 import { validateWinlogbeatPrivilegedGroups } from "../../src/sentinel/identity_adapters.ts";
 import { assert, assertEquals } from "@std/assert";
-import { join } from "@std/path";
+import { dirname, join } from "@std/path";
 import {
   createLiveSentinelAlertPublisher,
   publishSentinelAlerts,
@@ -13,6 +16,7 @@ import {
 import { ingestSentinelTelemetry } from "../../src/cli/commands/sentinel_telemetry.ts";
 import { ingestSentinelTraffic } from "../../src/cli/commands/sentinel_traffic.ts";
 import {
+  readSentinelAssessmentAlerts,
   refreshSentinelAssessment,
   startSentinelAssessment,
 } from "../../src/sentinel/assessment_store.ts";
@@ -819,6 +823,134 @@ Deno.test("Published Winlogbeat signals produce a case-scoped incident and adapt
     );
   } finally {
     await Deno.remove(dir, { recursive: true });
+  }
+});
+
+Deno.test("Normalized remote-access and DLP source alerts reach their case planner", async () => {
+  const base = await Deno.makeTempDir();
+  const path = resolveSentinelCasePath(base, "linked-case");
+  const peerPath = resolveSentinelCasePath(base, "peer");
+  let plannerIncidents: readonly { id: string }[] | undefined;
+  const planner = createSentinelModelPlanner(path, (_state, taskId) => ({
+    execute(message, emit) {
+      if (!taskId) {
+        plannerIncidents = JSON.parse(String(message).split("\n").at(-1)!)
+          .incidents;
+      }
+      emit({
+        type: "response",
+        text: taskId ? '{"summary":"Reviewed.","followUps":[]}' : "[]",
+        taint: "INTERNAL",
+      });
+      return Promise.resolve();
+    },
+    clear() {},
+  }));
+
+  try {
+    const snapshot = {
+      version: 1,
+      nodes: [
+        { id: "front", kind: "asset", label: "Front end" },
+        { id: "data", kind: "asset", label: "Data service" },
+      ],
+      edges: [{ from: "front", to: "data", relation: "depends_on" }],
+    };
+    for (const selected of [path, peerPath]) {
+      await Deno.mkdir(dirname(selected), { recursive: true });
+      await Deno.writeTextFile(selected, JSON.stringify(snapshot));
+      startSentinelAssessment(selected);
+    }
+    const events = [
+      {
+        id: "remote:1",
+        kind: "unexpected_remote_access",
+        asset: "front",
+        subject: "remote-source",
+        timestamp: "2026-01-01T00:00:00.000Z",
+      },
+      {
+        id: "dlp:1",
+        kind: "sensitive_egress_alert",
+        asset: "data",
+        subject: "dlp-source",
+        timestamp: "2026-01-01T00:00:01.000Z",
+      },
+    ].map((event) =>
+      JSON.stringify({
+        version: 1,
+        ...event,
+        sessionReference: `session:${"a".repeat(64)}`,
+      })
+    );
+    const publish = (target: string, records: string[]) =>
+      ingestSentinelTelemetry(
+        new Blob([records.join("\n")]).stream(),
+        "jsonl",
+        undefined,
+        undefined,
+        target,
+      );
+    await publish(path, events);
+    await publish(peerPath, events.slice(1));
+    const state = refreshSentinelAssessment(path);
+    const peer = refreshSentinelAssessment(peerPath);
+    assert(state?.result && peer?.result);
+
+    const alerts = readSentinelAssessmentAlerts(path, state.revision);
+    assertEquals(
+      alerts?.map(({ type, evidenceIds }) => ({ type, evidenceIds })),
+      [
+        { type: "unexpected_remote_access", evidenceIds: ["remote:1"] },
+        { type: "sensitive_egress_alert", evidenceIds: ["dlp:1"] },
+      ],
+    );
+    const coverage = assessSentinelDefenseCoverage({ alerts });
+    for (
+      const [behavior, signal] of [
+        ["lateral_movement", "unexpected_remote_access"],
+        ["exfiltration", "sensitive_egress_alert"],
+      ]
+    ) {
+      assert(
+        coverage.behaviors.some(({ id, signals }) =>
+          id === behavior &&
+          signals.some(({ type, records }) =>
+            type === signal && records.length === 1
+          )
+        ),
+      );
+    }
+
+    advanceAdaptiveSentinel(path, state);
+    advanceAdaptiveSentinel(peerPath, peer);
+    const saved = readAdaptiveSentinel(path, state);
+    assert(saved);
+    const review = saved.tasks.find(({ kind }) => kind === "review_incident");
+    assert(review);
+    assertEquals(review.evidenceIds.toSorted(), ["dlp:1", "remote:1"]);
+    assert(
+      !readAdaptiveSentinel(peerPath, peer)?.tasks.some(({ kind }) =>
+        kind === "review_incident"
+      ),
+    );
+    const provenance = buildSentinelProvenance(state.result, saved).snapshot();
+    assert(
+      provenance.edges.some(({ from, to, relation }) =>
+        from === `observation:assessment:${review.nodeId}` &&
+        to === `task:adaptive:${review.id}` && relation === "prompted"
+      ),
+    );
+
+    const deadline = Date.now() + 2_000;
+    while (!plannerIncidents && Date.now() < deadline) {
+      planner.advance(state);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert(plannerIncidents?.some(({ id }) => id === review.nodeId));
+  } finally {
+    planner.stop();
+    await Deno.remove(base, { recursive: true });
   }
 });
 
