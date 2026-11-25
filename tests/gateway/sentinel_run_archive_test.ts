@@ -555,6 +555,10 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
       [{
         tool: "sentinel_shared_asset",
         outcome: "returned",
+        aliasMapping: {
+          proof: "c".repeat(64),
+          sources: [{ caseId: sourceCase, snapshotDigest: assessmentDigest }],
+        },
         sourceSnapshots: [{
           caseId: sourceCase,
           snapshotDigest: assessmentDigest,
@@ -1187,6 +1191,71 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
       const handleTidepool = createTidepoolSentinelHandler(
         { baseDir, config: {} } as BootstrapResult,
       );
+      const aliasReply = async (request: Record<string, unknown>) => {
+        const replies: Record<string, unknown>[] = [];
+        await handleTidepool({
+          type: "alias_source_snapshot",
+          caseId: exact.id,
+          revision: exact.revision,
+          stepIndex: 0,
+          requestId: 32,
+          ...request,
+        }, {
+          readyState: WebSocket.OPEN,
+          send: (message: string) => replies.push(JSON.parse(message)),
+        } as unknown as WebSocket);
+        return replies[0];
+      };
+      const workerAliasRequest = {
+        traceKind: "worker",
+        traceId: sourceTaskId,
+        sourceCase: aliasOnlySource,
+        snapshotDigest: aliasOnlyDigest,
+      };
+      assertEquals(await aliasReply(workerAliasRequest), {
+        topic: "sentinel",
+        type: "sentinel_alias_source_snapshot",
+        requestId: 32,
+        caseId: exact.id,
+        sourceCase: aliasOnlySource,
+        snapshotDigest: aliasOnlyDigest,
+        aliasProof: aliasMapping.proof,
+        graph: aliasOnlySnapshot,
+      });
+      assertEquals(
+        (await aliasReply({
+          traceKind: "planner",
+          traceId: `${revision}:obs:archive-fixture`,
+          attempt: 1,
+          sourceCase: plannerAliasSource,
+          snapshotDigest: plannerAliasDigest,
+        })).aliasProof,
+        plannerAliasMapping.proof,
+      );
+      assertEquals(
+        (await aliasReply({
+          traceKind: "assessment",
+          traceId: assessmentTask.id,
+          sourceCase,
+          snapshotDigest: assessmentDigest,
+        })).graph,
+        assessmentSnapshot,
+      );
+      for (
+        const mismatch of [
+          { stepIndex: 1 },
+          { revision: initial.revision },
+          { snapshotDigest: traceDigest },
+          { caseId: "archive-peer" },
+        ]
+      ) {
+        const rejected = await aliasReply({
+          ...workerAliasRequest,
+          ...mismatch,
+        });
+        assertEquals(rejected.type, "error");
+        assertEquals(rejected.graph, undefined);
+      }
       const messages: Record<string, unknown>[] = [];
       await handleTidepool({
         type: "source_snapshot",

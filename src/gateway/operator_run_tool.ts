@@ -43,6 +43,7 @@ import {
 } from "../sentinel/cases.ts";
 import {
   readArchivedSentinelSnapshot,
+  readCitedSentinelAliasSnapshot,
   readSharedSentinelTopologySource,
 } from "../sentinel/shared_inventory.ts";
 import {
@@ -516,23 +517,16 @@ async function resolveCitedTraceSource(
     typeof sourceCase !== "string" || typeof snapshotDigest !== "string" ||
     read.outcome !== "returned"
   ) return;
-  if (
-    assetId === undefined &&
-    read.aliasMapping?.sources.some((source) =>
-      source.caseId === sourceCase && source.snapshotDigest === snapshotDigest
-    )
-  ) {
-    await readArchivedSentinelSnapshot(
+  if (assetId === undefined) {
+    const alias = await readCitedSentinelAliasSnapshot(
       baseDir,
+      path,
+      read.aliasMapping,
       sourceCase,
       snapshotDigest,
-      path,
     );
-    return {
-      caseId: sourceCase,
-      snapshotDigest,
-      aliasProof: read.aliasMapping.proof,
-    };
+    return alias &&
+      { caseId: sourceCase, snapshotDigest, aliasProof: alias.proof };
   }
   if (
     typeof assetId !== "string" ||

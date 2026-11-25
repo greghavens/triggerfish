@@ -10,6 +10,7 @@
     selectedId = $bindable(undefined),
     onOpenSource,
     onOpenPeerFinding,
+    onOpenAliasSource,
     onOpenDecision,
     onDownloadPath,
     sourceNavigationDisabled,
@@ -19,6 +20,7 @@
     selectedId?: string;
     onOpenDecision?: (kind: "finding" | "incident", id: number) => void;
     onOpenSource: (caseId: string, assetId: string, snapshotDigest?: string) => void;
+    onOpenAliasSource?: (taskId: string, stepIndex: number, sourceCase: string, snapshotDigest: string) => void;
     onOpenPeerFinding?: (citation: SentinelPeerFindingCitation) => void;
     sourceNavigationDisabled: boolean;
     onDownloadPath: (path: SentinelPathExport) => void;
@@ -441,13 +443,25 @@
               <details>
                 <summary>{t("Worker queries")} ({review.steps.length})</summary>
                 <ol class="review-steps">
-                  {#each review.steps as step}
+                  {#each review.steps as step, stepIndex}
                     <li>
                       {step.tool}{step.target ? ` · ${step.target}` : ""} · {t(humanize(step.outcome))}
                       {#if step.tool === "sentinel_intermediate_workflow_observation" && step.targetRef && nodeById.has(step.targetRef)}
                         <button type="button" onclick={() => (selectedId = step.targetRef)}>
                           {t("Open source observation")}
                         </button>
+                      {/if}
+                      {#if onOpenAliasSource && step.aliasMapping?.sources.length}
+                        <ul>
+                          {#each step.aliasMapping.sources as source (source.caseId)}
+                            <li>
+                              <button type="button" disabled={sourceNavigationDisabled}
+                                onclick={() => onOpenAliasSource?.(review.taskId, stepIndex, source.caseId, source.snapshotDigest)}>
+                                {t("Open alias source snapshot")} · {source.caseId}
+                              </button>
+                            </li>
+                          {/each}
+                        </ul>
                       {/if}
                       {#if step.sourceSnapshots?.length}
                         <ul>

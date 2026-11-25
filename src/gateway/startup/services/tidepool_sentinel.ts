@@ -91,6 +91,7 @@ import { readSentinelSourceAssetLineage } from "../../../sentinel/source_asset_l
 import {
   digestSentinelSnapshot,
   readArchivedSentinelSnapshot,
+  readCitedSentinelAliasSnapshot,
   readSharedSentinelAssetCatalog,
   readSharedSentinelAssetLinks,
   readSharedSentinelAssets,
@@ -1543,6 +1544,79 @@ export function createTidepoolSentinelHandler(
             type: "sentinel_source_asset_lineage",
             caseId,
             lineage,
+          });
+          return;
+        }
+        case "alias_source_snapshot": {
+          const {
+            revision,
+            sourceCase,
+            snapshotDigest,
+            traceKind,
+            traceId,
+            stepIndex,
+            attempt,
+          } = message;
+          if (
+            typeof revision !== "number" || !Number.isSafeInteger(revision) ||
+            revision < 1 ||
+            typeof sourceCase !== "string" || !isSentinelCaseId(sourceCase) ||
+            typeof snapshotDigest !== "string" ||
+            !/^[a-f0-9]{64}$/.test(snapshotDigest) ||
+            typeof traceId !== "string" || !traceId.trim() ||
+            traceId.length > 256 ||
+            typeof stepIndex !== "number" || !Number.isSafeInteger(stepIndex) ||
+            stepIndex < 0 || stepIndex >= 32 ||
+            (traceKind === "planner"
+              ? typeof attempt !== "number" || !Number.isSafeInteger(attempt) ||
+                attempt < 1
+              : attempt !== undefined ||
+                (traceKind !== "worker" && traceKind !== "assessment"))
+          ) {
+            throw new SentinelAssignmentError(
+              "Choose a retained alias proof source.",
+            );
+          }
+          const historical = readSentinelAssessmentRevision(path, revision);
+          if (!historical) {
+            throw new SentinelAssignmentError(
+              "The alias proof source is unavailable.",
+            );
+          }
+          const adaptive = traceKind === "assessment"
+            ? undefined
+            : readHistoricalAdaptiveSentinel(path, revision);
+          const step = traceKind === "assessment"
+            ? historical.reviews.find(({ task }) => task === traceId)?.steps
+              ?.[stepIndex]
+            : traceKind === "worker"
+            ? adaptive?.modelReviews.find(({ taskId }) => taskId === traceId)
+              ?.steps[stepIndex]
+            : adaptive?.modelPlannerHistory.find((
+              { identity, attempt: savedAttempt },
+            ) => identity === traceId && savedAttempt === attempt)?.reads
+              ?.[stepIndex];
+          const alias = step?.outcome === "returned" &&
+            await readCitedSentinelAliasSnapshot(
+              bootstrap.baseDir,
+              path,
+              step.aliasMapping,
+              sourceCase,
+              snapshotDigest,
+            );
+          if (!alias) {
+            throw new SentinelAssignmentError(
+              "The alias proof source is unavailable.",
+            );
+          }
+          send({
+            topic: "sentinel",
+            type: "sentinel_alias_source_snapshot",
+            caseId,
+            sourceCase,
+            snapshotDigest,
+            aliasProof: alias.proof,
+            graph: alias.graph,
           });
           return;
         }

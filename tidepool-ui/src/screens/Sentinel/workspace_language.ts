@@ -544,6 +544,8 @@ const messages = {
   "Save incident review": ["Guardar revisión del incidente", "인시던트 검토 저장", "保存事件审查", "インシデントレビューを保存"],
   "Shortest path option": ["Opción de ruta más corta", "최단 경로 옵션", "最短路径选项", "最短パスの選択肢"],
   "Show graph sample": ["Mostrar ejemplo de grafo", "그래프 예시 표시", "显示图示例", "グラフのサンプルを表示"],
+  "Open alias source snapshot": ["Abrir instantánea de origen del alias", "별칭 원본 스냅샷 열기", "打开别名来源快照", "エイリアスのソーススナップショットを開く"],
+  "Alias proof": ["Prueba de alias", "별칭 증명", "别名证明", "エイリアスの証明"],
   "Snapshot digest": ["Huella de la instantánea", "스냅샷 다이제스트", "快照摘要", "スナップショットのダイジェスト"],
   "Asset discovery proposals": ["Propuestas de descubrimiento de activos", "자산 발견 제안", "资产发现提案", "資産発見の提案"],
   "No asset discovery proposals.": ["No hay propuestas de descubrimiento de activos.", "자산 발견 제안이 없습니다.", "没有资产发现提案。", "資産発見の提案はありません。"],

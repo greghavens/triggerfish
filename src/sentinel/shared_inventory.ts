@@ -846,6 +846,31 @@ export async function readArchivedSentinelSnapshot(
   }
 }
 
+/** Read the archived snapshot bound to one exact alias proof source. */
+export async function readCitedSentinelAliasSnapshot(
+  baseDir: string,
+  path: string,
+  mapping: {
+    readonly proof: string;
+    readonly sources: readonly SharedAssetMappingSource[];
+  } | undefined,
+  sourceCase: string,
+  snapshotDigest: string,
+) {
+  if (
+    !mapping?.sources.some((source) =>
+      source.caseId === sourceCase && source.snapshotDigest === snapshotDigest
+    )
+  ) return;
+  const graph = await readArchivedSentinelSnapshot(
+    baseDir,
+    sourceCase,
+    snapshotDigest,
+    path,
+  );
+  return { proof: mapping.proof, graph };
+}
+
 /** Reconstruct only a relationship cited by an already-selected case graph. */
 export async function readSharedSentinelTopologySource(
   baseDir: string,

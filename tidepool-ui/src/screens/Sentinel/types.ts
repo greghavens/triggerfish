@@ -101,6 +101,7 @@ export interface SentinelNode {
     readonly at: string;
   };
   readonly modelReview?: {
+    readonly taskId: string;
     readonly summary: string;
     readonly at: string;
     readonly steps: readonly {
@@ -108,6 +109,7 @@ export interface SentinelNode {
       readonly target?: string;
       readonly outcome: string;
       readonly targetRef?: string;
+      readonly aliasMapping?: SentinelAliasMapping;
       readonly sourceSnapshots?: readonly {
         readonly caseId: string;
         readonly assetId?: string;
@@ -177,6 +179,11 @@ export interface SentinelPathExport {
   readonly edges: readonly SentinelEdge[];
 }
 
+export interface SentinelAliasMapping {
+  readonly proof: string;
+  readonly sources: readonly { readonly caseId: string; readonly snapshotDigest: string }[];
+}
+
 export interface SentinelGraph {
   readonly nodes: readonly SentinelNode[];
   readonly edges: readonly SentinelEdge[];
@@ -230,7 +237,7 @@ export interface SentinelTask {
 export interface SentinelReview {
   readonly task: string;
   readonly analysis: string;
-  readonly steps?: readonly { tool: string; target?: string; outcome: string }[];
+  readonly steps?: readonly { tool: string; target?: string; outcome: string; aliasMapping?: SentinelAliasMapping }[];
 }
 
 export interface SentinelObservation {
@@ -292,6 +299,7 @@ export interface SentinelAdaptive {
     readonly hintId?: number;
     readonly started: string;
     readonly finished: string | null;
+    readonly reads?: readonly { readonly tool: string; readonly aliasMapping?: SentinelAliasMapping }[];
     readonly outcome: string;
   }[];
   readonly historyCursor?: number | null;

@@ -66,7 +66,9 @@
       | { readonly kind: "relationship"; readonly to: string; readonly relation: string }
     );
   };
+  type AliasTrace = { traceKind: "worker" | "assessment" | "planner"; traceId: string; stepIndex: number; attempt?: number };
   type RequestPayload =
+    (AliasTrace & { revision: number; sourceCase: string; snapshotDigest: string }) |
     { readonly revision: number; readonly upstreamCheck: string } |
     { readonly revision: number; readonly expectedGoal: string | null; readonly note: string } |
     { readonly target: string; readonly reason: string; readonly ttlSeconds?: number; readonly expectedRevision?: string } |
@@ -127,6 +129,7 @@
     | "quarantine_source_snapshot"
     | "restore_source_snapshot"
     | "source_snapshot_audit"
+    | "alias_source_snapshot"
     | "source_snapshot"
     | "shared_finding_source"
     | "shared_asset_links"
@@ -220,7 +223,7 @@
   }>();
   type SnapshotCitation = { caseId: string; revision: number; focusId: string };
   let pendingSnapshotCitation: SnapshotCitation | undefined;
-  let sourceSnapshot = $state<{ sourceCase: string; digest: string; asset: string; graph: SentinelGraph; published: boolean; citations?: SnapshotCitation[]; nextCitationCursor?: string }>();
+  let sourceSnapshot = $state<{ sourceCase: string; digest: string; asset: string; graph: SentinelGraph; published: boolean; aliasProof?: string; citations?: SnapshotCitation[]; nextCitationCursor?: string }>();
   let containment = $state<{
     total: number;
     active: { target: string; reason: string; blockedAt: string; expiresAt: string; revision: string | null }[];
@@ -758,6 +761,18 @@
       (pending === "source_snapshot_audit" || pending === "quarantine_source_snapshot" || pending === "restore_source_snapshot")) {
       sourceSnapshotAudit = message.audit as typeof sourceSnapshotAudit;
       completeRequest();
+    } else if (message.type === "sentinel_alias_source_snapshot" && pending === "alias_source_snapshot") {
+      sourceSnapshot = {
+        sourceCase: String(message.sourceCase),
+        digest: String(message.snapshotDigest),
+        asset: "",
+        graph: message.graph as SentinelGraph,
+        published: false,
+        aliasProof: String(message.aliasProof),
+      };
+      sourceAsset = undefined;
+      completeRequest();
+      void tick().then(() => document.getElementById("sentinel-source-snapshot")?.scrollIntoView({ block: "nearest" }));
     } else if (message.type === "sentinel_source_snapshot" && (pending === "source_snapshot" || pending === "shared_finding_source")) {
       const citations = Array.isArray(message.citations) ? message.citations as SnapshotCitation[] : [];
       const previous = sourceSnapshot;
@@ -1021,6 +1036,10 @@
     });
   }
 
+  function openAliasSource(revision: number, trace: AliasTrace, sourceCase: string, snapshotDigest: string) {
+    request("alias_source_snapshot", { revision, ...trace, sourceCase, snapshotDigest });
+  }
+
   function openRelationshipSource(sourceCase: string, asset: string, snapshotDigest?: string) {
     if (snapshotDigest) request("source_snapshot", { sourceCase, asset, snapshotDigest });
     else {
@@ -1162,6 +1181,15 @@
     · {t("Output tokens")} {numbers.format(usage.outputTokens)}</p>
 {/snippet}
 
+{#snippet aliasSourceLinks(mapping: { sources: readonly { caseId: string; snapshotDigest: string }[] } | undefined, revision: number, trace: AliasTrace)}
+  {#each mapping?.sources ?? [] as source (source.caseId)}
+    <button type="button" class="focus-link" disabled={!online || !!pending}
+      onclick={() => openAliasSource(revision, trace, source.caseId, source.snapshotDigest)}>
+      {t("Open alias source snapshot")} · {source.caseId}
+    </button>
+  {/each}
+{/snippet}
+
 {#snippet modelPlannerHistory(entries: NonNullable<SentinelAdaptive["modelPlannerHistory"]>, revision: number | undefined)}
   {#if entries.length}
     <details>
@@ -1178,6 +1206,11 @@
                   onclick={() => openPlanningInput(input.kind, id)}>{t(input.label)} #{id}</button>
               {/each}
             {/each}
+            {#if revision !== undefined && entry.identity}
+              {#each entry.reads ?? [] as read, stepIndex}
+                {@render aliasSourceLinks(read.aliasMapping, revision, { traceKind: "planner", traceId: entry.identity, stepIndex, attempt: entry.attempt })}
+              {/each}
+            {/if}
             {#if entry.incidentCandidateIds?.length}
               <details>
                 <summary>{t("Incident inputs")} ({entry.incidentCandidateIds.length})</summary>
@@ -2104,8 +2137,10 @@
                   <p>{review.analysis}</p>
                   {#if review.steps?.length}
                     <ul>
-                      {#each review.steps as step}
-                        <li>{step.tool}{step.target ? ` · ${step.target}` : ""} · {t(step.outcome === "returned" ? "Returned" : "Error").toLocaleLowerCase(workspaceLanguage)}</li>
+                      {#each review.steps as step, stepIndex}
+                        <li>{step.tool}{step.target ? ` · ${step.target}` : ""} · {t(step.outcome === "returned" ? "Returned" : "Error").toLocaleLowerCase(workspaceLanguage)}
+                          {@render aliasSourceLinks(step.aliasMapping, historical.revision, { traceKind: "assessment", traceId: review.task, stepIndex })}
+                        </li>
                       {/each}
                     </ul>
                   {/if}
@@ -2266,6 +2301,7 @@
                 </button>
               </header>
               <p>{t("Snapshot digest")} <code>{sourceSnapshot.digest}</code></p>
+              {#if sourceSnapshot.aliasProof}<p>{t("Alias proof")} <code>{sourceSnapshot.aliasProof}</code></p>{/if}
               {#if sourceSnapshot.citations?.length}
                 <ul aria-label={t("Citing case revisions")}>
                   {#each sourceSnapshot.citations as citation (`${citation.caseId}/${citation.revision}/${citation.focusId}`)}
@@ -2306,6 +2342,9 @@
             {/key}
             <ProvenanceGraph graph={displayGraph} language={workspaceLanguage} bind:selectedId onOpenDecision={openPlanningInput}
               onOpenPeerFinding={openPeerFinding}
+              onOpenAliasSource={(traceId, stepIndex, sourceCase, snapshotDigest) => {
+                if (displayedRevision !== undefined) openAliasSource(displayedRevision, { traceKind: "worker", traceId, stepIndex }, sourceCase, snapshotDigest);
+              }}
               onOpenSource={openRelationshipSource} onDownloadPath={downloadGraphPath} sourceNavigationDisabled={!online || !!pending} />
             {#if upstreamChecks.length}
               <section class="panel" aria-label={t("Upstream coverage matches")}>

@@ -1161,3 +1161,11 @@ digest. The response identifies the proof without exposing the entire
 source graph. The archive gateway fixture removes the original workspace
 snapshots and verifies that exact worker and planner citations still resolve
 after restore.
+
+Tidepool opens a retained alias source from an exact historical worker
+step, planner attempt and step, or assessment review step. The source pane
+shows the archived graph, snapshot digest, and alias proof. The gateway
+checks the selected case and revision before opening the step and matches
+the exact source case and digest in its proof. The restore fixture verifies
+all three trace types and rejects mismatched case, revision, step, and
+digest requests.
