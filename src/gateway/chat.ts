@@ -380,7 +380,8 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
               const { step, payload } = JSON.parse(result);
               if (
                 typeof step?.id === "string" &&
-                payload?.kind === "github_actions_status"
+                (payload?.kind === "github_actions_status" ||
+                  payload?.kind === "github_repository_status")
               ) {
                 return { id: step.id, payload };
               }

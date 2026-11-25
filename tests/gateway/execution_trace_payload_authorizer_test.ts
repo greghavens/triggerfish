@@ -5,7 +5,12 @@ import { buildExecutionTracePayloadAuthorizer } from "../../src/gateway/startup/
 
 Deno.test("Historical GitHub Actions access checks only the current exact repository and workflow metadata", async () => {
   const repository = "fixture-owner/fixture-repo";
-  const config = { agent_recovery: { github_repositories: [repository] } };
+  const config = {
+    agent_recovery: {
+      github_repositories: [repository],
+      github_repository_status: false,
+    },
+  };
   const keychain = createMemorySecretStore();
   let visibility = "public";
   let reportedRepository = repository;
@@ -85,6 +90,22 @@ Deno.test("Historical GitHub Actions access checks only the current exact reposi
     "/repos/fixture-owner/fixture-repo",
     "/repos/fixture-owner/fixture-repo/actions/workflows/120",
   ]);
+  const metadata = {
+    kind: "github_repository_status" as const,
+    repo: repository,
+    repositoryId,
+    visibility: "private" as const,
+  };
+  assertEquals(await authorize(metadata, "INTERNAL"), false);
+  assertEquals(paths, []);
+  config.agent_recovery.github_repository_status = true;
+  assertEquals(await authorize(metadata, "INTERNAL"), true);
+  assertEquals(paths.splice(0), ["/repos/fixture-owner/fixture-repo"]);
+  assertEquals(
+    await authorize({ ...metadata, repositoryId: 999 }, "INTERNAL"),
+    false,
+  );
+  assertEquals(paths.splice(0), ["/repos/fixture-owner/fixture-repo"]);
   config.agent_recovery.github_repositories = ["replacement/repo"];
   assertEquals(await authorize(payload, "INTERNAL"), false);
   assertEquals(paths, []);

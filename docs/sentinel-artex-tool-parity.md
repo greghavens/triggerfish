@@ -589,3 +589,10 @@ without a verified repository ID cannot be reused. The
 [delegated recovery fixture](../tests/gateway/delegated_agent_recovery_test.ts)
 restores a paused run, denies access after a same-name repository replacement,
 and resumes with its original repository and a single recorded tool call.
+
+Shared execution history now supports opt-in repository status from
+`github_repos get` for configured recovery repositories. The delegated
+recovery fixture exercises interrupted execution and exact reuse without
+repeating the tool call. The authenticated operator gateway fixture restores
+an archived record and exercises the original tool's pre-call and response
+checks before returning the saved projection.

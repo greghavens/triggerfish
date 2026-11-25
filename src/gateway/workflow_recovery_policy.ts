@@ -87,11 +87,13 @@ function projectWorkflowStatus(text: string): string | undefined {
 export function createWorkflowRecoveryPolicy(options: {
   readonly repositories: readonly string[];
   readonly classification: () => ClassificationLevel;
+  readonly repositoryStatus?: boolean;
   readonly authorizeRepository: (
     repo: string,
     classification: ClassificationLevel,
     workflow: string | undefined,
     repositoryId: number,
+    metadataOnly?: boolean,
   ) => Promise<boolean>;
 }): AgentRecoveryPolicy {
   if (
@@ -105,16 +107,59 @@ export function createWorkflowRecoveryPolicy(options: {
     );
   }
   const repos = new Set(options.repositories);
+  const projectCall = (
+    { name, args }: { name: string; args: Record<string, unknown> },
+  ) =>
+    options.repositoryStatus && name === "github_repos" &&
+      args.action === "get" &&
+      typeof args.repo === "string" && repos.has(args.repo) &&
+      Object.keys(args).length === 2
+      ? { action: "get", repo: args.repo }
+      : approvedWorkflowArgs(name, args, repos);
+  function projectRepositoryStatus(
+    repo: string,
+    text: string,
+  ): string | undefined {
+    if (text.length > 512_000) return;
+    try {
+      const { name, repositoryId, visibility } = JSON.parse(text);
+      if (
+        typeof name !== "string" || name.toLowerCase() !== repo.toLowerCase() ||
+        !Number.isSafeInteger(repositoryId) || repositoryId < 1 ||
+        !["public", "internal", "private"].includes(visibility)
+      ) return;
+      return JSON.stringify({ name: repo, repositoryId, visibility });
+    } catch {
+      return undefined;
+    }
+  }
   return {
     version: "github-actions-status-v1",
     classification: options.classification,
-    projectCall: ({ name, args }) => approvedWorkflowArgs(name, args, repos),
-    projectResult: (_call, text) => projectWorkflowStatus(text),
+    projectCall,
+    projectResult(call, text) {
+      const args = projectCall(call);
+      if (!args) return;
+      return args.action === "get"
+        ? projectRepositoryStatus(String(args.repo), text)
+        : projectWorkflowStatus(text);
+    },
     resultResourceId(projected) {
       return JSON.parse(projected).repositoryId;
     },
     projectTracePayload(call, projected) {
-      const args = approvedWorkflowArgs(call.name, call.args, repos);
+      const args = projectCall(call);
+      if (args?.action === "get") {
+        const safe = projectRepositoryStatus(String(args.repo), projected);
+        if (safe !== projected) return;
+        const { repositoryId, visibility } = JSON.parse(safe);
+        return {
+          kind: "github_repository_status",
+          repo: String(args.repo),
+          repositoryId,
+          visibility,
+        };
+      }
       const safe = projectWorkflowStatus(projected);
       if (!args || !safe || safe !== projected) return undefined;
       const { runs, repositoryId } = JSON.parse(safe);
@@ -132,7 +177,7 @@ export function createWorkflowRecoveryPolicy(options: {
     },
 
     authorize(receipt) {
-      const args = approvedWorkflowArgs(receipt.name, receipt.args, repos);
+      const args = projectCall(receipt);
       if (!args || receipt.resourceId === undefined) {
         return Promise.resolve(false);
       }
@@ -141,6 +186,7 @@ export function createWorkflowRecoveryPolicy(options: {
         receipt.classification,
         typeof args.workflow === "string" ? args.workflow : undefined,
         receipt.resourceId,
+        args.action === "get",
       );
     },
   };

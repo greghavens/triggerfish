@@ -71,6 +71,7 @@ Enable recovery for specific GitHub repositories in `triggerfish.yaml`.
 ```yaml
 agent_recovery:
   github_repositories: ["example-org/example-repo"]
+  github_repository_status: true
   scheduler: true
   team: true
 ```
@@ -79,6 +80,12 @@ In owner chat, submit `/recover <execution-uuid> <request>` for an ordinary
 agent or `/recover-subagent <execution-uuid> <request>` for a delegated agent.
 After a disconnect or restart, send the same UUID and exact text to resume
 that execution. A completed UUID remains terminal.
+
+`github_repository_status: true` also allows recovery and exact trace
+retrieval for `github_repos get` against those repositories. The saved record
+contains only the repository name, immutable ID, and visibility. Retrieval
+requires current repository access and authorization for the original tool
+operation.
 
 When team recovery is enabled, use
 `/recover-team <delivery-uuid> <team-uuid> <member-session-uuid> <request>`.

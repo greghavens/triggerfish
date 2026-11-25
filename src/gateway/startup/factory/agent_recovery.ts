@@ -1,7 +1,10 @@
 /** Assemble the opt-in recovery policy from operator settings. */
 import { join } from "@std/path";
 import type { TriggerFishConfig } from "../../../core/config_types.ts";
-import type { ExecutionTraceApprovedPayload } from "../../../core/execution_traces.ts";
+import {
+  type ExecutionTraceApprovedPayload,
+  executionTracePayloadCall,
+} from "../../../core/execution_traces.ts";
 import type { SecretStore } from "../../../core/secrets/keychain/keychain.ts";
 import { safeFetchWithRedirects } from "../../../core/security/safe_fetch.ts";
 import {
@@ -66,6 +69,7 @@ function buildWorkflowMetadataAccess(
     prior: ClassificationLevel,
     workflow?: string,
     repositoryId?: number,
+    metadataOnly = false,
   ) => {
     const overrides = config.github?.classification_overrides as
       | Readonly<Record<string, ClassificationLevel>>
@@ -88,6 +92,7 @@ function buildWorkflowMetadataAccess(
     ) {
       return false;
     }
+    if (metadataOnly) return true;
     const path = `/repos/${encodeURIComponent(owner)}/${
       encodeURIComponent(name)
     }/actions/workflows`;
@@ -113,7 +118,7 @@ function buildWorkflowMetadataAccess(
   };
 }
 
-/** Build current access validation for the one saved historical payload type. */
+/** Build current access validation for approved historical payloads. */
 export function buildExecutionTracePayloadAuthorizer(
   config: GitHubWorkflowAuthorizationConfig,
   secretStore: SecretStore,
@@ -134,33 +139,27 @@ export function buildExecutionTracePayloadAuthorizer(
     try {
       const repositories = configuredWorkflowRepositories(config);
       if (
-        !repositories || payload.kind !== "github_actions_status" ||
+        !repositories ||
         !Number.isSafeInteger(payload.repositoryId) || payload.repositoryId < 1
       ) {
         return false;
       }
       const policy = createWorkflowRecoveryPolicy({
         repositories,
+        repositoryStatus:
+          config.agent_recovery?.github_repository_status === true,
         classification: () => prior,
         authorizeRepository: checkAccess,
       });
       if (
-        !policy.projectCall({
-          name: "github_actions",
-          args: {
-            action: "list_runs",
-            repo: payload.repo,
-            ...(payload.workflow !== undefined &&
-              { workflow: payload.workflow }),
-            ...(payload.perPage !== undefined && { per_page: payload.perPage }),
-          },
-        })
+        !policy.projectCall(executionTracePayloadCall(payload))
       ) return false;
       return await checkAccess(
         payload.repo,
         prior,
-        payload.workflow,
+        payload.kind === "github_actions_status" ? payload.workflow : undefined,
         payload.repositoryId,
+        payload.kind === "github_repository_status",
       );
     } catch {
       return false;
@@ -188,6 +187,8 @@ export function buildWorkflowRecoveryExecutor(
       id,
       createWorkflowRecoveryPolicy({
         repositories,
+        repositoryStatus:
+          config.agent_recovery?.github_repository_status === true,
         classification: classification ?? (() => options.targetClassification),
         authorizeRepository: checkAccess,
       }),

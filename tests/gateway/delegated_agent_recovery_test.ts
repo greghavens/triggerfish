@@ -37,7 +37,12 @@ import { buildTeamManager } from "../../src/gateway/startup/factory/team_executo
 const usage = { inputTokens: 1, outputTokens: 1 };
 const userId = "owner" as UserId;
 
-Deno.test("Delegated recovery preserves only the approved Actions trace and reuses the saved exchange", async () => {
+Deno.test("Delegated recovery reuses approved Actions history", () =>
+  checkDelegatedStatusRecovery(false));
+Deno.test("Delegated recovery reuses approved repository metadata history", () =>
+  checkDelegatedStatusRecovery(true));
+
+async function checkDelegatedStatusRecovery(metadata: boolean) {
   const directory = await Deno.makeTempDir();
   const recoveryPath = join(directory, "agent-recovery.db");
   const restoredPath = join(directory, "restored-recovery.db");
@@ -48,7 +53,13 @@ Deno.test("Delegated recovery preserves only the approved Actions trace and reus
   const runs = [{ id: 1234, status: "completed", conclusion: "success" }];
   const repo = "acme/security";
   const workflow = "build.yml";
-  const args = { action: "list_runs", repo, workflow, per_page: 10 };
+  const tool = metadata ? "github_repos" : "github_actions";
+  const args = metadata
+    ? { action: "get", repo }
+    : { action: "list_runs", repo, workflow, per_page: 10 };
+  const result = metadata
+    ? { name: repo, repositoryId: 72451, visibility: "private" }
+    : { runs, repositoryId: 72451 };
   const authorized: string[] = [];
   const received: string[] = [];
   let reads = 0;
@@ -57,11 +68,20 @@ Deno.test("Delegated recovery preserves only the approved Actions trace and reus
   let currentRepositoryId = 72451;
   const policy = createWorkflowRecoveryPolicy({
     repositories: [repo],
+    repositoryStatus: metadata,
     classification: () => "INTERNAL",
-    authorizeRepository: (name, classification, workflowId, repositoryId) => {
+    authorizeRepository: (
+      name,
+      classification,
+      workflowId,
+      repositoryId,
+      metadataOnly,
+    ) => {
       authorized.push(JSON.stringify([name, classification, workflowId]));
       return Promise.resolve(
-        permitted && name === repo && workflowId === workflow &&
+        permitted && name === repo &&
+          workflowId === (metadata ? undefined : workflow) &&
+          metadataOnly === metadata &&
           repositoryId === currentRepositoryId,
       );
     },
@@ -107,7 +127,7 @@ Deno.test("Delegated recovery preserves only the approved Actions trace and reus
               id: "fixture-approved-call",
               type: "function",
               function: {
-                name: "github_actions",
+                name: tool,
                 arguments: JSON.stringify(args),
               },
             }],
@@ -117,12 +137,11 @@ Deno.test("Delegated recovery preserves only the approved Actions trace and reus
       });
       providerRegistry.setDefault("delegated-recovery-fixture");
       const toolExecutor = (name: string) => {
-        assertEquals(name, "github_actions");
+        assertEquals(name, tool);
         reads++;
         return Promise.resolve(JSON.stringify({
           _classification: "INTERNAL",
-          repositoryId: 72451,
-          runs: runs.map((row) => ({ ...row, connectorCredential: rawSecret })),
+          ...result,
           rawCredential: rawSecret,
         }));
       };
@@ -132,7 +151,7 @@ Deno.test("Delegated recovery preserves only the approved Actions trace and reus
         hookRunner: createHookRunner(createPolicyEngine()),
         enableStreaming: false,
         tools: [{
-          name: "github_actions",
+          name: tool,
           description: "Approved status",
           parameters: {},
         }],
@@ -158,7 +177,12 @@ Deno.test("Delegated recovery preserves only the approved Actions trace and reus
         buildSubagentFactory(factory, { executionTracePath: tracePath }),
         run,
       );
-    const first = await ownerCommand()(command, parent, undefined, "INTERNAL");
+    const first = await ownerCommand()(
+      command,
+      parent,
+      undefined,
+      "INTERNAL",
+    );
     assertEquals(first, "Durable subagent execution failed.");
     assertEquals(reads, 1);
     const identity = await delegatedSubagentIdentity(parent.id, executionId);
@@ -220,17 +244,20 @@ Deno.test("Delegated recovery preserves only the approved Actions trace and reus
     assertEquals(reads, 1);
     assertEquals(
       authorized,
-      Array(3).fill(JSON.stringify([repo, "INTERNAL", workflow])),
+      Array(3).fill(
+        JSON.stringify([repo, "INTERNAL", metadata ? undefined : workflow]),
+      ),
     );
     assertEquals(
       received,
-      Array(2).fill(JSON.stringify({ runs, repositoryId: 72451 })),
+      Array(2).fill(JSON.stringify(result)),
     );
 
     const trace = openExecutionTraces(tracePath);
     try {
       const records =
-        trace.listRuns({ role: "delegated", ceiling: "INTERNAL" })?.runs ?? [];
+        trace.listRuns({ role: "delegated", ceiling: "INTERNAL" })?.runs ??
+          [];
       assertEquals(records.length, 1);
       const [record] = records;
       assertEquals(record.scope.sourceId, parent.id);
@@ -238,20 +265,30 @@ Deno.test("Delegated recovery preserves only the approved Actions trace and reus
       const steps = trace.list(record.scope, { ceiling: "INTERNAL" })?.steps ??
         [];
       assertEquals(steps.map(({ tool, outcome }) => ({ tool, outcome })), [
-        { tool: "github_actions", outcome: "returned" },
+        { tool, outcome: "returned" },
       ]);
       assertEquals(
         trace.readApprovedPayload(record.scope, 1, "PUBLIC"),
         undefined,
       );
-      assertEquals(trace.readApprovedPayload(record.scope, 1, "INTERNAL"), {
-        kind: "github_actions_status",
-        repo,
-        repositoryId: 72451,
-        workflow,
-        perPage: 10,
-        runs,
-      });
+      assertEquals(
+        trace.readApprovedPayload(record.scope, 1, "INTERNAL"),
+        metadata
+          ? {
+            kind: "github_repository_status",
+            repo,
+            repositoryId: 72451,
+            visibility: "private",
+          }
+          : {
+            kind: "github_actions_status",
+            repo,
+            repositoryId: 72451,
+            workflow,
+            perPage: 10,
+            runs,
+          },
+      );
       assert(!JSON.stringify(steps).includes(repo));
     } finally {
       trace.close();
@@ -266,7 +303,7 @@ Deno.test("Delegated recovery preserves only the approved Actions trace and reus
   } finally {
     await Deno.remove(directory, { recursive: true });
   }
-});
+}
 
 function orchestratorWith(
   executeAgentTurn: Orchestrator["executeAgentTurn"],

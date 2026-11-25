@@ -55,6 +55,7 @@ export async function fetchGitHubRepository(
   const result = await client.getRepo(repoResult.owner, repoResult.name);
   if (!result.ok) return formatGitHubError(result.error);
   return JSON.stringify({
+    repositoryId: result.value.id,
     name: result.value.fullName,
     description: result.value.description,
     visibility: result.value.visibility,

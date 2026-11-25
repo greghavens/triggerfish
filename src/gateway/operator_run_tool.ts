@@ -10,6 +10,7 @@ import {
 import { join } from "@std/path";
 import {
   type ExecutionTraceApprovedPayload,
+  executionTracePayloadCall,
   openExecutionTraces,
 } from "../core/execution_traces.ts";
 import {
@@ -565,20 +566,20 @@ async function authorizeTracePayload(
   payload: ExecutionTraceApprovedPayload,
   classification: ClassificationLevel,
 ): Promise<boolean> {
-  const call = {
-    name: "github_actions",
-    args: {
-      action: "list_runs",
-      repo: payload.repo,
-      ...(payload.workflow !== undefined && { workflow: payload.workflow }),
-      ...(payload.perPage !== undefined && { per_page: payload.perPage }),
-    },
-  };
+  const call = executionTracePayloadCall(payload);
   return await context.authorizeSavedCall(call) &&
     await authorizeSource(payload, classification) &&
     await context.authorizeSavedResponse(
       call.name,
-      JSON.stringify({ runs: payload.runs }),
+      JSON.stringify(
+        payload.kind === "github_actions_status"
+          ? { runs: payload.runs, repositoryId: payload.repositoryId }
+          : {
+            name: payload.repo,
+            repositoryId: payload.repositoryId,
+            visibility: payload.visibility,
+          },
+      ),
       classification,
     );
 }
@@ -589,8 +590,11 @@ function matchesTracePayload(
 ) {
   const matches = (value: string | number | null | undefined) =>
     value != null && String(value).toLowerCase().includes(term);
-  return matches(payload.repo) || matches(payload.workflow) ||
-    matches(payload.repositoryId) ||
+  if (matches(payload.repo) || matches(payload.repositoryId)) return true;
+  if (payload.kind === "github_repository_status") {
+    return matches(payload.visibility);
+  }
+  return matches(payload.workflow) ||
     payload.runs.some(({ id, status, conclusion }) =>
       matches(id) || matches(status) || matches(conclusion)
     );

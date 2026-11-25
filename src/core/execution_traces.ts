@@ -38,7 +38,7 @@ export interface ExecutionTraceStep {
 }
 
 /** Canonical, explicitly approved read projection. */
-export interface ExecutionTraceApprovedPayload {
+interface ActionsStatusPayload {
   readonly kind: "github_actions_status";
   readonly repo: string;
   readonly repositoryId: number;
@@ -49,6 +49,29 @@ export interface ExecutionTraceApprovedPayload {
     readonly status: string;
     readonly conclusion: string | null;
   }[];
+}
+
+export type ExecutionTraceApprovedPayload = ActionsStatusPayload | {
+  readonly kind: "github_repository_status";
+  readonly repo: string;
+  readonly repositoryId: number;
+  readonly visibility: "public" | "internal" | "private";
+};
+
+export function executionTracePayloadCall(
+  payload: ExecutionTraceApprovedPayload,
+) {
+  return payload.kind === "github_repository_status"
+    ? { name: "github_repos", args: { action: "get", repo: payload.repo } }
+    : {
+      name: "github_actions",
+      args: {
+        action: "list_runs",
+        repo: payload.repo,
+        ...(payload.workflow !== undefined && { workflow: payload.workflow }),
+        ...(payload.perPage !== undefined && { per_page: payload.perPage }),
+      },
+    };
 }
 
 export interface ExecutionTraceRun {
@@ -106,6 +129,19 @@ const workflowConclusions = new Set([
 function normalizeApprovedPayload(
   raw: ExecutionTraceApprovedPayload,
 ): ExecutionTraceApprovedPayload | undefined {
+  if (raw?.kind === "github_repository_status") {
+    const { repo, repositoryId, visibility } = raw;
+    if (
+      typeof repo !== "string" || !repoPattern.test(repo) ||
+      /\/(?:\.|\.\.)$/.test(repo) ||
+      !Number.isSafeInteger(repositoryId) || repositoryId < 1 ||
+      !["public", "internal", "private"].includes(visibility) ||
+      Object.keys(raw).some((key) =>
+        !["kind", "repo", "repositoryId", "visibility"].includes(key)
+      )
+    ) return undefined;
+    return { kind: raw.kind, repo, repositoryId, visibility };
+  }
   if (
     !raw || typeof raw !== "object" || raw.kind !== "github_actions_status" ||
     typeof raw.repo !== "string" || !repoPattern.test(raw.repo) ||
@@ -124,7 +160,7 @@ function normalizeApprovedPayload(
       )
     )
   ) return;
-  const runs: ExecutionTraceApprovedPayload["runs"][number][] = [];
+  const runs: ActionsStatusPayload["runs"][number][] = [];
   for (const entry of raw.runs) {
     if (
       !entry || typeof entry !== "object" ||
@@ -377,7 +413,8 @@ export function openExecutionTraces(path: string, now = Date.now) {
       : normalizeApprovedPayload(rawPayload);
     if (
       rawPayload !== undefined &&
-      (!payload || normalized.tool !== "github_actions" ||
+      (!payload ||
+        normalized.tool !== executionTracePayloadCall(payload).name ||
         normalized.outcome !== "returned")
     ) return;
     return transaction(db, () => {
@@ -527,7 +564,8 @@ export function openExecutionTraces(path: string, now = Date.now) {
           : normalizeApprovedPayload(entry.payload);
         if (
           entry.payload !== undefined && (!payload ||
-            step.tool !== "github_actions" || step.outcome !== "returned")
+            step.tool !== executionTracePayloadCall(payload).name ||
+            step.outcome !== "returned")
         ) return false;
         const id = hashId(
           "execution-trace",
@@ -932,7 +970,7 @@ export function openExecutionTraces(path: string, now = Date.now) {
         const admitted = checkedRun(scope, ceiling);
         const row = admitted && exact.get(admitted.sequence, ordinal);
         if (
-          !row || row.tool !== "github_actions" || row.outcome !== "returned"
+          !row || row.outcome !== "returned"
         ) return;
         const saved = readPayload.get(row.id)?.payload;
         if (typeof saved !== "string" || saved.length > 16_000) return;
@@ -940,12 +978,14 @@ export function openExecutionTraces(path: string, now = Date.now) {
           const payload = normalizeApprovedPayload(JSON.parse(saved));
           const step = normalizeStep({
             ordinal,
-            tool: "github_actions",
+            tool: String(row.tool),
             outcome: "returned",
             classification: row.classification as ClassificationLevel,
           });
           if (
-            !step || !payload || !canFlowTo(step.classification, ceiling) ||
+            !step || !payload ||
+            step.tool !== executionTracePayloadCall(payload).name ||
+            !canFlowTo(step.classification, ceiling) ||
             hashId("execution-trace", [scope, step, payload]) !== row.id
           ) return;
           return payload;

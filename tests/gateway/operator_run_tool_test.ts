@@ -79,6 +79,12 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
     workflow: "22",
     runs: [{ id: 123, status: "completed", conclusion: "success" }],
   };
+  const repositoryPayload = {
+    kind: "github_repository_status" as const,
+    repo: workflowPayload.repo,
+    repositoryId: workflowPayload.repositoryId,
+    visibility: "private",
+  } as const;
   const runs = createWorkflowRunRegistry();
   const journalPath = join(baseDir, "operator-workflows.db");
   const workflows = createOperatorWorkflowRuns(runs, [plan], journalPath);
@@ -147,9 +153,11 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
       evaluateHook(hook, { session, input, auditInput }) {
         const runTool = input.tool_name === tool ||
           (input.tool_call as { name?: string } | undefined)?.name === tool;
-        const traceSource = input.tool_name === "github_actions" ||
-          (input.tool_call as { name?: string } | undefined)?.name ===
-            "github_actions";
+        const traceSource = [
+          input.tool_name,
+          (input.tool_call as { name?: string } | undefined)?.name,
+        ]
+          .some((name) => name === "github_actions" || name === "github_repos");
         if (traceSource) {
           traceSourceChecks.push(hook);
           assert(!Object.hasOwn(auditInput ?? {}, "tool_response"));
@@ -201,6 +209,10 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
       providerRegistry,
       hookRunner,
       tools: [{
+        name: "github_repos",
+        description: "Fixture repository source.",
+        parameters: {},
+      }, {
         name: "github_actions",
         description: "Fixture registered GitHub Actions policy source.",
         parameters: {},
@@ -218,7 +230,12 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
         profiles: (ceiling) =>
           listEffectiveModelProfiles(providerRegistry, ceiling),
         authorizeExecutionTracePayload: (payload, classification) => {
-          assertEquals(payload, workflowPayload);
+          assertEquals(
+            payload,
+            payload.kind === "github_repository_status"
+              ? repositoryPayload
+              : workflowPayload,
+          );
           assertEquals(classification, "INTERNAL");
           return Promise.resolve(allowTracePayload);
         },
@@ -2209,6 +2226,12 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
           classification: "INTERNAL",
           outcome: "returned",
         }, workflowPayload));
+        assert(traceJournal.append(traceScope, {
+          ordinal: 3,
+          tool: "github_repos",
+          classification: "INTERNAL",
+          outcome: "returned",
+        }, repositoryPayload));
         assert(traceJournal.finish(traceScope, "completed"));
         assert(traceJournal.finish(confidentialScope, "completed"));
         assert(traceJournal.admit(scheduled));
@@ -2377,6 +2400,24 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
           JSON.parse((await restoreTurn(payload)).result).payload,
           workflowPayload,
         );
+        const repositoryAction = { ...payload, ordinal: 3 };
+        traceSourceChecks.length = 0;
+        assertEquals(
+          JSON.parse((await restoreTurn(repositoryAction)).result).payload,
+          repositoryPayload,
+        );
+        assertEquals(traceSourceChecks, [
+          "PRE_TOOL_CALL",
+          "POST_TOOL_RESPONSE",
+        ]);
+        for (const hook of ["PRE_TOOL_CALL", "POST_TOOL_RESPONSE"] as const) {
+          denyTraceSource = hook;
+          assertStringIncludes(
+            (await restoreTurn(repositoryAction)).result,
+            "unavailable",
+          );
+        }
+        denyTraceSource = undefined;
         assertEquals(originalToolInvocations, 0);
       }, restarted);
     }, restarted);
