@@ -1,4 +1,8 @@
 import {
+  MAX_SHARED_ASSET_MAPPING_SOURCES,
+  type SharedAssetMappingSource,
+} from "./shared_inventory.ts";
+import {
   isRepeatableSentinelReceiptRead,
   isSentinelAssignedPrerequisiteRead,
   isSentinelGoalReceiptRead,
@@ -549,6 +553,7 @@ export interface AdaptivePeerFindingCitation {
   readonly sourceAssetId: string;
   readonly sourceFindingId: string;
   readonly snapshotDigest: string;
+  readonly mappingSources?: readonly SharedAssetMappingSource[];
 }
 
 /** A completed, internal check against a destination evidence revision. */
@@ -1094,6 +1099,23 @@ function normalizePeerFindingCitation(citation: AdaptivePeerFindingCitation) {
     typeof citation.snapshotDigest !== "string" ||
     !/^[a-f0-9]{64}$/.test(citation.snapshotDigest)
   ) throw new Error("Invalid Sentinel peer finding citation source");
+  const { mappingSources } = citation;
+  if (
+    mappingSources !== undefined &&
+    (!Array.isArray(mappingSources) || !mappingSources.length ||
+      mappingSources.length > MAX_SHARED_ASSET_MAPPING_SOURCES ||
+      !mappingSources.every((source) =>
+        source && isSentinelCaseId(source.caseId) &&
+        typeof source.snapshotDigest === "string" &&
+        /^[a-f0-9]{64}$/.test(source.snapshotDigest)
+      ) ||
+      new Set(mappingSources.map(({ caseId }) => caseId)).size !==
+        mappingSources.length ||
+      !mappingSources.some(({ caseId, snapshotDigest }) =>
+        caseId === citation.sourceCaseId &&
+        snapshotDigest === citation.snapshotDigest
+      ))
+  ) throw new Error("Invalid Sentinel peer finding mapping sources");
   return {
     localAssetId: boundedText(citation.localAssetId, "local asset ID", 4096),
     sourceCaseId: citation.sourceCaseId,
@@ -1108,6 +1130,12 @@ function normalizePeerFindingCitation(citation: AdaptivePeerFindingCitation) {
       4096,
     ),
     snapshotDigest: citation.snapshotDigest,
+    ...(mappingSources && {
+      mappingSources: mappingSources.map(({ caseId, snapshotDigest }) => ({
+        caseId,
+        snapshotDigest,
+      })),
+    }),
   };
 }
 
@@ -1446,13 +1474,22 @@ export function readAdaptiveSourceSnapshotReferences(path: string) {
         "SELECT 1 FROM pragma_table_info('adaptive_tasks') WHERE name = 'plannerRound'",
       ).get()
     ) {
-      selects.push(`
+      selects.push(
+        `
         SELECT DISTINCT json_extract(citation.value, '$.sourceCaseId') AS caseId,
           json_extract(citation.value, '$.snapshotDigest') AS digest
         FROM adaptive_tasks AS task,
           json_each(task.plannerRound, '$.peerFindingCitations') AS citation
         WHERE json_type(citation.value, '$.snapshotDigest') = 'text'
-      `);
+      `,
+        `
+        SELECT DISTINCT json_extract(source.value, '$.caseId') AS caseId,
+          json_extract(source.value, '$.snapshotDigest') AS digest
+        FROM adaptive_tasks AS task,
+          json_each(task.plannerRound, '$.peerFindingCitations') AS citation,
+          json_each(citation.value, '$.mappingSources') AS source
+      `,
+      );
     }
     return selects.length ? db.prepare(selects.join(" UNION ")).all() : [];
   } finally {

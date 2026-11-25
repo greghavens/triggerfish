@@ -2860,6 +2860,13 @@ Deno.test("Saved worker observations change the planner round and link cited fol
     sourceFindingId: "peer-finding",
     snapshotDigest: "a".repeat(64),
   };
+  const verifiedPeerFinding = {
+    ...peerFinding,
+    mappingSources: [
+      { caseId: "bridge", snapshotDigest: "c".repeat(64) },
+      { caseId: "peer", snapshotDigest: peerFinding.snapshotDigest },
+    ],
+  };
   try {
     await Deno.writeTextFile(
       path,
@@ -2923,7 +2930,7 @@ Deno.test("Saved worker observations change the planner round and link cited fol
               tool: "sentinel_shared_finding_source",
               target: peerFinding.sourceFindingId,
               outcome: "returned",
-              peerFinding,
+              peerFinding: verifiedPeerFinding,
             });
             plannerPrompt = String(message);
             const input = JSON.parse(plannerPrompt.split("\n").at(-1)!);
@@ -2945,7 +2952,10 @@ Deno.test("Saved worker observations change the planner round and link cited fol
                   kind: "impact",
                   nodeId: "app",
                   sourceTaskId: saved.taskId,
-                  peerFinding,
+                  peerFinding: {
+                    ...peerFinding,
+                    mappingSources: [{ caseId: "untrusted" }],
+                  },
                 },
                 {
                   kind: "trace",
@@ -3035,7 +3045,9 @@ Deno.test("Saved worker observations change the planner round and link cited fol
       kind === "trace" && nodeId === "record"
     )!;
     assertEquals(impact.reviewedFrom, saved.taskId);
-    assertEquals(impact.plannerRound?.peerFindingCitations, [peerFinding]);
+    assertEquals(impact.plannerRound?.peerFindingCitations, [
+      verifiedPeerFinding,
+    ]);
     assertEquals(
       result.tasks.filter((task) =>
         task.plannerRound?.peerFindingCitations?.length

@@ -1,3 +1,4 @@
+import type { AdaptivePeerFindingCitation } from "../../src/sentinel/adaptive_store.ts";
 import { createHash } from "node:crypto";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import {
@@ -1556,7 +1557,6 @@ Deno.test("Pinned Sentinel workers reopen exact shared findings discovered this 
           id: "remote-app",
           kind: "asset",
           label: "Peer app",
-          aliases: ["local-app"],
         },
         {
           id: "finding-a",
@@ -1584,6 +1584,31 @@ Deno.test("Pinned Sentinel workers reopen exact shared findings discovered this 
         { from: "record-b", to: "finding-b", relation: "supports" },
       ],
     };
+    const bridgeDir = baseDir + "/data/sentinel-cases/bridge";
+    const bridge = bridgeDir + "/sentinel.json";
+    await Deno.mkdir(bridgeDir, { recursive: true });
+    const bridgeGraph = {
+      version: 1,
+      nodes: [{
+        id: "local-app",
+        kind: "asset",
+        label: "Published asset identity",
+        aliases: ["remote-app"],
+      }],
+      edges: [],
+    };
+    await Deno.writeTextFile(bridge, JSON.stringify(bridgeGraph));
+    const mappingSources = [{
+      caseId: "bridge",
+      snapshotDigest: digestSentinelSnapshot(
+        loadSentinelGraph(bridgeGraph).snapshot(),
+      ),
+    }, {
+      caseId: "peer",
+      snapshotDigest: digestSentinelSnapshot(
+        loadSentinelGraph(source).snapshot(),
+      ),
+    }];
     await Deno.writeTextFile(peer, JSON.stringify(source));
     const digest = digestSentinelSnapshot(loadSentinelGraph(source).snapshot());
     const exact = {
@@ -1641,6 +1666,7 @@ Deno.test("Pinned Sentinel workers reopen exact shared findings discovered this 
           );
           assertEquals(delivered.sourceSnapshots, [sourceRef]);
           assertEquals(delivered.links, []);
+          assertEquals(delivered.mappingSources, mappingSources);
           Deno.writeTextFileSync(
             peer,
             JSON.stringify({
@@ -1713,7 +1739,7 @@ Deno.test("Pinned Sentinel workers reopen exact shared findings discovered this 
       }),
     });
     const trace: SentinelReviewStep[] = [];
-    const peerReceipts: unknown[] = [];
+    const peerReceipts: AdaptivePeerFindingCitation[] = [];
     await worker.execute(
       "Inspect the peer report.",
       () => {},
@@ -1730,6 +1756,7 @@ Deno.test("Pinned Sentinel workers reopen exact shared findings discovered this 
       sourceAssetId: exact.sourceAsset,
       sourceFindingId: exact.finding,
       snapshotDigest: exact.snapshotDigest,
+      mappingSources,
     }]);
     assertEquals(calls, 3);
     await worker.execute("Try the old reference again.", () => {});
@@ -1751,13 +1778,8 @@ Deno.test("Pinned Sentinel workers reopen exact shared findings discovered this 
     try {
       const revision = store.activeRevision()!;
       store.addNote(revision, "Saved finding source.", undefined, trace);
-      const citation = {
-        localAssetId: exact.asset,
-        sourceCaseId: exact.sourceCase,
-        sourceAssetId: exact.sourceAsset,
-        sourceFindingId: exact.finding,
-        snapshotDigest: exact.snapshotDigest,
-      };
+      await Deno.remove(bridge);
+      const citation = peerReceipts[0];
       const otherCitation = { ...citation, sourceFindingId: "finding-b" };
       store.sync(revision, [{
         kind: "trace",
@@ -1886,7 +1908,7 @@ Deno.test("Pinned Sentinel workers reopen exact shared findings discovered this 
       store.close();
     }
     const audit = await auditSentinelSourceSnapshots(baseDir);
-    assertEquals(audit.referencedCount, 1);
+    assertEquals(audit.referencedCount, 2);
     assertEquals(audit.candidates, []);
   } finally {
     await Deno.remove(baseDir, { recursive: true });

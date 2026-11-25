@@ -328,6 +328,11 @@ export async function readSharedSentinelAssetCatalog(
 
 export const MAX_SHARED_ASSET_MAPPING_SOURCES = 32;
 
+export interface SharedAssetMappingSource {
+  readonly caseId: string;
+  readonly snapshotDigest: string;
+}
+
 export async function readSharedSentinelAssetLinks(
   baseDir: string,
   asset: string,
@@ -1037,6 +1042,7 @@ export async function readPinnedSentinelSharedFindingSource(
   reference: PinnedSentinelSharedFindingReference,
   localCaseId?: string,
   restoredCasePath?: string,
+  mappingSources?: readonly SharedAssetMappingSource[],
 ): Promise<Snapshot | undefined> {
   if (reference.caseId === localCaseId) return undefined;
   const localAssets = snapshotAssets(assigned);
@@ -1048,11 +1054,36 @@ export async function readPinnedSentinelSharedFindingSource(
     reference,
     restoredCasePath,
   );
-  if (
-    !archived ||
-    matchPinnedFindingAssets(localAssets, archived).get(reference.assetId) !==
-      reference.localAssetId
-  ) return undefined;
+  if (!archived) return undefined;
+  let matches = matchPinnedFindingAssets(localAssets, archived);
+  if (mappingSources) {
+    if (mappingSources.length > MAX_SHARED_ASSET_MAPPING_SOURCES) return;
+    const graphs = new Map<string, Snapshot>();
+    for (const source of mappingSources) {
+      if (source.caseId === localCaseId || graphs.has(source.caseId)) return;
+      if (source.caseId === reference.caseId) {
+        if (source.snapshotDigest !== reference.snapshotDigest) return;
+        graphs.set(source.caseId, archived);
+      } else {
+        graphs.set(
+          source.caseId,
+          await readArchivedSentinelSnapshot(
+            baseDir,
+            source.caseId,
+            source.snapshotDigest,
+            restoredCasePath,
+          ),
+        );
+      }
+    }
+    if (!graphs.has(reference.caseId)) return;
+    matches = matchInventorySource(
+      localAssets,
+      snapshotAssets(archived),
+      archivedSentinelInventoryAliases(assigned, graphs),
+    );
+  }
+  if (matches.get(reference.assetId) !== reference.localAssetId) return;
   return archived;
 }
 

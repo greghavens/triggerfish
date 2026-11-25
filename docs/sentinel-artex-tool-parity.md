@@ -920,5 +920,9 @@ A worker can reopen an exact finding whose reporting asset was matched through
 a cross-publication alias after the listing passes response policy. Restart
 validates the original listing and restores that exact authority before
 replaying the finding read. The gateway test removes the alias publication and
-verifies both saved responses. Cross-assignment planner citations still require
-a source-local asset match.
+verifies both saved responses. The planner carries the authorized listing's
+mapping sources into the exact finding citation on a follow-up assignment.
+The worker verifies the retained sources against its assigned revision before
+reopening the finding. Run archives and the source retention audit include
+those dependencies. Revalidating indirect citations across evidence revisions
+remains open.

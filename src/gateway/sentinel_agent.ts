@@ -925,7 +925,10 @@ interface ActiveTurn {
   readonly readGraph: ReadGraph;
   readonly outputLanguage: SentinelOutputLanguage;
   readonly send: ChatEventSender;
-  readonly sharedFindings: Set<string>;
+  readonly sharedFindings: Map<
+    string,
+    AdaptivePeerFindingCitation["mappingSources"]
+  >;
   readonly assignedDiscoveryEvidence: Set<string>;
   readonly readGoalTaskResults: Map<string, string>;
   readonly readGoalScopedReceipts: Set<string>;
@@ -1001,15 +1004,15 @@ function readAssignedModelReview(options: SentinelAgentOptions) {
   );
 }
 
-function matchesAssignedPeerFinding(
+function assignedPeerFinding(
   options: SentinelAgentOptions,
   citation: AdaptivePeerFindingCitation,
-): boolean {
+) {
   const task = readAssignedModelReview(options);
   return task?.status === "completed" &&
     task.nodeId === citation.localAssetId &&
     (task.kind === "trace" || task.kind === "impact") &&
-    (task.plannerRound?.peerFindingCitations ?? []).some((source) =>
+    (task.plannerRound?.peerFindingCitations ?? []).find((source) =>
       source.localAssetId === citation.localAssetId &&
       source.sourceCaseId === citation.sourceCaseId &&
       source.sourceAssetId === citation.sourceAssetId &&
@@ -1034,7 +1037,7 @@ function matchesPinnedFindingRead(
   args: Record<string, unknown>,
 ) {
   const read = parseSentinelPinnedFindingRead(args);
-  return read && matchesAssignedPeerFinding(options, {
+  return read && assignedPeerFinding(options, {
     localAssetId: read.asset,
     sourceCaseId: read.sourceCase,
     sourceAssetId: read.sourceAsset,
@@ -1528,13 +1531,16 @@ function parseSharedAssetLinkPage(
 function markSharedAssetFindings(turn: ActiveTurn, page: SharedAssetLinkPage) {
   for (const entry of page.findings ?? []) {
     if (typeof entry?.finding?.id === "string") {
-      turn.sharedFindings.add(sharedFindingReference(
-        page.asset,
-        entry.caseId,
-        entry.assetId,
-        entry.finding.id,
-        entry.snapshotDigest,
-      ));
+      turn.sharedFindings.set(
+        sharedFindingReference(
+          page.asset,
+          entry.caseId,
+          entry.assetId,
+          entry.finding.id,
+          entry.snapshotDigest,
+        ),
+        page.mappingSources,
+      );
     }
   }
 }
@@ -3275,10 +3281,11 @@ function createAgent(
             sourceFindingId: finding,
             snapshotDigest,
           };
+          const assignedFinding = discovered
+            ? undefined
+            : assignedPeerFinding(options, citation);
           const needsAssignment = !discovered;
-          if (
-            needsAssignment && !matchesAssignedPeerFinding(options, citation)
-          ) {
+          if (needsAssignment && !assignedFinding) {
             return "Error: That exact shared finding was not returned for this assigned case during this turn or cited by this active assignment.";
           }
           const reference = {
@@ -3302,6 +3309,7 @@ function createAgent(
               { ...reference, localAssetId: asset },
               localCaseId,
               options.snapshotPath,
+              assignedFinding ? assignedFinding.mappingSources : undefined,
             );
             if (!sourceGraph) {
               return "Error: The archived finding does not match the assigned local asset.";
@@ -3329,7 +3337,7 @@ function createAgent(
           }
           turn.signal.throwIfAborted();
           if (
-            needsAssignment && !matchesAssignedPeerFinding(options, citation)
+            needsAssignment && !assignedPeerFinding(options, citation)
           ) {
             return "Error: The Sentinel finding assignment is no longer active.";
           }
@@ -3986,6 +3994,16 @@ function createAgent(
             args: goalArgs,
             sha256: createHash("sha256").update(result).digest("hex"),
           };
+        const findingRead = !failed && name === sharedFindingSourceTool.name &&
+          parseSentinelPinnedFindingRead(args);
+        const mappingSources = findingRead &&
+          turn.sharedFindings.get(sharedFindingReference(
+            findingRead.asset,
+            findingRead.sourceCase,
+            findingRead.sourceAsset,
+            findingRead.finding,
+            findingRead.snapshotDigest,
+          ));
         turn.trace?.({
           tool: name,
           ...(typeof target === "string" && { target: target.slice(0, 256) }),
@@ -4010,6 +4028,7 @@ function createAgent(
               sourceAssetId: String(args.sourceAsset),
               sourceFindingId: String(args.finding),
               snapshotDigest: String(args.snapshotDigest),
+              ...(mappingSources && { mappingSources }),
             },
           }),
           ...(sourceSnapshots?.length && { sourceSnapshots }),
@@ -4113,7 +4132,7 @@ function createAgent(
               options.assessmentRevision,
             ),
           send,
-          sharedFindings: new Set(),
+          sharedFindings: new Map(),
           assignedDiscoveryEvidence: new Set(),
           readGoalTaskResults: new Map(),
           readGoalScopedReceipts: new Set(),

@@ -120,11 +120,19 @@ function adaptiveReferences(scope: AdaptiveScope) {
       LIMIT ?
     `
       : `
-      SELECT DISTINCT json_extract(citation.value, '$.sourceCaseId') AS caseId,
-        json_extract(citation.value, '$.snapshotDigest') AS digest
+      SELECT DISTINCT json_extract(source.value, '$.caseId') AS caseId,
+        json_extract(source.value, '$.snapshotDigest') AS digest
       FROM adaptive_evidence_revisions AS revision
       JOIN adaptive_tasks AS task USING (revision),
-        json_each(task.plannerRound, '$.peerFindingCitations') AS citation
+        json_each(task.plannerRound, '$.peerFindingCitations') AS citation,
+        json_each(json_insert(
+          COALESCE(json_extract(citation.value, '$.mappingSources'), '[]'),
+          '$[#]',
+          json_object(
+            'caseId', json_extract(citation.value, '$.sourceCaseId'),
+            'snapshotDigest', json_extract(citation.value, '$.snapshotDigest')
+          )
+        )) AS source
       WHERE revision.goalId = ? AND revision.evidenceNumber <= ?
       LIMIT ?
     `;

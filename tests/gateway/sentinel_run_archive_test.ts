@@ -340,12 +340,35 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
       findingDigest,
       findingSource,
     );
+    const mappingCase = "alias-bridge";
+    const mappingSnapshot = loadSentinelGraph({
+      version: 1,
+      nodes: [{
+        id: "app",
+        kind: "asset",
+        label: "Archived alias",
+        aliases: ["source-app"],
+      }],
+      edges: [],
+    }).snapshot();
+    const mappingDigest = digestSentinelSnapshot(mappingSnapshot);
+    await retainSentinelSourceSnapshot(
+      baseDir,
+      mappingCase,
+      mappingDigest,
+      mappingSnapshot,
+    );
+    const mappingSources = [
+      { caseId: mappingCase, snapshotDigest: mappingDigest },
+      { caseId: sourceCase, snapshotDigest: findingDigest },
+    ];
     const findingCitation = {
       localAssetId: "app",
       sourceCaseId: sourceCase,
       sourceAssetId: "source-app",
       sourceFindingId: "borrowed-finding",
       snapshotDigest: findingDigest,
+      mappingSources,
     };
     const traceSnapshot = loadSentinelGraph({
       ...originalSource,
@@ -720,6 +743,9 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
       findingDigest,
     );
     await Deno.remove(workspaceFinding);
+    await Deno.remove(
+      sentinelSourceSnapshotPath(baseDir, mappingCase, mappingDigest),
+    );
     const workspaceTrace = sentinelSourceSnapshotPath(
       baseDir,
       sourceCase,
@@ -1219,6 +1245,7 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
           },
           "restorable",
           path,
+          mappingSources,
         ),
         findingSource,
       );
