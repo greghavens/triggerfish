@@ -10,6 +10,7 @@
  */
 
 import { parseMcpLifecycleIntent } from "../../core/mcp_lifecycle_intent.ts";
+import { chatGoalMutation } from "../../core/chat_goal_intent.ts";
 import { isDeepStrictEqual } from "node:util";
 import { resolve } from "@std/path";
 import { computeContentHash } from "../../core/session/lineage_serde.ts";
@@ -349,6 +350,7 @@ export async function dispatchApprovedToolCall(
     };
   }
   const ownerAdministration = call.name === "list_skills" ||
+    chatGoalMutation(call.name, call.args) ||
     call.name === "inspect_skill_draft" || call.name === "approve_skill" ||
     call.name === "inspect_skill_creation" || call.name === "create_skill" ||
     call.name === "inspect_skill_revision" ||
@@ -574,6 +576,11 @@ export async function dispatchSecurityEnforcedToolCall(
               ) &&
               !enforceIntegrationWriteDownPolicy(call, config).blocked;
           },
+        }
+        : approval && chatGoalMutation(call.name, call.args)
+        ? {
+          toolApprovalRequestId: approval.requestId,
+          ownerSessionId: session.id,
         }
         : approval && parseMcpLifecycleIntent(call.name, call.args)
         ? { toolApprovalRequestId: approval.requestId }

@@ -142,6 +142,22 @@ export function createDefaultRules(): PolicyRule[] {
     buildResourceWriteDownRule(),
     buildResourceReadCeilingRule(),
     {
+      id: "owner-chat-goal-mutation-approval",
+      priority: 760,
+      hook: "PRE_TOOL_CALL",
+      conditions: [
+        { field: "tool_name", operator: "equals", value: "goal_report" },
+        {
+          field: "chat_goal_mutation",
+          operator: "matches",
+          value: "^(register|revise)$",
+        },
+        { field: "is_owner", operator: "equals", value: "true" },
+        { field: "is_trigger", operator: "equals", value: "false" },
+      ],
+      action: "REQUIRE_APPROVAL",
+    },
+    {
       id: "configured-mcp-lifecycle-approval",
       priority: 760,
       hook: "PRE_TOOL_CALL",

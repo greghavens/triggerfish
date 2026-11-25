@@ -1,4 +1,5 @@
 import type { ToolExecutionContext } from "../../core/types/tool.ts";
+import { chatGoalMutation } from "../../core/chat_goal_intent.ts";
 import { resolve } from "@std/path";
 /**
  * Tool access control and enforcement wrapper.
@@ -301,9 +302,10 @@ export function wrapToolExecutorWithEnforcement(
     if (accessErr) return accessErr;
 
     try {
-      // Todo entries are durable checklist text and never consume credentials.
+      // Durable checklist and goal text must remain the exact approved data.
       const { resolved, error } =
-        context?.todoAuthorization || name === "glob_files"
+        context?.todoAuthorization || name === "glob_files" ||
+          chatGoalMutation(name, input)
           ? { resolved: input, error: null }
           : await resolveToolSecrets(input, config);
       if (error) {

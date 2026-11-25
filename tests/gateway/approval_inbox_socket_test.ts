@@ -1,9 +1,22 @@
-import { assert, assertEquals, assertExists } from "@std/assert";
+import {
+  assert,
+  assertEquals,
+  assertExists,
+  assertStringIncludes,
+} from "@std/assert";
 import { join } from "@std/path";
 import { openApprovalInbox } from "../../src/core/approval_inbox.ts";
 import type { ApprovalInboxRecord } from "../../src/core/approval_inbox.ts";
 import { createToolApprovalService } from "../../src/core/tool_approval_service.ts";
 import { createProviderRegistry } from "../../src/agent/llm.ts";
+import { createMessageStore } from "../../src/core/conversation/mod.ts";
+import { GoalCompletionStore } from "../../src/core/goal_completion.ts";
+import { createPolicyEngine } from "../../src/core/policy/engine.ts";
+import {
+  createDefaultRules,
+  createHookRunner,
+} from "../../src/core/policy/hooks/hooks.ts";
+import { createMemoryStorage } from "../../src/core/storage/memory.ts";
 import {
   type ChannelId,
   createSession,
@@ -16,6 +29,205 @@ import { createGatewayServer } from "../../src/gateway/server/server.ts";
 
 const scope = "chat:owner";
 const sessionId = crypto.randomUUID();
+
+Deno.test("Owner model goal registration and revision use an exact root approval after reconnect", async () => {
+  const directory = await Deno.makeTempDir();
+  const goalPath = join(directory, "goals.db");
+  const inbox = createToolApprovalService(join(directory, "tool-approvals.db"));
+  const storage = createMemoryStorage();
+  const messages = createMessageStore(storage);
+  const session = createSession({
+    userId: "owner" as UserId,
+    channelId: "daemon" as ChannelId,
+  });
+  const registry = createProviderRegistry();
+  const originalId = crypto.randomUUID();
+  const reviseId = crypto.randomUUID();
+  const initial = {
+    action: "register",
+    requestId: originalId,
+    goal: "Verify the initial defensive control.",
+    policy: "automatic",
+    criteria: [{
+      id: "check",
+      description: "Verify the control.",
+      tool: "fixture_tool",
+      resultSha256: "a".repeat(64),
+    }],
+  };
+  let proposed: Record<string, unknown> = initial;
+  let result = "";
+  const registered: string[] = [];
+  registry.register({
+    name: "owner-goal-fixture",
+    supportsStreaming: false,
+    complete(history, tools) {
+      const event = history.at(-1);
+      const done = event?.role === "tool";
+      if (done) result = String(event.content);
+      else {assert(
+          tools?.some((tool) =>
+            (tool as { function?: { name: string } }).function?.name ===
+              "goal_report"
+          ),
+        );}
+      return Promise.resolve({
+        content: done ? "Goal operation complete." : "",
+        toolCalls: done ? [] : [{
+          id: crypto.randomUUID(),
+          type: "function",
+          function: {
+            name: "goal_report",
+            arguments: JSON.stringify(proposed),
+          },
+        }],
+        usage: { inputTokens: 1, outputTokens: 1 },
+      });
+    },
+  });
+  registry.setDefault("owner-goal-fixture");
+  const engine = createPolicyEngine();
+  for (const rule of createDefaultRules()) engine.addRule(rule);
+  const hooks = createHookRunner(engine);
+  const chat = createChatSession({
+    session,
+    providerRegistry: registry,
+    messageStore: messages,
+    goalCompletionPath: goalPath,
+    hookRunner: {
+      ...hooks,
+      toolApprovalInbox: inbox,
+      evaluateHook(hook, input) {
+        if (
+          hook === "POST_TOOL_RESPONSE" &&
+          typeof input.input.tool_response === "string"
+        ) {
+          try {
+            const goal = JSON.parse(input.input.tool_response).goal;
+            if (typeof goal === "string") registered.push(goal);
+          } catch { /* Direct policy denial responses are plain text. */ }
+        }
+        return hooks.evaluateHook(hook, input);
+      },
+    },
+    enableStreaming: false,
+  });
+  const token = crypto.randomUUID();
+  const gateway = createGatewayServer({ port: 0, token, chatSession: chat });
+  const { port } = await gateway.start();
+  let owner = await openSocket(port, token);
+  const store = new GoalCompletionStore(goalPath);
+  const family = `chat:${session.id}`;
+  const send = () =>
+    owner.socket.send(
+      JSON.stringify({ type: "message", content: "Review this goal change." }),
+    );
+  async function waitRecord(
+    predicate: (record: ApprovalInboxRecord) => boolean,
+  ) {
+    const deadline = Date.now() + 2000;
+    do {
+      const page = await owner.request({
+        type: "approval_inbox_list",
+        requestId: crypto.randomUUID(),
+      });
+      assertEquals(page.ok, true);
+      assert(!JSON.stringify(page).includes(String(proposed.goal)));
+      const record = (page.result as { records: ApprovalInboxRecord[] }).records
+        .find(predicate);
+      if (record) return record;
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    } while (Date.now() < deadline);
+    throw new Error("Owner goal request did not enter approval inbox");
+  }
+  function decide(record: ApprovalInboxRecord, approved: boolean) {
+    return owner.request({
+      type: "approval_inbox_decide",
+      requestId: crypto.randomUUID(),
+      approvalId: record.id,
+      approved,
+    });
+  }
+  async function apply(approved = true) {
+    result = "";
+    const ended = owner.next(({ type }) => type === "turn_end");
+    send();
+    const pending = await waitRecord(({ tool, status }) =>
+      tool === "goal_report" && status === "pending"
+    );
+    assertEquals((await decide(pending, approved)).ok, true);
+    await ended;
+    return pending;
+  }
+  try {
+    send();
+    const first = await waitRecord(({ status }) => status === "pending");
+    assertEquals(store.readRegistration(family), undefined);
+    await owner.close();
+    owner = await openSocket(port, token);
+    assertEquals(
+      (await waitRecord(({ id }) => id === first.id)).status,
+      "pending",
+    );
+    assertEquals((await decide(first, true)).ok, true);
+    const finished = await waitRecord(({ id, status }) =>
+      id === first.id && status === "completed"
+    );
+    assertEquals(store.readRegistration(family)?.requestId, originalId);
+    assertEquals(finished.dispatchOutcome, "returned");
+    assertEquals((await decide(first, true)).result, finished);
+    assertEquals(registered, [initial.goal]);
+
+    proposed = {
+      ...initial,
+      action: "revise",
+      requestId: reviseId,
+      expectedRequestId: originalId,
+      goal: "Verify a revised defensive control.",
+    };
+    await apply(false);
+    assertEquals(store.readRegistration(family)?.requestId, originalId);
+
+    const interrupted = owner.next(({ type }) => type === "turn_end");
+    send();
+    const held = await waitRecord(({ status }) => status === "pending");
+    engine.addRule({
+      id: "late-goal-deny",
+      priority: 999,
+      hook: "PRE_TOOL_CALL",
+      conditions: [{
+        field: "tool_name",
+        operator: "equals",
+        value: "goal_report",
+      }],
+      action: "BLOCK",
+    });
+    assertEquals((await decide(held, true)).ok, true);
+    await interrupted;
+    assertEquals(store.readRegistration(family)?.requestId, originalId);
+    engine.removeRule("late-goal-deny");
+    await apply();
+    const revised = store.readRegistration(family);
+    assertEquals(revised?.requestId, reviseId);
+    assertEquals(revised?.revisesRequestId, originalId);
+    assertEquals(
+      store.readRegistration(family, originalId)?.record.goal,
+      initial.goal,
+    );
+    await apply();
+    assertEquals(store.readRegistration(family), revised);
+    proposed = { ...proposed, requestId: crypto.randomUUID() };
+    await apply();
+    assertStringIncludes(result, "no longer current");
+    assertEquals(store.readRegistration(family), revised);
+  } finally {
+    store.close();
+    await owner.close();
+    await gateway.stop();
+    await storage.close();
+    await Deno.remove(directory, { recursive: true });
+  }
+});
 
 function chatWithInbox(
   approvalInbox: ApprovalInboxSocketService,

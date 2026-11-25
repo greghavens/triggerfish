@@ -1,5 +1,6 @@
 /** Owner-chat goal registration and evidence reporting. */
 import type { MessageStore } from "../core/conversation/mod.ts";
+import { chatGoalMutation } from "../core/chat_goal_intent.ts";
 import {
   type GoalCompletionRecord,
   GoalCompletionStore,
@@ -10,12 +11,15 @@ import {
 import type { ClassificationLevel } from "../core/types/classification.ts";
 import { canFlowTo } from "../core/types/classification.ts";
 import { computeContentHash } from "../core/session/lineage_serde.ts";
-import type { ToolDefinition } from "../core/types/tool.ts";
+import type {
+  ToolDefinition,
+  ToolExecutionContext,
+} from "../core/types/tool.ts";
 
 export const CHAT_GOAL_REPORT_TOOL: ToolDefinition = {
   name: "goal_report",
   description:
-    "Report a criterion using matching tool results saved in this chat, or read the owner chat's exact saved goal status or registration history.",
+    "Report a criterion using matching saved tool results, read exact goal history, or ask the owner to approve a new or revised formal goal.",
   parameters: {
     criterion: {
       type: "string",
@@ -23,17 +27,45 @@ export const CHAT_GOAL_REPORT_TOOL: ToolDefinition = {
     },
     action: {
       type: "string",
-      enum: ["status", "history"],
+      enum: ["status", "history", "register", "revise"],
       description:
-        "Read the active or exact saved decision, or list registrations",
+        "Read status/history or request an exact owner-approved registration/revision.",
     },
     requestId: {
       type: "string",
-      description: "Exact registration UUID or legacy for a status read",
+      description:
+        "Registration UUID for status or a fresh UUID for register/revise. Status also accepts legacy.",
     },
     before: {
       type: "string",
       description: "Registration history cursor from the preceding page",
+    },
+    expectedRequestId: {
+      type: "string",
+      description: "Exact current registration for revise.",
+    },
+    goal: {
+      type: "string",
+      description: "Formal goal for register or revise.",
+    },
+    policy: {
+      type: "string",
+      enum: ["automatic", "operator"],
+      description: "Completion policy for the proposed goal.",
+    },
+    criteria: {
+      type: "array",
+      description:
+        "Verifiable acceptance criteria with a tool name and SHA-256 of its expected result.",
+      items: {
+        type: "object",
+        properties: {
+          id: { type: "string" },
+          description: { type: "string" },
+          tool: { type: "string" },
+          resultSha256: { type: "string" },
+        },
+      },
     },
   },
 };
@@ -219,6 +251,37 @@ function describeRegistrationHistory(
 const goalReference =
   /^(?:legacy|[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12})$/;
 
+async function registerChatGoal(
+  store: GoalCompletionStore,
+  messages: MessageStore,
+  sessionId: string,
+  taint: ClassificationLevel,
+  input: ReturnType<typeof parseRegistration>,
+  isCurrent?: () => boolean,
+) {
+  const rows = await messages.loadSession(sessionId);
+  const afterSequence = rows.reduce(
+    (highest, { sequence }) => Math.max(highest, sequence),
+    0,
+  );
+  if (isCurrent?.() === false) {
+    throw new Error("Owner goal approval is unavailable.");
+  }
+  return describeRegistration(
+    store.registerSuccessive(
+      scope(sessionId),
+      input.requestId,
+      input.goal,
+      input.criteria,
+      input.policy,
+      afterSequence,
+      taint,
+      input.expectedRequestId,
+    ),
+    taint,
+  );
+}
+
 /** Handle an explicit owner command outside the model tool dispatcher. */
 export async function runChatGoalCommand(
   path: string,
@@ -236,24 +299,7 @@ export async function runChatGoalCommand(
         command.slice(mutation[0].length),
         mutation[1] === "revise",
       );
-      const rows = await messages.loadSession(sessionId);
-      const afterSequence = rows.reduce(
-        (highest, { sequence }) => Math.max(highest, sequence),
-        0,
-      );
-      return describeRegistration(
-        store.registerSuccessive(
-          family,
-          input.requestId,
-          input.goal,
-          input.criteria,
-          input.policy,
-          afterSequence,
-          taint,
-          input.expectedRequestId,
-        ),
-        taint,
-      );
+      return await registerChatGoal(store, messages, sessionId, taint, input);
     }
     const status = command.match(/^\/goal status(?: (\S+))?$/);
     if (status) {
@@ -290,19 +336,69 @@ export async function runChatGoalCommand(
   }
 }
 
-/** An agent may propose evidence, while operator confirmation stays in chat. */
+/** Handle model reads, evidence reports, and exactly approved registrations. */
 export async function reportChatGoal(
   path: string,
   messages: MessageStore,
   sessionId: string,
   taint: ClassificationLevel,
   args: Record<string, unknown>,
+  context?: ToolExecutionContext,
 ): Promise<string> {
   const { action, requestId, before, criterion } = args;
   const unavailable = "Error: Owner goal state is unavailable.";
+  const mutation = chatGoalMutation(CHAT_GOAL_REPORT_TOOL.name, args);
+  if (mutation) {
+    const current = () =>
+      context?.ownerSessionId === sessionId &&
+      !!context.toolApprovalRequestId &&
+      context.isCurrentInteractiveOwner?.() === true;
+    if (
+      !current() || typeof requestId !== "string" ||
+      requestId === "legacy" || !goalReference.test(requestId) ||
+      Object.keys(args).some((key) =>
+        ![
+          "action",
+          "requestId",
+          "expectedRequestId",
+          "goal",
+          "policy",
+          "criteria",
+        ].includes(key)
+      ) ||
+      !Array.isArray(args.criteria) ||
+      args.criteria.some((item) =>
+        !item || typeof item !== "object" ||
+        Array.isArray(item) ||
+        Object.keys(item).some((key) =>
+          !["id", "description", "tool", "resultSha256"].includes(key)
+        )
+      )
+    ) return unavailable;
+    let store: GoalCompletionStore | undefined;
+    try {
+      const registration = parseRegistration(
+        JSON.stringify(args),
+        mutation === "revise",
+      );
+      store = new GoalCompletionStore(path);
+      return await registerChatGoal(
+        store,
+        messages,
+        sessionId,
+        taint,
+        registration,
+        current,
+      );
+    } catch {
+      return "Error: The approved goal registration is invalid, conflicting, or no longer current.";
+    } finally {
+      store?.close();
+    }
+  }
   if (
     Object.keys(args).some((key) =>
-      !Object.hasOwn(CHAT_GOAL_REPORT_TOOL.parameters, key)
+      !["action", "requestId", "before", "criterion"].includes(key)
     ) ||
     (action === "status"
       ? criterion !== undefined || before !== undefined ||
