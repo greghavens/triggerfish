@@ -161,10 +161,14 @@ async function readGoalTrace(
     proofSource: string;
   },
 ): Promise<GoalEvidence | undefined> {
-  if (
-    !canFlowTo("INTERNAL", ceiling) || !access.current() ||
-    rule.tool !== "github_actions"
-  ) return;
+  const proofKind = rule.tool === "github_actions"
+    ? "github_actions_run_status"
+    : rule.tool === "github_repos"
+    ? "github_branch_protection"
+    : undefined;
+  if (!proofKind || !canFlowTo("INTERNAL", ceiling) || !access.current()) {
+    return;
+  }
   try {
     const response = await access.reopen(
       binding.role,
@@ -187,7 +191,7 @@ async function readGoalTrace(
       typeof step.recordedAt !== "string" ||
       !Number.isFinite(Date.parse(step.recordedAt)) ||
       step.recordedAt < createdAt ||
-      payload?.kind !== "github_actions_run_status" ||
+      payload?.kind !== proofKind ||
       createHash("sha256").update(executionTracePayloadResponse(payload))
           .digest("hex") !== rule.resultSha256
     ) return;

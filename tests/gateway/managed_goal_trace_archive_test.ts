@@ -11,6 +11,7 @@ import { assignmentRecoveryKey } from "../../src/core/durable_assignment.ts";
 import { createMessageStore } from "../../src/core/conversation/mod.ts";
 import {
   type ExecutionTraceApprovedPayload,
+  executionTracePayloadCall,
   executionTracePayloadResponse,
   type ExecutionTraceReceipt,
   openExecutionTraces,
@@ -230,39 +231,59 @@ async function prepareTeamTrace(
   };
 }
 
-async function testGoalTraceArchive(mode: "scheduled" | "subagent" | "team") {
+async function testGoalTraceArchive(
+  mode: "scheduled" | "subagent" | "team",
+  evidence: "attempt" | "branch" = "attempt",
+) {
   const role = mode === "scheduled" ? "scheduled" : "delegated";
   const directory = await Deno.makeTempDir();
   const storage = createMemoryStorage();
   const messages = createMessageStore(storage);
   try {
     const repo = "fixture-owner/fixture-project";
-    const payload = {
-      kind: "github_actions_run_status",
-      repo,
-      repositoryId: 9021,
-      id: 2024,
-      attempt: 3,
-      status: "completed",
-      conclusion: "success",
-    } as const;
+    const isBranch = evidence === "branch";
+    const payload: ExecutionTraceApprovedPayload = isBranch
+      ? {
+        kind: "github_branch_protection",
+        repo,
+        repositoryId: 9021,
+        protectedCount: 1,
+        unprotectedCount: 0,
+        approvedBranches: [{ name: "main", protected: true }],
+      }
+      : {
+        kind: "github_actions_run_status",
+        repo,
+        repositoryId: 9021,
+        id: 2024,
+        attempt: 3,
+        status: "completed",
+        conclusion: "success",
+      };
+    const sourceTool = executionTracePayloadCall(payload).name;
     const resultSha256 = await computeContentHash(
       executionTracePayloadResponse(payload),
     );
     const criterion = {
       id: "approved-attempt",
-      description: "Match the exact approved release attempt",
-      tool: "github_actions",
+      description: isBranch
+        ? "Match the retained branch protection result"
+        : "Match the exact approved release attempt",
+      tool: sourceTool,
       result_sha256: resultSha256,
     } as const;
     const secondCriterion = {
       ...criterion,
       id: "run-completed",
-      description: "Record the retained workflow completion",
+      description: isBranch
+        ? "Record retained branch coverage"
+        : "Record the retained workflow completion",
     };
     const release = {
       scope: "release",
-      goal: "Verify the retained release attempt",
+      goal: isBranch
+        ? "Verify retained branch protection"
+        : "Verify the retained release attempt",
       policy: "operator",
     } as const;
     const wrongResult = {
@@ -358,7 +379,7 @@ async function testGoalTraceArchive(mode: "scheduled" | "subagent" | "team") {
         assert(repoTrace.admit(scope));
         const receipt = repoTrace.append(scope, {
           ordinal: 1,
-          tool: "github_actions",
+          tool: sourceTool,
           outcome: "returned",
           classification: "INTERNAL",
         }, payload);
@@ -405,16 +426,24 @@ async function testGoalTraceArchive(mode: "scheduled" | "subagent" | "team") {
           visibility: "public",
         }));
       }
-      assertEquals(target.pathname, `/repos/${repo}/actions/workflows`);
+      assertEquals(
+        target.pathname,
+        isBranch
+          ? `/repositories/${payload.repositoryId}/commits`
+          : `/repos/${repo}/actions/workflows`,
+      );
       return Promise.resolve(
         new Response("", { status: permission ? 200 : 403 }),
       );
     };
+    const allowedBranches = ["main"];
     const authorize = buildExecutionTracePayloadAuthorizer(
       {
         agent_recovery: {
           github_repositories: [repo],
           github_run_status: true,
+          github_branch_protection: isBranch,
+          github_branch_names: { [repo]: allowedBranches },
         },
       },
       keychain,
@@ -478,7 +507,7 @@ async function testGoalTraceArchive(mode: "scheduled" | "subagent" | "team") {
         goalCompletionPath: join(directory, "goal-completion.db"),
         messageStore: messages,
         tools: [{
-          name: "github_actions",
+          name: sourceTool,
           description: "Fixture GitHub Actions tool schema",
           parameters: {},
         }],
@@ -525,7 +554,7 @@ async function testGoalTraceArchive(mode: "scheduled" | "subagent" | "team") {
             }
             if (
               (hook === "PRE_TOOL_CALL" || hook === "POST_TOOL_RESPONSE") &&
-              context.input.tool_name === "github_actions"
+              context.input.tool_name === sourceTool
             ) {
               sourceHooks.push(hook);
               assert(!Object.hasOwn(context.auditInput ?? {}, "tool_response"));
@@ -861,7 +890,7 @@ async function testGoalTraceArchive(mode: "scheduled" | "subagent" | "team") {
         reference: `${correct().scope.runId}:1:${correct().id}`,
         detail: `${
           role === "scheduled" ? "trigger:trigger" : mode
-        }:github_actions:${resultSha256}`,
+        }:${sourceTool}:${resultSha256}`,
         classification: "INTERNAL",
       });
       assert(!JSON.stringify(proof).includes(repo));
@@ -883,6 +912,15 @@ async function testGoalTraceArchive(mode: "scheduled" | "subagent" | "team") {
         "evidence could not be reverified",
       );
       deny = undefined;
+      if (isBranch) {
+        allowedBranches.splice(0, 1, "other-branch");
+        await assertRejects(
+          () => turn(confirm),
+          Error,
+          "evidence could not be reverified",
+        );
+        allowedBranches.splice(0, 1, "main");
+      }
       const confirmArgs = {
         role: commandRole,
         action: "confirm",
@@ -927,6 +965,17 @@ async function testGoalTraceArchive(mode: "scheduled" | "subagent" | "team") {
       permission = true;
       assertEquals(await status(), "awaiting_confirmation");
 
+      if (isBranch) {
+        const revokedBranch = await queue();
+        allowedBranches.splice(0, 1, "other-branch");
+        const before = probed.length;
+        await approvals.decide(revokedBranch.pending, true);
+        assert((await revokedBranch.ended).includes("unavailable"));
+        assertEquals(probed.length, before);
+        allowedBranches.splice(0, 1, "main");
+        assertEquals(await status(), "awaiting_confirmation");
+      }
+
       const changedPolicy = await queue();
       revokeAfterProbe = true;
       await approvals.decide(changedPolicy.pending, true);
@@ -963,3 +1012,8 @@ Deno.test("Owner gateway cites an exact restored subagent GitHub attempt anchore
   testGoalTraceArchive("subagent"));
 Deno.test("Owner gateway archives a reauthorized team tool result without replaying the handler", () =>
   testGoalTraceArchive("team"));
+
+Deno.test("Owner gateway cites and confirms exact scheduled branch protection evidence", () =>
+  testGoalTraceArchive("scheduled", "branch"));
+Deno.test("Owner gateway cites and confirms exact delegated branch protection evidence", () =>
+  testGoalTraceArchive("subagent", "branch"));
