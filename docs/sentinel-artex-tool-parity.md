@@ -53,6 +53,17 @@ routes. [Model registration and dispatch](../src/gateway/sentinel_agent.ts),
 [ARTEX worker assembly](https://github.com/jiwoochris/artex-global/blob/06b36d72/agent/worker.go),
 [platform tools](https://github.com/jiwoochris/artex-global/blob/06b36d72/server/platform_tools.go).
 
+The ordinary owner agent can update two settings on one configured
+MCP connector through `mcp_manage update`, the tool-call timeout and
+retry count. Root dispatch checks the owner session, shows the exact
+change for confirmation, and rechecks the config and owner before
+writing. The gateway fixture covers denial, stale confirmation,
+duplicate requests, response classification, and destination policy.
+The settings are read on daemon restart. The update accepts these two
+runtime settings and preserves connector transport, command, credentials,
+and classification. [Owner gateway fixture](../tests/gateway/tools/mcp_manage_update_test.ts).
+
+
 ## Graph, inventory, and findings
 
 | ARTEX tool                                                                                                                               | ARTEX binding and runtime path                                                                                                                           | Sentinel equivalent and boundary                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
