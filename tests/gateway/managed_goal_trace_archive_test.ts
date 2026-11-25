@@ -3,7 +3,9 @@ import { join } from "@std/path";
 import { createProviderRegistry } from "../../src/agent/llm.ts";
 import { createMessageStore } from "../../src/core/conversation/mod.ts";
 import {
+  type ExecutionTraceApprovedPayload,
   executionTracePayloadResponse,
+  type ExecutionTraceReceipt,
   openExecutionTraces,
 } from "../../src/core/execution_traces.ts";
 import { createPolicyEngine } from "../../src/core/policy/engine.ts";
@@ -11,23 +13,131 @@ import { createHookRunner } from "../../src/core/policy/hooks/hooks.ts";
 import { createMemorySecretStore } from "../../src/core/secrets/keychain/keychain.ts";
 import { computeContentHash } from "../../src/core/session/lineage_serde.ts";
 import { createMemoryStorage } from "../../src/core/storage/memory.ts";
+import type { StorageProvider } from "../../src/core/storage/provider.ts";
+import type { Orchestrator } from "../../src/core/types/orchestrator.ts";
+import type { EnhancedSessionManager } from "../../src/gateway/sessions.ts";
+import type { OrchestratorFactory } from "../../src/scheduler/service_types.ts";
 import type { ClassificationLevel } from "../../src/core/types/classification.ts";
 import {
   type ChannelId,
   createSession,
+  restoreSession,
   type SessionId,
+  type SessionState,
+  updateTaint,
   type UserId,
 } from "../../src/core/types/session.ts";
 import { createChatSession } from "../../src/gateway/chat.ts";
 import { createOperatorRunToolExecutor } from "../../src/gateway/operator_run_tool.ts";
 import { createGatewayServer } from "../../src/gateway/server/server.ts";
 import { buildExecutionTracePayloadAuthorizer } from "../../src/gateway/startup/factory/agent_recovery.ts";
-import { delegatedSubagentIdentity } from "../../src/gateway/startup/factory/delegated_agent_recovery.ts";
+import {
+  delegatedSubagentIdentity,
+  teamDeliveryExecutionId,
+  teamDeliveryTraceSource,
+} from "../../src/gateway/startup/factory/delegated_agent_recovery.ts";
+import { buildTeamManager } from "../../src/gateway/startup/factory/team_executor.ts";
 import { buildDelegatedGoalCompletion } from "../../src/gateway/startup/factory/delegated_goal_completion.ts";
 import { buildSchedulerGoalCompletion } from "../../src/gateway/startup/factory/scheduler_goal_completion.ts";
 import { schedulerExecutionIdentity } from "../../src/scheduler/service_execution.ts";
 
-async function testGoalTraceArchive(role: "scheduled" | "delegated") {
+async function prepareTeamTrace(
+  directory: string,
+  storage: StorageProvider,
+  owner: SessionState,
+  payload: ExecutionTraceApprovedPayload,
+) {
+  const factory: OrchestratorFactory = {
+    create(channelId, options) {
+      assert(options?.recoverySessionId);
+      const session = updateTaint(
+        restoreSession({
+          id: options.recoverySessionId,
+          userId: owner.userId,
+          channelId: channelId as ChannelId,
+        }),
+        "INTERNAL",
+        "Test member scope",
+      );
+      const orchestrator: Orchestrator = {
+        executeAgentTurn(turn) {
+          turn.onToolDispatchOutcome?.({
+            tool: "github_actions",
+            classification: "INTERNAL",
+            outcome: "returned",
+            approvedPayload: payload,
+          });
+          return Promise.resolve({
+            ok: true as const,
+            value: {
+              response: "Recorded the exact release result.",
+              tokenUsage: { inputTokens: 0, outputTokens: 0 },
+            },
+          });
+        },
+        getHistory: () => [],
+        clearHistory: () => {},
+        compactHistory: () =>
+          Promise.resolve({
+            messagesBefore: 0,
+            messagesAfter: 0,
+            tokensBefore: 0,
+            tokensAfter: 0,
+            summary: "",
+          }),
+      };
+      return Promise.resolve({
+        orchestrator,
+        session,
+        toolExecutor: () => Promise.resolve("No fixture tools"),
+        getSessionTaint: () => session.taint,
+      });
+    },
+  };
+  const manager = buildTeamManager({
+    storage,
+    orchestratorFactory: factory,
+    callerSessionId: owner.id,
+    sessionManager: {
+      get: (id: SessionId) =>
+        Promise.resolve(id === owner.id ? owner : undefined),
+    } as unknown as EnhancedSessionManager,
+    recovery: {
+      path: join(directory, "team-recovery.db"),
+      profileBinding: "a".repeat(64),
+      run: (_id, orchestrator, options) =>
+        orchestrator.executeAgentTurn(options),
+    },
+  });
+  const created = await manager.createTeam({
+    name: "Release review",
+    task: "Review an approved release attempt.",
+    members: [{
+      role: "reviewer",
+      description: "Review release verification",
+      isLead: true,
+      classificationCeiling: "INTERNAL",
+    }],
+  }, owner.id);
+  assert(created.ok);
+  manager.stopLifecycleMonitor(created.value.id);
+  const teamId = created.value.id;
+  const member = created.value.members[0].sessionId;
+  const delivery = crypto.randomUUID();
+  const runId = await teamDeliveryExecutionId(owner.id, member, delivery);
+  return {
+    runId,
+    teamId,
+    member,
+    command:
+      `/recover-team ${delivery} ${teamId} ${member} Review the exact release.`,
+    runner: manager.runRecoveryCommand,
+    source: teamDeliveryTraceSource(owner.id, teamId, delivery),
+  };
+}
+
+async function testGoalTraceArchive(mode: "scheduled" | "subagent" | "team") {
+  const role = mode === "scheduled" ? "scheduled" : "delegated";
   const directory = await Deno.makeTempDir();
   const storage = createMemoryStorage();
   const messages = createMessageStore(storage);
@@ -92,13 +202,16 @@ async function testGoalTraceArchive(role: "scheduled" | "delegated") {
       : buildDelegatedGoalCompletion(directory, [
         {
           ...release,
-          criteria: [{ ...criterion, kind: "subagent" }],
+          criteria: [{
+            ...criterion,
+            kind: mode === "team" ? "team" : "subagent",
+          }],
         },
         {
           ...wrongResult,
           criteria: [{
             ...criterion,
-            kind: "subagent",
+            kind: mode === "team" ? "team" : "subagent",
             result_sha256: "1".repeat(64),
           }],
         },
@@ -113,20 +226,34 @@ async function testGoalTraceArchive(role: "scheduled" | "delegated") {
       userId: "owner" as UserId,
       channelId: "owner" as ChannelId,
     });
+    const team = mode === "team"
+      ? await prepareTeamTrace(directory, storage, owner, payload)
+      : undefined;
     const tracePath = join(directory, "execution-traces.db");
     const saved = async (sourceId: string, wrongChild = false) => {
       const uuid = crypto.randomUUID();
-      const identity = role === "delegated"
+      const identity = mode === "subagent"
         ? await delegatedSubagentIdentity(sourceId as SessionId, uuid)
+        : undefined;
+      const teamRunId = team
+        ? await teamDeliveryExecutionId(
+          sourceId as SessionId,
+          uuid as SessionId,
+          uuid,
+        )
         : undefined;
       const repoTrace = openExecutionTraces(tracePath);
       try {
         const scope = {
           role,
-          runId: identity?.executionId ??
+          runId: identity?.executionId ?? teamRunId ??
             schedulerExecutionIdentity("trigger", sourceId, "fixture").id,
-          sourceId,
-          sessionId: !wrongChild && identity ? identity.sessionId : uuid,
+          sourceId: team
+            ? teamDeliveryTraceSource(sourceId as SessionId, team.teamId, uuid)
+            : sourceId,
+          sessionId: wrongChild
+            ? crypto.randomUUID()
+            : identity?.sessionId ?? uuid,
           classification: "INTERNAL",
         } as const;
         assert(repoTrace.admit(scope));
@@ -143,11 +270,17 @@ async function testGoalTraceArchive(role: "scheduled" | "delegated") {
         repoTrace.close();
       }
     };
-    const correct = await saved(role === "scheduled" ? "trigger" : owner.id);
+    let correctStep: ExecutionTraceReceipt | undefined = team
+      ? undefined
+      : await saved(role === "scheduled" ? "trigger" : owner.id);
+    const correct = () => {
+      assert(correctStep);
+      return correctStep;
+    };
     const wrong = await saved(
       role === "scheduled" ? "other-source" : crypto.randomUUID(),
     );
-    const wrongChild = role === "delegated"
+    const wrongChild = mode !== "scheduled"
       ? await saved(owner.id, true)
       : undefined;
     const keychain = createMemorySecretStore();
@@ -257,6 +390,7 @@ async function testGoalTraceArchive(role: "scheduled" | "delegated") {
           confirm: () => Promise.resolve(true),
         }),
         runManagedGoalCommand: managed.runCommand,
+        runTeamRecoveryCommand: team?.runner,
       });
       const token = crypto.randomUUID();
       const server = createGatewayServer({ port: 0, token, chatSession: chat });
@@ -301,22 +435,47 @@ async function testGoalTraceArchive(role: "scheduled" | "delegated") {
       }
     };
     const commandRole = role === "scheduled" ? "scheduler" : "delegated";
-    const citation = (runId = correct.scope.runId, scope = "release") =>
+    const citation = (
+      runId = correct().scope.runId,
+      scope = "release",
+      teamId: string | undefined = team?.teamId,
+    ) =>
       `/goal ${commandRole} cite ${
         JSON.stringify({
           scope,
           criterion: criterion.id,
           runId,
-          ordinal: correct.ordinal,
+          ordinal: correct().ordinal,
+          ...(teamId && { teamId }),
         })
       }`;
     const unavailable = `${role} goal evidence is unavailable`;
     const archiveId = crypto.randomUUID();
     await withGateway(async (turn) => {
+      if (team) {
+        assertEquals(await turn(team.command), "Team delivery completed.");
+        const traces = openExecutionTraces(tracePath);
+        try {
+          const run = traces.readRun("delegated", team.runId, "INTERNAL");
+          assert(run);
+          assertEquals(run.scope.sourceId, team.source);
+          assertEquals(run.scope.sessionId, team.member);
+          correctStep = traces.inspect(run.scope, 1, "INTERNAL");
+          assert(correctStep);
+          assertEquals(run.status, "completed");
+        } finally {
+          traces.close();
+        }
+        await assertRejects(
+          () => turn(citation(team.runId, "release", crypto.randomUUID())),
+          Error,
+          unavailable,
+        );
+      }
       operation = {
         action: "archive",
         kind: role,
-        id: correct.scope.runId,
+        id: correct().scope.runId,
         requestId: archiveId,
       };
       assertEquals(
@@ -335,11 +494,13 @@ async function testGoalTraceArchive(role: "scheduled" | "delegated") {
           Error,
           unavailable,
         );
-        await assertRejects(
-          () => turn(citation(correct.scope.runId, "team")),
-          Error,
-          unavailable,
-        );
+        if (!team) {
+          await assertRejects(
+            () => turn(citation(correct().scope.runId, "team")),
+            Error,
+            unavailable,
+          );
+        }
       }
     });
     await Deno.remove(tracePath);
@@ -352,7 +513,7 @@ async function testGoalTraceArchive(role: "scheduled" | "delegated") {
       operation = {
         action: "restore",
         kind: role,
-        id: correct.scope.runId,
+        id: correct().scope.runId,
         archiveId,
         requestId: crypto.randomUUID(),
       };
@@ -362,7 +523,7 @@ async function testGoalTraceArchive(role: "scheduled" | "delegated") {
         "succeeded",
       );
       await assertRejects(
-        () => turn(citation(correct.scope.runId, "wrong-result")),
+        () => turn(citation(correct().scope.runId, "wrong-result")),
         Error,
         unavailable,
       );
@@ -387,16 +548,18 @@ async function testGoalTraceArchive(role: "scheduled" | "delegated") {
       assertEquals(proof.observations[0].evidence[0], {
         source: role === "scheduled"
           ? "scheduler-trace:trigger:trigger"
+          : team
+          ? `delegated-trace:team:${team.teamId}`
           : "delegated-trace:subagent",
-        reference: `${correct.scope.runId}:1:${correct.id}`,
+        reference: `${correct().scope.runId}:1:${correct().id}`,
         detail: `${
-          role === "scheduled" ? "trigger:trigger" : "subagent"
+          role === "scheduled" ? "trigger:trigger" : mode
         }:github_actions:${resultSha256}`,
         classification: "INTERNAL",
       });
       assert(!JSON.stringify(proof).includes(repo));
       assertEquals(JSON.parse(await turn(citation())), proof);
-      assertEquals(await messages.loadSession(correct.scope.sessionId), []);
+      assertEquals(await messages.loadSession(correct().scope.sessionId), []);
       const confirm =
         `/goal ${commandRole} confirm release ${proof.confirmation.decisionSha256}`;
       permission = false;
@@ -429,4 +592,6 @@ async function testGoalTraceArchive(role: "scheduled" | "delegated") {
 Deno.test("Owner gateway cites an exact restored scheduled GitHub attempt", () =>
   testGoalTraceArchive("scheduled"));
 Deno.test("Owner gateway cites an exact restored subagent GitHub attempt anchored to its parent", () =>
-  testGoalTraceArchive("delegated"));
+  testGoalTraceArchive("subagent"));
+Deno.test("Owner gateway cites an exact archived result from an admitted team delivery", () =>
+  testGoalTraceArchive("team"));

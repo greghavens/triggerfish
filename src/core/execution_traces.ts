@@ -22,6 +22,7 @@ import {
   canFlowTo,
   CLASSIFICATION_ORDER,
   type ClassificationLevel,
+  maxClassification,
 } from "./types/classification.ts";
 
 export type ExecutionTraceRole = "delegated" | "scheduled";
@@ -823,6 +824,71 @@ export function openExecutionTraces(path: string, now = Date.now) {
     });
   }
   return {
+    /** Publish a completed execution and its selected steps atomically. */
+    recordCompletedRun(
+      rawScope: ExecutionTraceScope,
+      dispatches: readonly {
+        step: Omit<ExecutionTraceStep, "ordinal">;
+        recordedAt: number;
+        payload?: ExecutionTraceApprovedPayload;
+      }[],
+      admittedAt: number,
+      finishClassification: ClassificationLevel,
+    ): boolean {
+      const scope = normalizeScope(rawScope);
+      if (
+        !scope || !dispatches.length || dispatches.length > maxArchivedSteps ||
+        !levelOf(finishClassification) || !Number.isFinite(admittedAt)
+      ) return false;
+      const finishedAt = now();
+      let classification = maxClassification(
+        scope.classification!,
+        finishClassification,
+      );
+      const entries: ExecutionTraceArchive["entries"][number][] = [];
+      for (const { step: raw, recordedAt, payload: rawPayload } of dispatches) {
+        const step = normalizeStep({ ...raw, ordinal: entries.length + 1 });
+        const payload = rawPayload && normalizeApprovedPayload(rawPayload);
+        if (
+          !step || !Number.isFinite(recordedAt) ||
+          recordedAt < admittedAt || recordedAt > finishedAt ||
+          (rawPayload !== undefined && (!payload ||
+            step.tool !== executionTracePayloadCall(payload).name ||
+            step.outcome !== "returned"))
+        ) return false;
+        classification = maxClassification(classification, step.classification);
+        const id = hashId(
+          "execution-trace",
+          payload ? [scope, step, payload] : [scope, step],
+        );
+        entries.push({
+          step: {
+            ...step,
+            scope,
+            id,
+            recordedAt: new Date(recordedAt).toISOString(),
+          },
+          ...(payload && { payload }),
+        });
+      }
+      return this.restoreSnapshot(
+        {
+          run: {
+            scope,
+            classification,
+            admittedAt: new Date(admittedAt).toISOString(),
+            finishedAt: new Date(finishedAt).toISOString(),
+            status: "completed",
+          },
+          finishLevel: CLASSIFICATION_ORDER[finishClassification],
+          entries,
+        },
+        scope.role,
+        scope.runId,
+        classification,
+      );
+    },
+
     archiveSnapshot(
       role: ExecutionTraceRole,
       runId: string,

@@ -17,6 +17,32 @@ export interface TeamDeliveryRecovery {
   readonly senderTaint?: ClassificationLevel;
   readonly targetClassification?: ClassificationLevel;
   readonly signal?: AbortSignal;
+  readonly trace?: { readonly path: string; readonly teamId: string };
+}
+
+const uuid = "[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}";
+const teamSource = new RegExp(`^team-delivery:(${uuid}):(${uuid}):(${uuid})$`);
+
+export function parseTeamDeliveryTraceSource(source: unknown) {
+  const match = typeof source === "string" ? teamSource.exec(source) : null;
+  if (!match) return;
+  return {
+    sender: match[1] as SessionId,
+    teamId: match[2],
+    delivery: match[3],
+  };
+}
+
+export function teamDeliveryTraceSource(
+  sender: SessionId,
+  teamId: string,
+  delivery: string,
+): string {
+  const source = `team-delivery:${sender}:${teamId}:${delivery}`;
+  if (!parseTeamDeliveryTraceSource(source)) {
+    throw new Error("Invalid team delivery trace binding");
+  }
+  return source;
 }
 
 export async function delegatedSubagentIdentity(

@@ -14,6 +14,11 @@ import { canFlowTo } from "../../../core/types/classification.ts";
 import type { SessionId, SessionState } from "../../../core/types/session.ts";
 import type { StorageProvider } from "../../../core/storage/provider.ts";
 import type { Orchestrator } from "../../../core/types/orchestrator.ts";
+import {
+  type ExecutionTraceApprovedPayload,
+  type ExecutionTraceStep,
+  openExecutionTraces,
+} from "../../../core/execution_traces.ts";
 import type { OrchestratorFactory } from "../../../scheduler/service_types.ts";
 import {
   TEAM_STORAGE_PREFIX,
@@ -30,6 +35,7 @@ import { withTeamRecoveryStore } from "./team_recovery_store.ts";
 import {
   teamDeliveryExecutionId,
   type TeamDeliveryRecovery,
+  teamDeliveryTraceSource,
 } from "./delegated_agent_recovery.ts";
 
 const log = createLogger("team-wiring");
@@ -288,13 +294,61 @@ export function buildSendMessage(
           toId,
           recovery.deliveryId,
         );
+        const admittedAt = Date.now();
+        const dispatches: {
+          step: Omit<ExecutionTraceStep, "ordinal">;
+          recordedAt: number;
+          payload?: ExecutionTraceApprovedPayload;
+        }[] = [];
         const result = await recovery.run(executionId, live.orchestrator, {
           session: live.session,
           message: content,
           targetClassification,
           signal: recovery.signal,
+          ...(recovery.trace && {
+            onToolDispatchOutcome(entry) {
+              if (dispatches.length <= 1000) {
+                dispatches.push({
+                  step: {
+                    tool: entry.tool,
+                    classification: entry.classification,
+                    outcome: entry.outcome,
+                  },
+                  recordedAt: Date.now(),
+                  payload: entry.approvedPayload,
+                });
+              }
+            },
+          }),
         });
         if (!result.ok) return result;
+        if (recovery.trace && dispatches.length && !recovery.signal?.aborted) {
+          try {
+            const traces = openExecutionTraces(recovery.trace.path);
+            try {
+              traces.recordCompletedRun(
+                {
+                  role: "delegated",
+                  runId: executionId,
+                  sessionId: toId,
+                  sourceId: teamDeliveryTraceSource(
+                    fromId,
+                    recovery.trace.teamId,
+                    recovery.deliveryId,
+                  ),
+                  classification: targetClassification,
+                },
+                dispatches,
+                admittedAt,
+                live.getTaint(),
+              );
+            } finally {
+              traces.close();
+            }
+          } catch {
+            log.warn("Completed team delivery trace could not be recorded.");
+          }
+        }
         await persistMemberOutput(storage, toId, result.value.response);
         return { ok: true, value: { delivered: true } };
       }

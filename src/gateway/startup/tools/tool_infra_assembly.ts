@@ -8,6 +8,7 @@
  */
 
 import { join } from "@std/path";
+import { createHash } from "node:crypto";
 import type { ClassificationLevel } from "../../../core/types/classification.ts";
 import type { BootstrapResult } from "../bootstrap.ts";
 import type { CoreInfraResult } from "../infra/core_infra.ts";
@@ -101,7 +102,10 @@ export function buildCompositeToolExecutor(
     ...(teamRecovery && {
       recovery: {
         path: join(bootstrap.baseDir, "team-recovery.db"),
-        profileBinding: JSON.stringify([primary.provider, primary.model]),
+        profileBinding: createHash("sha256")
+          .update(JSON.stringify([primary.provider, primary.model])).digest(
+            "hex",
+          ),
         run: teamRecovery,
       },
     }),

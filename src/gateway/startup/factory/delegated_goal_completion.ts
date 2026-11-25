@@ -24,6 +24,7 @@ import type { Orchestrator } from "../../../core/types/orchestrator.ts";
 import { createManagedGoalCommand } from "./managed_goal_command.ts";
 import {
   delegatedGoalTraceSource,
+  delegatedTeamGoalId,
   parseManagedGoalCitation,
   parseManagedGoalTraceLocation,
   readDelegatedGoalTrace,
@@ -160,7 +161,9 @@ export function buildDelegatedGoalCompletion(
       const { target, access, ceiling } = operator;
       const criterion = plan.criteria.find(({ id }) => id === target.criterion);
       if (
-        criterion?.kind !== "subagent" || record.policy !== "operator" ||
+        criterion?.kind !==
+          (target.teamId === undefined ? "subagent" : "team") ||
+        record.policy !== "operator" ||
         !access || !canFlowTo(managedGoalClassification(record), ceiling)
       ) throw new Error(unavailable);
       const evidence = await readDelegatedGoalTrace(
@@ -219,13 +222,17 @@ export function buildDelegatedGoalCompletion(
         criterionId === criterion.id
       );
       for (const evidence of old?.evidence ?? []) {
-        if (evidence.source === delegatedGoalTraceSource) {
+        const teamId = delegatedTeamGoalId(evidence.source);
+        if (
+          evidence.source === delegatedGoalTraceSource || teamId !== undefined
+        ) {
           const location = parseManagedGoalTraceLocation(
             evidence.reference,
             "delegated",
           );
           if (
-            criterion.kind !== "subagent" || record.policy !== "operator" ||
+            criterion.kind !== (teamId === undefined ? "subagent" : "team") ||
+            record.policy !== "operator" ||
             evidence.detail !== criterion.requirement ||
             evidence.classification !== "INTERNAL" || !location
           ) continue;
@@ -246,7 +253,7 @@ export function buildDelegatedGoalCompletion(
               resultSha256: criterion.result_sha256,
               requirement: criterion.requirement,
             },
-            location,
+            { ...location, ...(teamId !== undefined && { teamId }) },
             record.createdAt,
           );
           if (reopened && evidenceKey(criterion.id, reopened) === key) {

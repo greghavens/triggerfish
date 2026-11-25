@@ -1,4 +1,5 @@
 /** Owner-authorized admission and reattachment for previously captured team scopes. */
+import { dirname, join } from "@std/path";
 import { buildTeamRosterPrompt } from "../../../agent/team/roster.ts";
 import { deserializeTeamInstance } from "../../../agent/team/serialization.ts";
 import { TEAM_STORAGE_PREFIX, type TeamId } from "../../../agent/team/types.ts";
@@ -187,6 +188,10 @@ export function buildOwnerTeamRecoveryCommand(options: {
         senderTaint: parent.taint,
         targetClassification: admission.targetClassification,
         signal,
+        trace: {
+          path: join(dirname(recovery.path), "execution-traces.db"),
+          teamId: admission.teamId,
+        },
       });
       return result.ok ? "Team delivery completed." : result.error;
     } catch {

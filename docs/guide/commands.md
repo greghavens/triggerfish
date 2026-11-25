@@ -94,6 +94,11 @@ Use `/goal delegated cite <JSON>` with the same fields for an operator-policy
 parent-session binding and the deterministic child-session identity from
 delegated recovery.
 
+For a `team` criterion, include `teamId` in the citation. The completed run
+must come from an owner-authorized `/recover-team` delivery whose saved
+owner, team, member, and delivery ID still match the archived trace. Team
+delivery traces publish after successful completion.
+
 #### Resume an interrupted request
 
 Enable recovery for specific GitHub repositories in `triggerfish.yaml`.
