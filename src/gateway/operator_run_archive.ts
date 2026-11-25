@@ -545,6 +545,37 @@ export async function executeOperatorRunArchive(
                   identity.runId,
                   "INTERNAL",
                 );
+                if (snapshot && role === "scheduled") {
+                  const admission = schedulerAdmissionArchive(
+                    baseDir,
+                    saved.scope,
+                  )?.read(true);
+                  let finishedRecovery;
+                  if (saved.status === "completed") {
+                    const key = recoveryKey(
+                      saved.scope.sessionId,
+                      identity.runId,
+                    );
+                    using lock = lockAgentRecovery(recoveryPath, key);
+                    if (!lock) return;
+                    const journal = new AgentRecoveryStore(recoveryPath);
+                    try {
+                      const record = journal.read(key);
+                      if (record?.status === "finished") {
+                        finishedRecovery = record;
+                      }
+                    } finally {
+                      journal.close();
+                    }
+                  }
+                  return admission || finishedRecovery
+                    ? {
+                      trace: snapshot,
+                      finishedRecovery,
+                      terminalAdmission: admission,
+                    }
+                    : snapshot;
+                }
                 if (
                   !snapshot || saved.status !== "completed" ||
                   role !== "delegated" || (!team &&
@@ -747,6 +778,7 @@ export async function executeOperatorRunArchive(
                 try {
                   const checkpoint = snapshot?.checkpoint;
                   const finished = snapshot?.finishedRecovery;
+                  const terminalAdmission = snapshot?.terminalAdmission;
                   const record = checkpoint ?? finished;
                   const scope = snapshot?.trace?.run?.scope;
                   const archiveScope = scope ?? snapshot?.run?.scope;
@@ -754,10 +786,14 @@ export async function executeOperatorRunArchive(
                     !archiveScope || !matchesTraceScope(archiveScope) ||
                     (finished !== undefined &&
                       (checkpoint !== undefined || !finished ||
-                        role !== "delegated" ||
                         finished.status !== "finished" ||
                         Object.hasOwn(finished, "tools") ||
                         Object.hasOwn(finished, "checkpoint"))) ||
+                    (terminalAdmission !== undefined &&
+                      (role !== "scheduled" || !scope ||
+                        checkpoint !== undefined ||
+                        snapshot?.admission !== undefined ||
+                        snapshot?.trace?.run?.status === "running")) ||
                     (team && (!record && snapshot?.run?.status === "running"))
                   ) {
                     throw new Error(
@@ -769,19 +805,25 @@ export async function executeOperatorRunArchive(
                   using lock = record && key
                     ? lockAgentRecovery(recoveryPath, key)
                     : undefined;
-                  const admission = snapshot?.admission && scope &&
-                    (team
-                      ? await teamAdmissionArchive(baseDir, scope)?.restore(
-                        snapshot.admission,
-                      )
-                      : schedulerAdmissionArchive(baseDir, scope)?.restore(
-                        snapshot.admission,
-                      ));
+                  const admission = terminalAdmission !== undefined && scope
+                    ? schedulerAdmissionArchive(baseDir, scope)?.restore(
+                      terminalAdmission,
+                      true,
+                    )
+                    : snapshot?.admission && scope &&
+                      (team
+                        ? await teamAdmissionArchive(baseDir, scope)?.restore(
+                          snapshot.admission,
+                        )
+                        : schedulerAdmissionArchive(baseDir, scope)?.restore(
+                          snapshot.admission,
+                        ));
                   if (
                     (snapshot?.admission &&
                       (!admission || !record ||
                         (!team && (role !== "scheduled" || !checkpoint)))) ||
-                    (team && record && !admission)
+                    (team && record && !admission) ||
+                    (terminalAdmission !== undefined && !admission)
                   ) {
                     throw new Error("Invalid execution archive admission");
                   }
@@ -790,11 +832,13 @@ export async function executeOperatorRunArchive(
                   }
                   if (
                     (record && !lock) || !trace.restoreSnapshot(
-                      record ? snapshot.trace : snapshot,
+                      record || terminalAdmission !== undefined
+                        ? snapshot.trace
+                        : snapshot,
                       role,
                       identity.runId,
                       "INTERNAL",
-                      record
+                      record || terminalAdmission !== undefined
                         ? { path: recoveryPath, record, admission }
                         : undefined,
                       installKey,

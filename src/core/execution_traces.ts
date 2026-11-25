@@ -1070,7 +1070,7 @@ export function openExecutionTraces(path: string, now = Date.now) {
       ceiling: ClassificationLevel,
       recovery?: {
         path: string;
-        record: RecoverableState | FinishedAgentRecoveryRecord;
+        record?: RecoverableState | FinishedAgentRecoveryRecord;
         admission?: { path: string; install(db: DatabaseSync): boolean };
         ownerChecklist?: ArchivedExecutionChecklist;
       },
@@ -1091,15 +1091,15 @@ export function openExecutionTraces(path: string, now = Date.now) {
         !levelOf(ceiling) || !levelOf(saved.classification) ||
         !canFlowTo(saved.classification, ceiling) ||
         !canFlowTo(scope.classification!, saved.classification) ||
-        (recovery &&
-          (record?.key !==
+        (recovery && !record &&
+          (role !== "scheduled" || !recovery.admission ||
+            saved.status === "running")) ||
+        (record &&
+          (record.key !==
               (scope.role === "owner_chat"
                 ? scope.runId
                 : assignmentRecoveryKey(scope.sessionId, scope.runId)) ||
-            (terminal
-              ? (scope.role !== "owner_chat" && scope.role !== "delegated") ||
-                saved.status !== "completed"
-              : !checkpoint))) ||
+            (terminal ? saved.status !== "completed" : !checkpoint))) ||
         (checkpoint
           ? saved.status !== "running" || saved.finishedAt !== undefined ||
             archive.finishLevel !== null ||
@@ -1178,7 +1178,7 @@ export function openExecutionTraces(path: string, now = Date.now) {
         entries.push({ id, step, recordedAt, payload });
         last = step.ordinal;
       }
-      if (recovery) {
+      if (recovery && record) {
         new AgentRecoveryStore(recovery.path).close();
         db.prepare("ATTACH DATABASE ? AS archive_recovery").run(recovery.path);
       }
@@ -1190,12 +1190,14 @@ export function openExecutionTraces(path: string, now = Date.now) {
           );
           admissionAttached = true;
           if (
+            db.prepare("PRAGMA main.journal_mode").get()?.journal_mode !==
+              "delete" ||
             db.prepare("PRAGMA archive_admission.journal_mode").get()
-              ?.journal_mode !== "delete"
+                ?.journal_mode !== "delete"
           ) return false;
         }
         if (
-          recovery && (
+          record && (
             db.prepare("PRAGMA main.journal_mode").get()?.journal_mode !==
               "delete" ||
             db.prepare("PRAGMA archive_recovery.journal_mode").get()
@@ -1309,7 +1311,7 @@ export function openExecutionTraces(path: string, now = Date.now) {
         return withOperatorRunLinks(db, links?.path, install);
       } finally {
         if (admissionAttached) db.exec("DETACH DATABASE archive_admission");
-        if (recovery) db.exec("DETACH DATABASE archive_recovery");
+        if (record) db.exec("DETACH DATABASE archive_recovery");
       }
     },
     admit(raw: ExecutionTraceScope): ExecutionTraceRun | undefined {

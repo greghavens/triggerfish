@@ -40,6 +40,8 @@ import { buildSubagentFactory } from "../../src/gateway/startup/factory/subagent
 import { assembleSchedulerToolExecutor } from "../../src/gateway/startup/tools/scheduler_tool_assembly.ts";
 import { resolveToolsForProfile } from "../../src/gateway/tools/agent_tools.ts";
 import { createGitHubToolExecutor } from "../../src/integrations/github/tools.ts";
+import { schedulerAdmissionArchive } from "../../src/scheduler/admission_archive.ts";
+import { schedulerAdmissionDatabase } from "../../src/scheduler/admission_database.ts";
 import { createSchedulerService } from "../../src/scheduler/service.ts";
 import type {
   OrchestratorFactory,
@@ -361,7 +363,7 @@ async function verifyBackgroundPauseBeforeFirstAction(
       `/recover-subagent ${input} ${instructions}`,
     );
   const triggerMdPath = join(baseDir, "TRIGGER.md");
-  const scheduledId = Promise.withResolvers<string>();
+  let scheduledId: string | undefined;
   let schedulerConfig: SchedulerServiceConfig | undefined;
   if (kind === "scheduled") {
     await Deno.writeTextFile(triggerMdPath, instructions);
@@ -382,7 +384,7 @@ async function verifyBackgroundPauseBeforeFirstAction(
       },
       webhooks: { enabled: false, sources: {} },
       recoverTurn(execution, orchestrator, options) {
-        scheduledId.resolve(execution.id);
+        scheduledId = execution.id;
         return bindings.recoverTurn!(execution, orchestrator, options);
       },
     };
@@ -473,12 +475,9 @@ async function verifyBackgroundPauseBeforeFirstAction(
     } finally {
       clearTimeout(timeout);
     }
-    const ref = {
-      kind,
-      id: kind === "scheduled"
-        ? await scheduledId.promise
-        : identity.executionId,
-    };
+    const id = kind === "scheduled" ? scheduledId : identity.executionId;
+    assert(id);
+    const ref = { kind, id };
     const pause = { action: "pause", ...ref };
     const resume = {
       action: "resume",
@@ -616,6 +615,152 @@ async function verifyBackgroundPauseBeforeFirstAction(
     assertStringIncludes(await control(resume), "unavailable");
     assertEquals(approvals, approvalsBeforeResume + 1);
     assertEquals(state.writes, 1);
+
+    if (schedulerConfig && scheduler) {
+      const getTrace = (id: string) => {
+        const traces = openExecutionTraces(tracePath);
+        try {
+          const snapshot = traces.archiveSnapshot("scheduled", id, "INTERNAL");
+          assert(snapshot);
+          return snapshot;
+        } finally {
+          traces.close();
+        }
+      };
+      const completedTrace = getTrace(ref.id);
+      assertEquals(completedTrace.run.status, "completed");
+      const recoveryPath = join(baseDir, "agent-recovery.db");
+      const completedKey = assignmentRecoveryKey(
+        completedTrace.run.scope.sessionId,
+        ref.id,
+      );
+      const readRecovery = () => {
+        const store = new AgentRecoveryStore(recoveryPath);
+        try {
+          return store.read(completedKey);
+        } finally {
+          store.close();
+        }
+      };
+      const finished = readRecovery();
+      assertEquals(finished?.status, "finished");
+      const cancelStarted = Promise.withResolvers<void>();
+      const releaseCancelled = Promise.withResolvers<void>();
+      let terminalModelCalls = 0;
+      state.beforeFirstModel = () => {
+        terminalModelCalls++;
+        cancelStarted.resolve();
+        return releaseCancelled.promise;
+      };
+      const cancelling = scheduler.runTrigger();
+      let cancelledId: string;
+      const cancelTimeout = setTimeout(
+        () =>
+          cancelStarted.reject(new Error("Scheduled cancel fixture timed out")),
+        5_000,
+      );
+      try {
+        await cancelStarted.promise;
+        assert(scheduledId && scheduledId !== ref.id);
+        cancelledId = scheduledId;
+        const cancellation = JSON.parse(
+          await control({
+            action: "cancel",
+            kind,
+            id: cancelledId,
+          }),
+        );
+        assertEquals(cancellation.run.status, "cancelled");
+      } finally {
+        clearTimeout(cancelTimeout);
+        releaseCancelled.resolve();
+        await cancelling;
+      }
+      const cancelledTrace = getTrace(cancelledId);
+      assertEquals(cancelledTrace.run.operatorCancelled, true);
+      assertEquals(state.writes, 1);
+      const cases = [];
+      for (const trace of [completedTrace, cancelledTrace]) {
+        const { scope } = trace.run;
+        const admission = schedulerAdmissionArchive(baseDir, scope)?.read(true);
+        assert(admission && "disposition" in admission);
+        assertEquals(
+          admission.disposition,
+          trace.run.operatorCancelled ? "execution_unavailable" : "completed",
+        );
+        const archiveId = crypto.randomUUID();
+        const archived = JSON.parse(
+          await control({
+            action: "archive",
+            kind,
+            id: scope.runId,
+            requestId: archiveId,
+          }),
+        );
+        assertEquals(archived.receipt.status, "succeeded");
+        cases.push({
+          trace,
+          admission,
+          restore: {
+            action: "restore",
+            kind,
+            id: scope.runId,
+            archiveId,
+            requestId: crypto.randomUUID(),
+          },
+        });
+      }
+      scheduler.stop();
+      const admissionsPath = join(baseDir, "scheduler-trigger-admissions.db");
+      const savedAdmissionsPath = join(baseDir, "terminal-admissions.db");
+      await Deno.rename(recoveryPath, join(baseDir, "terminal-recovery.db"));
+      await Deno.rename(tracePath, join(baseDir, "terminal-traces.db"));
+      await Deno.rename(admissionsPath, savedAdmissionsPath);
+
+      await Deno.copyFile(savedAdmissionsPath, admissionsPath);
+      schedulerAdmissionDatabase(admissionsPath)((db) => {
+        db.prepare(
+          "UPDATE trigger_admissions SET promptSha256 = ? WHERE id = ?",
+        )
+          .run("f".repeat(64), ref.id);
+      });
+      const collision = JSON.parse(
+        await control({
+          ...cases[0].restore,
+          requestId: crypto.randomUUID(),
+        }),
+      );
+      assertEquals(collision.receipt.status, "failed");
+      assertEquals(readRecovery(), undefined);
+      assertStringIncludes(
+        await control({ action: "inspect", ...ref }),
+        "unavailable",
+      );
+      await Deno.rename(
+        admissionsPath,
+        join(baseDir, "conflicting-terminal-admissions.db"),
+      );
+
+      scheduler = createSchedulerService(schedulerConfig);
+      for (const { trace, admission, restore } of cases) {
+        const restored = JSON.parse(await control(restore));
+        assertEquals(restored.receipt.status, "succeeded");
+        assertEquals(JSON.parse(await control(restore)), restored);
+        assertEquals(getTrace(restore.id), trace);
+        assertEquals(
+          schedulerAdmissionArchive(baseDir, trace.run.scope)?.read(true),
+          admission,
+        );
+        assertEquals(
+          await scheduler.resumeScheduledExecution?.(restore.id),
+          false,
+        );
+      }
+      assertEquals(readRecovery(), finished);
+      assertEquals(terminalModelCalls, 1);
+      assertEquals(state.writes, 1);
+      assertEquals(state.reads, 1);
+    }
 
     if (kind === "delegated") {
       const terminalArchiveId = crypto.randomUUID();

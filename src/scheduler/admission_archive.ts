@@ -22,6 +22,7 @@ const journals = {
   cron: {
     table: "cron_admissions",
     state: "closed = 0",
+    disposition: "closed",
     columns: [
       "id",
       "jobId",
@@ -34,6 +35,7 @@ const journals = {
   trigger: {
     table: "trigger_admissions",
     state: "outcome IS NULL",
+    disposition: "outcome",
     columns: [
       "id",
       "occurrence",
@@ -50,6 +52,7 @@ const journals = {
   webhook: {
     table: "webhook_admissions",
     state: "completed = 0",
+    disposition: "completed",
     columns: [
       "id",
       "sourceId",
@@ -96,7 +99,7 @@ export function schedulerAdmissionArchive(
   );
   if (!match || !scope.sourceId || !scope.classification) return;
   const kind = match[1] as keyof typeof journals;
-  const { table, state, columns, initialize } = journals[kind];
+  const { table, state, disposition, columns, initialize } = journals[kind];
   const fields = columns.join(", ");
   const path = join(baseDir, `scheduler-${kind}-admissions.db`);
   const parse = (row: Record<string, unknown>) => {
@@ -125,34 +128,73 @@ export function schedulerAdmissionArchive(
     return record;
   };
 
+  const validDisposition = (value: unknown) =>
+    kind === "trigger"
+      ? value === null || (typeof value === "string" && [
+        "completed",
+        "policy_changed",
+        "instructions_changed",
+        "history_unavailable",
+        "input_changed",
+        "execution_unavailable",
+      ].includes(value))
+      : value === 0 || value === 1;
   return {
-    read() {
+    read(terminal = false) {
       initialize(path);
       return schedulerAdmissionDatabase(path)((db) => {
         const row = db.prepare(`
-          SELECT ${fields} FROM ${table} WHERE id = ? AND ${state}
+          SELECT ${fields}, ${disposition} AS disposition, leaseToken, leaseUntil
+          FROM ${table} WHERE id = ? AND ${terminal ? "1" : state}
         `).get(scope.runId);
-        return row && parse(row);
+        if (!row) return;
+        const record = parse(row);
+        if (!terminal) return record;
+        if (
+          !record || !validDisposition(row.disposition) ||
+          row.leaseToken !== null || row.leaseUntil !== null
+        ) {
+          throw new Error(
+            "The scheduler admission did not settle at the archive boundary.",
+          );
+        }
+        return { ...record, disposition: row.disposition };
       });
     },
-    restore(raw: Record<string, unknown>) {
+    restore(raw: Record<string, unknown>, terminal = false) {
       const record = raw && parse(raw);
-      if (!record) return;
+      if (
+        !record ||
+        (terminal
+          ? !validDisposition(raw.disposition)
+          : raw.disposition !== undefined)
+      ) return;
       initialize(path);
       return {
         path,
         install(db: DatabaseSync) {
           const existing = db.prepare(`
-            SELECT ${fields}, (${state}) AS pending
+            SELECT ${fields}, (${state}) AS pending,
+              ${disposition} AS disposition, leaseToken, leaseUntil
             FROM archive_admission.${table} WHERE id = ?
           `).get(record.id);
           if (existing) {
-            return existing.pending === 1 &&
+            return (terminal
+              ? existing.disposition === raw.disposition &&
+                existing.leaseToken === null && existing.leaseUntil === null
+              : existing.pending === 1) &&
               JSON.stringify(parse(existing)) === JSON.stringify(record);
           }
           const values = columns.map((name) =>
             (record as unknown as Record<string, string | number>)[name]
           );
+          if (terminal) {
+            return db.prepare(`
+              INSERT INTO archive_admission.${table} (${fields}, ${disposition})
+              VALUES (${columns.map(() => "?").join(", ")}, ?)
+            `).run(...values, raw.disposition as string | number | null)
+              .changes === 1;
+          }
           return db.prepare(`
             INSERT INTO archive_admission.${table} (${fields})
             VALUES (${columns.map(() => "?").join(", ")})
