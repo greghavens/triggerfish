@@ -566,6 +566,12 @@ queues the requirement and dependent first, then proves that an unrelated
 receipt for the same asset leaves both queued and that the matching one
 releases the dependent and records provenance without a worker claim.
 
+When the case revision changes, a pending relationship requirement and its
+dependents can carry forward after the new graph and operating scope validate
+the selector. The new task remains queued for a receipt from the new revision.
+The graph fact gateway fixture proves that a fresh relationship receipt releases
+the carried dependent with zero worker attempts on the prerequisite.
+
 Receipt-only work uses a task ID that includes the exact relationship or
 receipt ID. Ordinary trace IDs remain stable, and repeat planning recognizes
 the stored IDs of legacy receipt-only tasks. The

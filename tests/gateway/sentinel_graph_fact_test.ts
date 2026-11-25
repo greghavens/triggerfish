@@ -3006,7 +3006,7 @@ Deno.test("Sentinel publishes a retained control outcome from the assigned asset
   }
 });
 
-Deno.test("Pending control requirements and dependent work carry only into compatible evidence revisions", async () => {
+Deno.test("Pending graph fact requirements and dependent work carry only into compatible evidence revisions", async () => {
   const baseDir = await Deno.makeTempDir();
   const path = resolveSentinelCasePath(baseDir, "control-rollover");
   const requirement = (to: string) => ({
@@ -3014,11 +3014,12 @@ Deno.test("Pending control requirements and dependent work carry only into compa
     relation: "verifies" as const,
     requireCurrentPass: true as const,
   });
+  const relationship = { from: "finding", to: "app", relation: "affects" };
   const now = Date.now();
   const snapshot = (second: boolean) => ({
     version: 1,
     nodes: [
-      ...["app", "child", "other-child"].map((id) => ({
+      ...["app", "child", "other-child", "relationship-child"].map((id) => ({
         id,
         kind: "asset",
         label: id,
@@ -3110,20 +3111,26 @@ Deno.test("Pending control requirements and dependent work carry only into compa
               type: "response",
               taint: "INTERNAL",
               text: JSON.stringify([
-                ...["control", "removed"].flatMap((control, index) => [
-                  {
-                    kind: "trace",
-                    nodeId: "app",
-                    depth: 1,
-                    graphFactOnly: true,
-                    graphRelationship: requirement(control),
-                  },
-                  {
-                    kind: "impact",
-                    nodeId: index === 0 ? "child" : "other-child",
-                    dependsOn: [2 * index],
-                  },
-                ]),
+                ...[
+                  requirement("control"),
+                  requirement("removed"),
+                  relationship,
+                ]
+                  .flatMap((graphRelationship, index) => [
+                    {
+                      kind: "trace",
+                      nodeId: "app",
+                      depth: 1,
+                      graphFactOnly: true,
+                      graphRelationship,
+                    },
+                    {
+                      kind: "impact",
+                      nodeId:
+                        ["child", "other-child", "relationship-child"][index],
+                      dependsOn: [2 * index],
+                    },
+                  ]),
               ]),
             });
           }
@@ -3135,7 +3142,7 @@ Deno.test("Pending control requirements and dependent work carry only into compa
       const deadline = Date.now() + 2000;
       while (
         !store.list(firstRevision).some(({ nodeId }) =>
-          nodeId === "other-child"
+          nodeId === "relationship-child"
         ) && Date.now() < deadline
       ) {
         await new Promise((resolve) => setTimeout(resolve, 10));
@@ -3190,6 +3197,17 @@ Deno.test("Pending control requirements and dependent work carry only into compa
         ),
       );
 
+      const relationshipGate = tasks().find(({ plannerRound }) =>
+        plannerRound?.graphRelationship?.relation === "affects"
+      );
+      const relationshipChild = tasks().find(({ nodeId }) =>
+        nodeId === "relationship-child"
+      );
+      assert(relationshipGate && relationshipChild);
+      assertEquals(relationshipGate.status, "queued");
+      assertEquals(relationshipChild.prerequisites, [relationshipGate.id]);
+      assertEquals(relationshipChild.status, "queued");
+
       const nextClaim = store.claimModelReview(
         next,
         MODEL_ASSIGNMENT_REASON,
@@ -3200,16 +3218,36 @@ Deno.test("Pending control requirements and dependent work carry only into compa
         assessmentRevision: second.revision,
         assignedTaskId: nextClaim.task.id,
         assignedTaskLeaseToken: nextClaim.token,
-      }, [[call(read, { id: oldFact.id }), call(assigned)], [call(publish, {
-        from: "new-check",
-        to: "control",
-        relation: "verifies",
-        requestId: crypto.randomUUID(),
-      })]]);
+      }, [[call(read, { id: oldFact.id }), call(assigned)], [
+        call(publish, {
+          from: "new-check",
+          to: "control",
+          relation: "verifies",
+          requestId: crypto.randomUUID(),
+        }),
+        call(publish, {
+          ...relationship,
+          requestId: crypto.randomUUID(),
+        }),
+      ]]);
       assertStringIncludes(published.results[0][0], "unavailable");
       const newFact = JSON.parse(published.results[1][0]);
       assertEquals(newFact.evidenceRevision, second.revision);
       advanceAdaptiveSentinel(path, second);
+      const relationshipFact = JSON.parse(published.results[1][1]);
+      const satisfiedRelationship = tasks().find(({ id }) =>
+        id === relationshipGate.id
+      );
+      assertEquals(relationshipFact.evidenceRevision, second.revision);
+      assertEquals(
+        satisfiedRelationship?.factSatisfaction?.graphFactId,
+        relationshipFact.id,
+      );
+      assertEquals(satisfiedRelationship?.attempts, 0);
+      assertEquals(
+        tasks().find(({ id }) => id === relationshipChild.id)?.status,
+        "completed",
+      );
       const satisfied = tasks().find(({ id }) => id === gate.id);
       assertEquals(satisfied?.factSatisfaction?.graphFactId, newFact.id);
       assertEquals(satisfied?.attempts, 0);
