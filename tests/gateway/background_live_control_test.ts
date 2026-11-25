@@ -220,7 +220,7 @@ Deno.test("Owner gateway steers and cancels a live scheduled model at real tool 
       headers: { "x-timestamp": timestamp, "x-signature": signature },
     };
     delivery = fetch(deliveryUrl, request);
-    async function turn(args: Record<string, unknown>) {
+    const turn = async (args: Record<string, unknown>) => {
       const complete = Promise.withResolvers<string>();
       const timer = setTimeout(
         () => complete.reject(new Error("Missing owner control response")),
@@ -245,7 +245,7 @@ Deno.test("Owner gateway steers and cancels a live scheduled model at real tool 
         clearTimeout(timer);
         socket.removeEventListener("message", receive);
       }
-    }
+    };
     const ref = { id, kind: "scheduled" };
     const requestId = crypto.randomUUID();
     const steer = { action: "steer", ...ref, requestId, note };
@@ -292,6 +292,28 @@ Deno.test("Owner gateway steers and cancels a live scheduled model at real tool 
     assertEquals(replay.status, 409);
     await replay.body?.cancel();
     assertEquals(scheduledSteps, 3);
+
+    const savedControls = await controls();
+    const archiveId = crypto.randomUUID();
+    const archived = JSON.parse(
+      await turn({ action: "archive", ...ref, requestId: archiveId }),
+    );
+    assertEquals(archived.receipt.status, "succeeded");
+    await Deno.rename(
+      join(baseDir, "execution-traces.db"),
+      join(baseDir, "original-execution-traces.db"),
+    );
+    const restore = {
+      action: "restore",
+      ...ref,
+      archiveId,
+      requestId: crypto.randomUUID(),
+    };
+    const restored = JSON.parse(await turn(restore));
+    assertEquals(restored.receipt.status, "succeeded");
+    assertEquals(JSON.parse(await turn(restore)), restored);
+    assertEquals(await controls(), savedControls);
+    assertEquals(effects, ["2"]);
   } finally {
     initial.resolve();
     finish.resolve();
