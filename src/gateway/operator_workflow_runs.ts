@@ -1,6 +1,7 @@
 /** Operator-admitted deterministic plans using the ordinary workflow runtime. */
 
 import { createHash } from "node:crypto";
+import { resolve } from "@std/path";
 import {
   canFlowTo,
   type ClassificationLevel,
@@ -10,7 +11,10 @@ import type { WorkflowRunRegistry } from "../workflow/registry_types.ts";
 import type { WorkflowStatus, WorkflowTaskEntry } from "../workflow/types.ts";
 import {
   createOperatorWorkflowJournal,
+  MAX_OPERATOR_WORKFLOW_CONTROL_EVENTS,
   type OperatorWorkflowJournalRow,
+  type OperatorWorkflowTraceEvent,
+  type OperatorWorkflowTraceInput,
 } from "./operator_workflow_journal.ts";
 
 export interface OperatorWorkflowPlan {
@@ -50,6 +54,7 @@ type AdmittedRun = {
   readonly plan: AdmittedPlan;
   readonly startedAt: string;
   readonly stepStatuses: StepStatus[];
+  readonly transientTrace: OperatorWorkflowTraceEvent[];
   status: WorkflowStatus;
   completedAt?: string;
 };
@@ -59,6 +64,7 @@ const MAX_HISTORY = 64;
 const MAX_PLANS = 32;
 const MAX_STEPS = 20;
 const MAX_DELAY_SECONDS = 30;
+const MAX_TRACE_PAGE = 30;
 const ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
 const RUN_ID = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/;
 const REQUEST_ID = /^[a-f0-9]{64}$/i;
@@ -195,12 +201,27 @@ export function createOperatorWorkflowRuns(
     };
   }
 
-  function save(run: AdmittedRun) {
-    journal?.update(
+  function save(run: AdmittedRun, event: OperatorWorkflowTraceInput) {
+    if (!journal) {
+      if (
+        (event.event === "paused" || event.event === "resumed") &&
+        run.transientTrace.filter((item) =>
+            item.event === "paused" || item.event === "resumed"
+          ).length >=
+          MAX_OPERATOR_WORKFLOW_CONTROL_EVENTS
+      ) return;
+      run.transientTrace.push({
+        ...event,
+        sequence: run.transientTrace.length + 1,
+      });
+      return;
+    }
+    journal.update(
       run.id,
       run.status,
       run.completedAt ?? null,
       JSON.stringify(run.stepStatuses),
+      event,
     );
   }
 
@@ -208,8 +229,9 @@ export function createOperatorWorkflowRuns(
     run: AdmittedRun,
     registration: ReturnType<WorkflowRunRegistry["registerRun"]>,
   ) {
-    let terminal: WorkflowStatus = "failed";
+    let terminal: "completed" | "failed" | "cancelled" = "failed";
     try {
+      save(run, { event: "started", at: new Date().toISOString() });
       const result = await executeWorkflow({
         definition: {
           document: { dsl: "1.0.0", namespace: "operator", name: run.plan.id },
@@ -231,30 +253,55 @@ export function createOperatorWorkflowRuns(
             taint: run.plan.classification,
           }),
         onStepEvent: (event) => {
+          if (
+            event.type !== "STEP_STARTED" && event.type !== "STEP_COMPLETED" &&
+            event.type !== "STEP_FAILED"
+          ) return;
+          const step = run.plan.steps[event.taskIndex];
+          if (!step || step.name !== event.taskName) return;
+          const before = run.stepStatuses[event.taskIndex];
+          let typedEvent: OperatorWorkflowTraceInput["event"];
           switch (event.type) {
             case "STEP_STARTED":
+              if (before !== "pending") return;
               run.stepStatuses[event.taskIndex] = "running";
+              typedEvent = "step_started";
               break;
             case "STEP_COMPLETED":
+              if (before !== "running") return;
               run.stepStatuses[event.taskIndex] = "completed";
+              typedEvent = "step_completed";
               break;
             case "STEP_FAILED":
+              if (before !== "running") return;
               run.stepStatuses[event.taskIndex] = "failed";
+              typedEvent = "step_failed";
               break;
-            default:
-              return;
           }
-          save(run);
+          save(run, {
+            event: typedEvent,
+            stepId: step.name,
+            at: event.timestamp,
+          });
         },
       });
-      if (result.ok) terminal = result.value.status;
+      if (
+        result.ok && (result.value.status === "completed" ||
+          result.value.status === "failed" ||
+          result.value.status === "cancelled")
+      ) {
+        terminal = result.value.status;
+      }
     } catch {
       // Return status only. Workflow outputs and errors do not leave the engine.
     } finally {
       run.status = registration.signal.aborted ? "cancelled" : terminal;
       run.completedAt = new Date().toISOString();
       try {
-        save(run);
+        save(run, {
+          event: run.status,
+          at: run.completedAt,
+        });
       } catch {
         // An unavailable journal leaves the durable admission interrupted.
       }
@@ -298,6 +345,81 @@ export function createOperatorWorkflowRuns(
       const saved = journal?.inspect(runId);
       return saved && reopen(saved, ceiling);
     },
+    traces(
+      runId: string,
+      ceiling: ClassificationLevel = "INTERNAL",
+      options: {
+        readonly cursor?: string;
+        readonly limit?: number;
+        readonly sequence?: number;
+      } = {},
+    ) {
+      const { cursor, limit = 10, sequence } = options;
+      if (
+        typeof runId !== "string" || !RUN_ID.test(runId) ||
+        !Number.isSafeInteger(limit) || limit < 1 || limit > MAX_TRACE_PAGE ||
+        (sequence !== undefined && (cursor !== undefined ||
+          !Number.isSafeInteger(sequence) || sequence < 1 || sequence > 999))
+      ) return undefined;
+      const live = find(runId, ceiling);
+      const saved = journal?.inspect(runId);
+      const run = saved
+        ? reopen(saved, ceiling)
+        : live
+        ? project(live)
+        : undefined;
+      const plan = run && plans.get(run.planId);
+      if (!run || !plan) return undefined;
+      const binding = createHash("sha256").update(JSON.stringify([
+        journalPath === undefined ? null : resolve(journalPath),
+        runId,
+        plan.fingerprint,
+      ])).digest("hex");
+      const parsed = typeof cursor === "string" &&
+        /^([a-f0-9]{64})\.([1-9][0-9]{0,2})$/.exec(cursor);
+      if (cursor !== undefined && (!parsed || parsed[1] !== binding)) {
+        return undefined;
+      }
+      const after = sequence !== undefined
+        ? sequence - 1
+        : parsed
+        ? Number(parsed[2])
+        : 0;
+      const pageSize = sequence === undefined ? limit + 1 : 1;
+      if (!journal && after > (live?.transientTrace.length ?? 0)) {
+        return undefined;
+      }
+      const page = journal
+        ? journal.traces(runId, plan.fingerprint, after, pageSize)
+        : live && {
+          events: live.transientTrace.slice(after, after + pageSize),
+          controlLimitReached: live.transientTrace.filter((item) =>
+            item.event === "paused" ||
+            item.event === "resumed"
+          ).length >= MAX_OPERATOR_WORKFLOW_CONTROL_EVENTS,
+        };
+      if (!page) return undefined;
+      if (sequence !== undefined && page.events[0]?.sequence !== sequence) {
+        return undefined;
+      }
+      if (
+        page.events.some((event) =>
+          "stepId" in event &&
+          !plan.steps.some(({ name }) => name === event.stepId)
+        )
+      ) return undefined;
+      const events = page.events.slice(0, limit);
+      return {
+        runId,
+        planId: plan.id,
+        classification: plan.classification,
+        events,
+        controlLimitReached: page.controlLimitReached,
+        nextCursor: page.events.length > limit
+          ? `${binding}.${events.at(-1)!.sequence}`
+          : null,
+      };
+    },
     start(
       planId: string,
       ceiling: ClassificationLevel = "INTERNAL",
@@ -331,6 +453,7 @@ export function createOperatorWorkflowRuns(
         startedAt: new Date().toISOString(),
         status: "running",
         stepStatuses: plan.steps.map(() => "pending"),
+        transientTrace: [],
       };
       const admission = journal?.admit({
         runId: id,
@@ -355,16 +478,23 @@ export function createOperatorWorkflowRuns(
       });
       runs.set(id, run);
       active++;
+      if (!journal) save(run, { event: "admitted", at: run.startedAt });
       void execute(run, registration);
       return project(run);
     },
     pause(runId: string, ceiling: ClassificationLevel = "INTERNAL") {
       const run = find(runId, ceiling);
-      return run && registry.pauseRun(runId) ? project(run) : undefined;
+      if (!run || !registry.pauseRun(runId)) return undefined;
+      run.status = "paused";
+      save(run, { event: "paused", at: new Date().toISOString() });
+      return project(run);
     },
     resume(runId: string, ceiling: ClassificationLevel = "INTERNAL") {
       const run = find(runId, ceiling);
-      return run && registry.unpauseRun(runId) ? project(run) : undefined;
+      if (!run || !registry.unpauseRun(runId)) return undefined;
+      run.status = "running";
+      save(run, { event: "resumed", at: new Date().toISOString() });
+      return project(run);
     },
   };
 }

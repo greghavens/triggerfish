@@ -431,6 +431,45 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
           .status,
         "paused",
       );
+      const workflowTrace = { action: "traces", ...workflow };
+      const initialTrace = JSON.parse(
+        (await turn({ ...workflowTrace, limit: 1 })).result,
+      ).page;
+      assertEquals(
+        initialTrace.events.map(({ event }: { event: string }) => event),
+        ["admitted"],
+      );
+      assert(typeof initialTrace.nextCursor === "string");
+      const nextTrace = JSON.parse(
+        (await turn({
+          ...workflowTrace,
+          cursor: initialTrace.nextCursor,
+          limit: 3,
+        })).result,
+      ).page;
+      assert(
+        nextTrace.events.some(({ event }: { event: string }) =>
+          event === "paused"
+        ),
+      );
+      assertStringIncludes(
+        (await turn({
+          ...workflowTrace,
+          id: unrelated,
+          cursor: initialTrace.nextCursor,
+        })).result,
+        "unavailable",
+      );
+      denied = "POST_TOOL_RESPONSE";
+      assertEquals(
+        (await turn(workflowTrace)).result,
+        "Tool response withheld by policy.",
+      );
+      denied = "PRE_OUTPUT";
+      const blockedTrace = await turn(workflowTrace);
+      assertEquals(blockedTrace.response, undefined);
+      assert(blockedTrace.error);
+      denied = undefined;
       const link = {
         action: "link",
         ...exact,
@@ -539,6 +578,33 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
       );
       assertEquals(workflowView.run.ref, workflow);
       assertEquals(workflowView.run.status, "completed");
+      const trace = JSON.parse(
+        (await turn({ action: "traces", ...workflow })).result,
+      ).page;
+      assertEquals(trace.events.at(-1).event, "completed");
+      const step = trace.events.find(
+        ({ event }: { event: string }) => event === "step_completed",
+      );
+      assert(step);
+      assertEquals(
+        JSON.parse(
+          (await turn({
+            action: "traces",
+            ...workflow,
+            sequence: step.sequence,
+          })).result,
+        ).page.events,
+        [step],
+      );
+      assertStringIncludes(
+        (await turn({
+          action: "traces",
+          ...workflow,
+          sequence: 300,
+        })).result,
+        "unavailable",
+      );
+
       assertEquals(workflowView.links, [linkReceipt]);
       const repeated =
         JSON.parse((await turn({ action: "start", ...configured })).result).run;

@@ -16,6 +16,53 @@ export interface OperatorWorkflowJournalRow {
   readonly stepStatuses: string;
 }
 
+export type OperatorWorkflowTraceInput =
+  | {
+    readonly event:
+      | "admitted"
+      | "started"
+      | "paused"
+      | "resumed"
+      | "completed"
+      | "failed"
+      | "cancelled";
+    readonly at: string;
+  }
+  | {
+    readonly event: "step_started" | "step_completed" | "step_failed";
+    readonly stepId: string;
+    readonly at: string;
+  };
+
+export type OperatorWorkflowTraceEvent = OperatorWorkflowTraceInput & {
+  readonly sequence: number;
+};
+
+export const MAX_OPERATOR_WORKFLOW_CONTROL_EVENTS = 128;
+
+const lifecycleEvents = new Set([
+  "admitted",
+  "started",
+  "paused",
+  "resumed",
+  "completed",
+  "failed",
+  "cancelled",
+]);
+const stepEvents = new Set(["step_started", "step_completed", "step_failed"]);
+
+function commit<T>(db: DatabaseSync, operation: () => T): T {
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    const result = operation();
+    db.exec("COMMIT");
+    return result;
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
+}
+
 function privateDatabase(path: string) {
   const absolute = resolve(path);
   const parent = dirname(absolute);
@@ -46,7 +93,9 @@ export function createOperatorWorkflowJournal(path: string) {
   function query<T>(operation: (db: DatabaseSync) => T): T {
     const db = privateDatabase(path);
     try {
-      db.exec("PRAGMA busy_timeout = 5000");
+      db.exec(
+        "PRAGMA busy_timeout = 5000; PRAGMA foreign_keys = ON; PRAGMA trusted_schema = OFF",
+      );
       return operation(db);
     } finally {
       db.close();
@@ -67,6 +116,14 @@ export function createOperatorWorkflowJournal(path: string) {
       completedAt TEXT,
       stepStatuses TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS workflow_trace_v1 (
+      runId TEXT NOT NULL REFERENCES workflow_admissions_v1(runId),
+      sequence INTEGER NOT NULL,
+      event TEXT NOT NULL,
+      stepId TEXT,
+      at TEXT NOT NULL,
+      PRIMARY KEY(runId, sequence)
+    );
   `)
   );
   const fields =
@@ -77,30 +134,61 @@ export function createOperatorWorkflowJournal(path: string) {
     )
       .get(requestId) as OperatorWorkflowJournalRow | undefined;
   }
+  function append(
+    db: DatabaseSync,
+    runId: string,
+    event: OperatorWorkflowTraceInput,
+  ) {
+    const control = event.event === "paused" || event.event === "resumed";
+    if (
+      control && Number(
+          db.prepare(`
+      SELECT COUNT(*) AS count FROM workflow_trace_v1
+      WHERE runId = ? AND event IN ('paused', 'resumed')
+    `).get(runId)?.count,
+        ) >= MAX_OPERATOR_WORKFLOW_CONTROL_EVENTS
+    ) return;
+    db.prepare(`
+      INSERT INTO workflow_trace_v1 (runId, sequence, event, stepId, at)
+      SELECT ?, COALESCE(MAX(sequence), 0) + 1, ?, ?, ?
+      FROM workflow_trace_v1 WHERE runId = ?
+    `).run(
+      runId,
+      event.event,
+      "stepId" in event ? event.stepId : null,
+      event.at,
+      runId,
+    );
+  }
   return {
     admit(entry: OperatorWorkflowJournalRow) {
-      return query((db) => {
-        const inserted = db.prepare(`
+      return query((db) =>
+        commit(db, () => {
+          const inserted = db.prepare(`
           INSERT INTO workflow_admissions_v1 (${fields})
           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
           ON CONFLICT(requestId) DO NOTHING
         `).run(
-          entry.runId,
-          entry.requestId,
-          entry.planId,
-          entry.fingerprint,
-          entry.classification,
-          entry.status,
-          entry.startedAt,
-          entry.completedAt,
-          entry.stepStatuses,
-        );
-        if (inserted.changes === 1) return { admitted: true as const };
-        return {
-          admitted: false as const,
-          prior: byRequest(db, entry.requestId),
-        };
-      });
+              entry.runId,
+              entry.requestId,
+              entry.planId,
+              entry.fingerprint,
+              entry.classification,
+              entry.status,
+              entry.startedAt,
+              entry.completedAt,
+              entry.stepStatuses,
+            );
+          if (inserted.changes === 1) {
+            append(db, entry.runId, { event: "admitted", at: entry.startedAt });
+            return { admitted: true as const };
+          }
+          return {
+            admitted: false as const,
+            prior: byRequest(db, entry.requestId),
+          };
+        })
+      );
     },
     readRequest(requestId: string) {
       return query((db) => byRequest(db, requestId));
@@ -124,13 +212,61 @@ export function createOperatorWorkflowJournal(path: string) {
       status: string,
       completedAt: string | null,
       stepStatuses: string,
+      event: OperatorWorkflowTraceInput,
     ) {
       query((db) =>
-        db.prepare(`
+        commit(db, () => {
+          const changed = db.prepare(`
         UPDATE workflow_admissions_v1 SET status = ?, completedAt = ?, stepStatuses = ?
         WHERE runId = ? AND completedAt IS NULL
-      `).run(status, completedAt, stepStatuses, runId)
+      `).run(status, completedAt, stepStatuses, runId);
+          if (changed.changes === 1) append(db, runId, event);
+        })
       );
+    },
+    traces(runId: string, fingerprint: string, after: number, limit: number) {
+      return query((db) => {
+        if (
+          !db.prepare(
+            "SELECT 1 FROM workflow_admissions_v1 WHERE runId = ? AND fingerprint = ?",
+          ).get(runId, fingerprint)
+        ) return undefined;
+        if (
+          after > 0 &&
+          !db.prepare(
+            "SELECT 1 FROM workflow_trace_v1 WHERE runId = ? AND sequence = ?",
+          ).get(runId, after)
+        ) return undefined;
+        const raw = db.prepare(`
+          SELECT sequence, event, stepId, at FROM workflow_trace_v1
+          WHERE runId = ? AND sequence > ? ORDER BY sequence LIMIT ?
+        `).all(runId, after, limit);
+        if (
+          raw.some(({ sequence, event, stepId, at }) =>
+            typeof sequence !== "number" || !Number.isSafeInteger(sequence) ||
+            typeof event !== "string" || typeof at !== "string" ||
+            !Number.isFinite(Date.parse(at)) ||
+            (stepEvents.has(event)
+              ? typeof stepId !== "string" ||
+                !/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(stepId)
+              : !lifecycleEvents.has(event) || stepId !== null)
+          )
+        ) return undefined;
+        return {
+          events: raw.map(({ sequence, event, stepId, at }) => ({
+            sequence: Number(sequence),
+            event: String(event),
+            at: String(at),
+            ...(typeof stepId === "string" && { stepId }),
+          } as OperatorWorkflowTraceEvent)),
+          controlLimitReached: Number(
+            db.prepare(`
+            SELECT COUNT(*) AS count FROM workflow_trace_v1
+            WHERE runId = ? AND event IN ('paused', 'resumed')
+          `).get(runId)?.count,
+          ) >= MAX_OPERATOR_WORKFLOW_CONTROL_EVENTS,
+        };
+      });
     },
   };
 }

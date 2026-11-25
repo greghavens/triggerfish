@@ -146,6 +146,14 @@ export const operatorRunTool: ToolDefinition = {
       items: { type: "integer" },
       description: "Exact worker step indices for the selected assignment",
     },
+    cursor: {
+      type: "string",
+      description: "Opaque continuation cursor for workflow trace events",
+    },
+    sequence: {
+      type: "integer",
+      description: "Exact workflow trace event sequence",
+    },
     offset: { type: "integer", description: "Saved result offset" },
     limit: { type: "integer", description: "Bounded result page size" },
   },
@@ -510,6 +518,25 @@ export function createOperatorRunToolExecutor(options: {
         return recorded
           ? safeProjection({ run: ref, record: recorded })
           : unavailable;
+      }
+      if (action === "traces" && ref.kind === "workflow") {
+        const { cursor, limit, sequence } = args;
+        if (
+          Object.keys(args).some((key) =>
+            !["action", "kind", "id", "cursor", "sequence", "limit"]
+              .includes(key)
+          ) ||
+          (cursor !== undefined && typeof cursor !== "string") ||
+          (limit !== undefined && typeof limit !== "number") ||
+          (sequence !== undefined && typeof sequence !== "number") ||
+          !await controller.inspect(ref)
+        ) return unavailable;
+        const page = options.workflows?.traces(ref.id, "INTERNAL", {
+          cursor,
+          limit,
+          sequence,
+        });
+        return page ? safeProjection({ run: ref, page }) : unavailable;
       }
       if (
         action === "graph" || action === "findings" || action === "node" ||

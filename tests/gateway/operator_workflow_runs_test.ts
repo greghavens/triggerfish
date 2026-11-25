@@ -167,3 +167,126 @@ Deno.test("Operator workflow journal reopens safe history and never replays an a
     await Deno.remove(directory, { recursive: true });
   }
 });
+
+Deno.test("Workflow traces page exact durable lifecycle and step events across restart", async () => {
+  const directory = await Deno.makeTempDir();
+  const path = join(directory, "workflow.db");
+  const plan = {
+    id: "traceable-review",
+    classification: "INTERNAL" as const,
+    steps: [{ id: "pause-point", waitSeconds: 0.15 }, { id: "reviewed" }],
+  };
+  const registry = createWorkflowRunRegistry();
+  const live = createOperatorWorkflowRuns(registry, [plan], path);
+  const first = live.start(plan.id);
+  assert(first);
+  try {
+    await waitFor(() =>
+      live.inspect(first.runId)?.steps[0].status === "running"
+    );
+    assertEquals(live.pause(first.runId)?.status, "paused");
+    const page = live.traces(first.runId, "INTERNAL", { limit: 2 });
+    assert(page?.nextCursor);
+    assertEquals(page.events.map(({ sequence, event }) => [sequence, event]), [
+      [1, "admitted"],
+      [2, "started"],
+    ]);
+    const reopened = createOperatorWorkflowRuns(createWorkflowRunRegistry(), [
+      plan,
+    ], path);
+    assertEquals(reopened.traces(first.runId, "PUBLIC"), undefined);
+    assertEquals(reopened.traces(crypto.randomUUID()), undefined);
+    const paused = reopened.traces(first.runId, "INTERNAL", {
+      cursor: page.nextCursor,
+      limit: 2,
+    });
+    assertEquals(
+      paused?.events.map(({ sequence, event }) => [sequence, event]),
+      [
+        [3, "step_started"],
+        [4, "paused"],
+      ],
+    );
+    const changedPlan = createOperatorWorkflowRuns(
+      createWorkflowRunRegistry(),
+      [
+        { ...plan, steps: [{ id: "replacement" }] },
+      ],
+      path,
+    );
+    assertEquals(changedPlan.traces(first.runId), undefined);
+    await waitFor(() =>
+      live.inspect(first.runId)?.steps[0].status === "completed"
+    );
+    assertEquals(live.resume(first.runId)?.status, "running");
+    await waitFor(() => live.inspect(first.runId)?.status === "completed");
+    const settled = reopened.traces(first.runId, "INTERNAL", {
+      cursor: page.nextCursor,
+    });
+    assert(settled);
+    assertEquals(
+      settled.events.map((entry) => [
+        entry.sequence,
+        entry.event,
+        "stepId" in entry ? entry.stepId : undefined,
+      ]),
+      [
+        [3, "step_started", "pause-point"],
+        [4, "paused", undefined],
+        [5, "step_completed", "pause-point"],
+        [6, "resumed", undefined],
+        [7, "step_started", "reviewed"],
+        [8, "step_completed", "reviewed"],
+        [9, "completed", undefined],
+      ],
+    );
+    assertEquals(settled.nextCursor, null);
+    const exact = reopened.traces(first.runId, "INTERNAL", { sequence: 8 });
+    assertEquals(exact?.events, [settled.events[5]]);
+    assertEquals(exact?.nextCursor, null);
+    assertEquals(
+      reopened.traces(first.runId, "INTERNAL", { sequence: 10 }),
+      undefined,
+    );
+    assertEquals(
+      reopened.traces(first.runId, "INTERNAL", {
+        sequence: 8,
+        cursor: page.nextCursor,
+      }),
+      undefined,
+    );
+    assertEquals(settled.controlLimitReached, false);
+    assert(
+      settled.events.every((event) =>
+        Object.keys(event).every((key) =>
+          ["sequence", "event", "stepId", "at"].includes(key)
+        )
+      ),
+    );
+    const second = live.start(plan.id);
+    assert(second);
+    try {
+      assertEquals(
+        live.traces(second.runId, "INTERNAL", { cursor: page.nextCursor }),
+        undefined,
+      );
+      assertEquals(
+        live.traces(first.runId, "INTERNAL", {
+          cursor: page.nextCursor.replace(/\.2$/, ".999"),
+        }),
+        undefined,
+      );
+    } finally {
+      if (registry.getActiveRun(second.runId)) registry.stopRun(second.runId);
+      await waitFor(() => registry.getActiveRun(second.runId) === null);
+    }
+    assertEquals(
+      reopened.traces(second.runId)?.events.at(-1)?.event,
+      "cancelled",
+    );
+  } finally {
+    if (registry.getActiveRun(first.runId)) registry.stopRun(first.runId);
+    await waitFor(() => registry.getActiveRun(first.runId) === null);
+    await Deno.remove(directory, { recursive: true });
+  }
+});
