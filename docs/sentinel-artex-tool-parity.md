@@ -98,7 +98,10 @@ An authenticated owner can steer an active durable team delivery through
 approval and instructions use the same durable journal as scheduled and
 delegated runs. The gateway fixture denies another owner, makes duplicate
 approval idempotent, and proves the superseded tool call stays out of the
-handler. A new connection reopens the applied steering receipt.
+handler. A new connection reopens the applied steering receipt. The same
+gateway fixture stops a second exact delivery after a committed read,
+retains that step, and rejects the original delivery request after the
+gateway and team manager restart.
 [Team steering gateway fixture](../tests/gateway/team_live_steering_test.ts).
 Free-text planner hints apply to Sentinel assessments. Configured
 deterministic workflows consume their reviewed step definitions.

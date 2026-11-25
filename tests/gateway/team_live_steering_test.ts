@@ -20,6 +20,9 @@ import { buildWorkflowRecoveryExecutor } from "../../src/gateway/startup/factory
 import { teamDeliveryExecutionId } from "../../src/gateway/startup/factory/delegated_agent_recovery.ts";
 import { buildTeamManager } from "../../src/gateway/startup/factory/team_executor.ts";
 
+const emptyChecklist =
+  "No todos. Use todo_write to create your task list. Revision: empty";
+
 const hooks = {
   evaluateHook: () =>
     Promise.resolve({
@@ -30,7 +33,7 @@ const hooks = {
     }),
 };
 
-Deno.test("Owner gateway steers one exact admitted team delivery at its next model step", async () => {
+Deno.test("Owner gateway steers and stops exact admitted team deliveries", async () => {
   const baseDir = await Deno.makeTempDir();
   const storage = createMemoryStorage();
   const keychain = createMemorySecretStore();
@@ -38,95 +41,126 @@ Deno.test("Owner gateway steers one exact admitted team delivery at its next mod
   const owner = createSession({ userId, channelId: "owner" as ChannelId });
   const entered = Promise.withResolvers<void>();
   const release = Promise.withResolvers<void>();
+  const enteredCancellation = Promise.withResolvers<void>();
+  const releaseCancellation = Promise.withResolvers<void>();
+  let cancelledDeliveryRunId: string | undefined;
+  let cancellationTurns = 0;
   const note = "Review the segregated local fixture before proceeding.";
   const touched: string[] = [];
   const usage = { inputTokens: 1, outputTokens: 1 };
-  const manager = buildTeamManager({
-    storage,
-    callerSessionId: owner.id,
-    sessionManager: {
-      get: (id: SessionId) => Promise.resolve(id === owner.id ? owner : null),
-    } as unknown as EnhancedSessionManager,
-    orchestratorFactory: {
-      create(channelId, options) {
-        const state = options?.recoverySessionId
-          ? restoreSession({
-            userId,
-            channelId: channelId as ChannelId,
-            id: options.recoverySessionId,
-          })
-          : createSession({ userId, channelId: channelId as ChannelId });
-        const session = options?.recoverySessionTaint
-          ? updateTaint(state, options.recoverySessionTaint, "Fixture taint")
-          : state;
-        const registry = createProviderRegistry();
-        registry.register({
-          name: "live-team-fixture",
-          supportsStreaming: false,
-          async complete(messages) {
-            if (!options?.executionChecklistRunId) {
-              return { content: "Team member ready.", usage, toolCalls: [] };
-            }
-            const tool = messages.findLast(({ role }) => role === "tool");
-            const steered = JSON.stringify(messages).includes(note);
-            if (!tool && !steered) {
-              entered.resolve();
-              await release.promise;
-            }
-            return {
-              content: tool ? "Local status reviewed." : "",
-              usage,
-              toolCalls: tool ? [] : [{
-                type: "function",
-                id: crypto.randomUUID(),
-                function: {
-                  name: steered ? "todo_read" : "todo_write",
-                  arguments: JSON.stringify({}),
-                },
-              }],
-            };
-          },
-        });
-        registry.setDefault("live-team-fixture");
-        const toolExecutor = (name: string) => {
-          touched.push(name);
-          return Promise.resolve('{"todos":[]}');
-        };
-        return Promise.resolve({
-          session,
-          getSessionTaint: () => session.taint,
-          toolExecutor,
-          orchestrator: createOrchestrator({
-            providerRegistry: registry,
-            hookRunner: hooks,
-            tools: ["todo_read", "todo_write"].map((name) => ({
-              name,
-              description: "Inspect local fixture checklist.",
-              parameters: {},
-            })),
-            toolExecutor,
+  const makeManager = () =>
+    buildTeamManager({
+      storage,
+      callerSessionId: owner.id,
+      sessionManager: {
+        get: (id: SessionId) => Promise.resolve(id === owner.id ? owner : null),
+      } as unknown as EnhancedSessionManager,
+      orchestratorFactory: {
+        create(channelId, options) {
+          const state = options?.recoverySessionId
+            ? restoreSession({
+              userId,
+              channelId: channelId as ChannelId,
+              id: options.recoverySessionId,
+            })
+            : createSession({ userId, channelId: channelId as ChannelId });
+          const session = options?.recoverySessionTaint
+            ? updateTaint(state, options.recoverySessionTaint, "Fixture taint")
+            : state;
+          const registry = createProviderRegistry();
+          registry.register({
+            name: "live-team-fixture",
+            supportsStreaming: false,
+            async complete(messages) {
+              if (!options?.executionChecklistRunId) {
+                return { content: "Team member ready.", usage, toolCalls: [] };
+              }
+              const tool = messages.findLast(({ role }) => role === "tool");
+              if (options.executionChecklistRunId === cancelledDeliveryRunId) {
+                cancellationTurns++;
+                if (tool) {
+                  assertEquals(tool.content, emptyChecklist);
+                  enteredCancellation.resolve();
+                  await releaseCancellation.promise;
+                }
+                return {
+                  usage,
+                  content: "",
+                  toolCalls: [{
+                    id: crypto.randomUUID(),
+                    type: "function",
+                    function: {
+                      name: tool ? "todo_write" : "todo_read",
+                      arguments: tool
+                        ? JSON.stringify({
+                          expected_revision: "empty",
+                          todos: [],
+                        })
+                        : "{}",
+                    },
+                  }],
+                };
+              }
+              const steered = JSON.stringify(messages).includes(note);
+              if (!tool && !steered) {
+                entered.resolve();
+                await release.promise;
+              }
+              return {
+                content: tool ? "Local status reviewed." : "",
+                usage,
+                toolCalls: tool ? [] : [{
+                  type: "function",
+                  id: crypto.randomUUID(),
+                  function: {
+                    name: steered ? "todo_read" : "todo_write",
+                    arguments: JSON.stringify({}),
+                  },
+                }],
+              };
+            },
+          });
+          registry.setDefault("live-team-fixture");
+          const toolExecutor = (name: string) => {
+            touched.push(name);
+            return Promise.resolve(emptyChecklist);
+          };
+          return Promise.resolve({
+            session,
             getSessionTaint: () => session.taint,
-          }),
-        });
+            toolExecutor,
+            orchestrator: createOrchestrator({
+              providerRegistry: registry,
+              hookRunner: hooks,
+              tools: ["todo_read", "todo_write"].map((name) => ({
+                name,
+                description: "Inspect local fixture checklist.",
+                parameters: {},
+              })),
+              toolExecutor,
+              getSessionTaint: () => session.taint,
+            }),
+          });
+        },
       },
-    },
-    recovery: {
-      path: join(baseDir, "team-recovery.db"),
-      profileBinding: "b".repeat(64),
-      exactChecklists: true,
-      run: () => Promise.reject(new Error("Expected isolated delivery")),
-      bindObservationRun: (source, authorizeObservationScope) =>
-        buildWorkflowRecoveryExecutor(
-          { agent_recovery: { team: true, background_checklists: true } },
-          baseDir,
-          keychain,
-          undefined,
-          source,
-          false,
-          { checklistRole: "team", authorizeObservationScope },
-        ),
-    },
-  });
+      recovery: {
+        path: join(baseDir, "team-recovery.db"),
+        profileBinding: "b".repeat(64),
+        exactChecklists: true,
+        run: () => Promise.reject(new Error("Expected isolated delivery")),
+        bindObservationRun: (source, authorizeObservationScope) =>
+          buildWorkflowRecoveryExecutor(
+            { agent_recovery: { team: true, background_checklists: true } },
+            baseDir,
+            keychain,
+            undefined,
+            source,
+            false,
+            { checklistRole: "team", authorizeObservationScope },
+          ),
+      },
+    });
+  let manager = makeManager();
   let approvals = 0;
   let rejectControl = false;
   const start = async (session: typeof owner, team = false) => {
@@ -287,8 +321,68 @@ Deno.test("Owner gateway steers one exact admitted team delivery at its next mod
     );
     assertEquals(trace.controls.steering[0].note, note);
     assert(trace.controls.steering[0].appliedAt);
+
+    const stoppedDelivery = crypto.randomUUID();
+    cancelledDeliveryRunId = await teamDeliveryExecutionId(
+      owner.id,
+      member,
+      stoppedDelivery,
+    );
+    const command =
+      `/recover-team ${stoppedDelivery} ${team.value.id} ${member} Review the local fixture again.`;
+    const cancel = {
+      action: "cancel",
+      kind: "delegated",
+      id: cancelledDeliveryRunId,
+    };
+    delivery = deliveryGateway.turn(command);
+    await Promise.race([
+      enteredCancellation.promise,
+      delivery.then((text) => {
+        throw new Error(text);
+      }),
+    ]);
+    assertEquals(touched, ["todo_read", "todo_read"]);
+    assertStringIncludes(
+      await other.turn(JSON.stringify(cancel)),
+      "unavailable",
+    );
+    assertEquals(approvals, 1);
+    const stopped = JSON.parse(await control.turn(JSON.stringify(cancel))).run;
+    assertEquals(stopped.status, "cancelled");
+    assertEquals(
+      JSON.parse(await control.turn(JSON.stringify(cancel))).run,
+      stopped,
+    );
+    assertEquals(approvals, 2);
+    releaseCancellation.resolve();
+    assertEquals(await delivery, "Run cancelled by operator.");
+    assertEquals(touched, ["todo_read", "todo_read"]);
+    assertEquals(cancellationTurns, 2);
+
+    await deliveryGateway.stop();
+    serving.splice(serving.indexOf(deliveryGateway), 1);
+    manager = makeManager();
+    const restarted = await start(owner, true);
+    serving.push(restarted);
+    const retained = JSON.parse(
+      await restarted.turn(JSON.stringify({
+        action: "execution_traces",
+        traceRole: "delegated",
+        id: cancelledDeliveryRunId,
+      })),
+    );
+    assertEquals(retained.controls.stopped, true);
+    assertEquals(
+      retained.page.steps.map(({ tool }: { tool: string }) => tool),
+      ["todo_read"],
+    );
+    assertEquals(await restarted.turn(command), "Run cancelled by operator.");
+    assertEquals(cancellationTurns, 2);
+    assertEquals(touched, ["todo_read", "todo_read"]);
   } finally {
     release.resolve();
+    releaseCancellation.resolve();
     await delivery?.catch(() => {});
     await Promise.all(serving.map((gateway) => gateway.stop()));
     await storage.close();
