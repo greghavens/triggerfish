@@ -4435,7 +4435,23 @@ function createAgent(
         );
       }
       if (name === SENTINEL_INCIDENT_ALERTS_READ) {
-        return queryIncidentAlerts(options, args);
+        const leased = options.assignedTaskId !== undefined ||
+          options.assignedTaskLeaseToken !== undefined;
+        const assignment = leased
+          ? readAssignedModelReview(options)
+          : undefined;
+        if (
+          (leased && !assignment) ||
+          (assignment?.kind === "review_incident" &&
+            assignment.nodeId !== args.incidentId)
+        ) {
+          return "Error: Incident evidence is unavailable outside the current assignment.";
+        }
+        return queryIncidentAlerts(
+          options,
+          args,
+          assignment?.kind === "review_incident",
+        );
       }
       if (name === SENTINEL_PATH_READ) {
         return await queryPath(

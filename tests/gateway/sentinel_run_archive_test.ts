@@ -73,6 +73,7 @@ import { createGatewayServer } from "../../src/gateway/server/server.ts";
 import { sentinelAlertsPath } from "../../src/sentinel/paths.ts";
 import {
   adaptiveRevision,
+  MODEL_ASSIGNMENT_REASON,
   sentinelIncidentCandidates,
 } from "../../src/sentinel/adaptive_planner.ts";
 import { openSentinelAdaptiveStore } from "../../src/sentinel/adaptive_store.ts";
@@ -3593,6 +3594,7 @@ async function verifyPlannerArchive(
       requestId: crypto.randomUUID(),
     };
     let incidentReview: unknown;
+    let outsideWorker: { taskId: string; result: unknown } | undefined;
     if (mode === "telemetry") {
       await withGateway(baseDir, async (turn, approvals) => {
         assertStringIncludes(
@@ -3614,6 +3616,107 @@ async function verifyPlannerArchive(
           "unavailable",
         );
         assertEquals(approvals.length, 1);
+        const exact = {
+          kind: "sentinel",
+          id: caseId,
+          revision: state.revision,
+        };
+        const outside =
+          JSON.parse(await turn({ ...exact, action: "incidents", offset: 25 }))
+            .incidents[0];
+        assert(outside);
+        const inspection =
+          JSON.parse(await turn({ ...exact, action: "inspect" })).run;
+        const intent = JSON.parse(
+          await turn({
+            ...exact,
+            action: "assign",
+            runId: state.plan.runId,
+            adaptiveRevision: inspection.details.adaptiveRevision,
+            requestId: crypto.randomUUID(),
+            taskKind: "review_incident",
+            node: outside.id,
+          }),
+        ).receipt;
+        assert(intent?.taskId);
+        for (let round = 0; round < 8; round++) {
+          advanceAdaptiveSentinel(path, state);
+        }
+        const journal = openSentinelAdaptiveStore(
+          join(dirname(path), "sentinel-adaptive.db"),
+        );
+        try {
+          const lease = journal.claimModelReview(
+            inspection.details.adaptiveRevision,
+            MODEL_ASSIGNMENT_REASON,
+            ({ id }) => id === intent.taskId,
+          );
+          assert(lease);
+          const providers = createProviderRegistry();
+          const results: string[] = [];
+          providers.register({
+            name: "incident-assignment-fixture",
+            supportsStreaming: false,
+            complete(messages) {
+              const frames = messages.filter(({ role }) => role === "tool");
+              results.push(...frames.map(({ content }) => String(content)));
+              return Promise.resolve({
+                content: frames.length ? "Reviewed the incident." : "",
+                usage: { inputTokens: 1, outputTokens: 1 },
+                toolCalls: frames.length
+                  ? []
+                  : [outside.id, incidentReviewRequest.incidentId].map((
+                    incidentId,
+                    index,
+                  ) => ({
+                    id: `incident-${index}`,
+                    type: "function",
+                    function: {
+                      name: "sentinel_incident_alerts",
+                      arguments: JSON.stringify({ incidentId, limit: 1 }),
+                    },
+                  })),
+              });
+            },
+          });
+          providers.setDefault("incident-assignment-fixture");
+          const steps: Parameters<
+            typeof journal.recordModelReviewProgress
+          >[3][number][] = [];
+          await createSentinelSubagent({
+            providerRegistry: providers,
+            snapshotPath: path,
+            assessmentRevision: state.revision,
+            assignedTaskId: lease.task.id,
+            assignedTaskLeaseToken: lease.token,
+            allowModelAccess: true,
+            hookRunner: hooks,
+          }).execute(
+            "Read the assigned incident.",
+            () => {},
+            undefined,
+            (step) => steps.push(step),
+            true,
+            { workerBoundary: () => ({}) },
+          );
+          assertEquals(JSON.parse(results[0]).incidentId, outside.id);
+          assertStringIncludes(results[1], "outside the current assignment");
+          assert(steps[0].goalReceiptRead);
+          assert(
+            journal.finishModelReview(
+              inspection.details.adaptiveRevision,
+              lease.task.id,
+              lease.token,
+              { note: "Reviewed exact retained alert.", steps },
+            ),
+          );
+          outsideWorker = {
+            taskId: lease.task.id,
+            result: JSON.parse(results[0]),
+          };
+        } finally {
+          journal.close();
+        }
       });
     }
     planner.stop();
@@ -3715,6 +3818,20 @@ async function verifyPlannerArchive(
           }),
         ).evidence;
         assertEquals(outsidePage.total, 2);
+        assert(outsideWorker);
+        const savedWorker = JSON.parse(
+          await turn({
+            ...exact,
+            action: "worker_trace_result",
+            taskId: outsideWorker.taskId,
+            stepIndices: [0],
+          }),
+        );
+        assertEquals(savedWorker.result, outsideWorker.result);
+        assertEquals(policy.workerSourceHooks.splice(0), [
+          "PRE_TOOL_CALL",
+          "POST_TOOL_RESPONSE",
+        ]);
         const outsideReview = JSON.parse(
           await turn({
             ...incidentReviewRequest,

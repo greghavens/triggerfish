@@ -2051,3 +2051,9 @@ Owner incident discovery combines the saved candidate sample with candidates
 reconstructed from the revision's retained alerts. The gateway fixture
 lists all 26 incidents from a restored case, then reads and reviews the
 incident outside the 25-candidate planner sample.
+
+An owner can assign a retained incident outside the planner sample. A leased
+incident-review worker can open the alerts for its exact assignment and
+revision. The gateway fixture assigns the 26th incident, verifies that
+the worker can read it and rejects a second incident, then reopens the
+worker's exact alert page after archive restore under current policy.

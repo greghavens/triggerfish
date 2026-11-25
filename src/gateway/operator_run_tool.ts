@@ -3221,7 +3221,12 @@ export function createOperatorRunToolExecutor(options: {
               const goalState = step.tool === "sentinel_goal_state" &&
                 readSentinelGoalStateProjection(step.goalStateProjection);
               const text = step.tool === "sentinel_incident_alerts"
-                ? queryIncidentAlerts(readOptions, args)
+                ? queryIncidentAlerts(
+                  readOptions,
+                  args,
+                  task.kind === "review_incident" &&
+                    task.nodeId === args.incidentId,
+                )
                 : step.tool === "sentinel_defense"
                 ? await readDefenseCoverage(readOptions, args)
                 : step.tool === "sentinel_saved_workflow_receipt"
