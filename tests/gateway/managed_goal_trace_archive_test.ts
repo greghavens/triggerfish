@@ -409,6 +409,7 @@ async function testGoalTraceArchive(mode: "scheduled" | "subagent" | "team") {
     assert(authorize);
     const registry = createProviderRegistry();
     let operation: Record<string, unknown> | undefined;
+    let operationName = "operator_runs";
     registry.register({
       name: "goal-trace-fixture",
       supportsStreaming: false,
@@ -422,7 +423,7 @@ async function testGoalTraceArchive(mode: "scheduled" | "subagent" | "team") {
               id: crypto.randomUUID(),
               type: "function",
               function: {
-                name: "operator_runs",
+                name: operationName,
                 arguments: JSON.stringify(read),
               },
             }]
@@ -435,6 +436,10 @@ async function testGoalTraceArchive(mode: "scheduled" | "subagent" | "team") {
     let taint: ClassificationLevel = "INTERNAL";
     let deny: "PRE_TOOL_CALL" | "POST_TOOL_RESPONSE" | undefined;
     const sourceHooks: string[] = [];
+    const managedHooks: string[] = [];
+    let denyManaged: "PRE_TOOL_CALL" | "POST_TOOL_RESPONSE" | undefined;
+    let denyGoalOutput = false;
+    let deniedGoalOutput = false;
     const withGateway = async <T>(
       run: (turn: (content: string) => Promise<string>) => Promise<T>,
     ): Promise<T> => {
@@ -454,6 +459,39 @@ async function testGoalTraceArchive(mode: "scheduled" | "subagent" | "team") {
         hookRunner: {
           ...hooks,
           evaluateHook(hook, context) {
+            if (
+              denyGoalOutput && hook === "PRE_OUTPUT" &&
+              typeof context.input.content === "string" &&
+              context.input.content.includes(correct().id)
+            ) {
+              deniedGoalOutput = true;
+              return Promise.resolve({
+                allowed: false,
+                action: "BLOCK",
+                ruleId: null,
+                duration: 0,
+              });
+            }
+            if (
+              context.input.tool_name === "managed_goal_state" &&
+              (hook === "PRE_TOOL_CALL" || hook === "POST_TOOL_RESPONSE")
+            ) {
+              managedHooks.push(hook);
+              assertEquals(
+                context.input.operation_type,
+                hook === "PRE_TOOL_CALL" ? "write" : "read",
+              );
+              assertEquals(context.input.resource_classification, "INTERNAL");
+              assert(!Object.hasOwn(context.auditInput ?? {}, "tool_call"));
+              if (denyManaged === hook) {
+                return Promise.resolve({
+                  allowed: false,
+                  action: "BLOCK",
+                  ruleId: null,
+                  duration: 0,
+                });
+              }
+            }
             if (
               (hook === "PRE_TOOL_CALL" || hook === "POST_TOOL_RESPONSE") &&
               context.input.tool_name === "github_actions"
@@ -669,7 +707,50 @@ async function testGoalTraceArchive(mode: "scheduled" | "subagent" | "team") {
       );
       assertEquals(probed.length, previousRequests);
       deny = undefined;
-      const proof = JSON.parse(await turn(citation()));
+      const citeFromModel = () => {
+        operationName = "managed_goal_state";
+        operation = {
+          role: commandRole,
+          action: "cite",
+          scope: "release",
+          criterion: criterion.id,
+          runId: correct().scope.runId,
+          ordinal: correct().ordinal,
+          ...(team && { teamId: team.teamId }),
+        };
+        return turn(
+          "Use the exact retained trace to report the release criterion.",
+        );
+      };
+      denyManaged = "PRE_TOOL_CALL";
+      await citeFromModel();
+      assertEquals(probed.length, previousRequests);
+      assertEquals(
+        JSON.parse(await turn(`/goal ${commandRole} status release`)).status,
+        "open",
+      );
+      denyManaged = undefined;
+      deny = "POST_TOOL_RESPONSE";
+      assert((await citeFromModel()).includes("unavailable"));
+      assertEquals(
+        JSON.parse(await turn(`/goal ${commandRole} status release`)).status,
+        "open",
+      );
+      deny = undefined;
+      denyManaged = "POST_TOOL_RESPONSE";
+      assert(!(await citeFromModel()).includes(correct().id));
+      denyManaged = undefined;
+      denyGoalOutput = true;
+      assert(!(await citeFromModel()).includes(correct().id));
+      assert(deniedGoalOutput);
+      denyGoalOutput = false;
+      const proof = JSON.parse(await citeFromModel());
+      assertEquals(proof._classification, "INTERNAL");
+      delete proof._classification;
+      assert(
+        managedHooks.filter((hook) => hook === "PRE_TOOL_CALL").length >= 4,
+      );
+      assert(managedHooks.includes("POST_TOOL_RESPONSE"));
       assertEquals(proof.status, "awaiting_confirmation");
       assertEquals(proof.observations[0].evidence[0], {
         source: role === "scheduled"

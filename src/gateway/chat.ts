@@ -57,8 +57,8 @@ import {
 } from "./operator_run_tool.ts";
 import {
   CHAT_GOAL_REPORT_TOOL,
+  executeManagedChatGoal,
   MANAGED_GOAL_STATE_TOOL,
-  readManagedChatGoal,
   reportChatGoal,
   runChatGoalCommand,
 } from "./chat_goal_completion.ts";
@@ -257,7 +257,12 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
             const meta = {
               tool_name: MANAGED_GOAL_STATE_TOOL.name,
               resource_classification: label,
-              operation_type: "read",
+              operation_type: hook === "PRE_TOOL_CALL" &&
+                  (context.input.tool_call as {
+                      args?: Record<string, unknown>;
+                    })?.args?.action === "cite"
+                ? "write"
+                : "read",
             };
             const owner = state.ownerSessionId;
             const decision = await config.hookRunner.evaluateHook(hook, {
@@ -413,18 +418,27 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
           name === MANAGED_GOAL_STATE_TOOL.name && config.runManagedGoalCommand
         ) {
           const taint = getSessionTaint();
-          const ownerId = state.ownerSessionId;
-          if (!owner || !canFlowTo(taint, ownerTargetClassification)) {
+          const session = getSession();
+          const current = () =>
+            (input.action !== "cite" ||
+              context?.isCurrentInteractiveOwner?.() === true) &&
+            state.activeSessionId === session.id &&
+            state.ownerSessionId === session.id &&
+            canFlowTo(taint, getSessionTaint()) &&
+            canFlowTo(getSessionTaint(), ownerTargetClassification);
+          if (!owner || !current()) {
             return Promise.resolve("Error: Managed goal state is unavailable.");
           }
-          return readManagedChatGoal(config.runManagedGoalCommand, input, taint)
-            .then((result) =>
-              state.activeSessionId === ownerId &&
-                state.ownerSessionId === ownerId &&
-                canFlowTo(taint, getSessionTaint())
-                ? result
-                : "Error: Managed goal state is unavailable."
-            );
+          return executeManagedChatGoal(
+            config.runManagedGoalCommand,
+            input,
+            taint,
+            input.action === "cite"
+              ? managedGoalTraceAccess(session, current)
+              : undefined,
+          ).then((result) =>
+            current() ? result : "Error: Managed goal state is unavailable."
+          );
         }
         return config.toolExecutor?.(name, input, context) ??
           Promise.resolve(`Unknown tool: ${name}`);
@@ -453,6 +467,26 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
     getSessionTaint,
     escalateTaint,
   );
+  function managedGoalTraceAccess(
+    session: SessionState,
+    current: () => boolean,
+  ) {
+    const execute = config.operatorRunExecutor;
+    if (!execute || !current()) return;
+    return {
+      ownerSessionId: session.id,
+      current,
+      reopen(role: "scheduled" | "delegated", runId: string, ordinal: number) {
+        return execute({
+          action: "execution_trace_payload",
+          traceRole: role,
+          id: runId,
+          ordinal,
+        }, savedToolAuthorization(session, getSessionTaint, current));
+      },
+    };
+  }
+
   function savedToolAuthorization(
     session: SessionState,
     taint: () => ClassificationLevel,
@@ -987,7 +1021,6 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
           let failed = false;
           try {
             const owner = state.ownerSessionId;
-            const executeRunTool = config.operatorRunExecutor;
             const current = () =>
               !signal?.aborted &&
               state.activeSessionId === owner &&
@@ -995,29 +1028,10 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
               getSession().id === session.id &&
               canFlowTo(taint, getSessionTaint()) &&
               canFlowTo(getSessionTaint(), ownerTargetClassification);
-            const traceAccess =
-              executeRunTool && (content.startsWith("/goal scheduler ") ||
-                  content.startsWith("/goal delegated ")) &&
-                current()
-                ? {
-                  ownerSessionId: owner,
-                  current,
-                  reopen: (
-                    role: "scheduled" | "delegated",
-                    runId: string,
-                    ordinal: number,
-                  ) =>
-                    executeRunTool(
-                      {
-                        action: "execution_trace_payload",
-                        traceRole: role,
-                        id: runId,
-                        ordinal,
-                      },
-                      savedToolAuthorization(session, getSessionTaint, current),
-                    ),
-                }
-                : undefined;
+            const traceAccess = (content.startsWith("/goal scheduler ") ||
+                content.startsWith("/goal delegated "))
+              ? managedGoalTraceAccess(session, current)
+              : undefined;
             result = await config.runManagedGoalCommand?.(
               content,
               taint,

@@ -6,6 +6,7 @@ import {
   GoalCompletionStore,
   goalConfirmationDigest,
   type GoalRegistration,
+  type ManagedGoalTraceAccess,
   summarizeGoalCriteria,
 } from "../core/goal_completion.ts";
 import type { ClassificationLevel } from "../core/types/classification.ts";
@@ -15,6 +16,8 @@ import type {
   ToolDefinition,
   ToolExecutionContext,
 } from "../core/types/tool.ts";
+
+import { parseManagedGoalCitation } from "./startup/factory/managed_goal_trace_evidence.ts";
 
 export const CHAT_GOAL_REPORT_TOOL: ToolDefinition = {
   name: "goal_report",
@@ -73,7 +76,7 @@ export const CHAT_GOAL_REPORT_TOOL: ToolDefinition = {
 export const MANAGED_GOAL_STATE_TOOL: ToolDefinition = {
   name: "managed_goal_state",
   description:
-    "Read configured scheduled or delegated goals in the current owner classification. List visible scopes or inspect one exact scope and its saved decision. Operators confirm using the separate /goal command.",
+    "List or inspect configured scheduled and delegated goals, or cite an exact approved tool trace for an operator-policy criterion. The operator confirms completion separately.",
   parameters: {
     role: {
       type: "string",
@@ -83,46 +86,80 @@ export const MANAGED_GOAL_STATE_TOOL: ToolDefinition = {
     },
     action: {
       type: "string",
-      description: "List goal scopes or read an exact goal's current status",
+      description:
+        "List scopes, inspect goal status, or cite an exact retained result",
       required: true,
-      enum: ["list", "status"],
+      enum: ["list", "status", "cite"],
     },
-    scope: { type: "string", description: "Exact scope for status" },
+    scope: { type: "string", description: "Exact scope for status or cite" },
     afterScope: { type: "string", description: "List page cursor" },
+    criterion: { type: "string", description: "Exact criterion ID for cite" },
+    runId: { type: "string", description: "Exact execution trace run ID" },
+    ordinal: { type: "integer", description: "Exact execution trace step" },
+    teamId: {
+      type: "string",
+      description: "Required for a team delivery citation",
+    },
   },
 };
 
-/** Translate one validated root read into the same backend used by owner chat. */
-export async function readManagedChatGoal(
+/** Translate a validated root operation for the managed goal backend. */
+export async function executeManagedChatGoal(
   runCommand: (
     command: string,
     taint: ClassificationLevel,
+    access?: ManagedGoalTraceAccess,
   ) => Promise<string | undefined>,
   args: Record<string, unknown>,
   taint: ClassificationLevel,
+  access?: ManagedGoalTraceAccess,
 ): Promise<string> {
-  const { role, action, scope, afterScope } = args;
+  const { role, action, scope, afterScope, criterion, runId, ordinal, teamId } =
+    args;
   const key = /^[A-Za-z0-9_.:-]{1,120}$/;
   const unavailable = "Error: Managed goal state is unavailable.";
   if (
     (role !== "scheduler" && role !== "delegated") ||
     Object.keys(args).some((field) =>
       !Object.hasOwn(MANAGED_GOAL_STATE_TOOL.parameters, field)
-    ) ||
-    (action === "status"
-      ? typeof scope !== "string" || !key.test(scope) ||
-        afterScope !== undefined
-      : action !== "list" || scope !== undefined ||
-        (afterScope !== undefined &&
-          (typeof afterScope !== "string" || !key.test(afterScope))))
-  ) return "Error: Select a managed goal role and a valid list or status read.";
-  const suffix = action === "status" ? scope : afterScope;
+    )
+  ) return unavailable;
+  const proof = { criterion, runId, ordinal, teamId };
   try {
+    let suffix;
+    if (action === "cite") {
+      if (!access?.current() || afterScope !== undefined) return unavailable;
+      suffix = JSON.stringify({ scope, ...proof });
+      parseManagedGoalCitation(
+        suffix,
+        role === "scheduler" ? "scheduled" : "delegated",
+      );
+    } else {
+      if (Object.values(proof).some((value) => value !== undefined)) {
+        return unavailable;
+      }
+      if (
+        action === "status" && typeof scope === "string" && key.test(scope) &&
+        afterScope === undefined
+      ) {
+        suffix = scope;
+      } else if (
+        action === "list" && scope === undefined && (afterScope === undefined ||
+          (typeof afterScope === "string" && key.test(afterScope)))
+      ) {
+        suffix = afterScope;
+      } else {
+        return unavailable;
+      }
+    }
     const result = await runCommand(
       `/goal ${role} ${action}${suffix ? ` ${suffix}` : ""}`,
       taint,
+      action === "cite" ? access : undefined,
     );
-    if (!result) return unavailable;
+    if (!result) {
+      return unavailable;
+    }
     const payload = JSON.parse(result);
     if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
       return unavailable;
