@@ -50,16 +50,16 @@ export function applyFileEdits(
 ): Result<string, string> {
   let updated = content;
   for (const [index, { old_text, new_text }] of edits.entries()) {
-    const count = updated.split(old_text).length - 1;
+    const first = updated.indexOf(old_text);
     const prefix = edits.length > 1 ? `Edit ${index + 1}: ` : "";
-    if (count === 0) {
+    if (first === -1) {
       return { ok: false, error: `${prefix}old_text not found in file.` };
     }
-    if (count > 1) {
+    if (updated.indexOf(old_text, first + 1) !== -1) {
       return {
         ok: false,
         error:
-          `${prefix}old_text appears ${count} times (must be exactly 1). Provide a larger unique snippet.`,
+          `${prefix}old_text appears more than once (must be exactly 1). Provide a larger unique snippet.`,
       };
     }
     updated = updated.replace(old_text, () => new_text);

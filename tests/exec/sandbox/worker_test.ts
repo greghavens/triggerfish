@@ -211,7 +211,7 @@ Deno.test("worker: edit fails when old_text not found", async () => {
 Deno.test("worker: edit fails when old_text is not unique", async () => {
   const tmpDir = await Deno.makeTempDir({ prefix: "sandbox-test-" });
   const testFile = join(tmpDir, "edit3.txt");
-  await Deno.writeTextFile(testFile, "aaa aaa aaa");
+  await Deno.writeTextFile(testFile, "aaaa");
 
   const w = spawnWorker(tmpDir);
   try {
@@ -222,7 +222,8 @@ Deno.test("worker: edit fails when old_text is not unique", async () => {
     });
     const resp = await w.receive();
     assertEquals(resp.ok, false);
-    assertStringIncludes(resp.error!, "3 times");
+    assertStringIncludes(resp.error!, "more than once");
+    assertEquals(await Deno.readTextFile(testFile), "aaaa");
   } finally {
     w.close();
     await Deno.remove(tmpDir, { recursive: true });
