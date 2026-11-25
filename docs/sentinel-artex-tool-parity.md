@@ -214,6 +214,10 @@ selects the exact approved GitHub Actions result. Its side history is keyed to
 the exact receipt and requires current source authorization. The gateway fixture
 verifies original pre-call and response policy checks, revocation during a turn,
 and history access denial, with zero calls to the original tool handler.
+Receipt side questions also support a saved Actions run and attempt from
+either delegated or scheduled execution. They use the same approved projection
+validator as the trace journal. The gateway checks exact source arguments,
+source authorization, output denial, and unchanged parent execution history.
 
 The owner can search committed execution metadata with
 `operator_runs execution_traces` and a `query`. Search spans delegated and
@@ -2198,6 +2202,14 @@ reference. Denials stay authorization events, and request parameters stay
 outside the retained projection. The gateway archive fixture ingests
 synthetic CloudTrail records and reopens both exact coverage matches after
 restoring the case. [AWS CloudTrail source documentation](https://docs.aws.amazon.com/AmazonCloudWatch/latest/logs/logging_cw_api_calls_cwl.html).
+
+The same CloudTrail feed reports account-level S3 Block Public Access
+writes and removals separately from bucket-level removals. The coverage
+check records the exact source action and event reference. The change
+record alone cannot establish effective public access. The archive
+gateway fixture reopens the account-level match after restore.
+[AWS S3 CloudTrail event reference](https://docs.aws.amazon.com/AmazonS3/latest/userguide/cloudtrail-logging-s3-info.html#cloudtrail-logging-s3-account-actions).
+
 
 The Kubernetes audit feed records successful changes to
 ValidatingAdmissionPolicy and ValidatingAdmissionPolicyBinding as two

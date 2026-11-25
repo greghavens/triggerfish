@@ -25,6 +25,7 @@ import {
   recordSentinelModelUsage,
 } from "./sentinel_adaptive_runtime.ts";
 import { createLogger } from "../core/logger/mod.ts";
+import { normalizeApprovedPayload } from "../core/execution_traces.ts";
 import { createOrchestrator } from "../agent/orchestrator/orchestrator.ts";
 import type { SessionState } from "../core/types/session.ts";
 import {
@@ -492,16 +493,10 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
               );
               if (!result.startsWith("{")) return;
               const { step, payload } = JSON.parse(result);
-              if (
-                typeof step?.id === "string" &&
-                (payload?.kind === "github_actions_status" ||
-                  payload?.kind === "github_repository_status" ||
-                  payload?.kind === "github_pull_status" ||
-                  payload?.kind === "github_release_status" ||
-                  payload?.kind === "github_branch_protection")
-              ) {
-                return { id: step.id, payload };
-              }
+              const approved = normalizeApprovedPayload(payload);
+              return typeof step?.id === "string" && approved
+                ? { id: step.id, payload: approved }
+                : undefined;
             }),
           );
         }

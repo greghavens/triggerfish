@@ -1,5 +1,10 @@
 import { createOperatorRunToolExecutor } from "../../src/gateway/operator_run_tool.ts";
-import { openExecutionTraces } from "../../src/core/execution_traces.ts";
+import {
+  type ExecutionTraceApprovedPayload,
+  executionTracePayloadCall,
+  type ExecutionTraceRole,
+  openExecutionTraces,
+} from "../../src/core/execution_traces.ts";
 import {
   assert,
   assertEquals,
@@ -569,20 +574,37 @@ Deno.test("authorized run side questions keep delegated and scheduled receipts a
   }
 });
 
-Deno.test("exact receipt side questions reauthorize saved evidence for model, output, and history", async () => {
+Deno.test("exact receipt side questions reauthorize saved evidence for model, output, and history", () =>
+  checkApprovedReceipt("delegated", {
+    kind: "github_actions_status",
+    repo: "acme/defense",
+    repositoryId: 123,
+    runs: [{ id: 45, status: "completed", conclusion: "success" }],
+  }));
+for (const role of ["delegated", "scheduled"] as const) {
+  Deno.test(`Side questions reopen the exact ${role} Actions run and attempt without dispatch`, () =>
+    checkApprovedReceipt(role, {
+      kind: "github_actions_run_status",
+      repo: "acme/defense",
+      repositoryId: 123,
+      id: 45,
+      attempt: 2,
+      status: "completed",
+      conclusion: "success",
+    }));
+}
+
+async function checkApprovedReceipt(
+  role: ExecutionTraceRole,
+  payload: ExecutionTraceApprovedPayload,
+) {
   const base = await Deno.makeTempDir();
   const path = join(base, "execution-traces.db");
   const journal = openExecutionTraces(path);
   const scope = {
-    role: "delegated" as const,
+    role,
     runId: "approved-evidence",
     sessionId: crypto.randomUUID(),
-  };
-  const payload = {
-    kind: "github_actions_status" as const,
-    repo: "acme/defense",
-    repositoryId: 123,
-    runs: [{ id: 45, status: "completed", conclusion: "success" }],
   };
   const originalHooks: string[] = [];
   let allowed = true;
@@ -624,6 +646,9 @@ Deno.test("exact receipt side questions reauthorize saved evidence for model, ou
           if (hook === "PRE_TOOL_CALL" || hook === "POST_TOOL_RESPONSE") {
             originalHooks.push(hook);
             assertEquals(input.tool_name, "github_actions");
+            if (hook === "PRE_TOOL_CALL") {
+              assertEquals(input.tool_call, executionTracePayloadCall(payload));
+            }
           }
           const allow = hook !== deniedHook;
           return Promise.resolve({
@@ -645,13 +670,17 @@ Deno.test("exact receipt side questions reauthorize saved evidence for model, ou
       outcome: "returned",
     }, payload);
     assert(step);
-    const command = "/btw --run delegated approved-evidence --receipt 1";
+    const runCommand = `/btw --run ${role} approved-evidence`;
+    const command = `${runCommand} --receipt 1`;
     for (const hook of ["PRE_TOOL_CALL", "POST_TOOL_RESPONSE"]) {
       deniedHook = hook;
       await ws.send(`${command} blocked before model`, "side_error");
     }
     deniedHook = undefined;
+    allowed = false;
+    await ws.send(`${command} source approval revoked`, "side_error");
     assertEquals(providerCalls, 0);
+    allowed = true;
     const answer = await ws.send(`${command} recap`, "side_answer");
     assert(originalHooks.includes("PRE_TOOL_CALL"));
     assert(originalHooks.includes("POST_TOOL_RESPONSE"));
@@ -659,21 +688,24 @@ Deno.test("exact receipt side questions reauthorize saved evidence for model, ou
       answer.entry,
     ]);
     assertEquals(
-      (await ws.send("/btw --run delegated approved-evidence", "side_history"))
-        .entries,
+      (await ws.send(runCommand, "side_history")).entries,
       [],
     );
+    deniedHook = "PRE_OUTPUT";
+    await ws.send(`${command} blocked output`, "side_error");
+    deniedHook = undefined;
     await ws.send(`${command} revoke during answer`, "side_error");
     await ws.send("/btw", "side_error");
     allowed = true;
     assertEquals((await ws.send(command, "side_history")).entries, [
       answer.entry,
     ]);
-    assertEquals(providerCalls, 2);
+    assertEquals(providerCalls, 3);
     assertEquals(handlerCalls, 0);
+    assertEquals(journal.recent(role, scope.runId, "INTERNAL")?.steps, [step]);
   } finally {
     await ws.close();
     journal.close();
     await Deno.remove(base, { recursive: true });
   }
-});
+}
