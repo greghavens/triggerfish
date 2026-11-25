@@ -49,6 +49,12 @@ function operatorGateway(
   baseDir: string,
   confirm: () => Promise<boolean>,
   denyPreTool = () => false,
+  probe?: {
+    denyResponse?: () => boolean;
+    denyOutput?: () => boolean;
+    echo?: () => boolean;
+    receive?: (frame: Record<string, unknown>) => void;
+  },
 ) {
   let pendingInput: Record<string, unknown>;
   let toolResult: string | undefined;
@@ -63,7 +69,9 @@ function operatorGateway(
         toolResult = String(last.content);
         return Promise.resolve({
           usage,
-          content: "The requested check finished.",
+          content: probe?.echo?.()
+            ? toolResult
+            : "The requested check finished.",
           toolCalls: [],
         });
       }
@@ -94,7 +102,10 @@ function operatorGateway(
       hookRunner: {
         evaluateHook(hook, { input }) {
           const blocked = denyPreTool() && hook === "PRE_TOOL_CALL" &&
-            (input.tool_call as { name?: string })?.name === tool;
+              (input.tool_call as { name?: string })?.name === tool ||
+            probe?.denyResponse?.() && hook === "POST_TOOL_RESPONSE" &&
+              input.tool_name === tool ||
+            probe?.denyOutput?.() && hook === "PRE_OUTPUT";
           return Promise.resolve({
             allowed: !blocked,
             action: blocked ? "BLOCK" : "ALLOW",
@@ -129,7 +140,9 @@ function operatorGateway(
           3000,
         );
         const listener = ({ data }: MessageEvent) => {
-          if (JSON.parse(data).type === "turn_end") result.resolve();
+          const frame = JSON.parse(data);
+          probe?.receive?.(frame);
+          if (frame.type === "turn_end") result.resolve();
         };
         socket.addEventListener("message", listener);
         socket.send(
@@ -565,6 +578,158 @@ Deno.test("authenticated evidence digest preserves exact historical members acro
       ) assert((await turn(invalid)).startsWith("Error:"));
       assertEquals(confirmations, 2);
     });
+  } finally {
+    await Deno.remove(baseDir, { recursive: true });
+  }
+});
+
+Deno.test("owner root correction confirms exact evidence, reapplies hooks and replays the durable receipt", async () => {
+  const baseDir = await Deno.makeTempDir();
+  const path = resolveSentinelCasePath(baseDir, sourceId);
+  const branch = {
+    ...fixtureGraph,
+    nodes: fixtureGraph.nodes,
+    edges: fixtureGraph.edges,
+  };
+  let deny = "";
+  let confirmations = 0;
+  let onConfirm: () => Promise<boolean> = () => Promise.resolve(true);
+  let frames: Record<string, unknown>[] = [];
+  const gateway = operatorGateway(
+    baseDir,
+    async () => {
+      confirmations++;
+      return await onConfirm();
+    },
+    () => deny === "pre",
+    {
+      denyResponse: () => deny === "response",
+      denyOutput: () => deny === "output",
+      echo: () => deny === "output",
+      receive: (frame) => frames.push(frame),
+    },
+  );
+  try {
+    await Deno.mkdir(dirname(path), { recursive: true, mode: 0o700 });
+    await Deno.writeTextFile(path, JSON.stringify(branch), { mode: 0o600 });
+    const state = startSentinelAssessment(path);
+    const snapshot = state.result?.sharedGraph.snapshot;
+    assert(snapshot);
+    const store = openSentinelAssetDiscoveryStore(baseDir);
+    try {
+      const seed = (evidenceId: string, key: string) =>
+        store.propose({
+          sourceCaseId: sourceId,
+          evidenceRevision: state.revision,
+          sourceDigest: digestSentinelSnapshot(snapshot),
+          taskId: "adaptive:" + key.repeat(64),
+          claim: { kind: "asset", assetId: host, evidenceId },
+        });
+      const first = seed("obs-a", "a");
+      const replacement = seed("obs-b", "b");
+      const original = await decideSentinelAssetDiscovery(
+        baseDir,
+        sourceId,
+        first.id,
+        first.version,
+        "approve",
+      );
+      assert(original);
+      const ask = {
+        kind: "sentinel",
+        action: "correct_discovery",
+        id: sourceId,
+        revision: state.revision,
+        originalId: original.id,
+        originalVersion: original.version,
+        replacementId: replacement.id,
+        replacementVersion: replacement.version,
+        requestId: crypto.randomUUID(),
+      };
+      const unchanged = () => {
+        assertEquals(store.get(original.id), original);
+        assertEquals(store.get(replacement.id), replacement);
+        assertEquals(
+          store.readCorrection({ sourceCaseId: sourceId, ...ask }),
+          undefined,
+        );
+      };
+      await gateway(async (turn) => {
+        const list = JSON.parse(
+          await turn({
+            kind: "sentinel",
+            action: "discovery_proposals",
+            id: sourceId,
+            revision: state.revision,
+          }),
+        );
+        assertEquals(list.proposals, [replacement, original]);
+        deny = "pre";
+        assert((await turn(ask)).includes("denied") || confirmations === 0);
+        assertEquals(confirmations, 0);
+        unchanged();
+        deny = "";
+        onConfirm = () => Promise.resolve(false);
+        assert((await turn(ask)).includes("unavailable"));
+        assertEquals(confirmations, 1);
+        unchanged();
+        onConfirm = async () => {
+          await Deno.writeTextFile(
+            path,
+            JSON.stringify({
+              ...branch,
+              edges: branch.edges.filter(({ from }) => from !== "obs-b"),
+            }),
+          );
+          return true;
+        };
+        assert((await turn(ask)).includes("unavailable"));
+        assertEquals(confirmations, 2);
+        unchanged();
+        await Deno.writeTextFile(path, JSON.stringify(branch));
+        onConfirm = () => Promise.resolve(true);
+        deny = "response";
+        assert((await turn(ask)).includes("withheld by policy"));
+        assertEquals(confirmations, 3);
+        assertEquals(store.get(original.id)?.status, "withdrawn");
+        assertEquals(store.get(replacement.id)?.status, "approved");
+        deny = "output";
+        frames = [];
+        const projection = await turn(ask);
+        assertEquals(
+          JSON.parse(projection).correction.replacement.id,
+          replacement.id,
+        );
+        assert(frames.some(({ type }) => type === "error"));
+        assert(
+          !frames.some(({ type }) => type === "response" || type === "token"),
+        );
+        assert(!JSON.stringify(frames).includes(replacement.sourceDigest));
+      });
+      deny = "";
+      const committed = store.readCorrection({
+        sourceCaseId: sourceId,
+        ...ask,
+      });
+      assert(committed);
+      await gateway(async (turn) => {
+        const result = JSON.parse(await turn(ask));
+        assertEquals(result.correction, committed);
+        assertEquals(confirmations, 3);
+        assert(
+          (await turn({ ...ask, originalVersion: original.version + 1 }))
+            .includes("unavailable"),
+        );
+        assert(
+          (await turn({ ...ask, revision: state.revision + 1 })).includes(
+            "unavailable",
+          ),
+        );
+        assertEquals(confirmations, 3);
+      });
+    } finally {
+      store.close();
+    }
   } finally {
     await Deno.remove(baseDir, { recursive: true });
   }

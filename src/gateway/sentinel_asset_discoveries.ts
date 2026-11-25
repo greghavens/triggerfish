@@ -7,6 +7,7 @@ import {
   resolveSentinelCasePath,
 } from "../sentinel/cases.ts";
 import {
+  readSentinelAssessment,
   readSentinelAssessmentRevision,
   withSentinelAssessmentWriteLock,
 } from "../sentinel/assessment_store.ts";
@@ -233,29 +234,75 @@ export async function decideSentinelAssetDiscovery(
 export async function correctSentinelAssetDiscovery(
   baseDir: string,
   input: SentinelAssetDiscoveryCorrectionRequest,
+  review?: {
+    readonly revision: number;
+    readonly confirm: (message: string) => Promise<boolean>;
+  },
 ) {
-  const saved = discoveryStore(baseDir, (store) => store.readCorrection(input));
-  if (saved) return saved;
-  return await withSentinelSourceSnapshotLock(baseDir, false, async () => {
-    const replacement = discoveryStore(
+  const readSaved = () => {
+    const receipt = discoveryStore(
       baseDir,
-      (store) => store.get(input.replacementId),
+      (store) => store.readCorrection(input),
+    );
+    return receipt &&
+        (review === undefined ||
+          review.revision === receipt.replacement.evidenceRevision)
+      ? receipt
+      : undefined;
+  };
+  const saved = readSaved();
+  if (saved) return saved;
+
+  const select = async () => {
+    const candidates = discoveryStore(
+      baseDir,
+      (store) => store.previewCorrection(input),
     );
     if (
-      replacement?.sourceCaseId !== input.sourceCaseId ||
-      replacement.version !== input.replacementVersion ||
-      replacement.status !== "pending"
-    ) return discoveryStore(baseDir, (store) => store.readCorrection(input));
-    const source = archivedDiscovery(baseDir, replacement);
+      !candidates ||
+      (review && review.revision !== candidates.replacement.evidenceRevision)
+    ) return;
+    const source = archivedDiscovery(baseDir, candidates.replacement);
     if (
-      !source || !await currentDiscovery(source.path, replacement, source.graph)
-    ) {
-      return;
-    }
-    return withSentinelAssessmentWriteLock(source.path, (state) => {
-      if (!state?.active || state.revision !== replacement.evidenceRevision) {
-        return;
-      }
+      !source ||
+      !await currentDiscovery(source.path, candidates.replacement, source.graph)
+    ) return;
+    const state = readSentinelAssessment(source.path);
+    if (
+      !state?.active ||
+      state.revision !== candidates.replacement.evidenceRevision
+    ) return;
+    return { ...candidates, path: source.path };
+  };
+  if (review) {
+    const candidate = await withSentinelSourceSnapshotLock(
+      baseDir,
+      false,
+      select,
+    );
+    if (!candidate) return readSaved();
+    const preview = (
+      { id, version, evidenceRevision, sourceDigest, claim }:
+        SentinelAssetDiscoveryRecord,
+    ) => ({ id, version, evidenceRevision, sourceDigest, claim });
+    if (
+      !await review.confirm(
+        `Replace this approved Sentinel discovery in case ${input.sourceCaseId}?
+` + JSON.stringify({
+            original: preview(candidate.original),
+            replacement: preview(candidate.replacement),
+          }),
+      )
+    ) return;
+  }
+  return await withSentinelSourceSnapshotLock(baseDir, false, async () => {
+    const current = await select();
+    if (!current) return readSaved();
+    return withSentinelAssessmentWriteLock(current.path, (state) => {
+      if (
+        !state?.active ||
+        state.revision !== current.replacement.evidenceRevision
+      ) return;
       return discoveryStore(baseDir, (store) => store.correctApproved(input));
     });
   });

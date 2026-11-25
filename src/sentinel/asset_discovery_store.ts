@@ -363,6 +363,28 @@ export function openSentinelAssetDiscoveryStore(
       : undefined;
   }
 
+  function correctionCandidates(
+    exact: NonNullable<ReturnType<typeof normalizeCorrection>>,
+  ) {
+    const originalRow = lookup.get(exact.originalId);
+    const replacementRow = lookup.get(exact.replacementId);
+    if (!originalRow || !replacementRow) return;
+    const original = decode(originalRow);
+    const replacement = decode(replacementRow);
+    if (
+      original.sourceCaseId !== exact.sourceCaseId ||
+      replacement.sourceCaseId !== exact.sourceCaseId ||
+      original.status !== "approved" ||
+      original.version !== exact.originalVersion ||
+      replacement.status !== "pending" ||
+      replacement.version !== exact.replacementVersion ||
+      replacement.evidenceRevision < original.evidenceRevision ||
+      replacement.claim.kind !== original.claim.kind ||
+      replacement.claim.assetId !== original.claim.assetId
+    ) return;
+    return { original, replacement };
+  }
+
   function writeChange(
     id: string,
     previousVersion: number,
@@ -526,6 +548,13 @@ export function openSentinelAssetDiscoveryStore(
       return exact && priorCorrection(exact);
     },
 
+    previewCorrection(input: SentinelAssetDiscoveryCorrectionRequest) {
+      const exact = normalizeCorrection(input);
+      return exact && !lookupCorrection.get(exact.requestId)
+        ? correctionCandidates(exact)
+        : undefined;
+    },
+
     /** Replace an approved version with a separately verified pending claim. */
     correctApproved(input: SentinelAssetDiscoveryCorrectionRequest) {
       const exact = normalizeCorrection(input);
@@ -534,22 +563,9 @@ export function openSentinelAssetDiscoveryStore(
         if (lookupCorrection.get(exact.requestId)) {
           return priorCorrection(exact);
         }
-        const originalRow = lookup.get(exact.originalId);
-        const replacementRow = lookup.get(exact.replacementId);
-        if (!originalRow || !replacementRow) return;
-        const original = decode(originalRow);
-        const replacement = decode(replacementRow);
-        if (
-          original.sourceCaseId !== exact.sourceCaseId ||
-          replacement.sourceCaseId !== exact.sourceCaseId ||
-          original.status !== "approved" ||
-          original.version !== exact.originalVersion ||
-          replacement.status !== "pending" ||
-          replacement.version !== exact.replacementVersion ||
-          replacement.evidenceRevision < original.evidenceRevision ||
-          replacement.claim.kind !== original.claim.kind ||
-          replacement.claim.assetId !== original.claim.assetId
-        ) return;
+        const candidates = correctionCandidates(exact);
+        if (!candidates) return;
+        const { original, replacement } = candidates;
         const time = now();
         const receipt: SentinelAssetDiscoveryCorrection = {
           ...exact,

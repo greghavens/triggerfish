@@ -1,3 +1,7 @@
+import {
+  correctSentinelAssetDiscovery,
+  listSentinelAssetDiscoveryProposals,
+} from "./sentinel_asset_discoveries.ts";
 import { delegatedSubagentIdentity } from "./startup/factory/delegated_agent_recovery.ts";
 import type { SessionId } from "../core/types/session.ts";
 import { assignmentRecoveryKey } from "../core/durable_assignment.ts";
@@ -337,6 +341,8 @@ export const operatorRunTool: ToolDefinition = {
         "preview_membership",
         "preview_discovery_withdrawal",
         "withdraw_discoveries",
+        "correct_discovery",
+        "discovery_proposals",
         "preview_inventory_withdrawal",
         "withdraw_inventory_host",
         "set_case_membership",
@@ -489,6 +495,22 @@ export const operatorRunTool: ToolDefinition = {
     version: {
       type: "integer",
       description: "Read one exact saved operating constraint version",
+    },
+    originalId: {
+      type: "string",
+      description: "Exact approved Sentinel discovery to replace",
+    },
+    originalVersion: {
+      type: "integer",
+      description: "Version of the approved Sentinel discovery",
+    },
+    replacementId: {
+      type: "string",
+      description: "Exact independently verified pending Sentinel discovery",
+    },
+    replacementVersion: {
+      type: "integer",
+      description: "Version of the pending Sentinel discovery",
     },
     proposalId: {
       type: "string",
@@ -2561,6 +2583,77 @@ export function createOperatorRunToolExecutor(options: {
           options.webContainmentConfigured,
         );
         return typeof result === "string" ? result : safeProjection(result);
+      }
+
+      if (action === "discovery_proposals") {
+        if (
+          ref.kind !== "sentinel" || ref.revision === undefined ||
+          !canFlowTo("INTERNAL", context?.ceiling ?? "INTERNAL") ||
+          Object.keys(args).some((key) =>
+            !["action", "kind", "id", "revision"].includes(key)
+          ) || !await controller.inspect(ref)
+        ) return unavailable;
+        const path = resolveSentinelCasePath(options.baseDir, ref.id);
+        if (readSentinelAssessment(path)?.revision !== ref.revision) {
+          return unavailable;
+        }
+        const proposals = listSentinelAssetDiscoveryProposals(
+          options.baseDir,
+          ref.id,
+        )
+          .filter(({ status, evidenceRevision }) =>
+            status === "pending"
+              ? evidenceRevision === ref.revision
+              : status === "approved" && evidenceRevision <= ref.revision!
+          );
+        return safeProjection({ run: ref, proposals });
+      }
+
+      if (action === "correct_discovery") {
+        const {
+          originalId,
+          originalVersion,
+          replacementId,
+          replacementVersion,
+          requestId,
+        } = args;
+        const discoveryId = /^asset-discovery:[a-f0-9]{64}$/;
+        if (
+          ref.kind !== "sentinel" || ref.revision === undefined ||
+          !canFlowTo("INTERNAL", context?.ceiling ?? "INTERNAL") ||
+          typeof originalId !== "string" || !discoveryId.test(originalId) ||
+          typeof replacementId !== "string" ||
+          !discoveryId.test(replacementId) ||
+          typeof originalVersion !== "number" ||
+          !Number.isSafeInteger(originalVersion) ||
+          originalVersion < 2 || replacementVersion !== 1 ||
+          typeof requestId !== "string" || !digestPattern.test(requestId) ||
+          Object.keys(args).some((key) =>
+            ![
+              "action",
+              "kind",
+              "id",
+              "revision",
+              "originalId",
+              "originalVersion",
+              "replacementId",
+              "replacementVersion",
+              "requestId",
+            ].includes(key)
+          ) ||
+          !await controller.inspect(ref)
+        ) return unavailable;
+        const receipt = await correctSentinelAssetDiscovery(options.baseDir, {
+          sourceCaseId: ref.id,
+          originalId,
+          originalVersion,
+          replacementId,
+          replacementVersion,
+          requestId,
+        }, { revision: ref.revision, confirm: options.confirm });
+        return receipt
+          ? safeProjection({ run: ref, correction: receipt })
+          : unavailable;
       }
 
       if (
