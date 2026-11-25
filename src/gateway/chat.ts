@@ -286,6 +286,7 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
                       "execution_trace_payload",
                       "case_execution_evidence",
                       "finding_recheck_candidates",
+                      "finding_recheck_sources",
                       "defense_coverage",
                       "incident_alerts",
                       "case_alert",
