@@ -14,6 +14,7 @@ for (
     "resume_mixed",
     "resume_multi",
     "resume_mutation",
+    "resume_unproven",
     "fresh",
     "blocked_pre",
     "revoked",
@@ -24,7 +25,9 @@ for (
 ) {
   Deno.test({
     name: phase === "resume_mutation"
-      ? "An interrupted committed mutation is held without dispatching it again"
+      ? "Sentinel reconciles a committed publication without dispatching it again"
+      : phase === "resume_unproven"
+      ? "An unproven publication remains held without dispatching it again"
       : phase === "resume_mixed"
       ? "Sentinel resumes both reads from one mixed tool batch"
       : phase === "resume_multi"
@@ -97,7 +100,9 @@ for (
           return;
         }
         child = spawn(
-          phase.startsWith("resume_")
+          phase === "resume_unproven"
+            ? "interrupt_mutation"
+            : phase.startsWith("resume_")
             ? phase.replace("resume_", "interrupt_")
             : "interrupt",
         );
@@ -146,6 +151,11 @@ for (
               1,
             );
           }
+          if (phase === "resume_unproven") {
+            store.exec(
+              "DELETE FROM adaptive_events WHERE event = 'workflow_observation_committed'",
+            );
+          }
           // Advance only the expired lease clock in the isolated fixture.
           store.exec(
             "UPDATE adaptive_model_reviews SET availableAt = 0 WHERE token IS NOT NULL",
@@ -186,14 +196,23 @@ for (
         );
         const hooks = (await Deno.readTextFile(join(dir, "hook.log"))).trim()
           .split("\n");
-        if (phase === "resume_mutation") {
+        if (phase === "resume_mutation" || phase === "resume_unproven") {
           assertEquals(
             hooks.filter((line) => line.endsWith(":mutation_committed")),
             ["interrupt_mutation:mutation_committed"],
           );
           assertEquals(
-            hooks.filter((line) => line.startsWith("resume_mutation:")),
-            [],
+            hooks.filter((line) => line.startsWith(`${phase}:`)),
+            phase === "resume_unproven" ? [] : [
+              "resume_mutation:pre_tool",
+              "resume_mutation:post_allow",
+              "resume_mutation:publication_reauthorized",
+              "resume_mutation:pre_metadata",
+              "resume_mutation:resolve_credential",
+              "resume_mutation:probe_metadata",
+              "resume_mutation:provider",
+              "resume_mutation:output_internal",
+            ],
           );
           const db = new DatabaseSync(database);
           try {
@@ -207,7 +226,9 @@ for (
               db.prepare(
                 "SELECT event FROM adaptive_events WHERE event LIKE 'model_mutation_%' ORDER BY rowid",
               ).all().map(({ event }) => event),
-              ["model_mutation_pending"],
+              phase === "resume_unproven"
+                ? ["model_mutation_pending"]
+                : ["model_mutation_pending", "model_mutation_settled"],
             );
           } finally {
             db.close();

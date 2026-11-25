@@ -34,6 +34,13 @@ const WORKER_CHECKPOINT_TTL_MS = 24 * 60 * 60 * 1000;
 const MAX_WORKER_CHECKPOINT_BYTES = 24 * 1024;
 const WORKFLOW_CHECKPOINT_TOOL = "sentinel_live_workflow_status";
 const WORKFLOW_CHECKPOINT_CALL = "sentinel-workflow-status";
+const WORKFLOW_PUBLICATION_TOOL = "sentinel_publish_workflow_observation";
+const WORKFLOW_PUBLICATION_CALL = "sentinel-workflow-publication";
+
+function workflowPublicationResult(observation: AdaptiveWorkflowObservation) {
+  const { id, targetId, evidenceRevision } = observation;
+  return JSON.stringify({ id, targetId, evidenceRevision });
+}
 const ASSIGNED_TARGET_CHECKPOINT_TOOL = "sentinel_assigned_target";
 const ASSIGNED_TARGET_CHECKPOINT_CALL = "sentinel-assigned-target";
 const WORKER_STEERING_PREFIX = "Operator guidance for this assignment:\n";
@@ -89,6 +96,7 @@ function normalizeWorkerCheckpoint(
   targetId: string,
   receipt: SentinelGitHubWorkflowReadReceipt | undefined,
   progress: readonly SentinelReviewStep[],
+  publication: AdaptiveWorkflowObservation | undefined,
   steering: readonly Pick<
     SentinelWorkerControlReceipt,
     "steeringId" | "note"
@@ -143,8 +151,9 @@ function normalizeWorkerCheckpoint(
       } | undefined;
       const name = call?.function?.name;
       const workflow = name === WORKFLOW_CHECKPOINT_TOOL;
+      const published = name === WORKFLOW_PUBLICATION_TOOL;
       if (
-        (!workflow && name !== ASSIGNED_TARGET_CHECKPOINT_TOOL) ||
+        (!workflow && !published && name !== ASSIGNED_TARGET_CHECKPOINT_TOOL) ||
         seen.has(name) || typeof call?.id !== "string" ||
         !/^[A-Za-z0-9._:-]{1,128}$/.test(call.id) || providerIds.has(call.id) ||
         (call.type !== undefined && call.type !== "function") ||
@@ -160,6 +169,11 @@ function normalizeWorkerCheckpoint(
         if (
           !receipt || tool.content !== JSON.stringify({ targetId, ...receipt })
         ) return;
+      } else if (published) {
+        if (
+          !publication || !seen.has(WORKFLOW_CHECKPOINT_TOOL) ||
+          tool.content !== workflowPublicationResult(publication)
+        ) return;
       } else {
         const digest = createHash("sha256").update(tool.content).digest("hex");
         if (
@@ -172,6 +186,8 @@ function normalizeWorkerCheckpoint(
       }
       const id = workflow
         ? WORKFLOW_CHECKPOINT_CALL
+        : published
+        ? WORKFLOW_PUBLICATION_CALL
         : ASSIGNED_TARGET_CHECKPOINT_CALL;
       seen.add(name);
       providerIds.add(call.id);
@@ -2101,7 +2117,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
   }
 
   const pendingMutation = db.prepare(`
-    SELECT event, note FROM adaptive_events
+    SELECT rowid, event, note FROM adaptive_events
     WHERE revision = ? AND taskId = ?
       AND event IN ('model_mutation_pending', 'model_mutation_settled')
     ORDER BY rowid DESC LIMIT 1
@@ -2286,6 +2302,19 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
       stepIndex: Number(row.stepIndex),
       receipt,
     };
+  }
+
+  function assignmentPublication(
+    revision: string,
+    id: string,
+    evidenceRevision: number,
+  ) {
+    if (!hasWorkflowObservationTable()) return;
+    const row = db.prepare(`
+      SELECT * FROM adaptive_workflow_observations
+      WHERE revision = ? AND taskId = ? AND evidenceRevision = ?
+    `).get(revision, id, evidenceRevision);
+    return row && decodeWorkflowObservation(row);
   }
 
   function validWorkflowObservationPage(offset: number, limit: number) {
@@ -4035,6 +4064,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
       token: string,
       evidenceRevision: number,
       tools: readonly string[] | null,
+      publicationIteration?: number,
     ): boolean {
       revision = revisionKey(revision);
       id = taskId(id);
@@ -4053,7 +4083,14 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
           tools ? "model_mutation_pending" : "model_mutation_settled",
           0,
           now(),
-          tools ? JSON.stringify(tools) : null,
+          tools
+            ? JSON.stringify(
+              publicationIteration === undefined ? tools : {
+                tools,
+                publicationIteration,
+              },
+            )
+            : null,
         );
         return true;
       });
@@ -4319,6 +4356,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
           nodeId,
           receipt,
           this.modelReviewProgress(revision, id),
+          assignmentPublication(revision, id, evidenceRevision),
           this.modelReviewControls(revision, id).steering,
         );
       });
@@ -4352,6 +4390,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
           nodeId,
           receipt,
           this.modelReviewProgress(revision, id),
+          assignmentPublication(revision, id, evidenceRevision),
           this.modelReviewControls(revision, id).steering,
         );
         if (!normalized) return false;
@@ -5661,6 +5700,136 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
           null,
         );
         return true;
+      });
+    },
+
+    reconcileWorkerPublications(
+      revision: string,
+      evidenceRevision: number,
+      eligible: (task: AdaptiveTask) => boolean,
+    ): void {
+      if (
+        !hasWorkerCheckpointTable() || !hasWorkflowObservationTable() ||
+        !hasGitHubWorkflowResultTable()
+      ) return;
+      transaction(db, () => {
+        if (
+          activeRevision() !== revision ||
+          recordedEvidenceNumber(revision) !== evidenceRevision
+        ) return;
+        const time = now();
+        const candidates = db.prepare(`
+          SELECT task.*, checkpoint.checkpoint, checkpoint.promptSha256, review.attempts AS reviewAttempts
+          FROM adaptive_worker_checkpoints AS checkpoint
+          JOIN adaptive_tasks AS task ON task.id = checkpoint.taskId
+          JOIN adaptive_model_reviews AS review ON review.taskId = task.id
+          WHERE checkpoint.revision = ? AND checkpoint.evidenceRevision = ?
+            AND checkpoint.version = 1 AND checkpoint.expiresAt > ?
+            AND task.revision = checkpoint.revision AND task.status = 'completed'
+            AND review.availableAt <= ? AND review.noteId IS NULL
+            AND NOT EXISTS (SELECT 1 FROM adaptive_worker_controls AS control
+              WHERE control.revision = task.revision AND control.taskId = task.id AND control.action = 'stop')
+        `).all(revision, evidenceRevision, time, time);
+        for (const row of candidates) {
+          const id = String(row.id);
+          const pending = pendingMutation.get(revision, id);
+          if (
+            pending?.event !== "model_mutation_pending" ||
+            typeof pending.note !== "string" ||
+            typeof row.nodeId !== "string" ||
+            !eligible(decodeTask(row))
+          ) continue;
+          const marker = JSON.parse(pending.note);
+          const saved = JSON.parse(
+            String(row.checkpoint),
+          ) as AgentTurnCheckpoint;
+          if (
+            !marker ||
+            !isDeepStrictEqual(marker.tools, [WORKFLOW_PUBLICATION_TOOL]) ||
+            (marker.publicationIteration !== saved.completedIterations &&
+              marker.publicationIteration !== saved.completedIterations + 1)
+          ) continue;
+          const observation = assignmentPublication(
+            revision,
+            id,
+            evidenceRevision,
+          );
+          const receipt = readWorkflowResult(revision, id, evidenceRevision);
+          if (
+            !observation || !receipt || observation.targetId !== row.nodeId ||
+            !isDeepStrictEqual(observation.receipt, receipt) ||
+            !db.prepare(`SELECT 1 FROM adaptive_events
+              WHERE revision = ? AND taskId = ? AND event = 'workflow_observation_committed'
+                AND rowid > ? AND note = ?`).get(
+              revision,
+              id,
+              pending.rowid,
+              observation.id,
+            )
+          ) continue;
+          const results = saved.history.filter(({ role }) => role === "tool");
+          if (
+            results[observation.stepIndex]?.content !==
+              JSON.stringify({ targetId: row.nodeId, ...receipt })
+          ) continue;
+          const alreadySaved =
+            marker.publicationIteration === saved.completedIterations;
+          if (
+            alreadySaved &&
+            results.at(-1)?.content !== workflowPublicationResult(observation)
+          ) {
+            continue;
+          }
+          const normalized = normalizeWorkerCheckpoint(
+            alreadySaved ? saved : {
+              ...saved,
+              completedIterations: marker.publicationIteration,
+              toolCallCounts: [...saved.toolCallCounts, [
+                `${WORKFLOW_PUBLICATION_TOOL}:{}`,
+                1,
+              ]],
+              history: [...saved.history, {
+                role: "assistant",
+                content: " ",
+                tool_calls: [{
+                  id: WORKFLOW_PUBLICATION_CALL,
+                  type: "function",
+                  function: {
+                    name: WORKFLOW_PUBLICATION_TOOL,
+                    arguments: "{}",
+                  },
+                }],
+              }, {
+                role: "tool",
+                tool_call_id: WORKFLOW_PUBLICATION_CALL,
+                content: workflowPublicationResult(observation),
+              }],
+            },
+            String(row.promptSha256),
+            row.nodeId,
+            receipt,
+            this.modelReviewProgress(revision, id),
+            observation,
+            this.modelReviewControls(revision, id).steering,
+          );
+          if (!normalized) continue;
+          const encoded = JSON.stringify(normalized);
+          if (
+            new TextEncoder().encode(encoded).length >
+              MAX_WORKER_CHECKPOINT_BYTES
+          ) continue;
+          db.prepare(`UPDATE adaptive_worker_checkpoints SET checkpoint = ?
+            WHERE revision = ? AND taskId = ? AND evidenceRevision = ?`)
+            .run(encoded, revision, id, evidenceRevision);
+          event.run(
+            revision,
+            id,
+            "model_mutation_settled",
+            row.reviewAttempts,
+            time,
+            observation.id,
+          );
+        }
       });
     },
 

@@ -193,7 +193,10 @@ export interface SentinelTurnCheckpointOptions {
     readonly version: number;
     readonly digest: string;
   };
-  readonly onMutationBoundary?: (tools: readonly string[] | null) => boolean;
+  readonly onMutationBoundary?: (
+    tools: readonly string[] | null,
+    publicationIteration?: number,
+  ) => boolean;
   readonly onToolBatchCheckpoint?: (
     checkpoint: AgentTurnCheckpoint,
   ) => Promise<void>;
@@ -3464,7 +3467,7 @@ function createAgent(
               return true;
             },
           }),
-          beforeToolBatch: onMutationBoundary && ((_batch, calls) => {
+          beforeToolBatch: onMutationBoundary && ((batch, calls) => {
             if (pendingMutations.length) {
               throw new Error("An earlier mutation is unresolved");
             }
@@ -3473,7 +3476,14 @@ function createAgent(
             ).map(({ name }) => name);
             settledMutations = 0;
             if (
-              pendingMutations.length && !onMutationBoundary(pendingMutations)
+              pendingMutations.length && !onMutationBoundary(
+                pendingMutations,
+                calls.length === 1 &&
+                  pendingMutations[0] === publishWorkflowObservationTool.name &&
+                  !Object.keys(calls[0].args).length
+                  ? batch
+                  : undefined,
+              )
             ) {
               throw new Error("The Sentinel mutation could not be admitted");
             }

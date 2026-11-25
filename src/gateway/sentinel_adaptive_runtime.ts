@@ -2763,6 +2763,7 @@ export function createSentinelModelPlanner(
       const allowed = decisionAllowsClaim(snapshotPath, current.revision);
       const eligible = (task: AdaptiveTask) =>
         !reviewing.has(task.id) && allowed(task);
+      store.reconcileWorkerPublications(revision, current.revision, eligible);
       if (
         !store.modelReviewAvailable(revision, MODEL_ASSIGNMENT_REASON, eligible)
       ) {
@@ -3045,14 +3046,39 @@ export function createSentinelModelPlanner(
                     }
                     continue;
                   }
+                  if (!githubWorkflowRead) continue;
                   if (
-                    !githubWorkflowRead ||
-                    entry.content !==
-                      JSON.stringify({
-                        targetId: task.nodeId,
-                        ...githubWorkflowRead,
-                      })
-                  ) continue;
+                    entry.content !== JSON.stringify({
+                      targetId: task.nodeId,
+                      ...githubWorkflowRead,
+                    })
+                  ) {
+                    const output = JSON.parse(entry.content);
+                    const publication = typeof output.id === "string" &&
+                      checkpointStore.workflowObservationById(
+                        revision,
+                        output.id,
+                      );
+                    if (
+                      publication && publication.taskId === task.id &&
+                      publication.targetId === task.nodeId &&
+                      publication.evidenceRevision === state.revision
+                    ) {
+                      const tool = "sentinel_publish_workflow_observation";
+                      const saved = previousProgress.find((step) =>
+                        step.tool === tool && step.outcome === "returned"
+                      );
+                      if (saved) resumedProgress.add(saved);
+                      steps.push(
+                        saved ?? {
+                          tool,
+                          outcome: "returned",
+                          target: publication.id,
+                        },
+                      );
+                    }
+                    continue;
+                  }
                   const saved = previousProgress.find((step) =>
                     step.tool === "sentinel_live_workflow_status" &&
                     step.outcome === "returned" &&
@@ -3071,7 +3097,7 @@ export function createSentinelModelPlanner(
                 }
                 saveProgress();
               },
-              onMutationBoundary: (tools) =>
+              onMutationBoundary: (tools, publicationIteration) =>
                 !signal.aborted &&
                 checkpointStore.recordModelMutationBoundary(
                   revision,
@@ -3079,6 +3105,7 @@ export function createSentinelModelPlanner(
                   token,
                   state.revision,
                   tools,
+                  publicationIteration,
                 ),
               onToolBatchCheckpoint: (checkpoint) => {
                 if (!signal.aborted) {

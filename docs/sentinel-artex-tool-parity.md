@@ -659,6 +659,11 @@ remains visible in the review state as uncertain and cannot be reclaimed
 or retried. The event history retains tool names without arguments.
 The worker restart fixture kills the process after publication commits
 and before response authorization finishes, then verifies that exactly one
-observation exists and no worker is dispatched again. The next gap is
-reconciling a held mutation against its exact committed receipt so eligible
-work can continue.
+observation exists and the publication handler is never dispatched again.
+For an interrupted standalone workflow publication, the scheduler reconciles
+against the exact observation event committed after the pending marker and
+the source workflow result in the same assignment and revision. It commits
+the reconstructed exchange and clears the hold atomically. The resumed
+agent sees the saved receipt only after the root hooks and current connector
+authorization pass. Without exact commit evidence, the hold persists.
+Other state-changing tools still need tool-specific reconciliation.

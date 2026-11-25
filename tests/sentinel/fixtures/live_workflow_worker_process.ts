@@ -88,7 +88,11 @@ const hookRunner: HookRunner = {
       ) {
         throw new Error("The fixture did not commit its observation");
       }
-      record("mutation_committed");
+      record(
+        phase === "resume_mutation"
+          ? "publication_reauthorized"
+          : "mutation_committed",
+      );
       if (phase === "interrupt_mutation") {
         Deno.writeTextFileSync(join(baseDir, "checkpoint-ready"), "ready");
         return new Promise(() => {});
@@ -214,8 +218,25 @@ registry.register({
         }],
       });
     }
-    if (phase === "resume_mutation") {
+    if (phase === "resume_unproven") {
       throw new Error("An uncertain mutation was re-claimed");
+    }
+    if (phase === "resume_mutation") {
+      if (
+        results.length !== 2 ||
+        !String(results[0].content).includes('"id":51') ||
+        !String(results[1].content).includes('"id":"workflow-observation:')
+      ) {
+        throw new Error(
+          "The committed publication did not reach the resumed model",
+        );
+      }
+      return Promise.resolve({
+        content:
+          '{"summary":"Resumed the committed publication.","followUps":[]}',
+        toolCalls: [],
+        usage,
+      });
     }
     if (phase === "interrupt_mutation") {
       return Promise.resolve({
@@ -364,7 +385,14 @@ try {
     planner.advance(state);
     const adaptive = readAdaptiveSentinel(path, state);
     if (
-      (phase === "resume_mutation" && adaptive?.modelReviewStates.some(
+      (phase === "resume_mutation" &&
+        adaptive?.modelReviews.some(({ summary, steps }) =>
+          summary === "Resumed the committed publication." &&
+          steps.length === 2 &&
+          steps[1].tool === "sentinel_publish_workflow_observation" &&
+          steps[1].target?.startsWith("workflow-observation:")
+        )) ||
+      (phase === "resume_unproven" && adaptive?.modelReviewStates.some(
         (review) =>
           review.outcomeUncertain && review.status === "interrupted" &&
           !review.retryable && review.attempts === 1,
