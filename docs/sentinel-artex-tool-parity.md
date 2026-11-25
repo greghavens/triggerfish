@@ -2160,3 +2160,11 @@ records a real leased worker read, restores the case, verifies exact page
 readback, and exercises pre-call and response denials. The worker trace stores
 the reference alongside its existing history. The payload stays in the retained
 traffic journal.
+
+Worker checkpoints can restore an exact finding-linked payload result using
+its committed trace selector and digest. The checkpoint stores a digest
+marker. Recovery reconstructs the page from the scoped traffic journal and
+the shared turn runner reruns policy before returning it to the model. The
+gateway archive fixture interrupts the worker after checkpoint commit,
+reopens the checkpoint store, exercises response-policy denial, and verifies
+an authorized resume without a second tool dispatch.

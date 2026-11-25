@@ -14,6 +14,7 @@ import {
 import { DatabaseSync } from "node:sqlite";
 import { createSentinelLiveWorkflowReader } from "../../src/gateway/sentinel_live_workflow.ts";
 import { createHash } from "node:crypto";
+import { reopenSentinelLinkedTrafficPayload } from "../../src/gateway/sentinel_finding_traffic_tool.ts";
 import { reopenProjectedSentinelTrafficPage } from "../../src/gateway/sentinel_traffic_tool.ts";
 import {
   withVerifiedRunArchive,
@@ -1452,12 +1453,22 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
       );
     });
     const linkedRegistry = createProviderRegistry();
+    const linkedPrompt = "Review linked traffic.";
+    const linkedPromptSha = createHash("sha256").update(linkedPrompt).digest(
+      "hex",
+    );
+    const interruptLinked = new AbortController();
+    let linkedDispatches = 0;
+    let resumeAccepted = false;
+    let denyLinkedResume = false;
+    let resumedPostChecks = 0;
     linkedRegistry.register({
       name: "linked-payload-fixture",
       supportsStreaming: false,
       complete(messages) {
         const result = messages.findLast(({ role }) => role === "tool");
         if (result) linkedWorkerResult = String(result.content);
+        else linkedDispatches++;
         return Promise.resolve({
           content: result ? "Reviewed the retained response." : "",
           usage: { inputTokens: 1, outputTokens: 1 },
@@ -1494,26 +1505,36 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
           sha256,
         },
       };
-      await createSentinelSubagent({
-        providerRegistry: linkedRegistry,
-        snapshotPath: path,
-        assessmentRevision: state.revision,
-        assignedTaskId: trafficTaskId,
-        assignedTaskLeaseToken: trafficReviewToken,
-        allowModelAccess: true,
-        hookRunner: {
-          evaluateHook: () =>
-            Promise.resolve({
-              allowed: true,
-              action: "ALLOW",
-              ruleId: null,
-              duration: 0,
-            }),
-        },
-      }).execute(
-        "Review linked traffic.",
+      const createLinkedWorker = () =>
+        createSentinelSubagent({
+          providerRegistry: linkedRegistry,
+          snapshotPath: path,
+          assessmentRevision: state.revision,
+          assignedTaskId: trafficTaskId,
+          assignedTaskLeaseToken: trafficReviewToken,
+          allowModelAccess: true,
+          hookRunner: {
+            evaluateHook(hook, { input }) {
+              const resumedRead = interruptLinked.signal.aborted &&
+                input.tool_name === "sentinel_finding_traffic_links";
+              if (
+                resumedRead && hook === "POST_TOOL_RESPONSE"
+              ) resumedPostChecks++;
+              const allowed = !(resumedRead && hook === "POST_TOOL_RESPONSE" &&
+                denyLinkedResume);
+              return Promise.resolve({
+                allowed,
+                action: allowed ? "ALLOW" : "BLOCK",
+                ruleId: null,
+                duration: 0,
+              });
+            },
+          },
+        });
+      await createLinkedWorker().execute(
+        linkedPrompt,
         () => {},
-        undefined,
+        interruptLinked.signal,
         (step) => {
           assert(step.linkedTrafficPayload);
           assert(!JSON.stringify(step).includes("🙂"));
@@ -1525,8 +1546,93 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
           ));
         },
         true,
-        { workerBoundary: () => ({}) },
+        {
+          workerBoundary: () => ({}),
+          onToolBatchCheckpoint(checkpoint) {
+            assert(linkedJournal.recordLeasedWorkerCheckpoint(
+              revision,
+              trafficTaskId,
+              trafficReviewToken,
+              state.revision,
+              linkedPromptSha,
+              checkpoint,
+            ));
+            interruptLinked.abort();
+            return Promise.resolve();
+          },
+        },
       );
+      assert(interruptLinked.signal.aborted);
+      const checkpointDb = new DatabaseSync(
+        join(dirname(path), "sentinel-adaptive.db"),
+        {
+          readOnly: true,
+        },
+      );
+      try {
+        const persisted = String(
+          checkpointDb.prepare(
+            "SELECT checkpoint FROM adaptive_worker_checkpoints WHERE taskId = ?",
+          ).get(trafficTaskId)?.checkpoint,
+        );
+        assertStringIncludes(persisted, "sentinel-linked-payload:");
+        assert(!persisted.includes("🙂"));
+      } finally {
+        checkpointDb.close();
+      }
+      const restarted = openSentinelAdaptiveStore(
+        join(dirname(path), "sentinel-adaptive.db"),
+      );
+      try {
+        const resume = restarted.readLeasedWorkerCheckpoint(
+          revision,
+          trafficTaskId,
+          trafficReviewToken,
+          state.revision,
+          linkedPromptSha,
+          undefined,
+          (assetId, args) =>
+            reopenSentinelLinkedTrafficPayload(
+              path,
+              "restorable",
+              state.revision,
+              assetId,
+              args,
+            ),
+        );
+        assert(resume);
+        const options = {
+          resume,
+          workerBoundary: () => ({}),
+          onResumeAccepted: () => {
+            resumeAccepted = true;
+          },
+        };
+        denyLinkedResume = true;
+        await createLinkedWorker().execute(
+          linkedPrompt,
+          () => {},
+          undefined,
+          undefined,
+          true,
+          options,
+        );
+        assert(!resumeAccepted);
+        denyLinkedResume = false;
+        await createLinkedWorker().execute(
+          linkedPrompt,
+          () => {},
+          undefined,
+          undefined,
+          true,
+          options,
+        );
+        assert(resumeAccepted);
+        assertEquals(resumedPostChecks, 2);
+        assertEquals(linkedDispatches, 1);
+      } finally {
+        restarted.close();
+      }
       assertEquals(
         JSON.parse(linkedWorkerResult!).payload.text,
         "x".repeat(511) + "🙂",

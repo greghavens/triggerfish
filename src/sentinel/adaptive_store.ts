@@ -46,6 +46,8 @@ import {
   SENTINEL_TRAFFIC_LINKS,
   SENTINEL_TRAFFIC_READ,
   SENTINEL_TRAFFIC_SEARCH,
+  sentinelLinkedTrafficPayloadArgs,
+  sentinelLinkedTrafficPayloadReference,
   sentinelTrafficAttachArgs,
   sentinelTrafficLinkPageReference,
   sentinelTrafficLinksArgs,
@@ -185,6 +187,11 @@ export function workerSteeringCheckpointIds(
   return delivered;
 }
 
+type ReopenLinkedTrafficPayload = (
+  targetId: string,
+  args: NonNullable<ReturnType<typeof sentinelLinkedTrafficPayloadArgs>>,
+) => string | undefined;
+
 function normalizeWorkerCheckpoint(
   value: AgentTurnCheckpoint,
   promptSha256: string,
@@ -200,6 +207,7 @@ function normalizeWorkerCheckpoint(
     tool: string,
     requestId: string,
   ) => ReturnType<SentinelJournalMutationLookup>,
+  reopenLinkedPayload?: ReopenLinkedTrafficPayload,
 ): AgentTurnCheckpoint | undefined {
   if (
     !value || !Array.isArray(value.history) || value.history.length < 3 ||
@@ -290,6 +298,8 @@ function normalizeWorkerCheckpoint(
         typeof tool.content !== "string" || tool.content.length > 7_000
       ) return;
       let args: Record<string, unknown> = {};
+      let retainedContent = tool.content;
+      let linkedPayloadRead = false;
       if (journalWrite) {
         let claimed:
           | ReturnType<typeof sentinelGraphPublicationArguments>
@@ -351,22 +361,58 @@ function normalizeWorkerCheckpoint(
         ) return;
         args = input;
       } else if (trafficLinks) {
-        let input: ReturnType<typeof sentinelTrafficLinksArgs>;
+        let offered: unknown;
         try {
-          input = sentinelTrafficLinksArgs(JSON.parse(call.function.arguments));
+          offered = JSON.parse(call.function.arguments);
         } catch {
           return;
         }
-        const sha256 = createHash("sha256").update(tool.content).digest("hex");
-        if (
-          !input ||
-          !progress.some((step) =>
-            step.tool === name && step.outcome === "returned" &&
-            step.trafficLinks?.sha256 === sha256 &&
-            isDeepStrictEqual(step.trafficLinks.args, input)
-          )
-        ) return;
-        args = input;
+        const payload = sentinelLinkedTrafficPayloadArgs(offered);
+        if (payload) {
+          const reference = progress.flatMap((step) => {
+            const binding = sentinelLinkedTrafficPayloadReference(
+              step.linkedTrafficPayload,
+            );
+            return step.tool === name && step.outcome === "returned" &&
+                binding && isDeepStrictEqual(binding.args, payload)
+              ? [binding]
+              : [];
+          }).at(-1);
+          if (!reference) return;
+          const marker = `sentinel-linked-payload:${reference.sha256}`;
+          if (reopenLinkedPayload) {
+            if (tool.content !== marker) return;
+            const reopened = reopenLinkedPayload(targetId, payload);
+            if (
+              !reopened ||
+              createHash("sha256").update(reopened).digest("hex") !==
+                reference.sha256
+            ) return;
+            retainedContent = reopened;
+          } else {
+            if (
+              createHash("sha256").update(tool.content).digest("hex") !==
+                reference.sha256
+            ) return;
+            retainedContent = marker;
+          }
+          args = payload;
+          linkedPayloadRead = true;
+        } else {
+          const input = sentinelTrafficLinksArgs(offered);
+          const sha256 = createHash("sha256").update(tool.content).digest(
+            "hex",
+          );
+          if (
+            !input ||
+            !progress.some((step) =>
+              step.tool === name && step.outcome === "returned" &&
+              step.trafficLinks?.sha256 === sha256 &&
+              isDeepStrictEqual(step.trafficLinks.args, input)
+            )
+          ) return;
+          args = input;
+        }
       } else if (trafficSearch) {
         let input: ReturnType<typeof sentinelTrafficSearchArgs>;
         try {
@@ -443,9 +489,11 @@ function normalizeWorkerCheckpoint(
       const signature = `${name}:${
         JSON.stringify(args, Object.keys(args).sort())
       }`;
-      const key = isRepeatableSentinelReceiptRead(name) ? signature : name;
+      const repeatable = linkedPayloadRead ||
+        isRepeatableSentinelReceiptRead(name);
+      const key = repeatable ? signature : name;
       if (seen.has(key)) return;
-      const id = isRepeatableSentinelReceiptRead(name)
+      const id = repeatable
         ? `recovery-${name}-${sourceResults.length}`
         : workflow
         ? WORKFLOW_CHECKPOINT_CALL
@@ -469,7 +517,11 @@ function normalizeWorkerCheckpoint(
         type: "function",
         function: { name, arguments: JSON.stringify(args) },
       });
-      results.push({ role: "tool", content: tool.content, tool_call_id: id });
+      results.push({
+        role: "tool",
+        content: retainedContent,
+        tool_call_id: id,
+      });
     }
     history.push(
       { role: "assistant", content: " ", tool_calls: calls },
@@ -5870,6 +5922,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
       evidenceRevision: number,
       promptSha256: string,
       lookupMutation?: SentinelJournalMutationLookup,
+      reopenLinkedPayload?: ReopenLinkedTrafficPayload,
     ): AgentTurnCheckpoint | undefined {
       revision = revisionKey(revision);
       id = taskId(id);
@@ -5916,6 +5969,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
           this.modelReviewControls(revision, id).steering,
           lookupMutation &&
             ((tool, requestId) => lookupMutation(id, nodeId, tool, requestId)),
+          reopenLinkedPayload,
         );
       });
     },

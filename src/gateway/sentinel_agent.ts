@@ -233,6 +233,7 @@ import {
 import {
   approvedSentinelTrafficAttachmentKey,
   executeSentinelFindingTrafficTool,
+  reopenSentinelLinkedTrafficPayload,
   sentinelFindingTrafficAttachTool,
   sentinelFindingTrafficListTool,
 } from "./sentinel_finding_traffic_tool.ts";
@@ -5777,6 +5778,25 @@ function createAgent(
                 }
 
                 if (call.name === SENTINEL_TRAFFIC_LINKS) {
+                  const linked = sentinelLinkedTrafficPayloadArgs(call.args);
+                  if (linked) {
+                    const saved = call.id && results.get(call.id);
+                    const caseId = locateSentinelCase(options.snapshotPath)
+                      ?.caseId;
+                    if (
+                      !saved || !caseId || !task.nodeId ||
+                      linked.revision !== revision ||
+                      reopenSentinelLinkedTrafficPayload(
+                          options.snapshotPath,
+                          caseId,
+                          revision,
+                          task.nodeId,
+                          linked,
+                        ) !== saved ||
+                      signal.aborted || !readAssignedModelReview(options)
+                    ) return false;
+                    continue;
+                  }
                   const args = sentinelTrafficLinksArgs(call.args);
                   const saved = call.id && results.get(call.id);
                   const caseId = locateSentinelCase(options.snapshotPath)

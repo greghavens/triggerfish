@@ -1,3 +1,4 @@
+import { reopenSentinelLinkedTrafficPayload } from "./sentinel_finding_traffic_tool.ts";
 import { isSentinelArchivedInventoryRead } from "../sentinel/worker_goal_recovery.ts";
 import {
   discoveryApproval,
@@ -3604,6 +3605,14 @@ export function createSentinelModelPlanner(
             state.revision,
             promptSha256,
             lookupMutation,
+            (assetId, args) =>
+              caseId && reopenSentinelLinkedTrafficPayload(
+                snapshotPath,
+                caseId,
+                state.revision,
+                assetId,
+                args,
+              ),
           );
           await worker.execute(
             prompt,

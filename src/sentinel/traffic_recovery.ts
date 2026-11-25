@@ -145,7 +145,7 @@ export function sentinelLinkedTrafficPayloadArgs(value: unknown) {
         .includes(key)
     )
   ) return;
-  const { revision, findingId, trafficLinkId, payloadPart, payloadOffset = 0 } =
+  const { revision, findingId, trafficLinkId, payloadPart, payloadOffset } =
     args;
   if (
     typeof revision !== "number" || !Number.isSafeInteger(revision) ||
@@ -155,10 +155,18 @@ export function sentinelLinkedTrafficPayloadArgs(value: unknown) {
     !/^finding-traffic-link:[a-f0-9]{64}$/.test(trafficLinkId) ||
     (payloadPart !== "request" && payloadPart !== "response" &&
       payloadPart !== "headers") ||
-    typeof payloadOffset !== "number" || !Number.isSafeInteger(payloadOffset) ||
-    payloadOffset < 0
+    (payloadOffset !== undefined &&
+      (typeof payloadOffset !== "number" ||
+        !Number.isSafeInteger(payloadOffset) ||
+        payloadOffset < 0))
   ) return;
-  return { revision, findingId, trafficLinkId, payloadPart, payloadOffset };
+  return {
+    revision,
+    findingId,
+    trafficLinkId,
+    payloadPart,
+    ...(payloadOffset !== undefined && { payloadOffset }),
+  };
 }
 
 export function sentinelLinkedTrafficPayloadReference(value: unknown) {
