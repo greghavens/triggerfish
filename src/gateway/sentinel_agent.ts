@@ -2851,6 +2851,7 @@ export function searchSentinelWorkerTraces(
         nextOffset,
         steps: page,
       }),
+      true,
     );
   } catch {
     return "Error: The requested Sentinel worker traces are unavailable.";
@@ -2925,7 +2926,6 @@ export function inspectSentinelWorkerObservation(
 export function inspectSentinelProvenance(
   options: ProvenanceScope,
   args: Record<string, unknown>,
-  redactWorkflow = options.assignedTaskLeaseToken !== undefined,
 ): string {
   const request = sentinelProvenanceNodeArgs(args);
   if (!request) {
@@ -2950,7 +2950,7 @@ export function inspectSentinelProvenance(
         nextOffset,
         connections,
       }),
-      redactWorkflow,
+      true,
     );
   } catch {
     return "Error: The requested Sentinel provenance is unavailable.";
@@ -3015,17 +3015,14 @@ function validateSavedProvenanceNode(
   if ("error" in provenance) return false;
   const current = provenance.graph.inspect(args.node);
   if (!current) return false;
-  const redactWorkflow = options.assignedTaskLeaseToken !== undefined;
   if (
     !isDeepStrictEqual(
-      JSON.parse(serializeToolResult(current.node, redactWorkflow)),
+      JSON.parse(serializeToolResult(current.node, true)),
       saved.node,
     )
   ) return false;
   const visible = new Set(
-    current.connections.map((item) =>
-      serializeToolResult(item, redactWorkflow)
-    ),
+    current.connections.map((item) => serializeToolResult(item, true)),
   );
   return saved.connections.every((item: unknown) =>
     visible.delete(JSON.stringify(item))
@@ -4604,12 +4601,7 @@ function createAgent(
         return inspectSentinelWorkerObservation(options, args);
       }
       if (name === SENTINEL_PROVENANCE_NODE_READ) {
-        return inspectSentinelProvenance(
-          options,
-          args,
-          options.assignedTaskLeaseToken !== undefined ||
-            options.plannerExecutionEvidenceRunId !== undefined,
-        );
+        return inspectSentinelProvenance(options, args);
       }
       if (name === SENTINEL_INCIDENT_ALERTS_READ) {
         const leased = options.assignedTaskId !== undefined ||
@@ -4631,13 +4623,7 @@ function createAgent(
         );
       }
       if (name === SENTINEL_PATH_READ) {
-        return await queryPath(
-          options,
-          turn.readGraph,
-          args,
-          options.assignedTaskLeaseToken !== undefined ||
-            options.plannerExecutionEvidenceRunId !== undefined,
-        );
+        return await queryPath(options, turn.readGraph, args, true);
       }
       let graph: Graph;
       try {

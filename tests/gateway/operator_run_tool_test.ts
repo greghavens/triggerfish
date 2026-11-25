@@ -1220,6 +1220,27 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
         (await turn(exactWorkflowResult)).result,
         "unavailable",
       );
+      const beforeDiscovery = workflowMetadataCalls;
+      const metadata = JSON.parse(
+        (await turn({ ...exactWorkflowResult, action: "traces" })).result,
+      );
+      const [step] = metadata.page.steps;
+      assertEquals(step.tool, "sentinel_live_workflow_status");
+      assertEquals(step.githubWorkflowRead, undefined);
+      const reviewNode = JSON.parse(
+        (await turn({
+          ...searchRight.run,
+          action: "node",
+          node: step.reviewId,
+        })).result,
+      );
+      assertEquals(reviewNode.page.node.id, step.reviewId);
+      for (const projection of [metadata, reviewNode]) {
+        const encoded = JSON.stringify(projection);
+        assert(!encoded.includes("githubWorkflowRead"));
+        assert(!encoded.includes("owner/repo"));
+      }
+      assertEquals(workflowMetadataCalls, beforeDiscovery);
       allowWorkflowMetadata = true;
       const trafficTarget = traffic.assetIds[0];
       const retainedTraffic = readProjectedSentinelTrafficReceipt(
