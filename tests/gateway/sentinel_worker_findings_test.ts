@@ -69,6 +69,7 @@ import {
   completeSentinelAssessmentGoal,
   pauseSentinelAssessment,
   readSentinelAssessment,
+  readSentinelOperatingConstraintDigest,
   recordSentinelOperatingConstraints,
   refreshSentinelAssessment,
   resumeSentinelAssessment,
@@ -2158,6 +2159,29 @@ async function verifyOperatorNativeRecheck(options: {
   blocked = true;
   assertEquals(JSON.parse(await run(command)).candidates, []);
   blocked = false;
+  const recordPolicy = (
+    expectedVersion: number,
+    deniedKinds: ["impact"] | [],
+  ) => {
+    const record = recordSentinelOperatingConstraints(path, {
+      runId: options.state.plan.runId!,
+      evidenceRevision: options.state.revision,
+      expectedVersion,
+      requestId: crypto.randomUUID(),
+      operatorScope: "owner",
+      constraints: { deniedKinds, note: "Private operator policy note" },
+    });
+    assert(record);
+    return {
+      digest: record.digest,
+      deniedKinds,
+      assetInScope: true,
+    };
+  };
+  const reviewedConstraints = options.alternate
+    ? recordPolicy(0, ["impact"])
+    : null;
+  let currentConstraints = reviewedConstraints;
   const discovered = JSON.parse(await run(command));
   assertEquals(
     [...discovered.candidates].sort((a, b) => a.nodeId.localeCompare(b.nodeId)),
@@ -2349,6 +2373,7 @@ async function verifyOperatorNativeRecheck(options: {
   if (options.alternate) {
     await amend(2, "Updated after recheck admission");
     assertEquals(JSON.parse(await run(queue)).receipt, assigned);
+    currentConstraints = recordPolicy(1, []);
   }
   const readLifecycle = async () => {
     let lifecycle: {
@@ -2734,6 +2759,11 @@ async function verifyOperatorNativeRecheck(options: {
           recheckNote,
         );
         const reviewedBaseline = JSON.parse(reviewed.results[1][0]);
+        assertEquals(reviewedBaseline.reviewedConstraints, reviewedConstraints);
+        assertEquals(reviewedBaseline.currentConstraints, currentConstraints);
+        assert(
+          !reviewed.results[1][0].includes("Private operator policy note"),
+        );
         assertEquals(
           reviewedBaseline.recheckBaseline,
           assigned.recheckBaseline,
@@ -3127,6 +3157,18 @@ async function verifyOperatorNativeRecheck(options: {
   );
   assertEquals(readSentinelAssessment(path)?.paused, true);
   assertEquals(await readLifecycle(), finishedLifecycle);
+  if (reviewedConstraints) {
+    const reviewed = readSentinelOperatingConstraintDigest(
+      path,
+      options.state.plan.runId!,
+      options.state.revision,
+      reviewedConstraints.digest,
+    );
+    assertEquals(
+      reviewed?.constraints.deniedKinds,
+      reviewedConstraints.deniedKinds,
+    );
+  }
   await run("Review the exact archived remediation status.");
   assertEquals(
     JSON.parse(modelResult ?? "").report.remediation.recheckId,

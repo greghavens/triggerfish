@@ -2956,6 +2956,36 @@ export function readSentinelOperatingConstraintVersion(
   return operatingConstraintRecords(path, runId, 1, undefined, version)[0];
 }
 
+/** Resolve the exact policy digest retained by a reviewed revision. */
+export function readSentinelOperatingConstraintDigest(
+  path: string,
+  runId: string,
+  revision: number,
+  digest: string,
+): SentinelOperatingConstraintRecord | undefined {
+  if (
+    !constraintUuid.test(runId) || !Number.isSafeInteger(revision) ||
+    revision < 1 || !/^[a-f0-9]{64}$/.test(digest)
+  ) return;
+  const db = openStore(path, false);
+  if (!db) return;
+  try {
+    if (!hasTable(db, "sentinel_operating_constraints")) return;
+    const row = db.prepare(
+      `SELECT record FROM sentinel_operating_constraints
+       WHERE runId = ? AND evidenceRevision <= ? AND json_extract(record, '$.digest') = ?
+       LIMIT 1`,
+    ).get(runId, revision, digest);
+    if (!row) return;
+    const policy = decodeOperatingConstraint({ record: row.record });
+    if (digestSentinelOperatingConstraints(policy.constraints) === digest) {
+      return policy;
+    }
+  } finally {
+    db.close();
+  }
+}
+
 /** Bind a linked run to its original empty-graph creation approval. */
 export function readSentinelEmptyCreationDigest(
   path: string,

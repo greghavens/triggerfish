@@ -29,8 +29,10 @@ import type { ToolDefinition } from "../core/types/tool.ts";
 import {
   readSentinelAssessment,
   readSentinelAssessmentRevision,
+  readSentinelOperatingConstraintDigest,
   readSentinelOperatingConstraints,
   readSentinelRunIdForRevision,
+  type SentinelOperatingConstraintRecord,
   withSentinelAssessmentWriteLock,
 } from "../sentinel/assessment_store.ts";
 import {
@@ -59,6 +61,20 @@ import {
 import type { SentinelAgentOptions } from "./sentinel_agent.ts";
 
 import { sentinelOperatingConstraintsAllow } from "../sentinel/operating_constraints.ts";
+
+/** Keep historical policy context scoped to the assigned asset. */
+function recheckConstraintProjection(
+  policy: SentinelOperatingConstraintRecord | undefined,
+  assetId: string,
+) {
+  if (!policy) return null;
+  const { allowedAssetIds, deniedKinds } = policy.constraints;
+  return {
+    digest: policy.digest,
+    deniedKinds,
+    assetInScope: allowedAssetIds?.includes(assetId) ?? true,
+  };
+}
 
 /** Compare one authorized saved report with the selected revision's attachments. */
 export function readSentinelFindingReportAttachmentReview(
@@ -537,6 +553,21 @@ export function executeSentinelWorkerFindingTool(
                   version === baseline.reportVersion
                 ));
             if (baseline && !reviewedReport) return;
+            const reviewedPolicy = baseline?.constraintsDigest
+              ? readSentinelOperatingConstraintDigest(
+                scope.snapshotPath,
+                finding.runId,
+                state.revision,
+                baseline.constraintsDigest,
+              )
+              : undefined;
+            if (baseline?.constraintsDigest && !reviewedPolicy) return;
+            const currentPolicy = baseline
+              ? readSentinelOperatingConstraints(
+                scope.snapshotPath,
+                finding.runId,
+              )
+              : undefined;
             return {
               _classification: "INTERNAL",
               finding,
@@ -548,6 +579,14 @@ export function executeSentinelWorkerFindingTool(
                 ? {
                   reportVersion: baseline.reportVersion,
                   recheckBaseline: baseline,
+                  reviewedConstraints: recheckConstraintProjection(
+                    reviewedPolicy,
+                    finding.targetId,
+                  ),
+                  currentConstraints: recheckConstraintProjection(
+                    currentPolicy,
+                    finding.targetId,
+                  ),
                   reviewedReport: {
                     title: reviewedReport.title,
                     summary: reviewedReport.summary,
