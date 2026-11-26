@@ -300,6 +300,7 @@ import {
   attachOperatorNativeWorkflowControl,
   projectExecutionRecheckSource,
 } from "./operator_execution_evidence.ts";
+import { executeOperatorInventoryAffiliation } from "./operator_inventory_affiliation.ts";
 import { executeOperatorInventoryWithdrawal } from "./operator_inventory_withdrawal.ts";
 import { executeOperatorAssetWithdrawal } from "./operator_asset_withdrawal.ts";
 import { executeOperatorRunArchive } from "./operator_run_archive.ts";
@@ -460,6 +461,8 @@ export const operatorRunTool: ToolDefinition = {
         "discovery_proposals",
         "propose_graph_fact_discovery",
         "preview_inventory_withdrawal",
+        "preview_inventory_affiliation",
+        "affiliate_inventory_asset",
         "withdraw_inventory_host",
         "pause_runs",
         "resume_runs",
@@ -4290,6 +4293,27 @@ ${
           ref,
           args,
           options.confirm,
+        );
+        return typeof result === "string" ? result : safeProjection(result);
+      }
+      if (
+        action === "preview_inventory_affiliation" ||
+        action === "affiliate_inventory_asset"
+      ) {
+        const authorize = context?.authorizeOwnerRunCall;
+        if (
+          !context?.authenticatedOwnerSessionId || !authorize ||
+          !canFlowTo("INTERNAL", context.ceiling ?? "PUBLIC") ||
+          !canFlowTo(context.inputClassification ?? "PUBLIC", "INTERNAL") ||
+          ref.kind !== "sentinel" || !await controller.inspect(ref)
+        ) return unavailable;
+        const result = await executeOperatorInventoryAffiliation(
+          options.baseDir,
+          ref,
+          args,
+          options.confirm,
+          () => authorize(args),
+          options.webContainmentConfigured,
         );
         return typeof result === "string" ? result : safeProjection(result);
       }

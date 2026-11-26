@@ -362,6 +362,7 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
                       "preview_membership",
                       "preview_discovery_withdrawal",
                       "preview_inventory_withdrawal",
+                      "preview_inventory_affiliation",
                       "archive_history",
                       "approval_history",
                       "profiles",
@@ -394,6 +395,8 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
                   (action === "narrow_constraints" ||
                     action === "constraints" || action === "steer" ||
                     action === "hint_batch" || action === "assign_batch" ||
+                    action === "preview_inventory_affiliation" ||
+                    action === "affiliate_inventory_asset" ||
                     action === "append_goals" || action === "withdraw_goal" ||
                     action === "add_case_membership") &&
                   {
@@ -412,7 +415,9 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
               return config.hookRunner.evaluateHook(hook, {
                 ...context,
                 input: { ...context.input, ...meta },
-                auditInput: action === "add_case_membership"
+                auditInput: action === "add_case_membership" ||
+                    action === "preview_inventory_affiliation" ||
+                    action === "affiliate_inventory_asset"
                   ? meta
                   : { ...context.auditInput, ...meta },
               });

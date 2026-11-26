@@ -12,10 +12,14 @@ import { decideSentinelAssetDiscovery } from "../../src/gateway/sentinel_asset_d
 import { createGatewayServer } from "../../src/gateway/server/server.ts";
 import { openSentinelAssetDiscoveryStore } from "../../src/sentinel/asset_discovery_store.ts";
 import {
+  readSentinelAssessment,
   readSentinelAssessmentRevision,
+  readSentinelOperatingConstraints,
+  recordSentinelOperatingConstraints,
   refreshSentinelAssessment,
   startSentinelAssessment,
 } from "../../src/sentinel/assessment_store.ts";
+import { resolveSentinelCaseMembership } from "../../src/sentinel/case_membership.ts";
 import { resolveSentinelCasePath } from "../../src/sentinel/cases.ts";
 import {
   digestSentinelSnapshot,
@@ -730,6 +734,201 @@ Deno.test("owner root correction confirms exact evidence, reapplies hooks and re
     } finally {
       store.close();
     }
+  } finally {
+    await Deno.remove(baseDir, { recursive: true });
+  }
+});
+
+Deno.test("authenticated owner reviews exact inventory affiliation without expanding approved membership", async () => {
+  const baseDir = await Deno.makeTempDir();
+  const path = resolveSentinelCasePath(baseDir, sourceId);
+  const input = {
+    kind: "sentinel",
+    id: sourceId,
+    assetId: host,
+    organizationId: "ops",
+    evidenceId: "obs-a",
+    note: "Reviewed ownership records for this exact asset.",
+  };
+  const graph = {
+    ...fixtureGraph,
+    nodes: [...fixtureGraph.nodes, {
+      id: "org-anchor",
+      kind: "asset",
+      label: "Known organization asset",
+      organization: { id: "ops", label: "Operations" },
+    }],
+  };
+  let confirmations = 0;
+  let duringReview = () => Promise.resolve();
+  let denyPre = false;
+  let denyResponse = false;
+  let denyOutput = false;
+  const frames: Record<string, unknown>[] = [];
+  const gateway = operatorGateway(
+    baseDir,
+    async () => {
+      confirmations++;
+      await duringReview();
+      return true;
+    },
+    () => denyPre,
+    {
+      denyResponse: () => denyResponse,
+      denyOutput: () => denyOutput,
+      echo: () => true,
+      receive: (frame) => frames.push(frame),
+    },
+  );
+  const read = async () =>
+    loadSentinelGraph(
+      JSON.parse(await Deno.readTextFile(path)),
+    ).snapshot();
+  try {
+    await Deno.mkdir(dirname(path), { recursive: true, mode: 0o700 });
+    await Deno.writeTextFile(path, JSON.stringify(graph), { mode: 0o600 });
+    const initial = startSentinelAssessment(path);
+    const runId = initial.plan.runId;
+    assert(runId);
+    const membership = resolveSentinelCaseMembership(
+      initial.result?.sharedGraph.snapshot,
+      {
+        caseId: sourceId,
+        evidenceRevision: initial.revision,
+        selector: { kind: "assets", assetIds: ["org-anchor"] },
+      },
+    );
+    assert(membership);
+    const initialPolicy = recordSentinelOperatingConstraints(path, {
+      runId,
+      evidenceRevision: initial.revision,
+      expectedVersion: 0,
+      requestId: crypto.randomUUID(),
+      operatorScope: "fixture-owner",
+      constraints: {
+        allowedAssetIds: membership.assetIds,
+        deniedKinds: ["trace"],
+      },
+      membership,
+    });
+    assert(initialPolicy);
+    const added = {
+      ...graph,
+      nodes: [...graph.nodes, {
+        id: "second-observation",
+        kind: "evidence",
+        label: "Later evidence",
+      }],
+    };
+    const preview = { ...input, action: "preview_inventory_affiliation" };
+    const apply = {
+      ...input,
+      action: "affiliate_inventory_asset",
+      requestId: crypto.randomUUID(),
+    };
+    let exactChange: Record<string, unknown> = {};
+    let committed = "";
+    await gateway(async (turn) => {
+      for (
+        const invalid of [
+          { ...preview, organizationId: "unregistered" },
+          { ...preview, evidenceId: "obs-prefix" },
+          { ...preview, assetId: "org-anchor" },
+        ]
+      ) {
+        assert((await turn(invalid)).includes("unavailable"));
+      }
+      const earlier = JSON.parse(await turn(preview)).preview;
+      assertEquals(earlier.evidenceId, input.evidenceId);
+      assertEquals(earlier.organizationLabel, "Operations");
+      assertEquals(
+        earlier.previousDigest,
+        digestSentinelSnapshot(await read()),
+      );
+      assert(!JSON.stringify(earlier).includes(material));
+      denyPre = true;
+      assert(
+        !(await turn({ ...apply, previewDigest: earlier.previousDigest }))
+          .includes('"receipt"'),
+      );
+      denyPre = false;
+      assertEquals(confirmations, 0);
+
+      duringReview = async () => {
+        await Deno.writeTextFile(path, JSON.stringify(added));
+      };
+      assert(
+        (await turn({ ...apply, previewDigest: earlier.previousDigest }))
+          .includes("unavailable"),
+      );
+      assertEquals(confirmations, 1);
+      assertEquals(await read(), loadSentinelGraph(added).snapshot());
+
+      const fresh = JSON.parse(await turn(preview)).preview;
+      exactChange = { ...apply, previewDigest: fresh.previousDigest };
+      duringReview = () => {
+        denyPre = true;
+        return Promise.resolve();
+      };
+      assert((await turn(exactChange)).includes("unavailable"));
+      assertEquals(confirmations, 2);
+      assertEquals(await read(), loadSentinelGraph(added).snapshot());
+      denyPre = false;
+      duringReview = () => Promise.resolve();
+      denyResponse = true;
+      assertEquals(
+        await turn(exactChange),
+        "Tool response withheld by policy.",
+      );
+      assertEquals(confirmations, 3);
+      denyResponse = false;
+      const latest = readSentinelAssessment(path);
+      assert(latest && latest.revision > initial.revision);
+      assertEquals(readSentinelOperatingConstraints(path), initialPolicy);
+      const newAsset = latest.result?.sharedGraph.snapshot?.nodes.find((
+        { id },
+      ) => id === host);
+      assert(newAsset?.kind === "asset");
+      assertEquals(newAsset.organization, { id: "ops", label: "Operations" });
+      const scoped = JSON.parse(
+        await turn({
+          action: "inventory",
+          kind: "sentinel",
+          id: sourceId,
+          revision: latest.revision,
+          scope: "membership",
+        }),
+      ).page;
+      assertEquals(scoped.assets.map(({ id }: { id: string }) => id), [
+        "org-anchor",
+      ]);
+      const archived = await readSentinelSourceSnapshotFile(
+        sentinelSourceSnapshotPath(baseDir, sourceId, fresh.previousDigest),
+        fresh.previousDigest,
+      );
+      assertEquals(archived, loadSentinelGraph(added).snapshot());
+
+      frames.length = 0;
+      denyOutput = true;
+      committed = await turn(exactChange);
+      denyOutput = false;
+      const { receipt } = JSON.parse(committed);
+      assertEquals(receipt.requestId, apply.requestId);
+      assertEquals(receipt.status, "succeeded");
+      assertEquals(receipt.nextDigest, fresh.nextDigest);
+      assert(
+        frames.every((frame) => !JSON.stringify(frame).includes(input.note)),
+      );
+      assertEquals(confirmations, 3);
+    });
+    await gateway(async (turn) => {
+      assertEquals(await turn(exactChange), committed);
+      assert(
+        (await turn({ ...exactChange, note: "Unreviewed replacement." }))
+          .includes("unavailable"),
+      );
+      assertEquals(confirmations, 3);
+    });
   } finally {
     await Deno.remove(baseDir, { recursive: true });
   }
