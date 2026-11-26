@@ -445,6 +445,7 @@ import {
   ensureSentinelFormalGoalContract,
   readSentinelGoalCompletionAtRevision,
   readSentinelWorkerGoalProofTraceReceipt,
+  sentinelGoalEvidenceIsCurrent,
 } from "./sentinel_goal_completion.ts";
 
 function validSentinelCancellationReason(value: unknown): value is string {
@@ -1486,6 +1487,7 @@ export const sentinelScopedTelemetryReadActions = [
 
 export const sentinelOperatorCaseReadActions = [
   "model_route",
+  "goals",
   "graph_overview",
   "graph",
   "findings",
@@ -1561,7 +1563,8 @@ export function sentinelOperatorCaseReadParameterAllowed(
   parameter: string,
 ): boolean {
   return sentinelOperatorCaseReadParameters.some((key) => key === parameter) ||
-    (action === "preview_membership" && parameter === "allowedAssetIds");
+    (action === "preview_membership" && parameter === "allowedAssetIds") ||
+    (action === "goals" && ["goalId", "includeProof"].includes(parameter));
 }
 
 export const sentinelOperatorCaseControlActions = [
@@ -1572,6 +1575,7 @@ export const sentinelOperatorCaseControlActions = [
   "assign_batch",
   "append_goals",
   "withdraw_goal",
+  "confirm_goal_completion",
   "set_case_membership",
   "add_case_membership",
   "record_analyst_finding",
@@ -1587,6 +1591,7 @@ export const sentinelOperatorCaseControlParameters = [
   "goals",
   "supersedes",
   "goalId",
+  "goalProofDigest",
   "version",
   "expectedVersion",
   "requestId",
@@ -1623,6 +1628,7 @@ function parseReviewedFindingFollowup(
 /** Runtime policy for reopening an approved original tool response. */
 export interface OperatorRunToolContext {
   readonly authorizeSelectedSentinelCase?: () => boolean;
+  readonly requireSettledGoalConfirmation?: boolean;
   readonly authorizeSentinelCaseRead?: (
     caseId: string,
     revision: number,
@@ -3004,6 +3010,66 @@ export function createOperatorRunToolExecutor(options: {
       "fail",
       executionControlReceipt(evidence.payload),
     ) && current();
+  };
+
+  const authorizeGoalEvidence = async (
+    caseId: string,
+    path: string,
+    state: NonNullable<ReturnType<typeof readSentinelAssessment>>,
+    proof: NonNullable<ReturnType<typeof readSentinelGoalCompletionAtRevision>>,
+    context: OperatorRunToolContext,
+    allowed: () => boolean,
+    historical: boolean,
+  ) => {
+    const runId = state.plan.runId;
+    if (!runId) return;
+    const protectedProofs = await authorizeSentinelProtectedGoalProofs(
+      path,
+      state,
+      proof.observations,
+      async ({ original, reference, verdict }, current) => {
+        const old = await readAuthorizedCaseEvidence(
+          caseId,
+          path,
+          original.evidenceRevision,
+          original.evidenceId,
+          context,
+          current,
+        );
+        if (!old || !current()) return false;
+        const fresh = await reopenOwnedSentinelRepositoryVisibility(
+          options.readRepositoryVisibility,
+          context,
+          {
+            caseId,
+            path,
+            runId,
+            revision: verdict.evidenceRevision,
+            assetId: verdict.targetId,
+            taskId: reference.taskId,
+            sourceStepIndex: reference.sourceStepIndex,
+            resultSha256: reference.resultSha256,
+          },
+          current,
+        );
+        return !!fresh &&
+          matchesRepositoryControlSource(old.payload, fresh) &&
+          repositoryControlOutcome(fresh) === verdict.outcome && current();
+      },
+      allowed,
+      historical,
+    );
+    if (
+      !allowed() ||
+      !sentinelGoalEvidenceIsCurrent(
+        path,
+        state,
+        proof,
+        protectedProofs,
+        historical,
+      )
+    ) return;
+    return protectedProofs;
   };
 
   const execute: OperatorRunToolExecutor = async (args, context) => {
@@ -13238,13 +13304,42 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
             proofDigest: goalProofDigest,
             status: "completed",
           });
+        const replay = state.completion?.note === decision &&
+          proof.status === "completed";
         if (
-          state.completion?.note === decision && proof.status === "completed"
-        ) return success();
-        if (
-          !state.active ||
-          !["awaiting_confirmation", "completed"].includes(proof.status)
+          (!replay &&
+            (context.requireSettledGoalConfirmation || !state.active ||
+              !["awaiting_confirmation", "completed"].includes(
+                proof.status,
+              ))) ||
+          !await authorize(args)
         ) return unavailable;
+        const goalStillReviewed = () => {
+          const latestState = readSentinelAssessment(path);
+          if (
+            latestState?.revision !== ref.revision ||
+            latestState?.plan.runId !== runId.toLowerCase()
+          ) return false;
+          const latest = readSentinelGoalCompletionAtRevision(
+            path,
+            ref.revision!,
+          );
+          return context.authorizeSelectedSentinelCase?.() !== false &&
+            !!latest && digestSentinelGoalProof(latest) === goalProofDigest &&
+            context.authorizeSentinelCaseRead?.(ref.id, ref.revision!) !==
+              false;
+        };
+        const protectedProofs = await authorizeGoalEvidence(
+          ref.id,
+          path,
+          state,
+          proof,
+          context,
+          goalStillReviewed,
+          replay,
+        );
+        if (!protectedProofs) return unavailable;
+        if (replay) return success();
         if (
           !await options.confirm(
             `Complete these exact Sentinel goal criteria?\n${
@@ -13258,53 +13353,17 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
             }`,
           )
         ) return "Error: The operator declined the run action.";
-        if (!await authorize(args)) return unavailable;
-        const goalStillReviewed = () => {
-          const latest = readSentinelGoalCompletionAtRevision(
-            path,
-            ref.revision!,
-          );
-          return !!latest &&
-            digestSentinelGoalProof(latest) === goalProofDigest &&
-            context.authorizeSentinelCaseRead?.(ref.id, ref.revision!) !==
-              false;
-        };
-        const protectedProofs = await authorizeSentinelProtectedGoalProofs(
+        if (!await authorize(args) || !goalStillReviewed()) return unavailable;
+        const reauthorizedProofs = await authorizeGoalEvidence(
+          ref.id,
           path,
           state,
-          proof.observations,
-          async ({ original, reference, verdict }, current) => {
-            const old = await readAuthorizedCaseEvidence(
-              ref.id,
-              path,
-              original.evidenceRevision,
-              original.evidenceId,
-              context,
-              current,
-            );
-            if (!old || !current()) return false;
-            const fresh = await reopenOwnedSentinelRepositoryVisibility(
-              options.readRepositoryVisibility,
-              context,
-              {
-                caseId: ref.id,
-                path,
-                runId: runId.toLowerCase(),
-                revision: verdict.evidenceRevision,
-                assetId: verdict.targetId,
-                taskId: reference.taskId,
-                sourceStepIndex: reference.sourceStepIndex,
-                resultSha256: reference.resultSha256,
-              },
-              current,
-            );
-            return !!fresh &&
-              matchesRepositoryControlSource(old.payload, fresh) &&
-              repositoryControlOutcome(fresh) === verdict.outcome && current();
-          },
+          proof,
+          context,
           goalStillReviewed,
+          false,
         );
-        if (!goalStillReviewed()) return unavailable;
+        if (!reauthorizedProofs) return unavailable;
         try {
           return completeSentinelRegisteredGoal(
               path,
@@ -13313,7 +13372,7 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
               decision,
               options.webContainmentConfigured,
               { runId: state.plan.runId!, digest: goalProofDigest },
-              protectedProofs,
+              reauthorizedProofs,
             )
             ? success()
             : unavailable;
@@ -13441,6 +13500,30 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
           const proof = includeProof && goal
             ? readSentinelGoalCompletionAtRevision(path, ref.revision)
             : undefined;
+          if (context?.authorizeSelectedSentinelCase && proof) {
+            if (!current || current.revision !== ref.revision) {
+              return unavailable;
+            }
+            const stillReviewed = () =>
+              context.authorizeSelectedSentinelCase?.() === true &&
+              context.authorizeSentinelCaseRead?.(ref.id, ref.revision!) ===
+                true &&
+              isDeepStrictEqual(
+                readSentinelGoalCompletionAtRevision(path, ref.revision!),
+                proof,
+              );
+            if (
+              !await authorizeGoalEvidence(
+                ref.id,
+                path,
+                current,
+                proof,
+                context,
+                stillReviewed,
+                !current.active || current.paused,
+              )
+            ) return unavailable;
+          }
           const visibleCriteria = new Set(
             page.map(({ id }) => `${goal?.id}/${id}`),
           );

@@ -4,7 +4,10 @@ import { readSentinelChatSnapshot } from "../sentinel/chat_mode.ts";
 import { isDeepStrictEqual } from "node:util";
 import type { WorkflowGoalCompletionEvidence } from "./operator_workflow_journal.ts";
 import { sentinelGoalProofArguments } from "../sentinel/worker_goal_recovery.ts";
-import { readSentinelCaseGraphFacts } from "../sentinel/worker_graph_facts.ts";
+import {
+  readSentinelCaseGraphFacts,
+  sentinelGraphFactScopeFilter,
+} from "../sentinel/worker_graph_facts.ts";
 import { digestSentinelSnapshot } from "../sentinel/shared_inventory.ts";
 /** Bind shared goal completion to exact Sentinel case evidence and lifecycle. */
 import { createHash } from "node:crypto";
@@ -95,6 +98,7 @@ export async function authorizeSentinelProtectedGoalProofs(
     current: () => boolean,
   ) => Promise<boolean>,
   allowed: () => boolean,
+  historical = false,
 ): Promise<ProtectedGoalProofs> {
   const runId = expected.plan.runId;
   if (!runId) return new Map();
@@ -102,7 +106,8 @@ export async function authorizeSentinelProtectedGoalProofs(
   const readCurrent = () => {
     const state = readSentinelAssessment(path);
     const policy = readSentinelOperatingConstraints(path, runId);
-    return allowed() && !!state?.active && !state.paused &&
+    return allowed() && !!state &&
+      (historical || (state.active && !state.paused)) &&
       goalScope(path, expected) === goalScope(path, state) &&
       policy?.digest === constraints?.digest &&
       policy?.version === constraints?.version;
@@ -112,13 +117,15 @@ export async function authorizeSentinelProtectedGoalProofs(
       if (record.outcome !== "pass") return [];
       return [(async () => {
         const read = () =>
-          readExactSentinelNativeRepositoryVerdict(
-            path,
-            runId,
-            expected.revision,
-            record.targetId,
-            record.id,
-          );
+          (historical
+            ? readRetainedSentinelNativeRepositoryVerdict
+            : readExactSentinelNativeRepositoryVerdict)(
+              path,
+              runId,
+              expected.revision,
+              record.targetId,
+              record.id,
+            );
         const proof = read();
         if (!proof || !readCurrent()) return;
         const same = () => readCurrent() && isDeepStrictEqual(read(), proof);
@@ -500,7 +507,28 @@ function goalEvidenceVerifier(
   deadlineAt?: number,
   protectedProofs?: ProtectedGoalProofs,
   historicalProtected = false,
+  checkScope = false,
 ) {
+  const scopeRun = state.plan.runId;
+  const snapshot = state.result?.sharedGraph.snapshot;
+  const allows = (
+    nodeId: string | undefined,
+    kind: "review_evidence" | "review_finding" = "review_evidence",
+  ) => {
+    if (!checkScope) return true;
+    if (!scopeRun || !nodeId || !snapshot) return false;
+    return [
+      readSentinelOperatingConstraints(snapshotPath, scopeRun, state.revision),
+      readSentinelOperatingConstraints(snapshotPath, scopeRun),
+    ]
+      .every((policy) =>
+        sentinelOperatingConstraintsAllow(
+          policy?.constraints,
+          { kind, nodeId },
+          snapshot,
+        )
+      );
+  };
   const rules = new Map(
     record.criteria.map(({ id, requirement }) => [id, requirement]),
   );
@@ -574,6 +602,9 @@ function goalEvidenceVerifier(
       const recheck = store.read(reference);
       if (
         recheck?.kind !== "recheck" || recheck.outcome !== "pass" ||
+        !allows(recheck.targetId) ||
+        !allows(recheck.graphFindingId, "review_finding") ||
+        (!recheck.nativeRepositoryVisibility && !allows(recheck.evidenceId)) ||
         recheck.caseId !== location.caseId ||
         recheck.runId !== state.plan.runId ||
         recheck.evidenceRevision !== state.revision ||
@@ -653,7 +684,8 @@ function goalEvidenceVerifier(
     const binding = requirement(source, reference);
     if (!binding) return false;
     if (source === "graph_evidence") {
-      return rule === binding && graphEvidence.has(reference);
+      return rule === binding && graphEvidence.has(reference) &&
+        allows(reference);
     }
     if (source === "graph_fact") {
       const caseId = locateSentinelCase(snapshotPath)?.caseId;
@@ -667,6 +699,10 @@ function goalEvidenceVerifier(
       }, { id: reference });
       if (!receipt || !("fact" in receipt)) return false;
       const { snapshotDigest, relationship, targetId } = receipt.fact;
+      if (
+        checkScope &&
+        !sentinelGraphFactScopeFilter(snapshot, allows)(receipt.fact)
+      ) return false;
       if (assignment && assignment.target !== targetId) return false;
       const shape = requirement(
         source,
@@ -685,7 +721,10 @@ function goalEvidenceVerifier(
         );
     }
     const result = loadCompletedTask(reference);
-    if (!result || (rule !== binding && rule !== result.shape)) return false;
+    if (
+      !result || !allows(result.target) ||
+      (rule !== binding && rule !== result.shape)
+    ) return false;
     if (
       assignment &&
       (result.target !== assignment.target ||
@@ -741,6 +780,27 @@ function savedGoalCriteriaVerify(
   return record.criteria.every(({ id }) =>
     record.observations.find(({ criterionId }) => criterionId === id)
       ?.evidence.some((proof) => verify(id, proof))
+  );
+}
+
+export function sentinelGoalEvidenceIsCurrent(
+  path: string,
+  state: State,
+  record: GoalRecord,
+  protectedProofs: ProtectedGoalProofs,
+  historical: boolean,
+) {
+  const verify = goalEvidenceVerifier(
+    path,
+    state,
+    record,
+    undefined,
+    protectedProofs,
+    historical,
+    true,
+  );
+  return record.observations.every(({ criterionId, evidence }) =>
+    evidence.every((proof) => verify(criterionId, proof))
   );
 }
 

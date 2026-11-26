@@ -128,7 +128,7 @@ async function ownerFacts(
   approve: boolean | (() => boolean) = false,
   denyPublicationRead?: "PRE_TOOL_CALL" | "POST_TOOL_RESPONSE",
   workflows?: ReturnType<typeof createOperatorWorkflowRuns>,
-  sentinelMode = false,
+  sentinelMode: boolean | string = false,
   authorizeCompletion?: () => boolean,
 ) {
   const registry = createProviderRegistry();
@@ -255,6 +255,9 @@ async function ownerFacts(
       }
     };
     if (sentinelMode) await turn("/sentinel on");
+    if (typeof sentinelMode === "string") {
+      await turn(`/sentinel case ${sentinelMode}`);
+    }
     await run(async (args) => {
       input = args;
       await turn("Read the requested exact graph fact or finding.");
@@ -2507,7 +2510,7 @@ Deno.test("Leased worker proposals require assigned evidence and exact owner app
         },
         undefined,
         undefined,
-        false,
+        ref.id,
         () => completionAuthorized,
       );
       await ownerFacts(baseDir, async (turn) => {
@@ -2518,12 +2521,101 @@ Deno.test("Leased worker proposals require assigned evidence and exact owner app
         return true;
       });
       await Deno.writeTextFile(path, originalGraph);
+      let approvals = 0;
+      await ownerFacts(
+        baseDir,
+        async (turn) => {
+          const selected = JSON.parse(await turn(goalLookup));
+          assertEquals(
+            selected.proof.digest,
+            completionRequest.goalProofDigest,
+          );
+          assertEquals(selected.proof.status, "awaiting_confirmation");
+          assertStringIncludes(
+            await turn({ ...goalLookup, id: "main" }),
+            "unavailable",
+          );
+          assertStringIncludes(
+            await turn({ ...completionRequest, runId: "a".repeat(64) }),
+            "unavailable",
+          );
+          assertStringIncludes(
+            await turn({
+              ...completionRequest,
+              goalProofDigest: "0".repeat(64),
+            }),
+            "unavailable",
+          );
+          assertEquals(approvals, 0);
+          assertStringIncludes(
+            await turn(completionRequest),
+            "operator declined",
+          );
+          assertEquals(approvals, 1);
+          assert(readSentinelAssessment(path)?.active);
+        },
+        () => {
+          approvals++;
+          return false;
+        },
+        undefined,
+        undefined,
+        ref.id,
+      );
+      const setProofPolicy = (expectedVersion: number, denied: boolean) =>
+        recordSentinelOperatingConstraints(path, {
+          runId: ref.runId!,
+          evidenceRevision: updated.revision,
+          expectedVersion,
+          requestId: crypto.randomUUID(),
+          operatorScope: "owner",
+          constraints: { deniedKinds: denied ? ["review_evidence"] : [] },
+        });
+      await ownerFacts(
+        baseDir,
+        async (turn) => {
+          assertStringIncludes(await turn(completionRequest), "unavailable");
+          assertStringIncludes(await turn(goalLookup), "unavailable");
+          assert(readSentinelAssessment(path)?.active);
+        },
+        () => {
+          assert(setProofPolicy(0, true));
+          return true;
+        },
+        undefined,
+        undefined,
+        ref.id,
+      );
+      assert(setProofPolicy(1, false));
       let completion: unknown;
-      await ownerFacts(baseDir, async (turn) => {
-        completion = JSON.parse(await turn(completionRequest));
-        assertEquals((completion as { status: string }).status, "completed");
-        assertEquals(readSentinelAssessment(path)?.active, false);
-      }, true);
+      await ownerFacts(
+        baseDir,
+        async (turn) => {
+          completion = JSON.parse(await turn(completionRequest));
+          assertEquals((completion as { status: string }).status, "completed");
+          assertEquals(readSentinelAssessment(path)?.active, false);
+        },
+        true,
+        undefined,
+        undefined,
+        ref.id,
+      );
+      await ownerFacts(
+        baseDir,
+        async (turn) => {
+          assertEquals(JSON.parse(await turn(completionRequest)), completion);
+          assertEquals(
+            JSON.parse(await turn(goalLookup)).proof.status,
+            "completed",
+          );
+        },
+        () => {
+          throw new Error("Settled confirmation must not prompt again");
+        },
+        undefined,
+        undefined,
+        ref.id,
+      );
       await ownerFacts(baseDir, async (turn) => {
         assertEquals(JSON.parse(await turn(completionRequest)), completion);
         const saved = JSON.parse(await turn(goalLookup)).proof;

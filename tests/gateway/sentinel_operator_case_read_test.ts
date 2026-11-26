@@ -355,6 +355,7 @@ Deno.test("Authenticated Sentinel chat reads exact approved cross-case graph fin
           definition.function?.parameters?.properties?.action?.enum,
           [
             "model_route",
+            "goals",
             "graph_overview",
             "graph",
             "findings",
@@ -387,6 +388,7 @@ Deno.test("Authenticated Sentinel chat reads exact approved cross-case graph fin
             "assign_batch",
             "append_goals",
             "withdraw_goal",
+            "confirm_goal_completion",
             "set_case_membership",
             "add_case_membership",
             "record_analyst_finding",

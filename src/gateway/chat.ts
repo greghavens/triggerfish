@@ -408,6 +408,7 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
                       "finding_receipts",
                       "finding_report",
                       "finding_report_history",
+                      "goals",
                       "finding_lineage",
                       "linked_finding",
                       "linked_findings",
@@ -429,6 +430,8 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
                     action === "preview_inventory_affiliation" ||
                     action === "affiliate_inventory_asset" ||
                     action === "append_goals" || action === "withdraw_goal" ||
+                    action === "goals" ||
+                    action === "confirm_goal_completion" ||
                     action === "preview_membership" ||
                     action === "set_case_membership" ||
                     action === "add_case_membership" ||
@@ -455,7 +458,8 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
                     action === "add_case_membership" ||
                     action === "preview_inventory_affiliation" ||
                     action === "affiliate_inventory_asset" ||
-                    action === "amend_finding_report"
+                    action === "amend_finding_report" ||
+                    action === "confirm_goal_completion"
                   ? meta
                   : { ...context.auditInput, ...meta },
               });
@@ -992,6 +996,8 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
           : linkedFinding?.sourceCase;
         const linkedRead = linkedReview || action === "linked_findings" ||
           action === "linked_finding";
+        const goalRead = action === "goals";
+        const goalConfirmation = action === "confirm_goal_completion";
         const selectedReport = action === "finding_report" ||
           action === "finding_report_history";
         const previewMembership = action === "preview_membership";
@@ -1030,7 +1036,7 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
           ) return false;
           const casePath = resolveCase();
           if (!selectedControl) {
-            return directRead || linkedRead || selectedReport ||
+            return directRead || linkedRead || selectedReport || goalRead ||
                 previewMembership
               ? casePath === selectedPath
               : !!casePath;
@@ -1038,6 +1044,10 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
           if (casePath !== selectedPath) return false;
           const assessment = readSentinelAssessment(selectedPath);
           if (!assessment || assessment.plan.runId !== runId) return false;
+          if (goalConfirmation) {
+            return (assessment.active || !!assessment.completion) &&
+              assessment.revision === revision;
+          }
           // Goal edits commit a new revision. Only an exact saved receipt
           // can replay an older request, and only append can reopen a run.
           return action === "append_goals" || action === "withdraw_goal"
@@ -1048,7 +1058,8 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
         if (!current()) return unavailable;
         const scopedDecision = action === "review_incident";
         const amendReport = action === "amend_finding_report";
-        const scopedRead = scopedDecision || amendReport ||
+        const scopedRead = scopedDecision || amendReport || goalRead ||
+          goalConfirmation ||
           sentinelScopedTelemetryReadActions.some(
             (allowed) => allowed === action,
           ) ||
@@ -1109,10 +1120,11 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
         ) return unavailable;
         const nativeGraph = directRead &&
           isSentinelNativeGraphRead(directRead.name);
-        const read = () =>
+        const read = (readSettled = false) =>
           execute(args, {
             ...authority,
-            ...((selectedControl || previewMembership) && {
+            ...(readSettled && { requireSettledGoalConfirmation: true }),
+            ...((selectedControl || previewMembership || goalRead) && {
               authorizeSelectedSentinelCase: current,
             }),
             authorizeSentinelCaseRead: (caseId, evidenceRevision) =>
@@ -1153,7 +1165,9 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
             case_id: id,
             evidence_revision: revision,
             resource_classification: "INTERNAL",
-            operation_type: setMembership || amendReport ? "write" : "read",
+            operation_type: setMembership || amendReport || goalConfirmation
+              ? "write"
+              : "read",
           };
           const policy: typeof orchestratorConfig = {
             ...orchestratorConfig,
@@ -1200,8 +1214,12 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
                   JSON.stringify(JSON.parse(reopened).membership) ===
                     JSON.stringify(JSON.parse(text).membership);
               }
-              if (linkedRead || selectedReport || scopedDecision) {
-                return await read() === text && sourceIsCurrent();
+              if (
+                linkedRead || selectedReport || scopedDecision || goalRead ||
+                goalConfirmation
+              ) {
+                return await read(goalConfirmation) === text &&
+                  sourceIsCurrent();
               }
               if (source.name !== SENTINEL_SHARED_ASSET_LINKS_READ) return true;
               return !!sourcePath && await readScopedSentinelConsoleGraph(

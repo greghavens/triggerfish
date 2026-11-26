@@ -4618,6 +4618,8 @@ export async function readSentinelGraphProjection(
 }
 
 export const sentinelScopedGraphReadActions = [
+  "goals",
+  "confirm_goal_completion",
   "linked_worker_review",
   "linked_findings",
   "linked_finding",
@@ -5754,6 +5756,7 @@ function createAgent(
           selectedCaseAction === "hint_batch" ||
           selectedCaseAction === "assign_batch" ||
           selectedCaseAction === "append_goals" ||
+          selectedCaseAction === "confirm_goal_completion" ||
           selectedCaseAction === "withdraw_goal" ||
           selectedCaseAction === "set_case_membership" ||
           selectedCaseAction === "add_case_membership" ||
@@ -5867,6 +5870,7 @@ function createAgent(
                   selectedCaseAction === "preview_membership" ||
                   selectedCaseAction === "set_case_membership" ||
                   selectedCaseAction === "amend_finding_report" ||
+                  selectedCaseAction === "confirm_goal_completion" ||
                   selectedCaseAction === "add_case_membership"
                 ? metadata
                 : { ...context.auditInput, ...metadata },
