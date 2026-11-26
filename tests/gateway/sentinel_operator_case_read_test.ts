@@ -192,6 +192,12 @@ Deno.test("Authenticated Sentinel chat reads exact approved cross-case graph fin
   let verifyWorkerBinding = false;
   let localInventory = false;
   let unleasedTelemetry = false;
+  let nestedTelemetry = false;
+  let revokeNestedParent = false;
+  let denyNestedSourceAfterChild = false;
+  let parentSourceBlocked = false;
+  const nestedQuestion = "Inspect the selected case telemetry for the parent.";
+  const nestedPrefix = "Keep this unrelated nested conversation context.";
   let localTelemetry:
     | "sentinel_defense"
     | "sentinel_incident_alerts"
@@ -230,6 +236,49 @@ Deno.test("Authenticated Sentinel chat reads exact approved cross-case graph fin
       const definition = definitions?.find((tool) =>
         tool.function?.name === "operator_runs"
       );
+      if (
+        nestedTelemetry &&
+        messages.some(({ role, content }) =>
+          role === "user" && String(content) === nestedQuestion
+        )
+      ) {
+        assertEquals(definition, undefined);
+        assert(
+          definitions?.some((tool) =>
+            tool.function?.name === "sentinel_defense"
+          ),
+        );
+        const read = messages.findLast(({ role }) => role === "tool");
+        if (read) {
+          const text = String(read.content);
+          assertEquals(
+            JSON.parse(text).matches.map(({ alertId }: { alertId: string }) =>
+              alertId
+            ),
+            [visibleAlertId],
+          );
+          return Promise.resolve({
+            content:
+              `Child analysis uses this exact detection evidence: ${text}`,
+            toolCalls: [],
+            usage: { inputTokens: 1, outputTokens: 1 },
+          });
+        }
+        return Promise.resolve({
+          content: "",
+          toolCalls: [{
+            type: "function",
+            id: "nested-defense-check",
+            function: {
+              name: "sentinel_defense",
+              arguments: JSON.stringify({
+                upstreamCheck: "cloudtrail_logging_stopped",
+              }),
+            },
+          }],
+          usage: { inputTokens: 1, outputTokens: 1 },
+        });
+      }
       if (verifyWorkerBinding || localInventory) {
         const binding = definitions?.find((tool) =>
           tool.function?.name === "sentinel_case_inventory"
@@ -306,6 +355,8 @@ Deno.test("Authenticated Sentinel chat reads exact approved cross-case graph fin
             function: {
               name: localInventory
                 ? "sentinel_case_inventory"
+                : nestedTelemetry
+                ? "sentinel_subagent"
                 : localTelemetry ?? "operator_runs",
               arguments: JSON.stringify(next),
             },
@@ -375,6 +426,31 @@ Deno.test("Authenticated Sentinel chat reads exact approved cross-case graph fin
             await Promise.resolve();
             constraintsAllowed = false;
             revokeBeforeContext = false;
+          }
+          if (
+            denyNestedSourceAfterChild && hook === "POST_TOOL_RESPONSE" &&
+            input.tool_name === "sentinel_subagent"
+          ) parentSourceBlocked = true;
+          if (
+            parentSourceBlocked && hook === "POST_TOOL_RESPONSE" &&
+            input.tool_name === "sentinel_defense"
+          ) {
+            return {
+              allowed: false,
+              action: "BLOCK",
+              ruleId: null,
+              duration: 0,
+            };
+          }
+          if (
+            revokeNestedParent && hook === "POST_TOOL_RESPONSE" &&
+            input.tool_name === "sentinel_subagent" &&
+            typeof input.tool_response === "string" &&
+            input.tool_response.includes(visibleAlert.subject)
+          ) {
+            await Promise.resolve();
+            constraintsAllowed = false;
+            revokeNestedParent = false;
           }
           if (hook === revokeTelemetry) {
             const content = hook === "POST_TOOL_RESPONSE"
@@ -960,6 +1036,65 @@ Deno.test("Authenticated Sentinel chat reads exact approved cross-case graph fin
       revision: approved.revision + 1,
     });
     assertStringIncludes(result, "unavailable");
+    localTelemetry = undefined;
+
+    await turn("/sentinel off");
+    await turn("/sentinel on");
+    await turn("/sentinel case approved");
+    await turn(nestedPrefix);
+    nestedTelemetry = true;
+    localTelemetry = "sentinel_defense";
+    await Deno.writeTextFile(alertsPath, "[]");
+    try {
+      await turn("Delegate a defensively scoped telemetry read.", {
+        question: nestedQuestion,
+      });
+    } finally {
+      await Deno.writeTextFile(alertsPath, uncommittedAlerts);
+    }
+    assertStringIncludes(result, visibleAlert.subject);
+    assert(!result.includes(restrictedAlert.subject));
+    captureModelContext = true;
+    await turn("Use the approved child result.");
+    assertStringIncludes(modelContext, visibleAlert.subject);
+    assertStringIncludes(modelContext, nestedPrefix);
+    captureModelContext = true;
+    revokeBeforeContext = true;
+    await turn(revokeContextRequest);
+    assert(!revokeBeforeContext);
+    assertStringIncludes(modelContext, nestedPrefix);
+    assert(!modelContext.includes(visibleAlert.subject));
+    constraintsAllowed = true;
+
+    denyNestedSourceAfterChild = true;
+    const childReadDispatch = dispatched;
+    const sourceDenied = await turn(
+      "Delegate but deny reuse of the exact child source.",
+      { question: nestedQuestion },
+    );
+    assert(parentSourceBlocked);
+    assertEquals(dispatched, childReadDispatch + 1);
+    assert(!result.includes(visibleAlert.subject));
+    assert(
+      sourceDenied.every((frame) => !frame.includes(visibleAlert.subject)),
+    );
+    denyNestedSourceAfterChild = false;
+    parentSourceBlocked = false;
+
+    revokeNestedParent = true;
+    const revokedDelegationFrames = await turn(
+      "Delegate while parent authority changes.",
+      { question: nestedQuestion },
+    );
+    assert(!revokeNestedParent);
+    assert(!result.includes(visibleAlert.subject));
+    assert(
+      revokedDelegationFrames.every((frame) =>
+        !frame.includes(visibleAlert.subject)
+      ),
+    );
+    constraintsAllowed = true;
+    nestedTelemetry = false;
     localTelemetry = undefined;
     await turn("Read selected case restrictions", {
       action: "constraints",

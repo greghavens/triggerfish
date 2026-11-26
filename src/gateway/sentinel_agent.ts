@@ -1266,9 +1266,10 @@ interface ActiveTurn {
   readonly controller: AbortController;
   readonly signal: AbortSignal;
   readonly readGraph: ReadGraph;
-  pendingTelemetryFence?: SentinelTelemetryFence & {
+  pendingTelemetryFence?: {
     readonly tool: string;
-    readonly revision: unknown;
+    readonly revision?: unknown;
+    readonly sources: readonly SentinelTelemetryFence[];
   };
   telemetryHistoryPrefix?: readonly HistoryEntry[];
   readonly outputLanguage: SentinelOutputLanguage;
@@ -3877,6 +3878,7 @@ function createAgent(
   options: SentinelAgentOptions,
   canDelegate: boolean,
   sharedGraph?: ReadGraph,
+  captureTelemetry?: (sources: readonly SentinelTelemetryFence[]) => void,
 ): SentinelAgent {
   let session = sentinelSession(options.identity);
   let active: ActiveTurn | undefined;
@@ -4110,13 +4112,29 @@ function createAgent(
     if (++turn.workers > MAX_WORKERS_PER_TURN) {
       return "Error: This turn reached the Sentinel subagent limit.";
     }
-    const worker = createAgent(options, false, turn.readGraph);
+    let telemetry: readonly SentinelTelemetryFence[] = [];
+    const worker = createAgent(
+      { ...options, allowUnleasedInteractiveTelemetry: true },
+      false,
+      turn.readGraph,
+      (sources) => {
+        telemetry = sources;
+      },
+    );
     let output = "No subagent result is available.";
+    turn.pendingTelemetryFence = undefined;
     try {
       await worker.execute(args.question, (event) => {
         if (event.type === "response") output = event.text;
       }, turn.signal);
-      return boundResult({ analysis: output });
+      const text = boundResult({ analysis: output });
+      if (telemetry.length && !turn.signal.aborted && text.startsWith("{")) {
+        turn.pendingTelemetryFence = {
+          tool: workerTool.name,
+          sources: telemetry,
+        };
+      }
+      return text;
     } finally {
       worker.clear();
     }
@@ -4414,17 +4432,29 @@ function createAgent(
           name === "POST_TOOL_RESPONSE" && turn?.pendingTelemetryFence &&
           toolName === turn.pendingTelemetryFence.tool
         ) {
-          const fence = turn.pendingTelemetryFence;
+          const { sources } = turn.pendingTelemetryFence;
           turn.pendingTelemetryFence = undefined;
           if (result.allowed) {
-            if (!fence.isCurrent() || !turn.telemetryHistoryPrefix) {
+            if (toolName === workerTool.name) {
+              for (const source of sources) {
+                if (!await source.authorize()) {
+                  return { ...result, allowed: false, action: "BLOCK" };
+                }
+              }
+            }
+            if (
+              !turn.telemetryHistoryPrefix ||
+              sources.some((source) => !source.isCurrent())
+            ) {
               return { ...result, allowed: false, action: "BLOCK" };
             }
             retainedTelemetry ??= {
               prefix: turn.telemetryHistoryPrefix,
               fences: new Map(),
             };
-            retainedTelemetry.fences.set(fence.key, fence);
+            for (const source of sources) {
+              retainedTelemetry.fences.set(source.key, source);
+            }
           }
         }
         if (
@@ -4640,9 +4670,9 @@ function createAgent(
           turn.signal,
           (fence) => {
             turn.pendingTelemetryFence = {
-              ...fence,
               tool: name,
               revision: request.revision,
+              sources: [fence],
             };
           },
           direct,
@@ -7675,6 +7705,9 @@ function createAgent(
             message: "The Sentinel assignment is no longer active.",
           });
           return;
+        }
+        if (retainedTelemetry && captureTelemetry) {
+          captureTelemetry([...retainedTelemetry.fences.values()]);
         }
         send({ type: "response", text: response, taint: "INTERNAL" });
       } catch {
