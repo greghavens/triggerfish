@@ -732,7 +732,10 @@ type GoalReceiptReadArguments =
     confidence?: "observed" | "inferred";
     conclusion?: SentinelWorkerNarrativeReceipt["conclusion"];
     detail?: string;
-    facts?: SentinelWorkerNarrativeReceipt["facts"];
+    facts?:
+      readonly (NonNullable<SentinelWorkerNarrativeReceipt["facts"]>[number] & {
+        evidenceId?: string;
+      })[];
     digest?: string;
     payloadPart?: string;
     byteLength?: number;

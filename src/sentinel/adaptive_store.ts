@@ -41,11 +41,13 @@ import {
 } from "./github_repository_visibility.ts";
 import {
   isWorkerNarrativeId,
+  readWorkerNarrativeFactBatch,
   readWorkerNarrativeReceipt,
   SENTINEL_WORKER_NARRATIVE_COMMIT,
   SENTINEL_WORKER_NARRATIVE_READ,
   type SentinelWorkerNarrativeReceipt,
   workerNarrativeArguments,
+  workerNarrativeSources,
 } from "./worker_narratives.ts";
 import {
   type AssignmentControlReceipt,
@@ -9012,7 +9014,9 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
       const receipt = readWorkerNarrativeReceipt(value);
       if (
         !receipt || !Number.isSafeInteger(stepIndex) || stepIndex < 0 ||
-        stepIndex >= 16
+        stepIndex >= 16 ||
+        (receipt.factSources !== undefined &&
+          receipt.factSources[0].stepIndex !== stepIndex)
       ) return;
       return transaction(db, () => {
         const authority = workerCheckpointAuthority(
@@ -9022,35 +9026,38 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
           evidenceRevision,
         );
         if (!authority) return;
-        const source = progressForAuthority(
+        const steps = progressForAuthority(
           revision,
           id,
           authority.controlClaimSha256,
-        )[stepIndex];
+        );
         const producer = lookup.get(id);
-        const alert = source?.goalReceiptRead &&
-          sentinelDefenseReadArgs(source.goalReceiptRead.args);
-        if (
-          typeof producer?.nodeId !== "string" ||
-          source?.outcome !== "returned" ||
-          (receipt.trafficDigest
-            ? source.tool !== SENTINEL_TRAFFIC_READ ||
-              source.trafficRead?.sha256 !== receipt.sourceSha256 ||
-              source.trafficRead.evidenceId !== receipt.evidenceId ||
-              source.trafficRead.digest !== receipt.trafficDigest ||
-              source.trafficRead.revision !== evidenceRevision
-            : receipt.upstreamCheck
-            ? source.tool !== "sentinel_defense" ||
-              source.goalReceiptRead?.sha256 !== receipt.sourceSha256 ||
-              alert?.alertId !== receipt.evidenceId ||
-              alert?.upstreamCheck !== receipt.upstreamCheck
-            : source.tool !== ASSIGNED_TARGET_CHECKPOINT_TOOL ||
-              source.assignedTarget?.targetId !== producer.nodeId ||
-              !source.assignedTarget.linkedNodeIds.includes(
-                receipt.evidenceId,
-              ) ||
-              source.resultSnapshot?.sha256 !== receipt.sourceSha256)
-        ) return;
+        if (typeof producer?.nodeId !== "string") return;
+        for (const proof of workerNarrativeSources(receipt, stepIndex)) {
+          const source = steps[proof.stepIndex];
+          const alert = source?.goalReceiptRead &&
+            sentinelDefenseReadArgs(source.goalReceiptRead.args);
+          if (
+            source?.outcome !== "returned" ||
+            (proof.trafficDigest
+              ? source.tool !== SENTINEL_TRAFFIC_READ ||
+                source.trafficRead?.sha256 !== proof.sourceSha256 ||
+                source.trafficRead.evidenceId !== proof.evidenceId ||
+                source.trafficRead.digest !== proof.trafficDigest ||
+                source.trafficRead.revision !== evidenceRevision
+              : proof.upstreamCheck
+              ? source.tool !== "sentinel_defense" ||
+                source.goalReceiptRead?.sha256 !== proof.sourceSha256 ||
+                alert?.alertId !== proof.evidenceId ||
+                alert?.upstreamCheck !== proof.upstreamCheck
+              : source.tool !== ASSIGNED_TARGET_CHECKPOINT_TOOL ||
+                source.assignedTarget?.targetId !== producer.nodeId ||
+                !source.assignedTarget.linkedNodeIds.includes(
+                  proof.evidenceId,
+                ) ||
+                source.resultSnapshot?.sha256 !== proof.sourceSha256)
+          ) return;
+        }
         const committed = narrativeJournal.publish({
           revision,
           taskId: id,
@@ -9110,11 +9117,15 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
         });
         for (const record of page) {
           if (
-            !allowed(
-              record.targetId,
-              record.receipt.evidenceId,
-              record.receipt.trafficDigest,
-              record.receipt.upstreamCheck,
+            !workerNarrativeSources(record.receipt, record.stepIndex).every((
+              source,
+            ) =>
+              allowed(
+                record.targetId,
+                source.evidenceId,
+                source.trafficDigest,
+                source.upstreamCheck,
+              )
             )
           ) continue;
           if (authorized++ < offset) continue;
@@ -11834,9 +11845,23 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
                   return exact ? [exact] : [];
                 })[0];
               if (
-                !verified || verified.args.evidenceId !== admitted.requestId ||
+                !verified ||
+                (verified.args.evidenceId ??
+                    readWorkerNarrativeFactBatch(verified.args)?.[0]
+                      .evidenceId) !== admitted.requestId ||
                 createHash("sha256").update(JSON.stringify(verified.args))
                     .digest("hex") !== admitted.argsDigest
+              ) break;
+              const receipt = readWorkerNarrativeReceipt(
+                JSON.parse(verified.result).receipt,
+              );
+              if (
+                !receipt || receipt.factSources?.some((source) => {
+                  const prior = earlierResults[source.stepIndex]?.content;
+                  return typeof prior !== "string" ||
+                    createHash("sha256").update(prior).digest("hex") !==
+                      source.sourceSha256;
+                })
               ) break;
               progress.push({
                 tool,
@@ -11874,7 +11899,8 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
                 step?.tool !== tool || step.outcome !== "returned" || !args ||
                 admitted?.requestId !==
                   (args.id ?? args.receiptId ?? args.task ?? args.view ??
-                    args.evidenceId ?? args.taskId) ||
+                    args.evidenceId ?? args.facts?.[0].evidenceId ??
+                    args.taskId) ||
                 admitted.argsDigest !==
                   createHash("sha256").update(JSON.stringify(args)).digest(
                     "hex",

@@ -1,3 +1,4 @@
+import { workerNarrativeSources } from "../../../sentinel/worker_narratives.ts";
 import { dirname, join } from "@std/path";
 import { isDeepStrictEqual } from "node:util";
 import { readSentinelGraphFindingReviewScope } from "../../sentinel_finding_review_scope.ts";
@@ -1741,8 +1742,12 @@ export function createTidepoolSentinelHandler(
             }
             const narrative = focused.node.workerNarrative;
             if (
-              (narrative.receipt.trafficDigest ||
-                narrative.receipt.upstreamCheck) &&
+              (narrative.receipt.factSources ||
+                workerNarrativeSources(narrative.receipt, narrative.stepIndex)
+                  .some(
+                    ({ trafficDigest, upstreamCheck }) =>
+                      trafficDigest || upstreamCheck,
+                  )) &&
               !isDeepStrictEqual(
                 narrative,
                 await readWorkerNarrative?.(

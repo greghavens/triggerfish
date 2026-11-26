@@ -8,6 +8,7 @@ import {
   readWorkerNarrativeReceipt,
   SENTINEL_WORKER_NARRATIVE_READ,
   type SentinelWorkerNarrativeReceipt,
+  workerNarrativeSources,
 } from "./worker_narratives.ts";
 import type { SentinelWorkerFindingRecheckRecord } from "./worker_finding_store.ts";
 import {
@@ -1323,17 +1324,23 @@ function addAdaptive(
   if (narrative && narrativeRef) {
     const { id, taskId, targetId, evidenceRevision, stepIndex } = narrative;
     const source = assignments.get(taskId);
-    const evidence = imported.get(narrative.receipt.evidenceId);
     const receipt = readWorkerNarrativeReceipt(narrative.receipt);
-    const evidenceRef = receipt?.upstreamCheck
-      ? derivedRef("observation", "assessment", receipt.evidenceId)
-      : evidence?.kind === "evidence"
-      ? evidence.ref
-      : undefined;
+    const sourceRefs = receipt &&
+      workerNarrativeSources(receipt, stepIndex).map(
+        ({ evidenceId, upstreamCheck }) => {
+          if (upstreamCheck) {
+            return derivedRef("observation", "assessment", evidenceId);
+          }
+          const node = imported.get(evidenceId);
+          return node?.kind === "evidence" ? node.ref : undefined;
+        },
+      );
     if (
       isWorkerNarrativeId(id) && source?.revision &&
       source.nodeId === targetId &&
-      evidenceRef && index.hasNode(evidenceRef) && receipt &&
+      receipt && sourceRefs?.every((id) =>
+        id !== undefined && index.hasNode(id)
+      ) &&
       evidenceRevision === view.evidenceRevision &&
       Number.isSafeInteger(stepIndex) && stepIndex >= 0 && stepIndex < 16 &&
       id === `worker-narrative:${
@@ -1365,7 +1372,9 @@ function addAdaptive(
         narrativeRef,
         "produces",
       );
-      index.addEdge(narrativeRef, evidenceRef, "references");
+      for (const id of new Set(sourceRefs)) {
+        if (id !== undefined) index.addEdge(narrativeRef, id, "references");
+      }
       for (const assignment of assignments.values()) {
         if (
           assignment.nodeId === targetId &&

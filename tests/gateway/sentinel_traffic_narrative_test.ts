@@ -1,4 +1,7 @@
-import { sentinelAlertsPath } from "../../src/sentinel/paths.ts";
+import {
+  sentinelAlertsPath,
+  sentinelTrafficPath,
+} from "../../src/sentinel/paths.ts";
 import { sentinelAlertReference } from "../../src/sentinel/telemetry.ts";
 import {
   assert,
@@ -29,6 +32,7 @@ import { createA2UIHost } from "../../src/tools/tidepool/host/host.ts";
 import { ingestSentinelTraffic } from "../../src/cli/commands/sentinel_traffic.ts";
 import type { HookRunner } from "../../src/core/policy/hooks/hooks.ts";
 import {
+  addSentinelCaseHint,
   advanceAdaptiveSentinel,
   createSentinelModelPlanner,
   readAdaptiveSentinel,
@@ -219,7 +223,11 @@ async function tidepoolNarrative(
   }
 }
 
-async function verifyRetainedNarrative(fromAlert: boolean) {
+async function verifyRetainedNarrative(
+  fromAlert: boolean,
+  perFact = false,
+  denyBatch = false,
+) {
   const baseDir = await Deno.makeTempDir();
   const caseId = fromAlert ? "alert-narrative" : "traffic-narrative";
   const sourceTool = fromAlert ? "sentinel_defense" : "sentinel_traffic_get";
@@ -236,6 +244,9 @@ async function verifyRetainedNarrative(fromAlert: boolean) {
   let planned: string | undefined;
   let peerRead: string | undefined;
   let scopeDenials = 0;
+  let deniedBatch = false;
+  let checkRevokedPlanning = false;
+  let withheldFromPlanner = false;
   let wakeOffset = 0;
   let coordinator:
     | ReturnType<typeof startSentinelAssessmentCoordinator>
@@ -243,6 +254,15 @@ async function verifyRetainedNarrative(fromAlert: boolean) {
   let planner: ReturnType<typeof createSentinelModelPlanner> | undefined;
   const hooks: HookRunner = {
     evaluateHook(hook, { input }) {
+      if (
+        denyBatch && hook === "POST_TOOL_RESPONSE" &&
+        input.tool_name === "sentinel_publish_worker_narrative" &&
+        typeof input.tool_response === "string" &&
+        input.tool_response.startsWith("Error:")
+      ) {
+        publicationResult = input.tool_response;
+        deniedBatch = true;
+      }
       const denied = !allowTraffic && hook === "PRE_TOOL_CALL" &&
         input.tool_name === sourceTool;
       if (denied) scopeDenials++;
@@ -288,6 +308,28 @@ async function verifyRetainedNarrative(fromAlert: boolean) {
         true,
       );
     }
+    const localEvidence = "independent-local-check";
+    if (perFact) {
+      const current = JSON.parse(await Deno.readTextFile(path));
+      const retained = JSON.parse(
+        await Deno.readTextFile(sentinelTrafficPath(path)),
+      );
+      const retainedAsset = retained.nodes.find(({ kind }: { kind: string }) =>
+        kind === "asset"
+      );
+      assert(retainedAsset);
+      current.nodes.push(retainedAsset, {
+        id: localEvidence,
+        kind: "evidence",
+        label: "Saved local check",
+      });
+      current.edges.push({
+        from: localEvidence,
+        to: retainedAsset.id,
+        relation: "observed_on",
+      });
+      await Deno.writeTextFile(path, JSON.stringify(current));
+    }
     const alert = {
       type: "integrity_change" as const,
       asset: "app",
@@ -331,12 +373,28 @@ async function verifyRetainedNarrative(fromAlert: boolean) {
     );
     const sourceModel = createProviderRegistry();
     let sourceDigest: string | undefined;
+    const facts = [{
+      summary: "The linked local record was present.",
+      confidence: "observed",
+      conclusion: "positive",
+      evidenceId: localEvidence,
+    }, {
+      summary: "The retained request did not report an HTTP error.",
+      confidence: "inferred",
+      conclusion: "negative",
+      evidenceId,
+      ...sourceSelection,
+    }];
     sourceModel.register({
       name: "traffic-narrative-source",
       supportsStreaming: false,
       async complete(messages) {
         const results = messages.filter(({ role }) => role === "tool");
-        if (!results.length) {
+        const sourceStep = perFact ? 1 : 0;
+        if (perFact && !results.length) {
+          return complete("", "sentinel_assigned_target");
+        }
+        if (results.length === sourceStep) {
           return complete(
             "",
             sourceTool,
@@ -349,8 +407,8 @@ async function verifyRetainedNarrative(fromAlert: boolean) {
               : { upstreamCheck, alertId: evidenceId },
           );
         }
-        if (results.length === 1) {
-          const source = String(results[0].content);
+        if (results.length === sourceStep + 1) {
+          const source = String(results[sourceStep].content);
           assert(source.startsWith("{"), source);
           assert(
             !source.includes("retained private body") &&
@@ -359,6 +417,10 @@ async function verifyRetainedNarrative(fromAlert: boolean) {
           sourceDigest = createHash("sha256").update(source).digest("hex");
           sourceWaiting = true;
           await publication.promise;
+          if (perFact) {
+            allowTraffic = !denyBatch;
+            return complete("", commit, { facts });
+          }
           return complete("", commit, {
             summary,
             confidence: "observed",
@@ -366,15 +428,48 @@ async function verifyRetainedNarrative(fromAlert: boolean) {
             ...sourceSelection,
           });
         }
-        publicationResult = String(results[1].content);
+        if (denyBatch) {
+          assertStringIncludes(String(results[2].content), "unavailable");
+          return complete(
+            '{"summary":"No observation was published.","followUps":[]}',
+          );
+        }
+        publicationResult = String(results.at(-1)!.content);
         created = JSON.parse(publicationResult);
-        assertEquals(created?.receipt, {
-          summary,
-          confidence: "observed",
-          sourceSha256: sourceDigest,
-          evidenceId,
-          ...sourceSelection,
-        });
+        if (perFact) {
+          const receipt = created?.receipt as {
+            facts: unknown;
+            factSources: unknown;
+          };
+          assertEquals(
+            receipt.facts,
+            facts.map(({ summary, confidence, conclusion }) => ({
+              summary,
+              confidence,
+              conclusion,
+            })),
+          );
+          assertEquals(receipt.factSources, [{
+            evidenceId: localEvidence,
+            stepIndex: 0,
+            sourceSha256: createHash("sha256").update(
+              String(results[0].content),
+            ).digest("hex"),
+          }, {
+            evidenceId,
+            stepIndex: 1,
+            sourceSha256: sourceDigest,
+            ...sourceSelection,
+          }]);
+        } else {
+          assertEquals(created?.receipt, {
+            summary,
+            confidence: "observed",
+            sourceSha256: sourceDigest,
+            evidenceId,
+            ...sourceSelection,
+          });
+        }
         await finishSource.promise;
         sourceFinished = true;
         return complete(
@@ -392,9 +487,23 @@ async function verifyRetainedNarrative(fromAlert: boolean) {
         const prompt = String(
           messages.findLast(({ role }) => role === "user")?.content,
         );
-        const id = JSON.parse(prompt.split("\n").at(-1)!).workerNarratives
-          ?.[0]
-          ?.id;
+        const input = JSON.parse(prompt.split("\n").at(-1)!);
+        if (checkRevokedPlanning) {
+          assertEquals(input.workerNarratives ?? [], []);
+          assert(!prompt.includes(String(created?.id)));
+          const result = messages.findLast(({ role }) => role === "tool");
+          if (!result) {
+            return Promise.resolve(
+              complete("", open, { query: facts[0].summary }),
+            );
+          }
+          const page = JSON.parse(String(result.content));
+          assertEquals(page.observations, []);
+          assertEquals(page.nextOffset, null);
+          withheldFromPlanner = true;
+          return Promise.resolve(complete("[]"));
+        }
+        const id = input.workerNarratives?.[0]?.id;
         if (!id) {
           wakeOffset = 58_750;
           return Promise.resolve(
@@ -472,6 +581,27 @@ async function verifyRetainedNarrative(fromAlert: boolean) {
       "worker received publication result",
       () => !!publicationResult,
     );
+    if (denyBatch) {
+      assert(deniedBatch && scopeDenials > 0);
+      assertStringIncludes(publicationResult!, "unavailable");
+      const db = new DatabaseSync(join(dirname(path), "sentinel-adaptive.db"), {
+        readOnly: true,
+      });
+      try {
+        const table = db.prepare(
+          "SELECT 1 FROM sqlite_schema WHERE name = 'adaptive_worker_narratives'",
+        ).get();
+        assert(
+          !table ||
+            db.prepare(
+                "SELECT COUNT(*) AS count FROM adaptive_worker_narratives",
+              ).get()?.count === 0,
+        );
+      } finally {
+        db.close();
+      }
+      return;
+    }
     assert(publicationResult?.startsWith("{"), publicationResult);
     await waitFor(
       "planner reopened exact published traffic narrative",
@@ -502,6 +632,22 @@ async function verifyRetainedNarrative(fromAlert: boolean) {
     assertEquals(JSON.parse(peerRead!), created);
     assertEquals(sourceFinished, false);
     assertEquals(scopeDenials, 0);
+    if (perFact) {
+      allowTraffic = false;
+      checkRevokedPlanning = true;
+      wakeOffset += 61_000;
+      addSentinelCaseHint(
+        path,
+        "Check whether the scoped evidence is still available.",
+      );
+      planner.advance(state);
+      await waitFor(
+        "revoked fact sources do not appear in planner context or search",
+        () => withheldFromPlanner,
+      );
+      allowTraffic = true;
+      checkRevokedPlanning = false;
+    }
     const selected = {
       kind: "sentinel",
       id: caseId,
@@ -645,3 +791,9 @@ Deno.test("Leased traffic observations wake the planner and retain exact peer ev
 
 Deno.test("Leased alert observations wake the planner and retain exact peer evidence", () =>
   verifyRetainedNarrative(true));
+
+Deno.test("A leased fact batch binds each exact source through planning, peer reads and restoration", () =>
+  verifyRetainedNarrative(false, true));
+
+Deno.test("A leased fact batch denies a revoked secondary atomically", () =>
+  verifyRetainedNarrative(false, true, true));

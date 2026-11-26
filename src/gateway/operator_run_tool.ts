@@ -53,7 +53,10 @@ import {
   SENTINEL_LIVE_BRANCH_PROTECTION,
   SENTINEL_LIVE_REPOSITORY_VISIBILITY,
 } from "../sentinel/github_repository_visibility.ts";
-import { isWorkerNarrativeId } from "../sentinel/worker_narratives.ts";
+import {
+  isWorkerNarrativeId,
+  workerNarrativeSources,
+} from "../sentinel/worker_narratives.ts";
 import { workerNarrativeEvidenceCall } from "./sentinel_worker_narratives.ts";
 import { readSentinelGraphFindingReviewScope } from "./sentinel_finding_review_scope.ts";
 import {
@@ -3159,9 +3162,6 @@ async function authorizeRetainedNarrativeSource(
   record: NonNullable<ReturnType<typeof retainedNarrativeForProvenance>>,
   isCurrent: () => boolean,
 ) {
-  const { evidenceId, trafficDigest, upstreamCheck, sourceSha256 } =
-    record.receipt;
-  if (!trafficDigest && !upstreamCheck) return true;
   const authorize = context?.authorizeSentinelTraceRead;
   const scope = { caseId, revision, taskId: record.taskId };
   const current = () => {
@@ -3170,56 +3170,69 @@ async function authorizeRetainedNarrativeSource(
       retainedNarrativeForProvenance(path, revision, runId, record.id);
     return isCurrent() && isDeepStrictEqual(exact, record);
   };
-  if (upstreamCheck) {
-    const args = { upstreamCheck, alertId: evidenceId };
+  const authorizeSource = async (
+    { evidenceId, trafficDigest, upstreamCheck, sourceSha256 }: ReturnType<
+      typeof workerNarrativeSources
+    >[number],
+  ) => {
+    if (!trafficDigest && !upstreamCheck && !record.receipt.factSources) {
+      return true;
+    }
+    if (upstreamCheck) {
+      const args = { upstreamCheck, alertId: evidenceId };
+      if (
+        !authorize || !current() ||
+        !await authorize(scope, "sentinel_defense", args) || !current()
+      ) return false;
+      const source = await readDefenseCoverage(
+        { snapshotPath: path, assessmentRevision: revision },
+        args,
+        { assignment: { kind: "trace", nodeId: record.targetId } },
+      );
+      return source.startsWith("{") && current() &&
+        createHash("sha256").update(source).digest("hex") === sourceSha256 &&
+        await authorize(scope, "sentinel_defense", args, source) && current();
+    }
+    const graph = workerNarrativeEvidenceCall(evidenceId, revision);
+    const evidence = readSentinelAssessmentRevision(path, revision)?.result
+      .sharedGraph.snapshot?.nodes.find(({ id }) => id === evidenceId);
     if (
-      !authorize || !current() ||
-      !await authorize(scope, "sentinel_defense", args) || !current()
+      !authorize || !evidence || !current() ||
+      !await authorize(scope, graph.name, graph.args) || !current() ||
+      !await authorize(
+        scope,
+        graph.name,
+        graph.args,
+        JSON.stringify({ _classification: "INTERNAL", evidence }),
+      ) || !current()
     ) return false;
-    const source = await readDefenseCoverage(
-      { snapshotPath: path, assessmentRevision: revision },
-      args,
-      { assignment: { kind: "trace", nodeId: record.targetId } },
-    );
-    return source.startsWith("{") && current() &&
+    if (!trafficDigest) return true;
+    const args = { evidenceId, digest: trafficDigest, revision };
+    const load = () => {
+      if (!current()) return;
+      const receipt = readProjectedSentinelTrafficReceipt(
+        path,
+        caseId,
+        revision,
+        args,
+        record.targetId,
+      );
+      return receipt && JSON.stringify(receipt);
+    };
+    const source = load();
+    return !!source && current() &&
       createHash("sha256").update(source).digest("hex") === sourceSha256 &&
-      await authorize(scope, "sentinel_defense", args, source) && current();
-  }
-  if (!trafficDigest) return false;
-  const args = { evidenceId, digest: trafficDigest, revision };
-  const load = () => {
-    if (!current()) return;
-    const receipt = readProjectedSentinelTrafficReceipt(
-      path,
-      caseId,
-      revision,
-      args,
-      record.targetId,
-    );
-    return receipt && JSON.stringify(receipt);
+      await authorize(scope, SENTINEL_TRAFFIC_READ, args) &&
+      current() && load() === source &&
+      await authorize(scope, SENTINEL_TRAFFIC_READ, args, source) &&
+      current() && load() === source;
   };
-  const source = load();
-  const evidence = readSentinelAssessmentRevision(path, revision)?.result
-    .sharedGraph.snapshot?.nodes.find(({ id }) => id === evidenceId);
-  const graph = workerNarrativeEvidenceCall(evidenceId, revision);
-  return !!authorize && !!source && isCurrent() &&
-    !!evidence && await authorize(scope, graph.name, graph.args) &&
-    isCurrent() && load() === source &&
-    await authorize(
-      scope,
-      graph.name,
-      graph.args,
-      JSON.stringify({
-        _classification: "INTERNAL",
-        evidence,
-      }),
-    ) &&
-    isCurrent() && load() === source &&
-    createHash("sha256").update(source).digest("hex") === sourceSha256 &&
-    await authorize(scope, SENTINEL_TRAFFIC_READ, args) &&
-    isCurrent() && load() === source &&
-    await authorize(scope, SENTINEL_TRAFFIC_READ, args, source) &&
-    isCurrent() && load() === source;
+  for (
+    const member of workerNarrativeSources(record.receipt, record.stepIndex)
+  ) {
+    if (!await authorizeSource(member) || !current()) return false;
+  }
+  return current();
 }
 
 export function createOperatorRunToolExecutor(options: {
@@ -7371,16 +7384,26 @@ ${request}`)
                 source.id,
               );
             const record = read();
+            if (!record || !current() || record.targetId !== asset) {
+              return false;
+            }
+            for (
+              const { evidenceId, upstreamCheck } of workerNarrativeSources(
+                record.receipt,
+                record.stepIndex,
+              )
+            ) {
+              if (
+                !await authorize({
+                  ...ref,
+                  action: "node",
+                  node: upstreamCheck
+                    ? `observation:assessment:${evidenceId}`
+                    : `evidence:${evidenceId}`,
+                }) || !current() || !isDeepStrictEqual(read(), record)
+              ) return false;
+            }
             if (
-              !record || !current() || record.targetId !== asset ||
-              !await authorize({
-                ...ref,
-                action: "node",
-                node: record.receipt.upstreamCheck
-                  ? `observation:assessment:${record.receipt.evidenceId}`
-                  : `evidence:${record.receipt.evidenceId}`,
-              }) ||
-              !current() || !isDeepStrictEqual(read(), record) ||
               !await authorizeRetainedNarrativeSource(
                 context,
                 ref.id,
@@ -14325,8 +14348,13 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
         const graphPage = JSON.parse(response);
         const narrative = graphPage.node?.workerNarrative;
         if (
-          (narrative?.receipt.trafficDigest ||
-            narrative?.receipt.upstreamCheck) &&
+          narrative && (
+            narrative.receipt.factSources ||
+            workerNarrativeSources(narrative.receipt, narrative.stepIndex).some(
+              ({ trafficDigest, upstreamCheck }) =>
+                trafficDigest || upstreamCheck,
+            )
+          ) &&
           !await authorizeRetainedNarrativeSource(
             context,
             ref.id,

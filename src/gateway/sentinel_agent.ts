@@ -34,6 +34,7 @@ import {
   sentinelIncidentRecommendationToolName,
 } from "../core/sentinel_incident_review_intent.ts";
 import {
+  authorizeWorkerNarrativeSources,
   currentWorkerNarrative,
   currentWorkerNarrativeEvidence,
   currentWorkerNarrativeScope,
@@ -58,9 +59,11 @@ import {
 import { readAdaptiveRepositoryVisibility } from "../sentinel/adaptive_store.ts";
 import {
   isWorkerNarrativeId,
+  readWorkerNarrativeFactBatch,
   readWorkerNarrativeSubmission,
   SENTINEL_WORKER_NARRATIVE_COMMIT,
   SENTINEL_WORKER_NARRATIVE_READ,
+  type WorkerNarrativeFactSource,
 } from "../sentinel/worker_narratives.ts";
 import { readLinkedSentinelWorkerReview } from "./sentinel_linked_worker_reviews.ts";
 import {
@@ -1245,7 +1248,7 @@ const workerNarrativeRead: ToolDefinition = {
 const workerNarrativeCommit: ToolDefinition = {
   name: SENTINEL_WORKER_NARRATIVE_COMMIT,
   description:
-    "Record a positive or negative conclusion or a batch of distinct conclusions supported by one exact evidence read from this assignment. Confidence describes the strength of the observation.",
+    "Record positive or negative conclusions supported by exact prior evidence reads of this assignment. Confidence describes the strength of each observation.",
   parameters: {
     conclusion: {
       type: "string",
@@ -1259,7 +1262,7 @@ const workerNarrativeCommit: ToolDefinition = {
     facts: {
       type: "array",
       description:
-        "Alternative to summary, confidence, conclusion and detail. Up to eight distinct conclusions supported by the same exact evidence.",
+        "Up to eight distinct conclusions. Supply one top-level evidenceId for a shared source, or give each fact its own evidenceId and any trafficDigest or upstreamCheck. Omit top-level evidence fields when using per-fact evidence.",
       items: {
         type: "object",
         additionalProperties: false,
@@ -1269,6 +1272,9 @@ const workerNarrativeCommit: ToolDefinition = {
           confidence: { type: "string", enum: ["observed", "inferred"] },
           conclusion: { type: "string", enum: ["positive", "negative"] },
           detail: { type: "string", maxLength: 300 },
+          evidenceId: { type: "string" },
+          trafficDigest: { type: "string" },
+          upstreamCheck: { type: "string" },
         },
       },
     },
@@ -1283,8 +1289,7 @@ const workerNarrativeCommit: ToolDefinition = {
     evidenceId: {
       type: "string",
       description:
-        "An exact linked local evidence ID from the assigned target or an approved retained traffic read",
-      required: true,
+        "The exact shared evidence ID when each conclusion uses the same source. Omit for per-fact evidence.",
     },
     upstreamCheck: {
       type: "string",
@@ -4632,7 +4637,8 @@ export function inspectSentinelProvenance(
       !record ||
       ("workerNarrative" in record.node &&
         (record.node.workerNarrative?.receipt.trafficDigest ||
-          record.node.workerNarrative?.receipt.upstreamCheck) &&
+          record.node.workerNarrative?.receipt.upstreamCheck ||
+          record.node.workerNarrative?.receipt.factSources) &&
         !options.allowProtectedNarrative)
     ) return "Error: The requested provenance node is unavailable.";
     return pageProvenance(
@@ -10558,16 +10564,20 @@ function createAgent(
     return {
       isCurrent,
       authorize: () =>
-        authorizeWorkerNarrative(
-          runId,
-          revision,
-          record.targetId,
-          record.receipt.evidenceId,
-          turn.signal,
-          isCurrent,
-          record.receipt.trafficDigest,
-          record.receipt.upstreamCheck,
-          record.receipt.sourceSha256,
+        authorizeWorkerNarrativeSources(
+          record.receipt,
+          (source) =>
+            authorizeWorkerNarrative(
+              runId,
+              revision,
+              record.targetId,
+              source.evidenceId,
+              turn.signal,
+              isCurrent,
+              source.trafficDigest,
+              source.upstreamCheck,
+              source.sourceSha256,
+            ),
         ),
     };
   }
@@ -10597,70 +10607,100 @@ function createAgent(
       if (name === SENTINEL_WORKER_NARRATIVE_COMMIT) {
         const token = options.assignedTaskLeaseToken;
         const parsed = sentinelGoalReceiptReadArguments(name, args);
-        if (!task?.nodeId || !parsed?.evidenceId || !token) return unavailable;
-        const scope = () =>
-          readAssignedModelReview(options)?.id === task.id &&
-          currentWorkerNarrativeEvidence(
-            options.snapshotPath,
-            runId,
-            revision,
-            task.nodeId!,
-            parsed.evidenceId!,
-            parsed.trafficDigest,
-            parsed.upstreamCheck,
-          );
-        const origin = scope();
-        if (!origin) return unavailable;
-        const trafficKey = origin.traffic &&
-          approvedSentinelTrafficAttachmentKey(JSON.stringify(origin.traffic));
-        const source = parsed.trafficDigest
-          ? trafficKey && turn.approvedTrafficReads.get(trafficKey)
-          : parsed.upstreamCheck
-          ? turn.narrativeAlertReads.get(
-            JSON.stringify([parsed.upstreamCheck, parsed.evidenceId]),
-          )
-          : turn.narrativeSource;
+        const batch = readWorkerNarrativeFactBatch(args);
+        const targets = batch ?? (parsed?.evidenceId
+          ? [{
+            evidenceId: parsed.evidenceId,
+            trafficDigest: parsed.trafficDigest,
+            upstreamCheck: parsed.upstreamCheck,
+          }]
+          : undefined);
+        const asset = task?.nodeId;
+        if (!task || !asset || !targets || !token) return unavailable;
+        const sourceProofs: WorkerNarrativeFactSource[] = [];
+        const sourcesCurrent: (() => boolean)[] = [];
+        for (const { evidenceId, trafficDigest, upstreamCheck } of targets) {
+          const scope = () =>
+            readAssignedModelReview(options)?.id === task.id &&
+            currentWorkerNarrativeEvidence(
+              options.snapshotPath,
+              runId,
+              revision,
+              asset,
+              evidenceId,
+              trafficDigest,
+              upstreamCheck,
+            );
+          const origin = scope();
+          if (!origin) return unavailable;
+          const trafficKey = origin.traffic &&
+            approvedSentinelTrafficAttachmentKey(
+              JSON.stringify(origin.traffic),
+            );
+          const source = trafficDigest
+            ? trafficKey && turn.approvedTrafficReads.get(trafficKey)
+            : upstreamCheck
+            ? turn.narrativeAlertReads.get(
+              JSON.stringify([upstreamCheck, evidenceId]),
+            )
+            : turn.narrativeSource;
+          if (
+            !source ||
+            (turn.narrativeBatchStart !== undefined &&
+              source.stepIndex >= turn.narrativeBatchStart) ||
+            (origin.traffic &&
+              createHash("sha256").update(JSON.stringify(origin.traffic))
+                  .digest("hex") !== source.sha256)
+          ) return unavailable;
+          sourceProofs.push({
+            evidenceId,
+            sourceSha256: source.sha256,
+            stepIndex: source.stepIndex,
+            ...(trafficDigest && { trafficDigest }),
+            ...(upstreamCheck && { upstreamCheck }),
+          });
+          sourcesCurrent.push(() => isDeepStrictEqual(scope(), origin));
+        }
+        const [primary] = sourceProofs;
+        const receipt = readWorkerNarrativeSubmission(
+          args,
+          batch ? sourceProofs : primary.sourceSha256,
+        );
+        const current = () => sourcesCurrent.every((check) => check());
         if (
-          !source ||
-          (turn.narrativeBatchStart !== undefined &&
-            source.stepIndex >= turn.narrativeBatchStart) ||
-          Object.hasOwn(args, "sourceSha256")
-        ) return unavailable;
-        const receipt = readWorkerNarrativeSubmission(args, source.sha256);
-        if (!receipt) return unavailable;
-        if (
-          (origin.traffic &&
-            createHash("sha256").update(JSON.stringify(origin.traffic)).digest(
-                "hex",
-              ) !== source.sha256) ||
-          !await authorizeWorkerNarrative(
-            runId,
-            revision,
-            task.nodeId,
-            receipt.evidenceId,
-            turn.signal,
-            () => isDeepStrictEqual(scope(), origin),
-            receipt.trafficDigest,
-            receipt.upstreamCheck,
-            receipt.sourceSha256,
+          !receipt || JSON.stringify(receipt).length > 6000 ||
+          !await authorizeWorkerNarrativeSources(
+            receipt,
+            (source) =>
+              authorizeWorkerNarrative(
+                runId,
+                revision,
+                asset,
+                source.evidenceId,
+                turn.signal,
+                current,
+                source.trafficDigest,
+                source.upstreamCheck,
+                source.sourceSha256,
+              ),
           )
         ) return unavailable;
         const committed = withSentinelAssessmentWriteLock(
           options.snapshotPath,
           () =>
-            scope() && store.commitLeasedWorkerNarrative(
+            current() && store.commitLeasedWorkerNarrative(
               mapped.revision,
               task.id,
               token,
               revision,
-              source.stepIndex,
+              primary.stepIndex,
               receipt,
             ),
         );
         if (!committed) return unavailable;
         if (committed.created) {
           notifyCommittedEvidence({
-            case: origin.caseId,
+            case: locateSentinelCase(options.snapshotPath)!.caseId,
             run_id: runId,
             revision,
             observation_id: committed.observation.id,
@@ -10706,7 +10746,8 @@ function createAgent(
         if (
           typeof query === "string" ||
           candidates.some(({ receipt }) =>
-            receipt.trafficDigest || receipt.upstreamCheck
+            receipt.trafficDigest || receipt.upstreamCheck ||
+            receipt.factSources
           )
         ) {
           const savedPolicy = readSentinelOperatingConstraints(
@@ -10745,23 +10786,29 @@ function createAgent(
               receipt.evidenceId,
               receipt.trafficDigest,
               receipt.upstreamCheck,
+              receipt.factSources,
             ]);
             let allowed = sourceAccess.get(source);
             if (
               allowed === undefined &&
-              (term || receipt.trafficDigest || receipt.upstreamCheck)
+              (term || receipt.trafficDigest || receipt.upstreamCheck ||
+                receipt.factSources)
             ) {
               if (!searchCurrent()) return unavailable;
-              allowed = await authorizeWorkerNarrative(
-                runId,
-                revision,
-                targetId,
-                receipt.evidenceId,
-                turn.signal,
-                searchCurrent,
-                receipt.trafficDigest,
-                receipt.upstreamCheck,
-                receipt.sourceSha256,
+              allowed = await authorizeWorkerNarrativeSources(
+                receipt,
+                (source) =>
+                  authorizeWorkerNarrative(
+                    runId,
+                    revision,
+                    targetId,
+                    source.evidenceId,
+                    turn.signal,
+                    searchCurrent!,
+                    source.trafficDigest,
+                    source.upstreamCheck,
+                    source.sourceSha256,
+                  ),
               );
               if (!searchCurrent()) return unavailable;
               sourceAccess.set(source, allowed);
@@ -10828,16 +10875,20 @@ function createAgent(
           ),
         );
       if (
-        !await authorizeWorkerNarrative(
-          runId,
-          revision,
-          record.targetId,
-          record.receipt.evidenceId,
-          turn.signal,
-          current,
-          record.receipt.trafficDigest,
-          record.receipt.upstreamCheck,
-          record.receipt.sourceSha256,
+        !await authorizeWorkerNarrativeSources(
+          record.receipt,
+          (source) =>
+            authorizeWorkerNarrative(
+              runId,
+              revision,
+              record.targetId,
+              source.evidenceId,
+              turn.signal,
+              current,
+              source.trafficDigest,
+              source.upstreamCheck,
+              source.sourceSha256,
+            ),
         )
       ) return unavailable;
       return boundResult({ _classification: "INTERNAL", ...record });
@@ -11509,7 +11560,8 @@ function createAgent(
                             record.receipt,
                             readWorkerNarrativeSubmission(
                               call.args,
-                              record.receipt.sourceSha256,
+                              record.receipt.factSources ??
+                                record.receipt.sourceSha256,
                             ),
                           ))) ||
                       saved !==
@@ -12110,7 +12162,8 @@ function createAgent(
                   (isSentinelRetainedReadReceipt(name, read)
                     ? read.id ?? read.receiptId ?? "search"
                     : read.id ?? read.receiptId ?? read.task ?? read.view ??
-                      read.evidenceId ?? read.taskId);
+                      read.evidenceId ?? read.facts?.[0].evidenceId ??
+                      read.taskId);
                 return id
                   ? {
                     requestId: id,

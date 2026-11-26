@@ -54,6 +54,7 @@ import { dirname, isAbsolute, join, relative, resolve } from "@std/path";
 import { createHash } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import {
+  readSentinelAssignedTargetReceipt,
   readSentinelGitHubWorkflowReadReceipt,
   SENTINEL_ASSESSMENT_TIMED_OUT,
   withSentinelAssessmentWriteLock,
@@ -405,10 +406,18 @@ function clearRows(db: DatabaseSync, tables: readonly string[]) {
 
 function discardStepExcerpts(db: DatabaseSync, table: string) {
   if (!tableExists(db, table)) return;
+  const step = table === "adaptive_note_steps"
+    // Mixed worker facts retain the source fingerprint after dropping its excerpt.
+    ? `CASE WHEN json_extract(value, '$.tool') = 'sentinel_assigned_target'
+               AND json_type(value, '$.resultSha256') IS NULL
+               AND json_type(value, '$.resultSnapshot.sha256') = 'text'
+        THEN json_set(value, '$.resultSha256', json_extract(value, '$.resultSnapshot.sha256'))
+        ELSE value END`
+    : "value";
   db.exec(`
     UPDATE ${quote(table)}
     SET steps = (
-      SELECT json_group_array(json(json_remove(value,'$.resultSnapshot')))
+      SELECT json_group_array(json(json_remove(${step}, '$.resultSnapshot')))
       FROM json_each(${quote(table)}.steps)
     )
   `);
@@ -715,9 +724,17 @@ function retainedTraceReceiptFields(
       digest(receipt.sha256)
     ) fields.resultSha256 = receipt.sha256;
   }
-  if (step.tool === "sentinel_assigned_target" && !fields.resultSha256) {
+  if (step.tool === "sentinel_assigned_target") {
     const snapshot = step.resultSnapshot as { sha256?: unknown } | undefined;
-    if (digest(snapshot?.sha256)) fields.resultSha256 = snapshot?.sha256;
+    if (!fields.resultSha256 && digest(snapshot?.sha256)) {
+      fields.resultSha256 = snapshot.sha256;
+    }
+    const assigned = step.assignedTarget as { targetId?: unknown } | undefined;
+    const proof = readSentinelAssignedTargetReceipt(
+      assigned,
+      assigned?.targetId,
+    );
+    if (proof && fields.resultSha256) fields.assignedTarget = proof;
   }
 
   if (

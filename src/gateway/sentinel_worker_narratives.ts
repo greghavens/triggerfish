@@ -1,3 +1,8 @@
+import {
+  type SentinelWorkerNarrativeReceipt,
+  type WorkerNarrativeFactSource,
+  workerNarrativeSources,
+} from "../sentinel/worker_narratives.ts";
 import { dirname, join } from "@std/path";
 import { createHash } from "node:crypto";
 import {
@@ -138,21 +143,27 @@ export function currentWorkerNarrative(
   if (record?.targetId !== asset || record.evidenceRevision !== revision) {
     return;
   }
-  const source = currentWorkerNarrativeEvidence(
-    path,
-    runId,
-    revision,
-    asset,
-    record.receipt.evidenceId,
-    record.receipt.trafficDigest,
-    record.receipt.upstreamCheck,
-  );
-  const projection = source?.traffic ?? source?.alertProjection;
-  if (
-    !source || (projection &&
-      createHash("sha256").update(JSON.stringify(projection)).digest("hex") !==
-        record.receipt.sourceSha256)
-  ) return;
+  for (
+    const proof of workerNarrativeSources(record.receipt, record.stepIndex)
+  ) {
+    const source = currentWorkerNarrativeEvidence(
+      path,
+      runId,
+      revision,
+      asset,
+      proof.evidenceId,
+      proof.trafficDigest,
+      proof.upstreamCheck,
+    );
+    const projection = source?.traffic ?? source?.alertProjection;
+    if (
+      !source || (projection &&
+        createHash("sha256").update(JSON.stringify(projection)).digest(
+            "hex",
+          ) !==
+          proof.sourceSha256)
+    ) return;
+  }
   return record;
 }
 
@@ -164,4 +175,17 @@ export function workerNarrativeEvidenceCall(
     name: SENTINEL_PROVENANCE_NODE_READ,
     args: { node: "evidence:" + evidenceId, revision },
   };
+}
+
+/** Complete the same authorization for every source before making a batch visible. */
+export async function authorizeWorkerNarrativeSources(
+  receipt: SentinelWorkerNarrativeReceipt,
+  authorize: (
+    source: WorkerNarrativeFactSource,
+  ) => Promise<boolean> | undefined,
+) {
+  for (const source of workerNarrativeSources(receipt, 0)) {
+    if (!await authorize(source)) return false;
+  }
+  return true;
 }

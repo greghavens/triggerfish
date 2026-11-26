@@ -100,6 +100,7 @@ import {
   parseSentinelAssessmentTemplateBinding,
   parseSentinelGoalSupersession,
   readSentinelAssessmentRevision,
+  readSentinelAssignedTargetReceipt,
   readSentinelRunIdForRevision,
   SENTINEL_ASSESSMENT_TIMED_OUT,
   validSentinelChildDescription,
@@ -108,6 +109,7 @@ import { readNativeWorkflowCitation } from "./native_workflow_evidence.ts";
 import {
   isWorkerNarrativeId,
   readWorkerNarrativeReceipt,
+  workerNarrativeSources,
 } from "./worker_narratives.ts";
 import { validateArchivedSourceSnapshots } from "./archive_source_snapshots.ts";
 import {
@@ -718,12 +720,15 @@ function validateArchivedWorkerNarratives(
             ])).digest("hex")
           }`
       ) throw invalid();
+      const sources = workerNarrativeSources(receipt, stepIndex);
+      const { publicationStepIndex } = row;
+      if (sources[0]?.stepIndex !== stepIndex) throw invalid();
       if (
-        row.publicationStepIndex != null &&
-        (typeof row.publicationStepIndex !== "number" ||
-          !Number.isSafeInteger(row.publicationStepIndex) ||
-          row.publicationStepIndex <= stepIndex ||
-          row.publicationStepIndex >= 16)
+        publicationStepIndex != null &&
+        (typeof publicationStepIndex !== "number" ||
+          !Number.isSafeInteger(publicationStepIndex) ||
+          sources.some(({ stepIndex }) => publicationStepIndex <= stepIndex) ||
+          publicationStepIndex >= 16)
       ) throw invalid();
       if (exact?.revision !== evidenceRevision) {
         const snapshot = readSentinelAssessmentRevision(
@@ -746,69 +751,79 @@ function validateArchivedWorkerNarratives(
         };
       }
       const source = assignment.get(taskId, revision, evidenceRevision);
-      const record = exact.nodes.get(receipt.evidenceId);
       if (
         source?.goalId !== exact.runId || source.nodeId !== targetId ||
-        exact.nodes.get(targetId)?.kind !== "asset" ||
-        (!receipt.upstreamCheck && (
-          record?.kind !== "evidence" || record.executionSource ||
-          record.nativeWorkflowSource ||
-          (!exact.edges.has(JSON.stringify([targetId, record.id])) &&
-            !exact.edges.has(JSON.stringify([record.id, targetId])))
-        ))
+        exact.nodes.get(targetId)?.kind !== "asset"
       ) throw invalid();
-      if (receipt.trafficDigest || receipt.upstreamCheck) {
-        const steps = completeSteps?.get(taskId)?.steps ??
-          archivedSteps?.get(revision, taskId)?.steps;
-        const decoded = typeof steps === "string"
-          ? JSON.parse(steps)
-          : undefined;
+      const steps = completeSteps?.get(taskId)?.steps ??
+        archivedSteps?.get(revision, taskId)?.steps;
+      const decoded = typeof steps === "string" ? JSON.parse(steps) : undefined;
+      for (const proof of sources) {
+        const { evidenceId, sourceSha256, trafficDigest, upstreamCheck } =
+          proof;
+        const record = exact.nodes.get(evidenceId);
+        if (
+          !upstreamCheck && (
+            record?.kind !== "evidence" || record.executionSource ||
+            record.nativeWorkflowSource ||
+            (!exact.edges.has(JSON.stringify([targetId, record.id])) &&
+              !exact.edges.has(JSON.stringify([record.id, targetId])))
+          )
+        ) throw invalid();
         const step = Array.isArray(decoded) && decoded.length <= 16
-          ? decoded[stepIndex]
+          ? decoded[proof.stepIndex]
           : undefined;
-        if (receipt.upstreamCheck) {
-          const proof = step?.goalReceiptRead;
+        if (upstreamCheck) {
+          const receipt = step?.goalReceiptRead;
           const alert = resolveWorkerNarrativeAlert(
             snapshotPath,
             exact.runId,
             evidenceRevision,
             targetId,
-            receipt.evidenceId,
-            receipt.upstreamCheck,
+            evidenceId,
+            upstreamCheck,
             true,
           );
           if (
             !alert || step?.tool !== "sentinel_defense" ||
             step.outcome !== "returned" ||
-            !proof || !isDeepStrictEqual(proof.args, {
-              upstreamCheck: receipt.upstreamCheck,
-              alertId: receipt.evidenceId,
-            }) || proof.sha256 !== receipt.sourceSha256 ||
+            !receipt || !isDeepStrictEqual(receipt.args, {
+              upstreamCheck,
+              alertId: evidenceId,
+            }) || receipt.sha256 !== sourceSha256 ||
             createHash("sha256").update(JSON.stringify(alert.projection))
-                .digest("hex") !== receipt.sourceSha256
+                .digest("hex") !== sourceSha256
           ) throw invalid();
-          continue;
-        }
-        const traffic = readSentinelTrafficReceipt(
-          snapshotPath,
-          evidenceRevision,
-          { evidenceId: receipt.evidenceId, digest: receipt.trafficDigest! },
-          targetId,
-        );
-        const proof = step?.trafficRead;
-        if (
-          !traffic || step?.tool !== "sentinel_traffic_get" ||
-          step.outcome !== "returned" ||
-          proof?.revision !== evidenceRevision ||
-          proof.evidenceId !== receipt.evidenceId ||
-          proof.digest !== receipt.trafficDigest ||
-          proof.sha256 !== receipt.sourceSha256 ||
-          createHash("sha256").update(JSON.stringify({
-              caseId,
-              evidenceRevision,
-              _classification: "INTERNAL",
-              receipt: projectSentinelTrafficMetadata(traffic, targetId),
-            })).digest("hex") !== receipt.sourceSha256
+        } else if (trafficDigest) {
+          const traffic = readSentinelTrafficReceipt(
+            snapshotPath,
+            evidenceRevision,
+            { evidenceId, digest: trafficDigest },
+            targetId,
+          );
+          const receipt = step?.trafficRead;
+          if (
+            !traffic || step?.tool !== "sentinel_traffic_get" ||
+            step.outcome !== "returned" ||
+            receipt?.revision !== evidenceRevision ||
+            receipt.evidenceId !== evidenceId ||
+            receipt.digest !== trafficDigest ||
+            receipt.sha256 !== sourceSha256 ||
+            createHash("sha256").update(JSON.stringify({
+                caseId,
+                evidenceRevision,
+                _classification: "INTERNAL",
+                receipt: projectSentinelTrafficMetadata(traffic, targetId),
+              })).digest("hex") !== sourceSha256
+          ) throw invalid();
+        } else if (
+          receipt.factSources && (
+            step?.tool !== "sentinel_assigned_target" ||
+            step.outcome !== "returned" ||
+            !readSentinelAssignedTargetReceipt(step.assignedTarget, targetId)
+              ?.linkedNodeIds.includes(evidenceId) ||
+            (step.resultSha256 ?? step.resultSnapshot?.sha256) !== sourceSha256
+          )
         ) throw invalid();
       }
     }
