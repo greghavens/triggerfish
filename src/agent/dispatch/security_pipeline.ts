@@ -331,6 +331,7 @@ export async function dispatchApprovedToolCall(
     ToolExecutionContext,
     "ownerSessionId" | "reauthorizeOwnerApproval" | "toolApprovalRequestId"
   >,
+  configuredCurrent?: () => boolean,
 ): Promise<{ resultText: string; blocked: boolean }> {
   const writeDown = enforceIntegrationWriteDownPolicy(call, config);
   if (writeDown.resultText !== undefined) {
@@ -353,7 +354,19 @@ export async function dispatchApprovedToolCall(
       blocked: true,
     };
   }
+  if (configuredCurrent && !configuredCurrent()) {
+    return {
+      resultText: "Error: Tool configuration changed or disallows this role.",
+      blocked: true,
+    };
+  }
   if (beforeAuthorizedDispatch) await beforeAuthorizedDispatch();
+  if (configuredCurrent && !configuredCurrent()) {
+    return {
+      resultText: "Error: Tool configuration changed or disallows this role.",
+      blocked: true,
+    };
+  }
   if (sleeping) {
     return {
       resultText: await executeSleep(call.args, signal),
@@ -419,7 +432,14 @@ export async function dispatchSecurityEnforcedToolCall(
   ) => ReturnType<
     NonNullable<RecoveryToolPersistence["beforeAuthorizedDispatch"]>
   >,
+  configuredCurrent?: () => boolean,
 ): Promise<{ resultText: string; blocked: boolean }> {
+  if (configuredCurrent && !configuredCurrent()) {
+    return {
+      resultText: "Error: Tool is unavailable in this role.",
+      blocked: true,
+    };
+  }
   const { input: secInput, ctx: secCtx } = assembleSecurityContext(
     call,
     config,
@@ -461,6 +481,13 @@ export async function dispatchSecurityEnforcedToolCall(
     secInput,
     audit && toolAuditInput(secInput, call, audit),
   );
+
+  if (configuredCurrent && !configuredCurrent()) {
+    return {
+      resultText: "Error: Tool configuration changed during review.",
+      blocked: true,
+    };
+  }
 
   let currentContext = secCtx;
   let approval: {
@@ -587,6 +614,9 @@ export async function dispatchSecurityEnforcedToolCall(
             throw new Error("The tool assignment is no longer active.");
           }
           signal?.throwIfAborted();
+          if (configuredCurrent && !configuredCurrent()) {
+            throw new Error("Tool configuration changed before dispatch.");
+          }
           commit();
         }),
       signal,
@@ -634,6 +664,7 @@ export async function dispatchSecurityEnforcedToolCall(
           ownerSessionId: session.id,
         }
         : undefined,
+      configuredCurrent,
     );
     if (!response.blocked) approval?.recordHandlerReturn();
     const permitted = await enforcePostToolResponse(
@@ -642,6 +673,13 @@ export async function dispatchSecurityEnforcedToolCall(
       session,
       response,
     );
+    if (configuredCurrent && !configuredCurrent()) {
+      outcome = "blocked";
+      return {
+        resultText: "Error: Tool configuration changed before result delivery.",
+        blocked: true,
+      };
+    }
     if (!permitted.blocked) {
       config.onAuthorizedToolResponse?.(
         call.name,
@@ -746,6 +784,7 @@ export async function authorizeSavedToolResponses(
     }
   }
   if (calls.length !== results.length) return false;
+  const stillConfigured: (() => boolean)[] = [];
   for (const [index, { name, toolCallId, text }] of results.entries()) {
     const { name: tool, args, resultReceipt } = calls[index];
     if (signal?.aborted || (name !== undefined && name !== tool)) return false;
@@ -760,13 +799,22 @@ export async function authorizeSavedToolResponses(
       }
       if (await computeContentHash(text) !== resultReceipt.sha256) return false;
     }
+    const configured = config.configureToolCall?.(tool, args);
+    if (
+      configured &&
+      (!configured.isCurrent() || !isDeepStrictEqual(configured.args, args))
+    ) return false;
+    if (configured) stillConfigured.push(configured.isCurrent);
     const decision = await enforcePostToolResponse(tool, config, session, {
       resultText: text,
       blocked: false,
     });
-    if (decision.blocked) return false;
+    if (decision.blocked || (configured && !configured.isCurrent())) {
+      return false;
+    }
   }
-  return !signal?.aborted && requests.size === 0;
+  return !signal?.aborted && requests.size === 0 &&
+    stillConfigured.every((valid) => valid());
 }
 
 /** Re-evaluate a trusted saved read against current tool policy without dispatch. */
@@ -781,6 +829,7 @@ export async function authorizeSavedToolCalls(
   signal?: AbortSignal,
 ) {
   if (!Array.isArray(calls) || calls.length > 128) return false;
+  const stillConfigured: (() => boolean)[] = [];
   try {
     for (const call of calls) {
       if (
@@ -792,6 +841,13 @@ export async function authorizeSavedToolCalls(
       if (call.name === sleepTool.name && !permitsSleepRole(config)) {
         return false;
       }
+      const configured = config.configureToolCall?.(call.name, call.args);
+      if (
+        configured &&
+        (!configured.isCurrent() ||
+          !isDeepStrictEqual(configured.args, call.args))
+      ) return false;
+      if (configured) stillConfigured.push(configured.isCurrent);
       const projected = persistence?.projectCall({
         ...call,
         args: structuredClone(call.args),
@@ -808,6 +864,7 @@ export async function authorizeSavedToolCalls(
         input,
         toolAuditInput(input, call, projected ?? {}),
       );
+      if (configured && !configured.isCurrent()) return false;
       const { allowed, action, ruleId } = decision.result;
       if (allowed && action === "ALLOW") continue;
       if (
@@ -816,7 +873,7 @@ export async function authorizeSavedToolCalls(
       ) continue;
       return false;
     }
-    return !signal?.aborted;
+    return !signal?.aborted && stillConfigured.every((valid) => valid());
   } catch {
     return false;
   }

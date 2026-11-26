@@ -3,6 +3,11 @@ import {
   readSentinelCompanyScopes,
   recordSentinelCompanyScope,
 } from "../sentinel/company_scope.ts";
+import {
+  parseSentinelToolConfigurationUpdate,
+  sentinelToolConfigurationRoles,
+  sentinelToolConfigurations,
+} from "./sentinel_tool_configuration.ts";
 import type {
   createSentinelRepositoryVisibilityReader,
   SentinelRepositoryVisibilityDestination,
@@ -330,6 +335,7 @@ import {
   reporterConnectorBinding,
   searchSentinelProvenance,
   searchSentinelWorkerTraces,
+  sentinelBuiltinToolDefinition,
   type SentinelReadTrace,
 } from "./sentinel_agent.ts";
 import {
@@ -562,6 +568,9 @@ export const operatorRunTool: ToolDefinition = {
         "hint",
         "profiles",
         "model_route",
+        "sentinel_tool_configuration",
+        "set_sentinel_tool_configuration",
+        "reset_sentinel_tool_configuration",
         "set_model_route",
         "set_model_role",
         "graph",
@@ -1280,6 +1289,16 @@ export const operatorRunTool: ToolDefinition = {
       type: "object",
       description:
         "Typed Boolean assets filter. Use {and:[...]}, {or:[...]}, {not:...}, or {field,op,value}. Text fields service, technology, url, title, ip, domain and registrationId accept contains/eq/ne. Numeric port and status accept eq/ne/gt/gte/lt/lte. Omit exact assetIds.",
+    },
+    builtinTool: {
+      type: "string",
+      description:
+        "Exact registered Sentinel built-in name for an operator settings review.",
+    },
+    builtinSettings: {
+      type: "object",
+      description:
+        "Reviewed settings with enabled, roles (chat/planner/worker/delegate), optional description and parameter description/default overrides. Existing role restrictions always apply.",
     },
     assetText: {
       type: "string",
@@ -3159,6 +3178,73 @@ export function createOperatorRunToolExecutor(options: {
           canFlowTo(classification, context?.ceiling ?? "PUBLIC"));
     }
     const action = args.action;
+    if (
+      action === "sentinel_tool_configuration" ||
+      action === "set_sentinel_tool_configuration" ||
+      action === "reset_sentinel_tool_configuration"
+    ) {
+      const { builtinTool, builtinSettings, expectedVersion, requestId } = args;
+      const authorize = context?.authorizeOwnerRunCall;
+      const inspect = action === "sentinel_tool_configuration";
+      const reset = action === "reset_sentinel_tool_configuration";
+      if (
+        !context?.authenticatedOwnerSessionId || !authorize ||
+        !canFlowTo("INTERNAL", context.ceiling ?? "PUBLIC") ||
+        typeof builtinTool !== "string" ||
+        !Object.keys(args).every((key) =>
+          [
+            "action",
+            "builtinTool",
+            ...(inspect ? [] : ["expectedVersion", "requestId"]),
+            ...(!inspect && !reset ? ["builtinSettings"] : []),
+          ].includes(key)
+        )
+      ) return unavailable;
+      const definition = sentinelBuiltinToolDefinition(builtinTool);
+      if (!definition) return unavailable;
+      const configurations = sentinelToolConfigurations(options.baseDir);
+      if (inspect) {
+        const current = configurations.read(builtinTool);
+        return safeProjection({
+          definition,
+          version: current?.version ?? 0,
+          settings: current?.settings ?? {
+            enabled: true,
+            roles: sentinelToolConfigurationRoles,
+          },
+        });
+      }
+      const mutation = parseSentinelToolConfigurationUpdate(
+        builtinTool,
+        reset
+          ? { enabled: true, roles: sentinelToolConfigurationRoles }
+          : builtinSettings,
+        expectedVersion,
+        requestId,
+      );
+      if (
+        !mutation || Object.keys(mutation.settings.parameters ?? {}).some(
+          (key) => !Object.hasOwn(definition.parameters, key),
+        )
+      ) return unavailable;
+      const saved = configurations.receipt(mutation);
+      if (saved) return safeProjection({ settingsReceipt: saved });
+      if (
+        (configurations.read(builtinTool)?.version ?? 0) !==
+          mutation.expectedVersion ||
+        !await options.confirm(
+          `Approve these exact Sentinel built-in settings?
+${JSON.stringify(mutation)}`,
+        ) || !await authorize(args)
+      ) return unavailable;
+      const receipt = configurations.commit(
+        mutation,
+        context.authenticatedOwnerSessionId,
+      );
+      return receipt
+        ? safeProjection({ settingsReceipt: receipt })
+        : unavailable;
+    }
     if (args.restoreStatus !== undefined && action !== "archive_catalog") {
       return unavailable;
     }

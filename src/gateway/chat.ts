@@ -359,6 +359,7 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
                       "list",
                       "profiles",
                       "model_route",
+                      "sentinel_tool_configuration",
                       "inspect",
                       "graph",
                       "findings",
@@ -455,7 +456,9 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
               return config.hookRunner.evaluateHook(hook, {
                 ...context,
                 input: { ...context.input, ...meta },
-                auditInput: action === "set_company_scope" ||
+                auditInput: action === "set_sentinel_tool_configuration" ||
+                    action === "reset_sentinel_tool_configuration" ||
+                    action === "set_company_scope" ||
                     action === "preview_membership" ||
                     action === "set_case_membership" ||
                     action === "add_case_membership" ||

@@ -18,6 +18,7 @@ export interface ToolDefinition {
       readonly type: string;
       readonly description: string;
       readonly required?: boolean;
+      readonly default?: string | number | boolean;
       readonly items?: Readonly<Record<string, unknown>>;
       readonly enum?: readonly string[];
     }>

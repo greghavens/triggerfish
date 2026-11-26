@@ -74,6 +74,7 @@ async function dispatchSingleToolCall(
   ) => ReturnType<
     NonNullable<RecoveryToolPersistence["beforeAuthorizedDispatch"]>
   >,
+  configuredCurrent?: () => boolean,
 ): Promise<{ resultText: string; blocked: boolean }> {
   const execute = (executor: ToolExecutor) =>
     dispatchSecurityEnforcedToolCall(
@@ -85,6 +86,7 @@ async function dispatchSingleToolCall(
       signal,
       sessionKey,
       beforeAuthorizedDispatch,
+      configuredCurrent,
     );
   if (call.name === "read_more") {
     const cacheId = typeof call.args.cache_id === "string"
@@ -182,19 +184,36 @@ async function emitToolResult(
   name: string,
   result: string,
   blocked: boolean,
+  configurationIsCurrent?: () => boolean,
 ) {
   const allowed = await authorizeToolEvent(
     state,
     session,
     targetClassification,
     result,
-  );
+  ) && (configurationIsCurrent?.() ?? true);
   state.emit({
     type: "tool_result",
     name,
     result: allowed ? result : "Tool result withheld by the output policy.",
     blocked: blocked || !allowed,
   });
+}
+
+/** Freeze scalar defaults and the settings revision used for the effective call. */
+export function prepareConfiguredToolCall(
+  config: OrchestratorConfig,
+  call: ParsedToolCall,
+): ParsedToolCall {
+  if (call.argsParseError || call.configurationIsCurrent) return call;
+  const configured = config.configureToolCall?.(call.name, call.args);
+  return configured
+    ? {
+      ...call,
+      args: configured.args,
+      configurationIsCurrent: configured.isCurrent,
+    }
+    : call;
 }
 
 /** Execute a single tool call with event emission and format the result. */
@@ -208,6 +227,7 @@ async function executeAndFormatToolCall(
   signal?: AbortSignal,
   trace?: (entry: ToolDispatchOutcome) => void,
 ): Promise<FormattedToolCallResult> {
+  call = prepareConfiguredToolCall(orchestratorState.config, call);
   function traceOutcome(
     outcome: ToolDispatchOutcome["outcome"],
     payload?: () => ToolDispatchOutcome["approvedPayload"],
@@ -289,7 +309,7 @@ async function executeAndFormatToolCall(
       bumpersBlocked: false,
     };
   }
-  const { resultText, blocked } = await dispatchSingleToolCall(
+  const dispatch = await dispatchSingleToolCall(
     call,
     orchestratorState,
     orchestratorState.config,
@@ -299,10 +319,16 @@ async function executeAndFormatToolCall(
     signal,
     persistence?.beforeAuthorizedDispatch &&
       ((ruleId) => persistence.beforeAuthorizedDispatch!(offered, ruleId)),
+    call.configurationIsCurrent,
   ).catch((error: unknown) => {
     traceOutcome("failed");
     throw error;
   });
+  const settingsAreCurrent = call.configurationIsCurrent?.() ?? true;
+  const resultText = settingsAreCurrent
+    ? dispatch.resultText
+    : "Error: Tool is unavailable under the current configuration.";
+  const blocked = dispatch.blocked || !settingsAreCurrent;
   const projected = persistence
     ? safeArgs &&
       persistence.projectResult(offered, { text: resultText, blocked })
@@ -334,9 +360,11 @@ async function executeAndFormatToolCall(
     call.name,
     cappedText,
     blocked,
+    call.configurationIsCurrent,
   );
 
-  if (safeArgs && projected !== undefined) {
+  const deliveryIsCurrent = call.configurationIsCurrent?.() ?? true;
+  if (deliveryIsCurrent && safeArgs && projected !== undefined) {
     await recordToolCallLineageAndPersist(
       persistence ? { ...call, args: safeArgs } : call,
       projected,
@@ -348,8 +376,10 @@ async function executeAndFormatToolCall(
   }
 
   return {
-    text: cappedText,
-    ...(blocked && { blocked }),
+    text: deliveryIsCurrent
+      ? cappedText
+      : "Error: Tool is unavailable under the current configuration.",
+    ...((blocked || !deliveryIsCurrent) && { blocked: true }),
     toolName: call.name,
     ...(call.id ? { toolCallId: call.id } : {}),
     bumpersBlocked,

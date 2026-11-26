@@ -13,6 +13,7 @@ import { parseNativeToolCalls } from "../dispatch/tool_format.ts";
 import {
   BUMPERS_BLOCK_USER_RESPONSE,
   orchestrateToolCallBatch,
+  prepareConfiguredToolCall,
 } from "../dispatch/tool_dispatch.ts";
 import { deliverFinalResponse } from "../dispatch/response_handling.ts";
 import {
@@ -329,6 +330,40 @@ async function handleToolCallsIteration(
   ctx: AgentLoopContext,
   iter: IterationData & { parsedCalls: readonly ParsedToolCall[] },
 ): Promise<Result<void, string>> {
+  const configuredArgs = new Map<string, Record<string, unknown>>();
+  if (ctx.state.config.configureToolCall) {
+    iter = {
+      ...iter,
+      parsedCalls: iter.parsedCalls.map((call) => {
+        const prepared = prepareConfiguredToolCall(ctx.state.config, call);
+        if (call.id && prepared.args !== call.args) {
+          configuredArgs.set(call.id, prepared.args);
+        }
+        return prepared;
+      }),
+    };
+    if (configuredArgs.size && iter.completion.toolCalls) {
+      iter = {
+        ...iter,
+        completion: {
+          ...iter.completion,
+          toolCalls: iter.completion.toolCalls.map((raw) => {
+            if (!raw || typeof raw !== "object") return raw;
+            const call = raw as Record<string, unknown>;
+            const args = typeof call.id === "string" &&
+              configuredArgs.get(call.id);
+            if (!args) return raw;
+            if (call.type === "tool_use") return { ...call, input: args };
+            if (!call.function || typeof call.function !== "object") return raw;
+            return {
+              ...call,
+              function: { ...call.function, arguments: JSON.stringify(args) },
+            };
+          }),
+        },
+      };
+    }
+  }
   if (ctx.beforeToolBatch) {
     if (ctx.signal?.aborted) {
       return { ok: false, error: "Operation cancelled by user" };

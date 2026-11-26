@@ -162,6 +162,14 @@ export interface OrchestratorConfig {
     tools: readonly ToolDefinition[],
     isOwner: boolean,
   ) => readonly ToolDefinition[];
+  /** Optional settings snapshot for a registered tool, held through dispatch. */
+  readonly configureToolCall?: (
+    name: string,
+    args: Readonly<Record<string, unknown>>,
+  ) => {
+    readonly args: Record<string, unknown>;
+    readonly isCurrent: () => boolean;
+  } | undefined;
   /**
    * Message store for persisting conversation records.
    * When absent, conversation persistence is disabled (backward compatible).

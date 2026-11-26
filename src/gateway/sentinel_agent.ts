@@ -1,4 +1,9 @@
 import {
+  configureSentinelToolDefinition,
+  type SentinelToolConfigurationRole,
+  sentinelToolConfigurations,
+} from "./sentinel_tool_configuration.ts";
+import {
   parseSentinelScopeRuleIntent,
   sentinelScopeRuleToolName,
 } from "../core/sentinel_scope_rule_intent.ts";
@@ -5515,6 +5520,49 @@ function sentinelSession(
   );
 }
 
+/** Canonical built-ins eligible for reviewed, subtractive configuration. */
+export function sentinelBuiltinToolDefinition(name: string) {
+  return [
+    ...graphTools,
+    graphOverviewTool,
+    ...sentinelEvidenceDigestTools,
+    ...sentinelTrafficTools,
+    sentinelFindingTrafficListTool,
+    sharedAssetTool,
+    sharedTopologySourceTool,
+    sharedFindingSourceTool,
+    assessmentTool,
+    workerTool,
+    assignedTargetTool,
+    workerIncidentRecommendationTool,
+    assignedExecutionEvidenceTool,
+    sentinelReadGraphFact,
+    sentinelPublishGraphFact,
+    workerNarrativeRead,
+    workerNarrativeCommit,
+    priorAssignedEvidenceTool,
+    savedWorkflowReceiptTool,
+    sharedWorkerReviewTool,
+    intermediateWorkflowObservationTool,
+    ...sentinelFindingWriteTools,
+    proposeWorkerGoalTool,
+    proveWorkerGoalTool,
+    sentinelFindingTrafficAttachTool,
+    submitAssetDiscoveryTool,
+    sharedAssetDiscoveriesTool,
+    liveWorkflowStatusTool,
+    publishWorkflowObservationTool,
+    liveBranchProtectionTool,
+    liveRepositoryVisibilityTool,
+    savedRepositoryVisibilityTool,
+    plannerStopTool,
+    plannerSteerTool,
+    plannerFindingReviewTool,
+    plannerScopeRuleTool,
+    caseExecutionEvidenceTool,
+  ].find((definition) => definition.name === name);
+}
+
 function plannerTodoTimestamp(value: string): boolean {
   return /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/.test(value) &&
     Number.isFinite(Date.parse(value));
@@ -5879,6 +5927,17 @@ function createAgent(
     publishWorkflowObservationTool.name,
   ]);
   const toolNames = new Set(toolDefs.map(({ name }) => name));
+  const configurationBaseDir = options.sharedInventoryBaseDir ??
+    locateSentinelCase(options.snapshotPath)?.baseDir;
+  const toolConfiguration = configurationBaseDir &&
+    sentinelToolConfigurations(configurationBaseDir);
+  const toolRole: SentinelToolConfigurationRole = canDelegate
+    ? "chat"
+    : canReadPlannerCase
+    ? "planner"
+    : options.assignedTaskLeaseToken
+    ? "worker"
+    : "delegate";
 
   // The base orchestrator's final summarization path also uses this wrapper,
   // so abort applies to every provider call, including a forced summary.
@@ -6948,11 +7007,46 @@ function createAgent(
     },
     tools: toolDefs,
     filterTools: (tools) =>
-      tools.filter(({ name }) => toolNames.has(name)).map((tool) =>
-        tool.name === sentinelInventoryTool.name
+      tools.flatMap((tool) => {
+        if (!toolNames.has(tool.name)) return [];
+        const source = tool.name === sentinelInventoryTool.name
           ? sentinelInventoryToolForScope(options)
-          : tool
-      ),
+          : tool;
+        const selected = configureSentinelToolDefinition(
+          source,
+          toolRole,
+          toolConfiguration ? toolConfiguration.read(tool.name) : undefined,
+        );
+        return selected ? [selected] : [];
+      }),
+    ...(toolConfiguration && {
+      configureToolCall(name, args) {
+        const definition = toolDefs.find((tool) => tool.name === name);
+        if (!definition || !name.startsWith("sentinel_")) return;
+        const receipt = toolConfiguration.read(name);
+        const selected = configureSentinelToolDefinition(
+          definition,
+          toolRole,
+          receipt,
+        );
+        let updated: Record<string, unknown> | undefined;
+        for (
+          const [key, { default: fallback }] of Object.entries(
+            selected?.parameters ?? {},
+          )
+        ) {
+          if (!Object.hasOwn(args, key) && fallback !== undefined) {
+            (updated ??= { ...args })[key] = fallback;
+          }
+        }
+        return {
+          args: updated ?? args,
+          isCurrent: () =>
+            selected !== undefined &&
+            toolConfiguration.read(name)?.version === receipt?.version,
+        };
+      },
+    }),
     maxIterations: canDelegate
       ? 8
       : reporter

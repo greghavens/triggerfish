@@ -23,6 +23,7 @@ function convertParameterToProperty(
     type: v.type,
     description: v.description,
   };
+  if (v.default !== undefined) prop.default = v.default;
   if (v.items) prop.items = v.items;
   if (v.enum) prop.enum = v.enum;
   return prop;
