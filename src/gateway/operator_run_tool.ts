@@ -1131,6 +1131,11 @@ export const operatorRunTool: ToolDefinition = {
       description:
         "Exact graph node for assignment or saved provenance ID for inspection",
     },
+    latestResult: {
+      type: "boolean",
+      description:
+        "Select the last committed returned step of an interrupted or stopped worker with worker_trace_result. Omit stepIndices.",
+    },
     stepIndices: {
       type: "array",
       items: { type: "integer" },
@@ -1308,6 +1313,7 @@ export const sentinelOperatorCaseReadParameters = [
   "digestId",
   "taskId",
   "stepIndices",
+  "latestResult",
   "workflowRunNumber",
 ] as const;
 
@@ -2479,6 +2485,11 @@ export function createOperatorRunToolExecutor(options: {
       args.includeFrontier !== undefined &&
       (action !== "graph_overview" || args.includeFrontier !== true ||
         !canFlowTo("INTERNAL", context?.ceiling ?? "PUBLIC"))
+    ) return unavailable;
+    if (
+      args.latestResult !== undefined &&
+      (action !== "worker_trace_result" || args.latestResult !== true ||
+        args.stepIndices !== undefined || args.workflowRunNumber !== undefined)
     ) return unavailable;
     if (args.trafficReference !== undefined && action !== "hint") {
       return unavailable;
@@ -6664,7 +6675,7 @@ ${JSON.stringify({ run: ref, runId: exactRunId, adaptiveRevision, ...scope })}`,
               "offset",
               ...(nativeAttach ? ["controlId", "validUntil"] : []),
               ...(progress
-                ? ["taskId", "stepIndices", "workflowRunNumber"]
+                ? ["taskId", "stepIndices", "workflowRunNumber", "latestResult"]
                 : ["query"]),
             ]
               .includes(key)
@@ -6690,13 +6701,32 @@ ${JSON.stringify({ run: ref, runId: exactRunId, adaptiveRevision, ...scope })}`,
             item.taskId === taskId
           );
           if (result) {
+            const workerStatus = worker?.archivedProgress &&
+                worker.status !== "stopped"
+              ? "interrupted"
+              : worker?.status;
+            const latest = args.latestResult === true;
+            const index = latest
+              ? (workerStatus === "stopped" || workerStatus === "interrupted")
+                ? worker?.progressSteps?.findLastIndex(({ outcome }) =>
+                  outcome === "returned"
+                )
+                : undefined
+              : Array.isArray(stepIndices) && stepIndices.length === 1
+              ? stepIndices[0]
+              : undefined;
             if (
-              !Array.isArray(stepIndices) || stepIndices.length !== 1 ||
+              typeof index !== "number" || index < 0 ||
               args.offset !== undefined || args.limit !== undefined
             ) {
               return unavailable;
             }
-            const [index] = stepIndices;
+            const projectResult = (value: Record<string, unknown>) =>
+              safeProjection({
+                ...value,
+                ...(latest && { status: workerStatus }),
+                ...(latest && worker?.archivedProgress && { archived: true }),
+              });
             const savedStep = (
               state: typeof history,
             ): SentinelReadTrace | undefined => {
@@ -6770,7 +6800,7 @@ ${JSON.stringify({ run: ref, runId: exactRunId, adaptiveRevision, ...scope })}`,
                 current?.goal.id !== runId ||
                 !isDeepStrictEqual(savedStep(current), step)
               ) return unavailable;
-              return safeProjection({
+              return projectResult({
                 run: ref,
                 runId,
                 taskId,
@@ -6816,7 +6846,7 @@ ${JSON.stringify({ run: ref, runId: exactRunId, adaptiveRevision, ...scope })}`,
                 current?.goal.id !== runId ||
                 !isDeepStrictEqual(savedStep(current), step)
               ) return unavailable;
-              return safeProjection({ run: ref, runId, taskId, index, result });
+              return projectResult({ run: ref, runId, taskId, index, result });
             }
             if (step?.tool === "sentinel_assigned_target") {
               const task = history?.tasks.find(({ id }) => id === taskId);
@@ -6859,7 +6889,7 @@ ${JSON.stringify({ run: ref, runId: exactRunId, adaptiveRevision, ...scope })}`,
                 current?.goal.id !== runId ||
                 !isDeepStrictEqual(savedStep(current), step)
               ) return unavailable;
-              return safeProjection({
+              return projectResult({
                 run: ref,
                 runId,
                 taskId,
@@ -6907,7 +6937,7 @@ ${JSON.stringify({ run: ref, runId: exactRunId, adaptiveRevision, ...scope })}`,
                 current?.goal.id !== runId ||
                 !isDeepStrictEqual(savedStep(current), step)
               ) return unavailable;
-              return safeProjection({
+              return projectResult({
                 run: ref,
                 runId,
                 taskId,
@@ -6960,7 +6990,7 @@ ${JSON.stringify({ run: ref, runId: exactRunId, adaptiveRevision, ...scope })}`,
                 current?.goal.id !== runId ||
                 !isDeepStrictEqual(savedStep(current), step)
               ) return unavailable;
-              return safeProjection({
+              return projectResult({
                 run: ref,
                 runId,
                 taskId,
@@ -7012,7 +7042,7 @@ ${JSON.stringify({ run: ref, runId: exactRunId, adaptiveRevision, ...scope })}`,
                 current?.goal.id !== runId ||
                 !isDeepStrictEqual(savedStep(current), step)
               ) return unavailable;
-              return safeProjection({
+              return projectResult({
                 run: ref,
                 runId,
                 taskId,
@@ -7066,7 +7096,7 @@ ${JSON.stringify({ run: ref, runId: exactRunId, adaptiveRevision, ...scope })}`,
                 current?.goal.id !== runId ||
                 !isDeepStrictEqual(savedStep(current), step)
               ) return unavailable;
-              return safeProjection({
+              return projectResult({
                 run: ref,
                 runId,
                 taskId,
@@ -7174,7 +7204,7 @@ ${JSON.stringify({ run: ref, runId: exactRunId, adaptiveRevision, ...scope })}`,
                 current?.goal.id !== runId ||
                 !isDeepStrictEqual(savedStep(current), step)
               ) return unavailable;
-              return safeProjection({
+              return projectResult({
                 run: ref,
                 runId,
                 taskId,
@@ -7269,7 +7299,7 @@ ${JSON.stringify({ run: ref, runId: exactRunId, adaptiveRevision, ...scope })}`,
                 current?.goal.id !== runId ||
                 !isDeepStrictEqual(savedStep(current), step)
               ) return unavailable;
-              return safeProjection({
+              return projectResult({
                 run: ref,
                 runId,
                 taskId,
@@ -7320,7 +7350,7 @@ ${JSON.stringify({ run: ref, runId: exactRunId, adaptiveRevision, ...scope })}`,
                 current?.goal.id !== runId ||
                 !isDeepStrictEqual(savedStep(current), step)
               ) return unavailable;
-              return safeProjection({
+              return projectResult({
                 run: ref,
                 runId,
                 taskId,
@@ -7378,7 +7408,7 @@ ${JSON.stringify({ run: ref, runId: exactRunId, adaptiveRevision, ...scope })}`,
                 current?.goal.id !== runId ||
                 !isDeepStrictEqual(savedStep(current), step)
               ) return unavailable;
-              return safeProjection({
+              return projectResult({
                 run: ref,
                 runId,
                 taskId,
@@ -7440,7 +7470,7 @@ ${JSON.stringify({ run: ref, runId: exactRunId, adaptiveRevision, ...scope })}`,
                 current?.goal.id !== runId ||
                 !isDeepStrictEqual(savedStep(current), step)
               ) return unavailable;
-              return safeProjection({ run: ref, runId, taskId, index, result });
+              return projectResult({ run: ref, runId, taskId, index, result });
             }
             if (step?.tool === "sentinel_graph_facts") {
               const task = history?.tasks.find(({ id }) => id === taskId);
@@ -7491,7 +7521,7 @@ ${JSON.stringify({ run: ref, runId: exactRunId, adaptiveRevision, ...scope })}`,
                 current?.goal.id !== runId ||
                 !isDeepStrictEqual(savedStep(current), step)
               ) return unavailable;
-              return safeProjection({
+              return projectResult({
                 run: ref,
                 runId,
                 taskId,
@@ -7562,7 +7592,7 @@ ${JSON.stringify({ run: ref, runId: exactRunId, adaptiveRevision, ...scope })}`,
                 current?.goal.id !== runId ||
                 !isDeepStrictEqual(savedStep(current), step)
               ) return unavailable;
-              return safeProjection({ run: ref, runId, taskId, index, result });
+              return projectResult({ run: ref, runId, taskId, index, result });
             }
             if (step?.tool === "sentinel_intermediate_workflow_observation") {
               const authorize = context.authorizeSentinelTraceRead;
@@ -7629,7 +7659,7 @@ ${JSON.stringify({ run: ref, runId: exactRunId, adaptiveRevision, ...scope })}`,
                 current?.goal.id !== runId ||
                 !isDeepStrictEqual(savedStep(current), step)
               ) return unavailable;
-              return safeProjection({
+              return projectResult({
                 run: ref,
                 runId,
                 taskId,
@@ -7674,7 +7704,7 @@ ${JSON.stringify({ run: ref, runId: exactRunId, adaptiveRevision, ...scope })}`,
                 current?.goal.id !== runId ||
                 !isDeepStrictEqual(savedStep(current), step)
               ) return unavailable;
-              return safeProjection({
+              return projectResult({
                 run: ref,
                 runId,
                 taskId,
@@ -7721,7 +7751,7 @@ ${JSON.stringify({ run: ref, runId: exactRunId, adaptiveRevision, ...scope })}`,
                 current?.goal.id !== runId ||
                 !isDeepStrictEqual(savedStep(current), step)
               ) return unavailable;
-              return safeProjection({
+              return projectResult({
                 run: ref,
                 runId,
                 taskId,
@@ -7792,7 +7822,7 @@ ${JSON.stringify({ run: ref, runId: exactRunId, adaptiveRevision, ...scope })}`,
                 saved.outcome !== "returned" || saved.target !== record.id ||
                 saved.assetDiscoveryRequestId !== requestId
               ) return unavailable;
-              return safeProjection({
+              return projectResult({
                 run: ref,
                 runId,
                 taskId,
@@ -7849,7 +7879,7 @@ ${JSON.stringify({ run: ref, runId: exactRunId, adaptiveRevision, ...scope })}`,
                 saved.outcome !== "returned" || saved.target !== step.target ||
                 saved.goalProofRequestId !== requestId
               ) return unavailable;
-              return safeProjection({
+              return projectResult({
                 run: ref,
                 runId,
                 taskId,
@@ -7901,7 +7931,7 @@ ${JSON.stringify({ run: ref, runId: exactRunId, adaptiveRevision, ...scope })}`,
                 current?.goal.id !== runId || saved?.tool !== step.tool ||
                 saved.outcome !== "returned" || saved.target !== proposalId
               ) return unavailable;
-              return safeProjection({
+              return projectResult({
                 run: ref,
                 runId,
                 taskId,
@@ -7961,7 +7991,7 @@ ${JSON.stringify({ run: ref, runId: exactRunId, adaptiveRevision, ...scope })}`,
                 current?.goal.id !== runId || saved?.tool !== step.tool ||
                 saved.outcome !== "returned" || saved.target !== observationId
               ) return unavailable;
-              return safeProjection({
+              return projectResult({
                 run: ref,
                 runId,
                 taskId,
@@ -8011,7 +8041,7 @@ ${JSON.stringify({ run: ref, runId: exactRunId, adaptiveRevision, ...scope })}`,
                 current?.goal.id !== runId || saved?.tool !== step.tool ||
                 saved.outcome !== "returned" || saved.target !== factId
               ) return unavailable;
-              return safeProjection({
+              return projectResult({
                 run: ref,
                 runId,
                 taskId,
@@ -8101,7 +8131,7 @@ ${JSON.stringify({ run: ref, runId: exactRunId, adaptiveRevision, ...scope })}`,
                 current?.goal.id !== runId || saved?.tool !== step.tool ||
                 saved.outcome !== "returned" || saved.target !== receiptId
               ) return unavailable;
-              return safeProjection({
+              return projectResult({
                 run: ref,
                 runId,
                 taskId,
@@ -8165,7 +8195,7 @@ ${JSON.stringify({ run: ref, runId: exactRunId, adaptiveRevision, ...scope })}`,
                 current?.goal.id !== runId || saved?.tool !== step.tool ||
                 saved.outcome !== "returned" || saved.target !== linkId
               ) return unavailable;
-              return safeProjection({
+              return projectResult({
                 run: ref,
                 runId,
                 taskId,
@@ -8240,7 +8270,7 @@ ${JSON.stringify({ run: ref, runId: exactRunId, adaptiveRevision, ...scope })}`,
                     sentinelTrafficPageReference(saved.trafficSearchPage),
                   ) !== JSON.stringify(page)
               ) return unavailable;
-              return safeProjection({
+              return projectResult({
                 run: ref,
                 runId,
                 taskId,
@@ -8379,7 +8409,7 @@ ${JSON.stringify({ run: ref, runId: exactRunId, adaptiveRevision, ...scope })}`,
                 saved.outcome !== "returned" ||
                 JSON.stringify(bindingFor(saved)) !== JSON.stringify(binding)
               ) return unavailable;
-              return safeProjection({
+              return projectResult({
                 run: ref,
                 runId,
                 taskId,
@@ -8477,7 +8507,7 @@ ${JSON.stringify({ run: ref, runId: exactRunId, adaptiveRevision, ...scope })}`,
                   ? safeProjection(attached)
                   : unavailable;
               }
-              return safeProjection({
+              return projectResult({
                 run: ref,
                 runId,
                 taskId,
@@ -8531,7 +8561,7 @@ ${JSON.stringify({ run: ref, runId: exactRunId, adaptiveRevision, ...scope })}`,
             const hash = createHash("sha256").update(JSON.stringify(retained))
               .digest("hex");
             if (hash !== digest || !isCurrent()) return unavailable;
-            return safeProjection({
+            return projectResult({
               run: ref,
               runId,
               taskId,

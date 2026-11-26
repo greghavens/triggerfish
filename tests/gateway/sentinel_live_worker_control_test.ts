@@ -150,6 +150,7 @@ async function withOwnerControl(
     sentinelMode?: boolean;
     onConfirm?: () => void;
     graphRetries?: boolean;
+    deniesSavedTarget?: (hook: string) => boolean;
   } = {},
 ) {
   const approvals: string[] = [];
@@ -213,8 +214,10 @@ async function withOwnerControl(
     }),
     hookRunner: {
       evaluateHook(hook, { session, input, auditInput }) {
-        const allowed = hook !== "PRE_TOOL_CALL" || !input.tool_call ||
-          allowCall();
+        const allowed =
+          (hook !== "PRE_TOOL_CALL" || !input.tool_call || allowCall()) &&
+          (input.tool_name !== "sentinel_assigned_target" ||
+            !options.deniesSavedTarget?.(hook));
         if (
           hook === "POST_TOOL_RESPONSE" && input.tool_name === "operator_runs"
         ) {
@@ -660,21 +663,59 @@ Deno.test("Owner socket steers and stops one exact leased worker with a shared T
         ({ taskId, status }) =>
           taskId === fields.taskId && status === "stopped",
       ));
-      await withOwnerControl(baseDir, async (owner) => {
-        const state = readSentinelAssessment(path)!;
-        const progress = JSON.parse(
-          await owner({
-            action: "worker_trace_progress",
+      let denySourceHook: string | undefined;
+      await withOwnerControl(
+        baseDir,
+        async (owner) => {
+          const state = readSentinelAssessment(path)!;
+          const progress = JSON.parse(
+            await owner({
+              action: "worker_trace_progress",
+              kind: "sentinel",
+              id: "main",
+              revision: state.revision,
+              taskId: fields.taskId,
+              stepIndices: [0],
+            }),
+          );
+          assertEquals(progress.status, "stopped");
+          assertEquals(progress.page.steps[0].tool, "sentinel_assigned_target");
+          const latest = {
+            action: "worker_trace_result",
             kind: "sentinel",
             id: "main",
             revision: state.revision,
             taskId: fields.taskId,
-            stepIndices: [0],
-          }),
-        );
-        assertEquals(progress.status, "stopped");
-        assertEquals(progress.page.steps[0].tool, "sentinel_assigned_target");
-      });
+            latestResult: true,
+          };
+          const output = JSON.parse(await owner(latest));
+          assertEquals(output.status, "stopped");
+          assertEquals(output.index, 0);
+          assertEquals(output.result, JSON.parse(seenResults[0]));
+          assert(
+            (await owner({ ...latest, stepIndices: [0] })).includes(
+              "unavailable",
+            ),
+          );
+          assert(
+            (await owner({ ...latest, revision: state.revision + 1 })).includes(
+              "unavailable",
+            ),
+          );
+          for (const hook of ["PRE_TOOL_CALL", "POST_TOOL_RESPONSE"]) {
+            denySourceHook = hook;
+            assert((await owner(latest)).includes("unavailable"));
+          }
+          denySourceHook = undefined;
+          assertEquals(JSON.parse(await owner(latest)), output);
+        },
+        undefined,
+        undefined,
+        {
+          sentinelMode: true,
+          deniesSavedTarget: (hook) => hook === denySourceHook,
+        },
+      );
       const duplicate = await request("worker_stop", {
         ...fields,
         controlRequestId: stopId,
