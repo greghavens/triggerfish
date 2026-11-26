@@ -114,6 +114,7 @@ import {
   querySentinelWorkerObservations,
   readAdaptiveAssetSnapshotCitations,
   readAdaptiveOperatorTrafficHint,
+  readSentinelDedicatedRecheckSettlements,
   readSentinelQueuedCancellations,
   roundWithUpstreamCitations,
   selectAdaptiveGraphRetries,
@@ -460,10 +461,16 @@ function plannerFindingRechecks(snapshotPath: string, state: State) {
   if (!caseId || !runId) return [];
   const constraints = operatingConstraints(snapshotPath, state)?.constraints;
   const snapshot = state.result?.sharedGraph.snapshot;
+  const settlements = readSentinelDedicatedRecheckSettlements(
+    storePath(snapshotPath),
+    runId,
+    state.revision,
+  );
   return readSentinelWorkerFindingHistory(snapshotPath, state.revision)
     .flatMap((record) =>
       record.kind === "recheck" && record.caseId === caseId &&
         record.runId === runId && record.evidenceRevision === state.revision &&
+        settledPlannerRecheck(settlements, record) &&
         sentinelOperatingConstraintsAllow(
           constraints,
           { kind: "review_evidence", nodeId: record.targetId },
@@ -486,6 +493,16 @@ function plannerFindingRechecks(snapshotPath: string, state: State) {
         : []
     )
     .slice(0, 8);
+}
+
+function settledPlannerRecheck(
+  settlements: ReturnType<typeof readSentinelDedicatedRecheckSettlements>,
+  receipt: { taskId: string; findingId: string; evidenceId: string },
+) {
+  const assignment = settlements.get(receipt.taskId);
+  return !assignment || (assignment.completed &&
+    assignment.findingId === receipt.findingId &&
+    assignment.evidenceId === receipt.evidenceId);
 }
 
 /** Keep only original findings still attached to the same asset and control. */
@@ -1035,27 +1052,27 @@ export function readSentinelTaskQueue(
 }
 
 /** Settlement requires the durable result from this exact assignment. */
-function hasCommittedRecheckResult(
+function committedDedicatedRecheckResult(
   path: string,
   state: State,
   task: AdaptiveTask,
-): boolean {
+) {
   const findingId = task.plannerRound?.recheckFindingId;
-  if (!findingId) return true;
+  if (!findingId) return;
   const caseId = locateSentinelCase(path)?.caseId;
   const runId = state.plan.runId;
   const snapshot = state.result?.sharedGraph.snapshot;
   if (
     !caseId || !runId || !snapshot || !task.nodeId ||
     !hasSentinelWorkerFindingJournal(path)
-  ) return false;
+  ) return;
   const journal = openSentinelWorkerFindingStore(path);
   try {
     const original = journal.readFinding(findingId);
     if (
       !original || original.caseId !== caseId || original.runId !== runId ||
       original.evidenceRevision > state.revision
-    ) return false;
+    ) return;
     const snapshotDigest = digestSentinelSnapshot(snapshot);
     const matches = (receipt: {
       caseId: string;
@@ -1072,13 +1089,13 @@ function hasCommittedRecheckResult(
       receipt.evidenceId === task.nodeId &&
       receipt.snapshotDigest === snapshotDigest &&
       receipt.targetId === original.targetId;
-    return journal.listFindingRechecks(findingId, state.revision).some((
+    return journal.listFindingRechecks(findingId, state.revision).find((
       receipt,
     ) =>
       receipt.controlId === original.controlId &&
       receipt.graphFindingId === original.graphFindingId && matches(receipt)
     ) ||
-      journal.listInconclusiveRechecks(findingId, state.revision).some(matches);
+      journal.listInconclusiveRechecks(findingId, state.revision).find(matches);
   } finally {
     journal.close();
   }
@@ -6072,7 +6089,7 @@ export function createSentinelModelPlanner(
         worker.clear();
       }
     }).catch(() => undefined).then((review) => {
-      const schedule = withSentinelAssessmentWriteLock(
+      const outcome = withSentinelAssessmentWriteLock(
         snapshotPath,
         (latest) => {
           const interrupted = controller.signal.aborted || !latest?.active ||
@@ -6097,8 +6114,12 @@ export function createSentinelModelPlanner(
                 !signal.aborted
                 ? review
                 : undefined;
-            const missingRecheckResult = !!eligibleReview &&
-              !hasCommittedRecheckResult(snapshotPath, state, task);
+            const dedicated = task.plannerRound?.recheckFindingId !== undefined;
+            const recheck = eligibleReview && dedicated
+              ? committedDedicatedRecheckResult(snapshotPath, state, task)
+              : undefined;
+            const missingRecheckResult = !!eligibleReview && dedicated &&
+              !recheck;
             const acceptedReview = missingRecheckResult
               ? undefined
               : eligibleReview;
@@ -6126,15 +6147,26 @@ export function createSentinelModelPlanner(
                 : "failed",
               missingRecheckResult ? "missing_recheck_result" : undefined,
             );
-            return recorded && assignmentCurrent && !stopped && !interrupted &&
-              !signal.aborted &&
-              !!followUps?.length;
+            const settled = recorded && !!acceptedReview;
+            return {
+              schedule: settled && !!followUps?.length,
+              recheck: settled ? recheck : undefined,
+            };
           } finally {
             notes.close();
           }
         },
       );
-      if (schedule) advanceAdaptiveSentinel(snapshotPath, state);
+      if (outcome?.recheck) {
+        const receipt = outcome.recheck;
+        notifyCommittedEvidence({
+          case: receipt.caseId,
+          run_id: receipt.runId,
+          revision: receipt.evidenceRevision,
+          observation_id: receipt.id,
+        });
+      }
+      if (outcome?.schedule) advanceAdaptiveSentinel(snapshotPath, state);
     }).catch(() => {
       // A persisted lease can be recovered after expiry.
     }).finally(() => {

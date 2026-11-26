@@ -824,6 +824,7 @@ export function executeSentinelWorkerFindingTool(
               findingId: previous.id,
               outcome: outcome.outcome,
             }, (recheck) => {
+              if (task?.plannerRound?.recheckFindingId) return;
               notify(recheck);
               if (recheck.outcome === "pass") notify({ id: recheck.findingId });
             });

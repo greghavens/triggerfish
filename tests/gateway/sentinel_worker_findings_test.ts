@@ -1,3 +1,4 @@
+import { subscribeCommittedEvidence } from "../../src/core/evidence_task_progression.ts";
 import { DatabaseSync } from "node:sqlite";
 import { INCONCLUSIVE_RECHECK_TOOL } from "../../src/sentinel/recheck_inconclusive.ts";
 import { createTrafficDownload } from "../../tidepool-ui/src/screens/Sentinel/traffic_download.ts";
@@ -2484,11 +2485,20 @@ async function verifyOperatorNativeRecheck(options: {
   const rationaleRequest = crypto.randomUUID();
   let workerRuns = 0;
   const workerStopped = Promise.withResolvers<void>();
+  let plannerClock = Date.now();
+  const plannerReceipts: string[][] = [];
+  const wakes: string[] = [];
   const planner = createSentinelModelPlanner(
     path,
     (state, taskId, leaseToken) => ({
       async execute(message, send, signal, onStep, digests, checkpoint) {
         if (taskId !== assigned.taskId) {
+          if (options.goalSettlement && taskId === undefined) {
+            const input = JSON.parse(String(message).split("\n").at(-1)!);
+            plannerReceipts.push(
+              (input.findingRechecks ?? []).map(({ id }: { id: string }) => id),
+            );
+          }
           send({
             type: "response",
             text:
@@ -2633,6 +2643,8 @@ async function verifyOperatorNativeRecheck(options: {
           assertStringIncludes(repeated.results[1][2], "Error:");
         }
         if (options.goalSettlement) {
+          assert(!wakes.includes(record.id));
+          assert(!plannerReceipts.some((ids) => ids.includes(record.id)));
           advanceAdaptiveSentinel(path, state);
           assertEquals(recheckGate()?.status, "queued");
           assertEquals(recheckGate()?.attempts, 0);
@@ -2679,11 +2691,33 @@ async function verifyOperatorNativeRecheck(options: {
             workerStopped.reject(error);
           }
         }
+        if (options.goalSettlement) plannerClock += 60_001;
         for (const event of reviewed.events) send(event);
       },
       clear() {},
     }),
+    undefined,
+    () => plannerClock,
   );
+  const unsubscribe = options.goalSettlement
+    ? subscribeCommittedEvidence(caseId, (address) => {
+      if (
+        address.run_id === options.state.plan.runId &&
+        address.revision === options.state.revision
+      ) {
+        wakes.push(address.observation_id);
+      }
+    })
+    : undefined;
+  const coordinator = options.goalSettlement
+    ? startSentinelAssessmentCoordinator({
+      snapshotPath: path,
+      advanceAdaptive(current) {
+        advanceAdaptiveSentinel(path, current);
+        planner.advance(current);
+      },
+    })
+    : undefined;
   try {
     for (let i = 0; i < 200; i++) {
       planner.advance(options.state);
@@ -2712,9 +2746,16 @@ async function verifyOperatorNativeRecheck(options: {
       assert(verified);
       advanceAdaptiveSentinel(path, options.state);
       if (options.stopAfterResult) {
+        assert(!wakes.includes(verified.id));
+        assert(!plannerReceipts.some((ids) => ids.includes(verified!.id)));
         assertEquals(recheckGate()?.status, "queued");
         assertEquals(recheckDependent()?.status, "queued");
       } else {
+        await waitForCondition(
+          () => plannerReceipts.some((ids) => ids.includes(verified!.id)),
+          () => {},
+        );
+        assertEquals(wakes.filter((id) => id === verified!.id), [verified.id]);
         assertEquals(recheckGate()?.status, "completed");
         assertEquals(recheckGate()?.attempts, 0);
         assertEquals(
@@ -2813,6 +2854,8 @@ async function verifyOperatorNativeRecheck(options: {
       },
     );
   } finally {
+    coordinator?.stop();
+    unsubscribe?.();
     planner.stop();
   }
 
