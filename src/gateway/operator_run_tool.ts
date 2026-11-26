@@ -1,3 +1,4 @@
+import { validPlannerHeartbeatSeconds } from "../core/evidence_task_progression.ts";
 import {
   readSentinelArchivedToolDecisions,
   sentinelArchivedToolDecisionsFile,
@@ -638,9 +639,18 @@ export const operatorRunTool: ToolDefinition = {
       enum: ["sentinel", "workflow", "delegated", "scheduled"],
     },
     targetId: { type: "string", description: "Exact linked run ID" },
+    childGoal: {
+      type: "string",
+      description: "Optional objective for a linked Sentinel assessment start.",
+    },
     timeoutSeconds: {
       type: "integer",
       description: "Optional wall-clock limit for a new linked Sentinel run",
+    },
+    plannerHeartbeatSeconds: {
+      type: "integer",
+      description:
+        "Optional idle planning interval for the linked Sentinel run, 600 to 86400 seconds",
     },
     modelProfile: {
       type: "string",
@@ -7856,8 +7866,10 @@ export function createOperatorRunToolExecutor(options: {
           targetKind,
           targetId,
           requestId,
+          childGoal,
           timeoutSeconds,
           modelProfile: namedProfile,
+          plannerHeartbeatSeconds,
         } = args;
         const workflows = options.workflows;
         const ceiling = context?.ceiling ?? "INTERNAL";
@@ -7875,10 +7887,18 @@ export function createOperatorRunToolExecutor(options: {
               "targetKind",
               "targetId",
               "requestId",
+              "childGoal",
               "timeoutSeconds",
               "modelProfile",
+              "plannerHeartbeatSeconds",
             ].includes(key)
           ) ||
+          (childGoal !== undefined &&
+            (targetKind !== "sentinel" || typeof childGoal !== "string" ||
+              !childGoal.trim() || childGoal.length > 500)) ||
+          (plannerHeartbeatSeconds !== undefined &&
+            (targetKind !== "sentinel" ||
+              !validPlannerHeartbeatSeconds(plannerHeartbeatSeconds))) ||
           (namedProfile !== undefined &&
             (targetKind !== "sentinel" || !isModelProfileName(namedProfile))) ||
           (timeoutSeconds !== undefined &&
@@ -7935,7 +7955,10 @@ export function createOperatorRunToolExecutor(options: {
             if (
               link.origin !== "spawn" || link.requestId !== request ||
               other.id !== targetId || other.revision === undefined ||
+              !providers.sentinel.matchesStartGoal(other, childGoal) ||
               !providers.sentinel.matchesStartTimeout(other, timeoutSeconds) ||
+              providers.sentinel.plannerHeartbeat(other) !==
+                plannerHeartbeatSeconds ||
               !isDeepStrictEqual(
                 providers.sentinel.modelProfile(other),
                 modelProfile,
@@ -7967,8 +7990,11 @@ export function createOperatorRunToolExecutor(options: {
                 target,
                 requestId: request,
                 ...(graphDigest && { graphDigest }),
+                ...(childGoal !== undefined && { childGoal }),
                 ...(timeoutSeconds !== undefined && { timeoutSeconds }),
                 ...(modelProfile && { modelProfile }),
+                ...(plannerHeartbeatSeconds !== undefined &&
+                  { plannerHeartbeatSeconds }),
               })
             }`,
           )
@@ -7996,8 +8022,10 @@ export function createOperatorRunToolExecutor(options: {
             providers.sentinel.startLinked(target, {
               ...link,
               graphDigest,
+              childGoal,
               timeoutSeconds,
               modelProfile,
+              plannerHeartbeatSeconds,
             });
           } else {
             workflows?.start(target.id, ceiling, childRequest, link);

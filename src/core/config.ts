@@ -7,6 +7,7 @@
  */
 
 import { parse as parseYaml } from "@std/yaml";
+import { validPlannerHeartbeatSeconds } from "./evidence_task_progression.ts";
 import { isModelProfileName } from "./model_profile_selection.ts";
 import { resolveConfigSecrets } from "./secrets/resolver.ts";
 import type { SecretStore } from "./secrets/keychain/keychain.ts";
@@ -120,9 +121,7 @@ export function enforceConfig(
   const plannerHeartbeat = sentinel?.planner_heartbeat_seconds;
   if (
     plannerHeartbeat !== undefined &&
-    (typeof plannerHeartbeat !== "number" ||
-      !Number.isSafeInteger(plannerHeartbeat) || plannerHeartbeat < 600 ||
-      plannerHeartbeat > 86_400)
+    !validPlannerHeartbeatSeconds(plannerHeartbeat)
   ) {
     return {
       ok: false,

@@ -39,6 +39,11 @@ export function createEvidenceTaskSettler(
   };
 }
 
+export function validPlannerHeartbeatSeconds(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) &&
+    value >= 600 && value <= 86_400;
+}
+
 /** Coalesce planner wakeups and retry the latest inputs when a cooldown ends. */
 export function createEvidencePlanningGate(
   wake: () => void,

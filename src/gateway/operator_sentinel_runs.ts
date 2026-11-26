@@ -15,8 +15,10 @@ import {
   publishedSentinelGraphDigest,
   readSentinelAssessment,
   readSentinelAssessmentRevision,
+  matchesSentinelLinkedStartGoal,
   readSentinelCaseStatus,
   readSentinelModelProfileForRevision,
+  readSentinelPlannerHeartbeatForRevision,
   readSentinelRunTimeoutForRevision,
   resumeSentinelAssessment,
   startSentinelAssessment,
@@ -41,6 +43,8 @@ export function createOperatorSentinelRuns(
   ): OperatorRunSummary | undefined;
   publishedStartDigest(ref: OperatorRunRef): string | undefined;
   modelProfile(ref: OperatorRunRef): SelectedModelProfile | undefined;
+  plannerHeartbeat(ref: OperatorRunRef): number | undefined;
+  matchesStartGoal(ref: OperatorRunRef, goal?: string): boolean;
   matchesStartTimeout(ref: OperatorRunRef, timeoutSeconds?: number): boolean;
   startLinked(
     ref: OperatorRunRef,
@@ -48,8 +52,10 @@ export function createOperatorSentinelRuns(
       path: string;
       input: Omit<OperatorRunLinkInput, "right">;
       graphDigest: string;
+      childGoal?: string;
       timeoutSeconds?: number;
       modelProfile?: SelectedModelProfile;
+      plannerHeartbeatSeconds?: number;
     },
   ): OperatorRunSummary | undefined;
   workerControl(
@@ -127,9 +133,15 @@ export function createOperatorSentinelRuns(
       path,
       publicRef.revision,
     );
+    const plannerHeartbeatSeconds = readSentinelPlannerHeartbeatForRevision(
+      path,
+      publicRef.revision,
+    );
     return {
       ...summary,
       details: {
+        ...(plannerHeartbeatSeconds !== undefined &&
+          { plannerHeartbeatSeconds }),
         runId: state.plan?.runId ?? null,
         adaptiveRevision: adaptive?.revision ?? null,
         ...(modelProfile && { modelProfile }),
@@ -211,11 +223,22 @@ export function createOperatorSentinelRuns(
       ) return;
       return publishedSentinelGraphDigest(path);
     },
+    plannerHeartbeat(ref) {
+      const path = pathFor(ref);
+      return path && ref.revision !== undefined
+        ? readSentinelPlannerHeartbeatForRevision(path, ref.revision)
+        : undefined;
+    },
     modelProfile(ref) {
       const path = pathFor(ref);
       return path && ref.revision !== undefined
         ? readSentinelModelProfileForRevision(path, ref.revision)
         : undefined;
+    },
+    matchesStartGoal(ref, goal) {
+      const path = pathFor(ref);
+      return !!path && ref.revision !== undefined &&
+        matchesSentinelLinkedStartGoal(path, ref.revision, goal);
     },
     matchesStartTimeout(ref, timeoutSeconds) {
       const path = pathFor(ref);
@@ -228,7 +251,7 @@ export function createOperatorSentinelRuns(
       if (!path || ref.id === "main" || ref.revision !== undefined) return;
       const started = startSentinelAssessment(
         path,
-        {},
+        link.childGoal === undefined ? {} : { goal: link.childGoal },
         webContainmentConfigured,
         {
           ...link,

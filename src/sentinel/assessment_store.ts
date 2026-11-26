@@ -1,3 +1,4 @@
+import { validPlannerHeartbeatSeconds } from "../core/evidence_task_progression.ts";
 import {
   isSelectedModelProfile,
   type SelectedModelProfile,
@@ -88,6 +89,7 @@ export type AssessmentPlan =
     readonly timeoutSeconds?: number;
     readonly deadlineAt?: number;
     readonly modelProfile?: SelectedModelProfile;
+    readonly plannerHeartbeatSeconds?: number;
     readonly formalGoals?: readonly SentinelFormalGoal[];
     readonly activeFormalGoalIds?: readonly string[];
     readonly completedFormalGoalIds?: readonly string[];
@@ -697,13 +699,15 @@ function readFormalGoalHistory(db: DatabaseSync, revision: number) {
 function saveAssessmentRunRevision(
   db: DatabaseSync,
   revision: number,
-  runId: string | undefined,
-  timeoutSeconds?: number,
-  modelProfile?: SelectedModelProfile,
+  { runId, timeoutSeconds, modelProfile, plannerHeartbeatSeconds }: Pick<
+    AssessmentPlan,
+    "runId" | "timeoutSeconds" | "modelProfile" | "plannerHeartbeatSeconds"
+  >,
 ) {
   if (!runId) return;
   db.exec(`CREATE TABLE IF NOT EXISTS assessment_run_revisions (
-    revision INTEGER PRIMARY KEY, runId TEXT NOT NULL, timeoutSeconds INTEGER, modelProfile TEXT
+    revision INTEGER PRIMARY KEY, runId TEXT NOT NULL, timeoutSeconds INTEGER,
+    modelProfile TEXT, plannerHeartbeatSeconds INTEGER
   )`);
   const columns = db.prepare("PRAGMA table_info(assessment_run_revisions)")
     .all().map(({ name }) => name);
@@ -717,13 +721,21 @@ function saveAssessmentRunRevision(
       "ALTER TABLE assessment_run_revisions ADD COLUMN modelProfile TEXT",
     );
   }
+  if (!columns.includes("plannerHeartbeatSeconds")) {
+    db.exec(
+      "ALTER TABLE assessment_run_revisions ADD COLUMN plannerHeartbeatSeconds INTEGER",
+    );
+  }
   db.prepare(
-    "INSERT OR IGNORE INTO assessment_run_revisions (revision, runId, timeoutSeconds, modelProfile) VALUES (?, ?, ?, ?)",
+    `INSERT OR IGNORE INTO assessment_run_revisions
+      (revision, runId, timeoutSeconds, modelProfile, plannerHeartbeatSeconds)
+      VALUES (?, ?, ?, ?, ?)`,
   ).run(
     revision,
     runId,
     timeoutSeconds ?? null,
     modelProfile ? JSON.stringify(modelProfile) : null,
+    plannerHeartbeatSeconds ?? null,
   );
 }
 
@@ -1160,13 +1172,7 @@ function refresh(
     updatedAt,
     result,
   );
-  saveAssessmentRunRevision(
-    db,
-    revision,
-    plan.runId,
-    plan.timeoutSeconds,
-    plan.modelProfile,
-  );
+  saveAssessmentRunRevision(db, revision, plan);
   saveFormalGoalHistory(db, revision, plan);
   if (
     prior && incidentCandidateCount(assessment) > incidentCandidateCount(prior)
@@ -1262,13 +1268,20 @@ export function startSentinelAssessment(
     graphDigest: string;
     timeoutSeconds?: number;
     modelProfile?: SelectedModelProfile;
+    plannerHeartbeatSeconds?: number;
   },
 ): StoredAssessment {
   if (
     plan.formalGoals !== undefined || plan.activeFormalGoalIds !== undefined ||
     plan.completedFormalGoalIds !== undefined
   ) throw new Error("Formal Sentinel goals require an approved goal proposal");
-  const { timeoutSeconds, modelProfile } = linkedStart ?? {};
+  const { timeoutSeconds, modelProfile, plannerHeartbeatSeconds } =
+    linkedStart ?? {};
+  if (
+    plan.plannerHeartbeatSeconds !== undefined ||
+    (plannerHeartbeatSeconds !== undefined &&
+      !validPlannerHeartbeatSeconds(plannerHeartbeatSeconds))
+  ) throw new Error("Invalid Sentinel planner heartbeat interval");
   if (
     plan.modelProfile !== undefined ||
     (modelProfile !== undefined && !isSelectedModelProfile(modelProfile))
@@ -1311,6 +1324,8 @@ export function startSentinelAssessment(
             ...settings,
             runId: crypto.randomUUID(),
             ...(modelProfile && { modelProfile }),
+            ...(plannerHeartbeatSeconds !== undefined &&
+              { plannerHeartbeatSeconds }),
             ...(timeoutSeconds !== undefined && {
               timeoutSeconds,
               deadlineAt: startedAt + timeoutSeconds * 1000,
@@ -1983,7 +1998,7 @@ function insertOperatingConstraintRecord(
   record: SentinelOperatingConstraintRecord,
 ) {
   const { runId, evidenceRevision, requestId, version } = record;
-  saveAssessmentRunRevision(db, evidenceRevision, runId);
+  saveAssessmentRunRevision(db, evidenceRevision, { runId });
   db.prepare(
     "INSERT INTO sentinel_operating_constraints VALUES (?, ?, ?, ?, ?)",
   ).run(runId, version, evidenceRevision, requestId, JSON.stringify(record));
@@ -2185,6 +2200,37 @@ export function readSentinelRunIdForRevision(
     return typeof runId === "string" && constraintUuid.test(runId)
       ? runId
       : undefined;
+  } finally {
+    db.close();
+  }
+}
+
+/** Reopen the reviewed planner heartbeat override for an exact saved revision. */
+export function readSentinelPlannerHeartbeatForRevision(
+  path: string,
+  revision: number,
+): number | undefined {
+  const db = openStore(path, false);
+  if (!db) return;
+  try {
+    const current = getRow(db);
+    if (current?.revision === revision) {
+      return (JSON.parse(current.plan) as AssessmentPlan)
+        .plannerHeartbeatSeconds;
+    }
+    if (
+      !hasTable(db, "assessment_run_revisions") ||
+      !db.prepare("PRAGMA table_info(assessment_run_revisions)").all()
+        .some(({ name }) => name === "plannerHeartbeatSeconds")
+    ) return;
+    const value = db.prepare(
+      "SELECT plannerHeartbeatSeconds FROM assessment_run_revisions WHERE revision = ?",
+    ).get(revision)?.plannerHeartbeatSeconds;
+    if (value == null) return;
+    if (!validPlannerHeartbeatSeconds(value)) {
+      throw new Error("Invalid saved Sentinel planner heartbeat interval");
+    }
+    return value;
   } finally {
     db.close();
   }

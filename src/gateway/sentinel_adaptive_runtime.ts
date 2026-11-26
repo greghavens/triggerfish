@@ -3544,7 +3544,7 @@ export function createSentinelModelPlanner(
   reserve?: () => (() => void) | undefined,
   now: () => number = Date.now,
   webContainmentConfigured?: boolean,
-  heartbeatSeconds?: number,
+  defaultHeartbeatSeconds?: number,
 ) {
   const superseded = Symbol("Sentinel plan superseded");
   let permitPlannerWake = true;
@@ -4858,6 +4858,8 @@ export function createSentinelModelPlanner(
       }
       if (activePlan || draining) return;
       let roundIdentity = baseIdentity;
+      const heartbeatSeconds = state.plan.plannerHeartbeatSeconds ??
+        defaultHeartbeatSeconds;
       if (
         heartbeatSeconds !== undefined && goalCompletion?.status !== "completed"
       ) {

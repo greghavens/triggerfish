@@ -1,5 +1,5 @@
 import { assert, assertEquals, assertFalse } from "@std/assert";
-import { dirname } from "@std/path";
+import { dirname, join } from "@std/path";
 import { createProviderRegistry } from "../../src/agent/llm.ts";
 import type { HookRunner } from "../../src/core/policy/hooks/hooks.ts";
 import {
@@ -873,6 +873,132 @@ Deno.test("Owner gateway selects a permitted Sentinel model for a child and omis
     assertFalse(routing.workerOptions(profile).allowModelAccess);
   } finally {
     for (const planner of planners) planner.stop();
+    await Deno.remove(baseDir, { recursive: true });
+  }
+});
+
+Deno.test("A linked Sentinel run keeps its reviewed idle interval through exact retries and archive restore", async () => {
+  const baseDir = await Deno.makeTempDir();
+  const rootPath = resolveSentinelCasePath(baseDir);
+  const childPath = resolveSentinelCasePath(baseDir, "idle-child");
+  let time = Date.now();
+  const prompts: string[] = [];
+  const planner = createSentinelModelPlanner(
+    childPath,
+    () => ({
+      execute(prompt, send) {
+        prompts.push(String(prompt));
+        send({ type: "response", text: "[]", taint: "INTERNAL" });
+        return Promise.resolve();
+      },
+      clear() {},
+    }),
+    undefined,
+    () => time,
+    false,
+  );
+  const state = () => {
+    const current = readSentinelAssessment(childPath);
+    assert(current);
+    return current;
+  };
+  try {
+    for (const path of [rootPath, childPath]) {
+      await Deno.mkdir(dirname(path), { recursive: true });
+      await Deno.writeTextFile(
+        path,
+        JSON.stringify({ version: 1, nodes: [], edges: [] }),
+      );
+    }
+    await withTidepoolSocket(baseDir, async (request) => {
+      assertEquals((await request("start")).type, "sentinel_state");
+    });
+    const root = readSentinelAssessment(rootPath);
+    assert(root);
+    const spawn = {
+      action: "spawn",
+      kind: "sentinel",
+      id: "main",
+      revision: root.revision,
+      targetKind: "sentinel",
+      targetId: "idle-child",
+      requestId: crypto.randomUUID(),
+      plannerHeartbeatSeconds: 600,
+    };
+    await withOwnerControl(baseDir, async (request, approvals) => {
+      assert((await request({
+        ...spawn,
+        plannerHeartbeatSeconds: 599,
+      })).startsWith("Error:"));
+      assertEquals(approvals.length, 0);
+      const started = JSON.parse(await request(spawn));
+      assertEquals(started.run.details.plannerHeartbeatSeconds, 600);
+      assert(approvals[0].includes('"plannerHeartbeatSeconds":600'));
+      assertEquals(JSON.parse(await request(spawn)), started);
+      assert((await request({
+        ...spawn,
+        plannerHeartbeatSeconds: 601,
+      })).startsWith("Error:"));
+      assertEquals(approvals.length, 1);
+
+      planner.advance(state());
+      await until(() => prompts.length === 1 && !planner.hasInFlightWork());
+      time += 599_999;
+      planner.advance(state());
+      assertFalse(planner.hasInFlightWork());
+      time += 1;
+      planner.advance(state());
+      await until(() => prompts.length === 2 && !planner.hasInFlightWork());
+      assert(prompts[1].includes("idle_planner_check"));
+
+      const child = { ...started.run.ref, runId: started.run.details.runId };
+      assertEquals(
+        JSON.parse(
+          await request({
+            ...child,
+            action: "cancel",
+          }),
+        ).run.status,
+        "stopped",
+      );
+      const archiveId = crypto.randomUUID();
+      assertEquals(
+        JSON.parse(
+          await request({
+            ...child,
+            action: "archive",
+            requestId: archiveId,
+          }),
+        ).receipt.status,
+        "succeeded",
+      );
+      await Deno.rename(dirname(childPath), join(baseDir, "prior-idle-child"));
+      assertEquals(
+        JSON.parse(
+          await request({
+            ...child,
+            action: "restore",
+            archiveId,
+            requestId: crypto.randomUUID(),
+          }),
+        ).receipt.status,
+        "succeeded",
+      );
+      const { run } = JSON.parse(
+        await request({
+          ...started.run.ref,
+          action: "inspect",
+        }),
+      );
+      assertEquals(run.status, "paused");
+      assertEquals(run.details.plannerHeartbeatSeconds, 600);
+      assertEquals(state().plan.plannerHeartbeatSeconds, 600);
+      planner.advance(state());
+      assertFalse(planner.hasInFlightWork());
+    });
+  } finally {
+    planner.stop();
+    await until(() => !planner.hasInFlightWork());
     await Deno.remove(baseDir, { recursive: true });
   }
 });

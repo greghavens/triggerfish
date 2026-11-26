@@ -58,6 +58,9 @@ enabled. After a planning round settles, the planner checks the same case
 and evidence again at the next interval if no new input has triggered a
 round. The saved round history preserves the interval across gateway
 restarts. Paused, stopped, and completed assessments skip idle rounds.
+When starting a linked Sentinel run with `operator_runs spawn`, pass
+`plannerHeartbeatSeconds` to approve an interval for that run only. Omitting
+it uses the gateway setting.
 To make an existing provider selectable for linked assessments, list its
 name in `sentinel.model_profile_allowlists.INTERNAL` (for example,
 `INTERNAL: [ollama]`). The owner tool lists permitted choices with
@@ -276,8 +279,11 @@ When starting a published linked Sentinel case through `operator_runs spawn`,
 the operator can approve a wall-clock limit through `timeoutSeconds`. The limit
 ranges from one second to seven days. Pause, restart, and duplicate requests
 preserve the saved deadline. At expiry Sentinel stops background work and
-retains the committed evidence under the `timed_out` status. Timed-out cases
-can be archived and restored for inspection with their terminal status.
+reviews the committed completion record once. An automatic goal decision
+committed by the deadline can complete the assessment if its exact evidence
+still verifies. Cases without that proof retain their committed evidence under
+`timed_out`. Timed-out cases can be archived and restored for inspection with
+their terminal status.
 
 The archive retains committed case records and evidence references. Credential
 stores, pending approvals, live leases, and resumable tool spools stay outside

@@ -1,3 +1,4 @@
+import { validPlannerHeartbeatSeconds } from "../core/evidence_task_progression.ts";
 import { isSelectedModelProfile } from "../core/model_profile_selection.ts";
 import {
   decodeSentinelToolDecisions,
@@ -328,9 +329,20 @@ function restoreAssessment(
         "Sentinel archive does not match the exact stopped case run",
       );
     }
-    const { timeoutSeconds, deadlineAt, modelProfile } = object(
+    const {
+      timeoutSeconds,
+      deadlineAt,
+      modelProfile,
+      plannerHeartbeatSeconds,
+    } = object(
       JSON.parse(row.plan),
     );
+    if (
+      plannerHeartbeatSeconds !== undefined &&
+      !validPlannerHeartbeatSeconds(plannerHeartbeatSeconds)
+    ) {
+      throw new Error("Invalid archived Sentinel planner heartbeat interval");
+    }
     if (modelProfile !== undefined && !isSelectedModelProfile(modelProfile)) {
       throw new Error("Invalid archived Sentinel assessment model profile");
     }
