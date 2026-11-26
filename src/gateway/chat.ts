@@ -417,6 +417,7 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
                       "case_alert",
                       "incidents",
                       "decision_history",
+                      "list_companies",
                       "company_scope",
                       "company_assets",
                       "finding_receipt",
@@ -476,6 +477,7 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
                     action === "set_sentinel_tool_configuration" ||
                     action === "reset_sentinel_tool_configuration" ||
                     action === "set_company_scope" ||
+                    action === "delete_company" ||
                     action === "preview_membership" ||
                     action === "set_case_membership" ||
                     action === "add_case_membership" ||

@@ -15495,11 +15495,47 @@ Deno.test("Owner reviews shared company scope and attribution never grants case 
       (input.tool_call as { args?: Record<string, unknown> } | undefined)?.args
           ?.action !==
         "set_company_scope");
+    const deleteCompany = {
+      action: "delete_company",
+      organizationId: "another",
+      expectedVersion: 2,
+      requestId: crypto.randomUUID(),
+      note: "Remove duplicate ownership assignment.",
+    };
+    await withFindingAssignmentGateway(
+      baseDir,
+      () => Promise.resolve(true),
+      async (turn) => {
+        const list = { action: "list_companies" };
+        const before = JSON.parse(await turn(list));
+        assertEquals(before.companies.length, 2);
+        const removed = JSON.parse(await turn(deleteCompany));
+        assertEquals(removed.edit.deleted, true);
+        assertEquals(removed.edit.version, 3);
+        assertEquals(JSON.parse(await turn(deleteCompany)), removed);
+        assertEquals(JSON.parse(await turn(list)).companies.length, 1);
+        assertEquals(
+          JSON.parse(await turn({ ...read, organizationId: "another" }))
+            .company,
+          null,
+        );
+        assertEquals(
+          JSON.parse(await turn(catalog)).inventory.assets.map(
+            ({ id }: { id: string }) => id,
+          ),
+          ["first.company.example", "ip-evidence", "second.company.example"],
+        );
+        assertStringIncludes(
+          await turn({ ...deleteCompany, requestId: crypto.randomUUID() }),
+          "unavailable",
+        );
+      },
+    );
     await withFindingAssignmentGateway(
       baseDir,
       () => Promise.resolve(false),
       async (turn) => {
-        assertEquals(JSON.parse(await turn(read)).version, 2);
+        assertEquals(JSON.parse(await turn(read)).version, 3);
         assertEquals(JSON.parse(await turn(read)).company.version, 1);
       },
     );

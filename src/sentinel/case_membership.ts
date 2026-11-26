@@ -24,6 +24,7 @@ export type SentinelCaseMembershipSelector =
     readonly kind: "rules";
     readonly organizationId?: string;
     readonly rules: readonly SentinelScopeRule[];
+    readonly change?: SentinelCaseScopeRuleChange;
     readonly reason: string;
   }
   | {
@@ -32,6 +33,50 @@ export type SentinelCaseMembershipSelector =
     readonly addition: ExactSentinelCaseMembershipSelector;
     readonly reason: string;
   };
+
+interface SentinelCaseScopeRuleChange {
+  readonly operation: "add" | "remove";
+  readonly rule: SentinelScopeRule;
+}
+
+function parseScopeRuleChange(
+  value: unknown,
+): SentinelCaseScopeRuleChange | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return;
+  const { operation, rule } = value as Record<string, unknown>;
+  const normalized = parseSentinelScopeRules([rule])?.[0];
+  if (
+    Object.keys(value).length === 2 && normalized &&
+    (operation === "add" || operation === "remove")
+  ) return { operation, rule: normalized };
+}
+
+/** Apply one explicit operation to the rules in an exact reviewed baseline. */
+export function changeSentinelCaseScopeRule(
+  baseline: SentinelCaseMembershipSelector,
+  raw: unknown,
+  reason: unknown,
+): SentinelCaseMembershipSelector | undefined {
+  const change = parseScopeRuleChange(raw);
+  const note = assetText(reason);
+  if (!change || !note || baseline.kind !== "rules") return;
+  const present = baseline.rules.some((rule) =>
+    isDeepStrictEqual(rule, change.rule)
+  );
+  if (present === (change.operation === "add")) return;
+  const rules = change.operation === "add"
+    ? [...baseline.rules, change.rule]
+    : baseline.rules.filter((rule) => !isDeepStrictEqual(rule, change.rule));
+  return {
+    kind: "rules",
+    ...(baseline.organizationId !== undefined && {
+      organizationId: baseline.organizationId,
+    }),
+    rules,
+    reason: note,
+    change,
+  };
+}
 
 export interface SentinelCaseMembershipScope {
   readonly caseId: string;
@@ -85,12 +130,21 @@ function normalizeSelector(
   if (!value || typeof value !== "object" || Array.isArray(value)) return;
   const selector = value as Record<string, unknown>;
   if (selector.kind === "rules") {
-    const rules = parseSentinelScopeRules(selector.rules);
+    const change = parseScopeRuleChange(selector.change);
+    const rules = change?.operation === "remove" &&
+        Array.isArray(selector.rules) && !selector.rules.length
+      ? []
+      : parseSentinelScopeRules(selector.rules);
     const reason = assetText(selector.reason);
     if (
       !rules || !reason || Object.keys(selector).some((key) =>
-        !["kind", "organizationId", "rules", "reason"].includes(key)
+        !["kind", "organizationId", "rules", "reason", "change"].includes(key)
       ) ||
+      (selector.change !== undefined && !change) ||
+      (change && rules.some((rule) =>
+            isDeepStrictEqual(rule, change.rule)
+          ) !==
+          (change.operation === "add")) ||
       (selector.organizationId !== undefined &&
         !assetText(selector.organizationId, 256))
     ) {
@@ -103,6 +157,7 @@ function normalizeSelector(
       }),
       rules,
       reason,
+      ...(change && { change }),
     };
   }
   if (selector.kind !== "addition") return normalizeExactSelector(value);

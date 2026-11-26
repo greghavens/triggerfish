@@ -2111,6 +2111,51 @@ Deno.test("Authenticated Sentinel chat reads exact approved cross-case graph fin
     });
     assertStringIncludes(result, "unavailable");
     assertEquals(scopeRuleReviews.length, 2);
+    const { scopeRules: _priorRules, ...edit } = setRules;
+    const addRule = {
+      ...edit,
+      expectedVersion: scopeRuleBefore.version + 1,
+      requestId: crypto.randomUUID(),
+      scopeRuleChange: {
+        operation: "add",
+        rule: { kind: "domain", value: "a.example.test" },
+      },
+    };
+    await turn("Review adding one case scope rule", addRule);
+    assertEquals(JSON.parse(result).version, scopeRuleBefore.version + 2);
+    assertEquals(
+      readSentinelOperatingConstraints(approved.path)?.constraints
+        .allowedAssetIds,
+      ["asset-a", "asset-c"],
+    );
+    const removed = {
+      ...edit,
+      expectedVersion: scopeRuleBefore.version + 2,
+      requestId: crypto.randomUUID(),
+      scopeRuleChange: {
+        operation: "remove" as const,
+        rule: { kind: "keyword" as const, value: "asset c" },
+      },
+    };
+    await turn("Review removal of exactly one scope rule", removed);
+    const removedReceipt = JSON.parse(result);
+    assertEquals(removedReceipt.version, scopeRuleBefore.version + 3);
+    const currentScope = readSentinelOperatingConstraints(approved.path);
+    assertEquals(currentScope?.constraints.allowedAssetIds, ["asset-a"]);
+    assertEquals(currentScope?.membership?.selector, {
+      kind: "rules",
+      rules: [{ kind: "domain", value: "a.example.test" }],
+      reason: removed.note,
+      change: removed.scopeRuleChange,
+    });
+    await turn("Replay the exact reviewed removal", removed);
+    assertEquals(JSON.parse(result), removedReceipt);
+    await turn("Reject a distinct stale removal", {
+      ...removed,
+      requestId: crypto.randomUUID(),
+    });
+    assertStringIncludes(result, "unavailable");
+    assertEquals(scopeRuleReviews.length, 4);
   } finally {
     socket.close();
     await gateway.stop();

@@ -3,7 +3,7 @@
 
 import { join } from "@std/path";
 import { DatabaseSync } from "node:sqlite";
-import { assetText } from "./asset_properties.ts";
+import { assetText, canonicalAssetUrl } from "./asset_properties.ts";
 import {
   parseSentinelScopeRules,
   type SentinelScopeRule,
@@ -19,6 +19,8 @@ const maxCompanies = 128;
 interface CompanyScope {
   readonly organizationId: string;
   readonly organizationName: string;
+  readonly logoUrl?: string;
+  readonly deleted?: true;
   readonly reason: string;
   readonly rules: readonly SentinelScopeRule[];
 }
@@ -76,8 +78,22 @@ function parseScope(
   const rules = Array.isArray(raw.rules) && !raw.rules.length
     ? []
     : parseSentinelScopeRules(raw.rules);
-  if (organizationId && organizationName && reason && rules) {
-    return { organizationId, organizationName, reason, rules };
+  const logo = assetText(raw.logoUrl);
+  const href = logo && canonicalAssetUrl(logo);
+  const logoUrl = href && href.length <= 384 ? href : undefined;
+  if (
+    organizationId && organizationName && reason && rules &&
+    (raw.logoUrl === undefined || logoUrl) &&
+    (raw.deleted === undefined || (raw.deleted === true && rules.length === 0))
+  ) {
+    return {
+      organizationId,
+      organizationName,
+      reason,
+      rules,
+      ...(logoUrl && { logoUrl }),
+      ...(raw.deleted === true && { deleted: true as const }),
+    };
   }
 }
 
@@ -125,13 +141,17 @@ function state(db: DatabaseSync) {
       SELECT MAX(prior.version) FROM company_scope_edits AS prior
       WHERE prior.organizationId = e.organizationId
     )
+    AND json_extract(e.edit, '$.deleted') IS NULL
     ORDER BY e.organizationId LIMIT ?
   `).all(maxCompanies + 1).map(decode);
   if (companies.length > maxCompanies) {
     throw new Error("Sentinel company scope limit exceeded");
   }
   return {
-    version: Math.max(0, ...companies.map(({ version }) => version)),
+    version: Number(
+      db.prepare("SELECT MAX(version) AS version FROM company_scope_edits")
+        .get()?.version ?? 0,
+    ),
     companies,
   };
 }
@@ -139,11 +159,33 @@ function state(db: DatabaseSync) {
 export function readSentinelCompanyScopes(baseDir: string) {
   const db = open(baseDir);
   try {
-    return db?.prepare(
+    if (!db) return { version: 0, companies: [] as CompanyScopeEdit[] };
+    db.exec("BEGIN");
+    const result = db.prepare(
         "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'company_scope_edits'",
       ).get()
       ? state(db)
       : { version: 0, companies: [] as CompanyScopeEdit[] };
+    db.exec("COMMIT");
+    return result;
+  } finally {
+    db?.close();
+  }
+}
+
+/** Read the company state that an exact reviewed edit was based on. */
+export function readSentinelCompanyAtVersion(
+  baseDir: string,
+  organizationId: string,
+  version: number,
+): CompanyScopeEdit | undefined {
+  const db = open(baseDir);
+  try {
+    const row = db?.prepare(
+      "SELECT * FROM company_scope_edits WHERE organizationId = ? AND version <= ? ORDER BY version DESC LIMIT 1",
+    ).get(organizationId, version);
+    const company = row && decode(row);
+    return company?.deleted ? undefined : company;
   } finally {
     db?.close();
   }
@@ -181,7 +223,10 @@ export function recordSentinelCompanyScope(
         const nameKey = scope.organizationName.toLowerCase();
         if (
           before.version === expectedVersion &&
-          (!!priorCompany || before.companies.length < maxCompanies) &&
+          (scope.deleted
+            ? priorCompany?.organizationName === scope.organizationName &&
+              priorCompany.logoUrl === scope.logoUrl
+            : !!priorCompany || before.companies.length < maxCompanies) &&
           !before.companies.some((company) =>
             company.organizationId !== scope.organizationId &&
             company.organizationName.toLowerCase() === nameKey

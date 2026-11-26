@@ -11,6 +11,7 @@ import {
 } from "./operator_agent_profiles.ts";
 import {
   parseSentinelCompanyScopeUpdate,
+  readSentinelCompanyAtVersion,
   readSentinelCompanyScopes,
   recordSentinelCompanyScope,
 } from "../sentinel/company_scope.ts";
@@ -296,7 +297,10 @@ import {
   type SentinelReviewStep,
   validSentinelChildDescription,
 } from "../sentinel/assessment_store.ts";
-import { resolveSentinelCaseMembership } from "../sentinel/case_membership.ts";
+import {
+  changeSentinelCaseScopeRule,
+  resolveSentinelCaseMembership,
+} from "../sentinel/case_membership.ts";
 import {
   isSentinelCaseId,
   resolveSentinelCasePath,
@@ -534,7 +538,9 @@ export const operatorRunTool: ToolDefinition = {
         "worker_limit",
         "set_worker_limit",
         "assessment_concurrency",
+        "list_companies",
         "company_scope",
+        "delete_company",
         "set_company_scope",
         "company_assets",
         "live_model_route",
@@ -994,6 +1000,11 @@ export const operatorRunTool: ToolDefinition = {
       type: "array",
       items: { type: "string" },
       description: "Complete set of defensive task kinds to disable in the run",
+    },
+    scopeRuleChange: {
+      type: "object",
+      description:
+        "For set_case_membership, review adding or removing one rule from the current rules selector using {operation,rule}. Include exact expectedVersion, requestId and note.",
     },
     scopeRules: {
       type: "array",
@@ -1469,6 +1480,11 @@ export const operatorRunTool: ToolDefinition = {
       description:
         "Page the visible asset IDs declared for the exact organizationId.",
     },
+    companyLogoUrl: {
+      type: "string",
+      description:
+        "Optional HTTP(S) company logo URL without query or credentials",
+    },
     companyName: {
       type: "string",
       description: "Unique display name for the reviewed shared company scope",
@@ -1692,6 +1708,7 @@ export const sentinelOperatorCaseControlActions = [
 
 export const sentinelOperatorCaseControlParameters = [
   "scopeRules",
+  "scopeRuleChange",
   "adaptiveRevision",
   "allowedAssetIds",
   "assignments",
@@ -3904,14 +3921,18 @@ ${JSON.stringify(mutation)}`,
     }
     if (
       action === "company_scope" || action === "set_company_scope" ||
-      action === "company_assets"
+      action === "company_assets" || action === "list_companies" ||
+      action === "delete_company"
     ) {
-      const writing = action === "set_company_scope";
+      const deleting = action === "delete_company";
+      const listing = action === "list_companies";
+      const writing = action === "set_company_scope" || deleting;
       const catalog = action === "company_assets";
       const authorize = context?.authorizeOwnerRunCall;
       const {
         organizationId,
         companyName,
+        companyLogoUrl,
         scopeRules,
         note,
         requestId,
@@ -3922,21 +3943,23 @@ ${JSON.stringify(mutation)}`,
         !context?.authenticatedOwnerSessionId ||
         !canFlowTo("INTERNAL", context.ceiling ?? "PUBLIC") ||
         (writing && !authorize) ||
-        typeof organizationId !== "string" || !organizationId.trim() ||
-        organizationId.length > 256 ||
+        (!listing && (typeof organizationId !== "string" ||
+          !organizationId.trim() || organizationId.length > 256)) ||
+        (listing && organizationId !== undefined) ||
         Object.keys(args).some((key) =>
           ![
             "action",
             "organizationId",
-            ...(writing
+            ...(deleting ? ["note", "requestId", "expectedVersion"] : writing
               ? [
                 "companyName",
+                "companyLogoUrl",
                 "scopeRules",
                 "note",
                 "requestId",
                 "expectedVersion",
               ]
-              : catalog
+              : catalog || listing
               ? ["cursor"]
               : []),
           ].includes(key)
@@ -3948,7 +3971,7 @@ ${JSON.stringify(mutation)}`,
           const inventory = await readSharedSentinelAssetCatalog(
             options.baseDir,
             {
-              organizationId,
+              organizationId: organizationId as string,
               cursor,
               limit: 6,
             },
@@ -3956,6 +3979,34 @@ ${JSON.stringify(mutation)}`,
           return safeProjection({ inventory });
         }
         const before = readSentinelCompanyScopes(options.baseDir);
+        if (listing) {
+          const prefix = `${before.version}:`;
+          const offset = typeof cursor === "string" && cursor.startsWith(prefix)
+            ? Number(cursor.slice(prefix.length))
+            : 0;
+          if (
+            cursor !== undefined &&
+            (offset <= 0 || !Number.isSafeInteger(offset) ||
+              offset >= before.companies.length || cursor !== prefix + offset)
+          ) return unavailable;
+          const companies = before.companies.slice(offset, offset + 6).map(
+            (
+              { organizationId, organizationName, version, rules, logoUrl },
+            ) => ({
+              organizationId,
+              organizationName,
+              version,
+              ruleCount: rules.length,
+              ...(logoUrl && { logoUrl }),
+            }),
+          );
+          const next = offset + companies.length;
+          return safeProjection({
+            version: before.version,
+            companies,
+            nextCursor: next < before.companies.length ? prefix + next : null,
+          });
+        }
         const company = before.companies.find((entry) =>
           entry.organizationId === organizationId
         );
@@ -3965,11 +4016,24 @@ ${JSON.stringify(mutation)}`,
             company: company ?? null,
           });
         }
+        const deletedCompany = deleting &&
+          typeof expectedVersion === "number" &&
+          Number.isSafeInteger(expectedVersion) && expectedVersion >= 0 &&
+          readSentinelCompanyAtVersion(
+            options.baseDir,
+            organizationId as string,
+            expectedVersion,
+          );
+        if (deleting && !deletedCompany) return unavailable;
         const update = parseSentinelCompanyScopeUpdate({
           organizationId,
-          organizationName: companyName,
+          organizationName: deletedCompany
+            ? deletedCompany.organizationName
+            : companyName,
+          logoUrl: deletedCompany ? deletedCompany.logoUrl : companyLogoUrl,
+          ...(deletedCompany && { deleted: true }),
           reason: note,
-          rules: scopeRules,
+          rules: deleting ? [] : scopeRules,
           requestId,
           expectedVersion,
         });
@@ -3979,7 +4043,9 @@ ${JSON.stringify(mutation)}`,
         if (update.expectedVersion === before.version) {
           if (
             !await options.confirm(
-              "Approve this exact shared Sentinel company attribution? This does not grant case access.\n" +
+              (deleting
+                ? "Approve removing this company's shared attribution rules? Existing evidence is retained.\n"
+                : "Approve this exact shared Sentinel company attribution? This does not grant case access.\n") +
                 JSON.stringify({ existing: company ?? null, update }),
             )
           ) return "Error: The operator declined the run action.";
@@ -7943,16 +8009,24 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
           allowedAssetIds,
           organizationId,
           scopeRules,
+          scopeRuleChange,
           note,
           expectedVersion,
           requestId,
         } = args;
         const update = action === "set_case_membership";
-        const reviewedRules = scopeRules !== undefined;
+        const reviewedRules = scopeRules !== undefined ||
+          scopeRuleChange !== undefined;
         const authorize = context?.authorizeOwnerRunCall;
         const selected = context?.authorizeSelectedSentinelCase;
         if (
           (update && (!authorize || !context?.authenticatedOwnerSessionId)) ||
+          (scopeRuleChange !== undefined &&
+            (!update || scopeRules !== undefined ||
+              organizationId !== undefined ||
+              typeof expectedVersion !== "number" ||
+              !Number.isSafeInteger(expectedVersion) ||
+              expectedVersion < 1 || expectedVersion >= 1024)) ||
           ref.kind !== "sentinel" || ref.revision === undefined ||
           typeof runId !== "string" || !digestPattern.test(runId) ||
           (reviewedRules
@@ -7974,7 +8048,9 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
               "runId",
               "allowedAssetIds",
               "organizationId",
-              ...(reviewedRules ? ["scopeRules", "note"] : []),
+              ...(reviewedRules
+                ? ["scopeRules", "scopeRuleChange", "note"]
+                : []),
               ...(update ? ["expectedVersion", "requestId"] : []),
             ].includes(key)
           ) ||
@@ -7994,12 +8070,29 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
             node.kind === "asset" && node.organization?.id === organizationId
           )
         ) return unavailable;
+        const baseline =
+          scopeRuleChange !== undefined && typeof expectedVersion === "number"
+            ? readSentinelOperatingConstraintVersion(
+              path,
+              activeRunId,
+              expectedVersion,
+            )
+            : undefined;
+        const changedSelector = baseline?.membership &&
+          changeSentinelCaseScopeRule(
+            baseline.membership.selector,
+            scopeRuleChange,
+            note,
+          );
+        if (scopeRuleChange !== undefined && !changedSelector) {
+          return unavailable;
+        }
         const membership = resolveSentinelCaseMembership(
           current.result.sharedGraph.snapshot,
           {
             caseId: ref.id,
             evidenceRevision: ref.revision,
-            selector: reviewedRules
+            selector: changedSelector ?? (reviewedRules
               ? {
                 kind: "rules",
                 ...(organizationId !== undefined && { organizationId }),
@@ -8008,7 +8101,7 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
               }
               : typeof organizationId === "string"
               ? { kind: "organization", organizationId }
-              : { kind: "assets", assetIds: allowedAssetIds as string[] },
+              : { kind: "assets", assetIds: allowedAssetIds as string[] }),
           },
         );
         if (!membership || membership.overflow) return unavailable;
