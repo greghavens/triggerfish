@@ -17,6 +17,7 @@ import {
   trafficCompositionReceiptId,
   trafficCompositionTable,
 } from "./finding_traffic_composition.ts";
+import { readSentinelCaseFindingReceipts } from "./worker_finding_store.ts";
 import { assertOperatorSourceDirectoryInfo } from "./source_snapshot_lock.ts";
 import {
   type SentinelTrafficSource,
@@ -445,6 +446,25 @@ function openLinks(snapshotPath: string, readOnly: boolean, now: () => number) {
 
   const decode = (row: Readonly<Record<string, unknown>>) =>
     decodeSentinelFindingTrafficLink(row, caseId!);
+
+  const pendingLinksTable = "staged_publication_links";
+  function visibleRows(rows: Readonly<Record<string, unknown>>[]) {
+    if (!hasTable(db, pendingLinksTable)) return rows;
+    const pending = new Set(
+      db.prepare("SELECT link_id FROM staged_publication_links").all()
+        .map(({ link_id }) => String(link_id)),
+    );
+    const candidates = rows.filter(({ id }) => pending.has(String(id)));
+    if (!candidates.length) return rows;
+    const findings = readSentinelCaseFindingReceipts(
+      snapshotPath,
+      candidates.map(({ finding_id }) => String(finding_id)),
+    );
+    return rows.filter(({ id, finding_id }) =>
+      !pending.has(String(id)) ||
+      findings.get(String(finding_id))?.kind === "finding"
+    );
+  }
 
   function annotationsForLink(
     linkId: string,
@@ -957,6 +977,21 @@ function openLinks(snapshotPath: string, readOnly: boolean, now: () => number) {
     ) {
       return transaction(db, () => recordOne(raw, verifyNew));
     },
+    recordStagedPublication(
+      input: SentinelFindingTrafficLinkInput,
+      verifyNew: (input: SentinelFindingTrafficLinkInput) => boolean,
+    ) {
+      return transaction(db, () => {
+        const link = recordOne(input, verifyNew);
+        if (!link) return;
+        db.exec(`CREATE TABLE IF NOT EXISTS staged_publication_links (
+          link_id TEXT PRIMARY KEY REFERENCES traffic_links(id)
+        ) STRICT`);
+        db.prepare("INSERT OR IGNORE INTO staged_publication_links VALUES (?)")
+          .run(link.id);
+        return link;
+      });
+    },
     list(filter: SentinelFindingTrafficLinkFilter = {}) {
       const {
         id,
@@ -984,26 +1019,31 @@ function openLinks(snapshotPath: string, readOnly: boolean, now: () => number) {
       ) throw new Error("Invalid Sentinel finding traffic link filter");
       const compose = !includeWithdrawn &&
         hasTable(db, trafficCompositionTable);
-      const rows = db.prepare(`SELECT * FROM traffic_links
+      const staged = hasTable(db, pendingLinksTable);
+      const rows = visibleRows(
+        db.prepare(`SELECT * FROM traffic_links
         WHERE (? IS NULL OR finding_id = ?) AND (? IS NULL OR revision = ?)
           AND (? IS NULL OR json_extract(input, '$.assetId') = ?)
           AND (? IS NULL OR id = ?)
           AND (? IS NULL OR json_extract(input, '$.recheckId') = ?)
         ORDER BY rowid DESC LIMIT ? OFFSET ?`).all(
-        findingId ?? null,
-        findingId ?? null,
-        evidenceRevision ?? null,
-        evidenceRevision ?? null,
-        assetId ?? null,
-        assetId ?? null,
-        id ?? null,
-        id ?? null,
-        recheckId ?? null,
-        recheckId ?? null,
-        compose ? maxLinks + 1 : limit,
-        compose ? 0 : offset,
+          findingId ?? null,
+          findingId ?? null,
+          evidenceRevision ?? null,
+          evidenceRevision ?? null,
+          assetId ?? null,
+          assetId ?? null,
+          id ?? null,
+          id ?? null,
+          recheckId ?? null,
+          recheckId ?? null,
+          compose || staged ? maxLinks + 1 : limit,
+          compose || staged ? 0 : offset,
+        ),
       );
-      if (!compose) return rows.map(decode);
+      if (!compose) {
+        return (staged ? rows.slice(offset, offset + limit) : rows).map(decode);
+      }
       if (rows.length > maxLinks) {
         throw new Error("Invalid Sentinel traffic link journal size");
       }
@@ -1052,7 +1092,7 @@ function openLinks(snapshotPath: string, readOnly: boolean, now: () => number) {
       if (rows.length > maxLinks) {
         throw new Error("Invalid Sentinel traffic link journal size");
       }
-      return rows.map(decode);
+      return visibleRows(rows).map(decode);
     },
     close() {
       db.close();

@@ -385,6 +385,11 @@ export type SentinelReadTrace = SentinelReviewStep & {
 
 export interface SentinelTurnCheckpointOptions {
   readonly resume?: AgentTurnCheckpoint;
+  readonly resumedPendingToolCall?: {
+    readonly id: string;
+    readonly name: string;
+    readonly args: Record<string, unknown>;
+  };
   readonly retainedProgress?: readonly SentinelReviewStep[];
   readonly onResumeAccepted?: () => void;
   readonly workerBoundary?: WorkerBoundary;
@@ -4734,6 +4739,7 @@ function createAgent(
           plannerRead
             ? (target) => currentPlannerReceiptScope(turn, target)
             : undefined,
+          turn.approvedReporterTraffic,
         );
         return !plannerRead || currentPlannerReceiptScope(turn)
           ? result
@@ -5580,7 +5586,7 @@ function createAgent(
         if (key) {
           turn.approvedTraffic.add(key);
           if (
-            reporter && turn.traceStepCount < 16 &&
+            turn.traceStepCount < 16 &&
             !turn.approvedReporterTraffic.has(key)
           ) {
             turn.approvedReporterTraffic.set(key, {
@@ -6581,6 +6587,7 @@ function createAgent(
           targetClassification: "INTERNAL",
           signal,
           resume,
+          resumedPendingToolCall: checkpointOptions?.resumedPendingToolCall,
           ...(resume && {
             resumeClassification: "INTERNAL",
             resumeToolCalls: savedCalls,
@@ -7103,7 +7110,7 @@ function createAgent(
                   if (!key) return false;
                   turn.approvedTraffic.add(key);
                   if (
-                    reporter && stepIndex < 16 &&
+                    stepIndex < 16 &&
                     !turn.approvedReporterTraffic.has(key)
                   ) {
                     turn.approvedReporterTraffic.set(key, {

@@ -16,6 +16,7 @@ import {
   sentinelFindingDispositions,
   sentinelFindingSeverities,
 } from "./graph.ts";
+import { readSentinelFindingTrafficWriteReceipt } from "./finding_traffic_links.ts";
 import { assertOperatorSourceDirectoryInfo } from "./source_snapshot_lock.ts";
 
 export interface SentinelWorkerFindingReceiptScope {
@@ -38,6 +39,38 @@ export interface SentinelWorkerFindingInput
   extends SentinelWorkerFindingReceiptScope {
   readonly title: string;
   readonly summary: string;
+}
+
+export interface SentinelFindingTrafficPublication {
+  readonly evidenceId: string;
+  readonly digest: string;
+  readonly stepIndex: number;
+  readonly resultSha256: string;
+}
+
+type StagedFindingPublication = {
+  readonly finding: ReturnType<typeof normalizeFinding>;
+  readonly findingId: string;
+  readonly traffic: SentinelFindingTrafficPublication;
+};
+
+function canonicalFindingTrafficPublication(
+  raw: SentinelFindingTrafficPublication,
+): SentinelFindingTrafficPublication | undefined {
+  if (
+    !raw || typeof raw !== "object" || !bounded(raw.evidenceId, 100) ||
+    typeof raw.digest !== "string" || !/^[a-f0-9]{64}$/.test(raw.digest) ||
+    typeof raw.resultSha256 !== "string" ||
+    !/^[a-f0-9]{64}$/.test(raw.resultSha256) ||
+    !Number.isSafeInteger(raw.stepIndex) || raw.stepIndex < 0 ||
+    raw.stepIndex >= 16
+  ) return;
+  return {
+    evidenceId: raw.evidenceId,
+    digest: raw.digest,
+    stepIndex: raw.stepIndex,
+    resultSha256: raw.resultSha256,
+  };
 }
 
 export const sentinelWorkerRecheckOutcomes = [
@@ -376,6 +409,41 @@ function decodeAmendment(row: Row): SentinelWorkerFindingReportAmendment {
   };
 }
 
+export function decodeStagedTrafficFinding(
+  row: Readonly<Record<string, unknown>>,
+  caseId: string | undefined,
+) {
+  if (typeof row.input !== "string" || typeof row.traffic !== "string") return;
+  const finding = normalizeFinding(JSON.parse(row.input));
+  const traffic = canonicalFindingTrafficPublication(JSON.parse(row.traffic));
+  if (
+    !traffic || finding.caseId !== caseId ||
+    finding.requestId !== row.requestId ||
+    findingReceiptId(finding) !== row.findingId ||
+    JSON.stringify(finding) !== row.input ||
+    JSON.stringify(traffic) !== row.traffic ||
+    redactCredentialText(finding.title) !== finding.title ||
+    redactCredentialText(finding.summary) !== finding.summary
+  ) return;
+  return { finding, findingId: row.findingId as string, traffic };
+}
+
+function readStagedFindingPublication(
+  db: DatabaseSync,
+  caseBinding: string | undefined,
+  requestId: string,
+): StagedFindingPublication | undefined {
+  if (
+    !db.prepare(
+      "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'staged_traffic_findings'",
+    ).get()
+  ) return;
+  const row = db.prepare(
+    "SELECT requestId, findingId, input, traffic FROM staged_traffic_findings WHERE requestId = ?",
+  ).get(requestId);
+  return row && decodeStagedTrafficFinding(row, caseBinding);
+}
+
 /** The broker supplies verified scope and holds its current-lease gate across each write. */
 export function openSentinelWorkerFindingStore(
   snapshotPath: string,
@@ -440,9 +508,58 @@ export function openSentinelWorkerFindingStore(
     return row && decode(row);
   }
 
+  const readStagedPublication = (requestId: string) =>
+    readStagedFindingPublication(db, caseBinding, requestId);
+
+  function stageTrafficFinding(
+    raw: SentinelWorkerFindingInput,
+    traffic: SentinelFindingTrafficPublication,
+  ) {
+    const finding = normalizeFinding(raw);
+    const selected = canonicalFindingTrafficPublication(traffic);
+    if (
+      !selected || finding.caseId !== caseBinding ||
+      redactCredentialText(finding.title) !== finding.title ||
+      redactCredentialText(finding.summary) !== finding.summary
+    ) return;
+    return transaction(db, () => {
+      const prior = readStagedPublication(finding.requestId);
+      const findingId = findingReceiptId(finding);
+      if (prior) {
+        return prior.findingId === findingId &&
+            JSON.stringify(prior.traffic) === JSON.stringify(selected)
+          ? prior
+          : undefined;
+      }
+      if (
+        db.prepare("SELECT 1 FROM requests WHERE requestId = ?").get(
+          finding.requestId,
+        ) ||
+        lookup.get(findingId)
+      ) return;
+      db.exec(`CREATE TABLE IF NOT EXISTS staged_traffic_findings (
+        requestId TEXT PRIMARY KEY, findingId TEXT NOT NULL UNIQUE, input TEXT NOT NULL, traffic TEXT NOT NULL
+      ) STRICT`);
+      if (
+        Number(
+          db.prepare("SELECT COUNT(*) AS n FROM staged_traffic_findings").get()
+            ?.n,
+        ) >= MAX_RECEIPTS
+      ) return;
+      db.prepare("INSERT INTO staged_traffic_findings VALUES (?, ?, ?, ?)").run(
+        finding.requestId,
+        findingId,
+        JSON.stringify(finding),
+        JSON.stringify(selected),
+      );
+      return { finding, findingId, traffic: selected };
+    });
+  }
+
   function write<T extends JournalInput>(
     input: T,
     onCommit?: (record: T & Receipt) => void,
+    publication?: StagedFindingPublication,
   ): T & Receipt {
     if (caseBinding !== undefined && input.caseId !== caseBinding) {
       throw new Error(
@@ -453,6 +570,19 @@ export function openSentinelWorkerFindingStore(
     const id = findingReceiptId(input);
     let inserted = false;
     const record = transaction(db, () => {
+      const staged = input.kind === "finding" && db.prepare(
+        "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'staged_traffic_findings'",
+      ).get() && db.prepare(
+        "SELECT requestId FROM staged_traffic_findings WHERE requestId = ? OR findingId = ?",
+      ).get(requestId, id);
+      if (
+        staged &&
+        (publication?.findingId !== id || staged.requestId !== requestId)
+      ) {
+        throw new Error(
+          "The staged finding requires its exact retained traffic link.",
+        );
+      }
       const request = db.prepare(
         "SELECT receiptId FROM requests WHERE requestId = ?",
       ).get(requestId);
@@ -831,6 +961,30 @@ export function openSentinelWorkerFindingStore(
     ): SentinelWorkerFindingRecord {
       return write(normalizeFinding(input), onCommit);
     },
+    publishTrafficFinding(
+      requestId: string,
+      onCommit?: (record: SentinelWorkerFindingRecord) => void,
+    ) {
+      const pending = readStagedPublication(requestId);
+      if (!pending) return;
+      const { finding, findingId, traffic } = pending;
+      const link = readSentinelFindingTrafficWriteReceipt(snapshotPath, {
+        caseId: finding.caseId,
+        evidenceRevision: finding.evidenceRevision,
+        assetId: finding.targetId,
+        taskId: finding.taskId,
+      }, requestId);
+      if (
+        !link || link.findingId !== findingId ||
+        link.trafficId !== traffic.evidenceId ||
+        link.trafficDigest !== traffic.digest ||
+        link.sourceStep?.stepIndex !== traffic.stepIndex ||
+        link.sourceStep.sha256 !== traffic.resultSha256
+      ) return;
+      return { record: write(finding, onCommit, pending), link };
+    },
+    stageTrafficFinding,
+    readStagedPublication,
     recordRecheck(
       input: SentinelWorkerFindingRecheckInput,
       onCommit?: (record: SentinelWorkerFindingRecheckRecord) => void,
@@ -931,6 +1085,28 @@ export function openSentinelWorkerFindingStore(
       db.close();
     },
   };
+}
+
+export function readSentinelStagedTrafficFinding(
+  path: string,
+  scope: FindingWriteScope & { runId: string },
+  requestId: string,
+) {
+  const caseId = locateSentinelCase(path)?.caseId;
+  if (caseId !== scope.caseId || !hasSentinelWorkerFindingJournal(path)) return;
+  const db = openDatabase(path, true);
+  try {
+    db.exec("PRAGMA busy_timeout = 1500; PRAGMA trusted_schema = OFF");
+    const staged = readStagedFindingPublication(db, caseId, requestId);
+    const finding = staged?.finding;
+    return finding?.runId === scope.runId &&
+        finding.evidenceRevision === scope.evidenceRevision &&
+        finding.targetId === scope.targetId && finding.taskId === scope.taskId
+      ? staged
+      : undefined;
+  } finally {
+    db.close();
+  }
 }
 
 /** Reopen a committed write by request within a caller-authorized assignment. */

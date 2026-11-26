@@ -366,7 +366,9 @@ function normalizeWorkerCheckpoint(
         if (
           !claimed || !saved || !isDeepStrictEqual(claimed, saved.args) ||
           tool.content !== saved.result ||
-          (trafficAttach &&
+          ((trafficAttach ||
+            (finding === "sentinel_report_finding" &&
+              "trafficDigest" in claimed)) &&
             (saved.trafficBatch
               ? saved.trafficBatch.some(({ args, stepIndex, sha256 }) =>
                 !isDeepStrictEqual(trafficReads.get(stepIndex), args) ||
@@ -4637,7 +4639,17 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
           WHERE recovered.revision = task.revision AND recovered.taskId = task.id
             AND recovered.event = 'model_mutation_settled'
             AND recovered.note GLOB 'worker-finding-amendment:*'
-        )))
+        ))
+        OR EXISTS (
+          SELECT 1 FROM adaptive_events AS recovered
+          WHERE recovered.revision = task.revision AND recovered.taskId = task.id
+            AND recovered.event = 'model_mutation_settled'
+            AND recovered.note GLOB 'traffic-finding-replay:*'
+            AND NOT EXISTS (SELECT 1 FROM adaptive_events AS newer
+              WHERE newer.revision = task.revision AND newer.taskId = task.id
+                AND newer.rowid > recovered.rowid
+                AND newer.event IN ('model_review_failed', 'model_mutation_pending', 'model_mutation_settled'))
+        ))
       AND COALESCE(review.availableAt, 0) <= ?
       AND COALESCE((SELECT activity.event FROM adaptive_events AS activity
         WHERE activity.revision = task.revision AND activity.taskId = task.id
@@ -7630,6 +7642,15 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
       return observationJournal.readById(revision, receiptId);
     },
 
+    pendingTrafficFindingReplay(revision: string, id: string) {
+      const marker = pendingMutation.get(revisionKey(revision), taskId(id));
+      if (
+        marker?.event !== "model_mutation_settled" ||
+        typeof marker.note !== "string"
+      ) return;
+      return /^traffic-finding-replay:([a-f0-9-]{36})$/.exec(marker.note)?.[1];
+    },
+
     readLeasedWorkerCheckpoint(
       revision: string,
       id: string,
@@ -9681,6 +9702,11 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
       evidenceRevision: number,
       eligible: (task: AdaptiveTask) => boolean,
       lookupMutation?: SentinelJournalMutationLookup,
+      lookupPendingTrafficFinding?: (
+        taskId: string,
+        targetId: string,
+        requestId: string,
+      ) => { readonly args: Record<string, unknown> } | undefined,
     ): void {
       transaction(db, () => {
         if (
@@ -10144,7 +10170,40 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
               ...verified,
             });
           }
-          if (batch.length !== marker.tools.length) continue;
+          if (batch.length !== marker.tools.length) {
+            const request = marker.journalRequests?.[0];
+            if (
+              !alreadySaved && saved.completedIterations >= 1 &&
+              marker.tools.length === 1 &&
+              marker.tools[0] === "sentinel_report_finding" &&
+              typeof request?.requestId === "string" &&
+              /^[a-f0-9-]{36}$/.test(request.requestId)
+            ) {
+              const intent = lookupPendingTrafficFinding?.(
+                id,
+                row.nodeId,
+                request.requestId,
+              );
+              if (
+                intent &&
+                createHash("sha256").update(JSON.stringify(intent.args)).digest(
+                    "hex",
+                  ) ===
+                  request.argsDigest
+              ) {
+                event.run(
+                  revision,
+                  id,
+                  "model_mutation_settled",
+                  row.reviewAttempts,
+                  time,
+                  `traffic-finding-replay:${request.requestId}`,
+                );
+              }
+            }
+            continue;
+          }
+
           const references = batch.flatMap(({ id }) => id ? [id] : []);
           if (!references.length) continue;
           const savedResult = (

@@ -177,7 +177,7 @@ function exactId(value: unknown, maxLength: number): value is string {
     value.length <= maxLength && !value.includes("\0");
 }
 
-function attachmentKey(
+export function sentinelTrafficAttachmentKey(
   caseId: string,
   revision: number,
   assetId: string,
@@ -215,7 +215,7 @@ export function approvedSentinelTrafficAttachmentKey(
       typeof digest !== "string" || !digestPattern.test(digest) ||
       !sentinelTrafficSources.includes(family)
     ) return undefined;
-    return attachmentKey(
+    return sentinelTrafficAttachmentKey(
       caseId,
       evidenceRevision,
       assetIds[0],
@@ -442,7 +442,7 @@ function attachReporterBatch(
     const { evidenceId, digest, ...annotation } = member;
     const family = sentinelTrafficSources.find((source) =>
       approved.has(
-        attachmentKey(
+        sentinelTrafficAttachmentKey(
           caseId,
           args.revision,
           assetId,
@@ -453,7 +453,14 @@ function attachReporterBatch(
       )
     );
     const sourceStep = family && approved.get(
-      attachmentKey(caseId, args.revision, assetId, evidenceId, digest, family),
+      sentinelTrafficAttachmentKey(
+        caseId,
+        args.revision,
+        assetId,
+        evidenceId,
+        digest,
+        family,
+      ),
     );
     if (!sourceStep) return requiredReceipt;
     const receipt = readSentinelTrafficReceipt(
@@ -560,7 +567,14 @@ function attachForScope(
   // Check the approved receipt identity before reopening traffic or finding journals.
   const family = sentinelTrafficSources.find((source) =>
     approvedTraffic.has(
-      attachmentKey(caseId, revision, assetId, evidenceId, digest, source),
+      sentinelTrafficAttachmentKey(
+        caseId,
+        revision,
+        assetId,
+        evidenceId,
+        digest,
+        source,
+      ),
     )
   );
   if (!family) return requiredReceipt;

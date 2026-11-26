@@ -27,7 +27,7 @@ import {
   evaluatePreOutputHook,
 } from "../dispatch/response_handling.ts";
 import type { AgentLoopContext } from "./loop_types.ts";
-import { buildLlmMessages } from "./loop_types.ts";
+import { buildLlmMessages, resolveActiveToolList } from "./loop_types.ts";
 import {
   callLlmAndRecordUsage,
   dispatchIterationOutcome,
@@ -67,6 +67,8 @@ export interface AgentLoopOptions {
   readonly targetClassification: ClassificationLevel;
   readonly signal: AbortSignal | undefined;
   readonly resume?: AgentTurnCheckpoint;
+  readonly resumedPendingToolCall?:
+    ProcessMessageOptions["resumedPendingToolCall"];
   readonly beforeToolBatch?: ProcessMessageOptions["beforeToolBatch"];
   readonly toolPersistence?: ProcessMessageOptions["toolPersistence"];
   readonly workerBoundary?: ProcessMessageOptions["workerBoundary"];
@@ -99,6 +101,7 @@ function buildAgentLoopContext(opts: AgentLoopOptions): AgentLoopContext {
 async function executeIteration(
   ctx: AgentLoopContext,
   iteration: number,
+  pending?: AgentLoopOptions["resumedPendingToolCall"],
 ): Promise<
   | { done: true; result: Result<ProcessMessageResult, string> }
   | { done: false }
@@ -108,12 +111,39 @@ async function executeIteration(
     ctx.workerBoundary &&
     await checkWorkerBoundary(ctx, "before_model") === "stopped"
   ) return { done: true, result: stoppedWorker };
-  const llmResult = await callLlmAndRecordUsage(ctx, iteration);
+  const llmResult = pending
+    ? {
+      ok: true as const,
+      tools: resolveActiveToolList(ctx.state),
+      completion: {
+        content: "",
+        usage: { inputTokens: 0, outputTokens: 0 },
+        toolCalls: [{
+          id: pending.id,
+          type: "function" as const,
+          function: {
+            name: pending.name,
+            arguments: JSON.stringify(pending.args),
+          },
+        }],
+      },
+    }
+    : await callLlmAndRecordUsage(ctx, iteration);
   if (!llmResult.ok) return { done: true, result: llmResult.result };
   if (ctx.workerBoundary) {
     const decision = await checkWorkerBoundary(ctx, "before_action");
     if (decision === "stopped") return { done: true, result: stoppedWorker };
-    if (decision === "steered") return { done: false };
+    if (decision === "steered") {
+      return pending
+        ? {
+          done: true,
+          result: {
+            ok: false,
+            error: "Worker guidance changed during recovery.",
+          },
+        }
+        : { done: false };
+    }
   }
   const outcome = await dispatchIterationOutcome(ctx, {
     completion: llmResult.completion,
@@ -253,7 +283,10 @@ export async function orchestrateAgentLoop(
     if (opts.signal?.aborted) {
       return { ok: false, error: "Operation cancelled by user" };
     }
-    const step = await executeIteration(ctx, i);
+    const pending = i === (opts.resume?.completedIterations ?? 0) + 1
+      ? opts.resumedPendingToolCall
+      : undefined;
+    const step = await executeIteration(ctx, i, pending);
     if (!step.done) continue;
     if ("forceTextOnly" in step) {
       log.info(

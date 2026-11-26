@@ -1,3 +1,4 @@
+import { decodeStagedTrafficFinding } from "./worker_finding_store.ts";
 import { parseOperatorRunAdmissionCategory } from "../core/operator_run_categories.ts";
 import { retainPortablePausedGraphCheckpoints } from "./adaptive_store.ts";
 import { decodeInconclusiveRecheck } from "./recheck_inconclusive.ts";
@@ -236,12 +237,15 @@ function checkedDatabase<T>(
           family === "sentinel-goal-completion.db" &&
             name === "goal_evidence_submissions" ||
           family === "sentinel-worker-findings.db" &&
-            version === 2 && name === "inconclusive_rechecks" ||
+            version === 2 &&
+            (name === "inconclusive_rechecks" ||
+              name === "staged_traffic_findings") ||
           family === "sentinel-finding-traffic-links.db" &&
             version === 2 && (name === "traffic_link_request_aliases" ||
               name === "traffic_link_annotations" ||
               name === "traffic_link_composition" ||
-              name === "traffic_link_batches")
+              name === "traffic_link_batches" ||
+              name === "staged_publication_links")
         : name === family || name.startsWith(family + "_") ||
           family === "assessment" && name === "sentinel_operating_constraints");
     const tables = new Set<string>();
@@ -876,6 +880,73 @@ function validateAuxiliary(
   });
 }
 
+/** Require the two archived journal halves to name the same finished publication. */
+function validateArchivedTrafficFindingPublications(
+  findingsPath: string | undefined,
+  linksPath: string | undefined,
+  caseId: string,
+) {
+  const findings = findingsPath &&
+    new DatabaseSync(findingsPath, { readOnly: true });
+  const links = linksPath && new DatabaseSync(linksPath, { readOnly: true });
+  try {
+    const table = (db: DatabaseSync | undefined, name: string) =>
+      db?.prepare(
+        "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = ?",
+      ).get(name);
+    const published = findings && table(findings, "staged_traffic_findings")
+      ? findings.prepare(
+        `SELECT stage.*, receipt.input AS saved FROM staged_traffic_findings AS stage
+        LEFT JOIN receipts AS receipt ON receipt.id = stage.findingId
+        LIMIT 4097`,
+      ).all()
+      : [];
+    const attachments = links && table(links, "staged_publication_links")
+      ? links.prepare(`SELECT links.* FROM staged_publication_links AS stage
+        LEFT JOIN traffic_links AS links ON links.id = stage.link_id LIMIT 4097`)
+        .all()
+      : [];
+    if (published.length > 4096 || published.length !== attachments.length) {
+      throw new Error(
+        "Incomplete archived Sentinel finding traffic publication",
+      );
+    }
+    const byRequest = new Map(attachments.map((row) => {
+      const link = decodeSentinelFindingTrafficLink(row, caseId);
+      return [link.requestId, link] as const;
+    }));
+    for (const row of published) {
+      const staged = decodeStagedTrafficFinding(row, caseId);
+      if (!staged) {
+        throw new Error(
+          "Invalid archived Sentinel finding traffic publication",
+        );
+      }
+      const { finding, traffic } = staged;
+      const link = byRequest.get(String(row.requestId));
+      if (
+        row.input !== row.saved || !link ||
+        link.findingId !== row.findingId ||
+        link.evidenceRevision !== finding.evidenceRevision ||
+        link.assetId !== finding.targetId ||
+        link.authority.kind !== "assignment" ||
+        link.authority.taskId !== finding.taskId ||
+        link.trafficId !== traffic.evidenceId ||
+        link.trafficDigest !== traffic.digest ||
+        link.sourceStep?.stepIndex !== traffic.stepIndex ||
+        link.sourceStep?.sha256 !== traffic.resultSha256
+      ) {
+        throw new Error(
+          "Mismatched archived Sentinel finding traffic publication",
+        );
+      }
+    }
+  } finally {
+    if (findings) findings.close();
+    if (links) links.close();
+  }
+}
+
 function rejectDuplicateRun(baseDir: string, caseId: string, runId: string) {
   for (const existing of ["main", ...listSentinelCaseIds(baseDir)]) {
     if (existing === caseId) continue;
@@ -1255,6 +1326,13 @@ export async function restoreVerifiedSentinelCaseArchive(
     validateAuxiliary(source, name, caseId, runId, revision);
     return [{ name, source }];
   });
+  validateArchivedTrafficFindingPublications(
+    auxiliary.find(({ name }) => name === "sentinel-worker-findings.db")
+      ?.source,
+    auxiliary.find(({ name }) => name === "sentinel-finding-traffic-links.db")
+      ?.source,
+    caseId,
+  );
   const sourceBundles: { name: Artifact; source: string }[] = [];
   const toolDecisions = stagedPath(archive, sentinelArchivedToolDecisionsFile);
   if (toolDecisions) {

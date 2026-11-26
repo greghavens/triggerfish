@@ -120,6 +120,8 @@ export interface ProcessMessageOptions {
     signal?: AbortSignal,
     sourceAuthorization?: SavedSourceAuthorization,
   ) => Promise<boolean>;
+  /** Exact server-selected unfinished operation to route through root after resume authorization. */
+  readonly resumedPendingToolCall?: RecoveryToolCall & { readonly id: string };
   /** Mark the turn uncertain before dispatch, even for calls that cannot be checkpointed. */
   readonly beforeToolBatch?: (
     batch: number,

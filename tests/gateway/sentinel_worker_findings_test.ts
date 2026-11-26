@@ -1,3 +1,4 @@
+import { DatabaseSync } from "node:sqlite";
 import { INCONCLUSIVE_RECHECK_TOOL } from "../../src/sentinel/recheck_inconclusive.ts";
 import { createFindingDownload } from "../../tidepool-ui/src/screens/Sentinel/finding_download.ts";
 import { startSentinelAssessmentCoordinator } from "../../src/gateway/sentinel_assessment_service.ts";
@@ -73,12 +74,15 @@ import {
 import { resolveSentinelCasePath } from "../../src/sentinel/cases.ts";
 import { importSentinelHar } from "../../src/sentinel/har.ts";
 import {
+  listSentinelFindingTrafficLinks,
   sentinelFindingTrafficEvidenceVersion,
   type SentinelFindingTrafficLink,
 } from "../../src/sentinel/finding_traffic_links.ts";
 import { readSentinelTrafficReceiptPage } from "../../src/sentinel/traffic_receipts.ts";
 import { readSentinelWorkerFindingPublications } from "../../src/sentinel/worker_finding_publications.ts";
 import {
+  openSentinelWorkerFindingStore,
+  readSentinelWorkerFindingHistory,
   readSentinelWorkerFindingReport,
   type SentinelWorkerFindingJournalRecord,
   type SentinelWorkerFindingRecord,
@@ -5309,12 +5313,262 @@ Deno.test("A clean Sentinel recheck turn without an exact result records a faile
 Deno.test("Stopping an exact recheck preserves its staged evidence without publishing remediation", () =>
   verifyReceiptFamily("native workflow result", "stop-after-result"));
 
+async function verifyInitialTrafficPublication(
+  baseDir: string,
+  path: string,
+  state: State,
+  source: ReturnType<typeof assignedLease>,
+  input: Record<string, unknown>,
+  traffic: { revision: number; evidenceId: string; digest: string },
+  assetId: string,
+  neighbor: { evidenceId: string; digest: string },
+  mode: "resume" | "revoked" | "stale",
+) {
+  const ref = {
+    kind: "sentinel",
+    id: "retained-finding",
+    revision: state.revision,
+    runId: state.plan.runId,
+  };
+  const denied = await workerTurn(path, source, [
+    [tool(assigned)],
+    [tool("sentinel_traffic_get", traffic)],
+    [
+      tool(report, {
+        ...input,
+        trafficEvidenceId: neighbor.evidenceId,
+        trafficDigest: neighbor.digest,
+      }),
+      tool(report, {
+        ...input,
+        trafficEvidenceId: traffic.evidenceId,
+        trafficDigest: "f".repeat(64),
+      }),
+    ],
+  ]);
+  assert(denied.results[2].every((result) => result.startsWith("Error:")));
+  assertEquals(readSentinelWorkerFindingHistory(path), []);
+  assertEquals(listSentinelFindingTrafficLinks(path), []);
+  const revision = adaptiveRevision(state);
+  const adaptive = openSentinelAdaptiveStore(
+    join(dirname(path), "sentinel-adaptive.db"),
+  );
+  try {
+    assert(
+      adaptive.finishModelReview(
+        revision,
+        source.assignedTaskId,
+        source.assignedTaskLeaseToken,
+        "interrupted",
+      ),
+    );
+  } finally {
+    adaptive.close();
+  }
+  openSentinelWorkerFindingStore(path).close();
+  const findingDb = new DatabaseSync(
+    join(dirname(path), "sentinel-worker-findings.db"),
+  );
+  findingDb.exec(
+    `CREATE TRIGGER interrupt_composite_finding BEFORE INSERT ON receipts
+    BEGIN SELECT RAISE(ABORT, 'interrupt between link and finding'); END`,
+  );
+  findingDb.close();
+  await Deno.writeTextFile(
+    join(baseDir, "traffic-finding-fixture.json"),
+    JSON.stringify({
+      taskId: source.assignedTaskId,
+      input: {
+        ...input,
+        trafficEvidenceId: traffic.evidenceId,
+        trafficDigest: traffic.digest,
+      },
+      traffic,
+    }),
+    { mode: 0o600 },
+  );
+  const fixture = new URL(
+    "./fixtures/traffic_finding_gateway_process.ts",
+    import.meta.url,
+  );
+  const launch = async (phase: string) => {
+    const result = await new Deno.Command(Deno.execPath(), {
+      args: ["run", "-A", fixture.pathname, baseDir, phase],
+      stdout: "null",
+      stderr: "piped",
+    }).output();
+    assert(result.success, new TextDecoder().decode(result.stderr));
+  };
+  await launch("interrupt");
+  assertEquals(readSentinelWorkerFindingHistory(path), []);
+  assertEquals(listSentinelFindingTrafficLinks(path), []);
+  const linksDb = new DatabaseSync(
+    join(dirname(path), "sentinel-finding-traffic-links.db"),
+    { readOnly: true },
+  );
+  try {
+    assertEquals(
+      linksDb.prepare("SELECT COUNT(*) AS count FROM staged_publication_links")
+        .get()?.count,
+      1,
+    );
+  } finally {
+    linksDb.close();
+  }
+  const reopened = new DatabaseSync(
+    join(dirname(path), "sentinel-worker-findings.db"),
+  );
+  reopened.exec("DROP TRIGGER interrupt_composite_finding");
+  reopened.close();
+  const expireFixtureLease = () => {
+    const expired = new DatabaseSync(
+      join(dirname(path), "sentinel-adaptive.db"),
+    );
+    try {
+      expired.exec(
+        "UPDATE adaptive_model_reviews SET availableAt = 0 WHERE token IS NOT NULL",
+      );
+    } finally {
+      expired.close();
+    }
+  };
+  expireFixtureLease();
+  if (mode === "resume") {
+    await launch("reclaim-crash");
+    expireFixtureLease();
+  }
+  if (mode === "stale") {
+    const graph = JSON.parse(await Deno.readTextFile(path));
+    graph.nodes.find(({ id }: { id: string }) => id === "gap").label +=
+      " (new evidence revision)";
+    await Deno.writeTextFile(path, JSON.stringify(graph));
+    const updated = refreshSentinelAssessment(path);
+    assert(updated && updated.revision > state.revision);
+    await launch(mode);
+    assertEquals(readSentinelWorkerFindingHistory(path), []);
+    assertEquals(listSentinelFindingTrafficLinks(path), []);
+    return;
+  }
+  await launch(mode);
+  const events =
+    (await Deno.readTextFile(join(baseDir, "traffic-finding-events.log")))
+      .trim().split("\n");
+  assertEquals(events.filter((event) => event.endsWith(":traffic-result")), [
+    "interrupt:traffic-result",
+  ]);
+  assert(
+    events.includes("interrupt:report-pre") &&
+      events.includes("interrupt:interrupted"),
+  );
+  assert(events.includes(`${mode}:traffic-pre`));
+  if (mode === "revoked") {
+    assert(!events.includes("revoked:report-pre"));
+    assertEquals(readSentinelWorkerFindingHistory(path), []);
+    assertEquals(listSentinelFindingTrafficLinks(path), []);
+    return;
+  }
+  assert(events.includes("reclaim-crash:traffic-pre"));
+  assert(!events.includes("reclaim-crash:report-pre"));
+  assert(events.includes("resume:report-pre"));
+  assert(events.includes("resume:report-post"));
+  const recovered = JSON.parse(
+    await Deno.readTextFile(join(baseDir, "traffic-finding-result.json")),
+  );
+  assertEquals(recovered.link.findingId, recovered.record.id);
+  assertEquals(recovered.link.trafficDigest, traffic.digest);
+  assertEquals(recovered.link.authority, {
+    kind: "assignment",
+    taskId: source.assignedTaskId,
+  });
+  assertEquals(recovered.link.sourceStep?.stepIndex, 1);
+  assertEquals(recovered.record.runId, state.plan.runId);
+  assertEquals(recovered.record.targetId, assetId);
+  assertEquals(readSentinelWorkerFindingHistory(path), [recovered.record]);
+  assertEquals(listSentinelFindingTrafficLinks(path), [recovered.link]);
+  assert(stopSentinelAssessment(path));
+  const archiveId = crypto.randomUUID();
+  await withFindingAssignmentGateway(
+    baseDir,
+    () => Promise.resolve(true),
+    async (turn) => {
+      assertEquals(
+        JSON.parse(
+          await turn({ ...ref, action: "archive", requestId: archiveId }),
+        ).receipt.status,
+        "succeeded",
+      );
+    },
+  );
+  await Deno.rename(
+    dirname(path),
+    join(baseDir, "before-traffic-finding-restore"),
+  );
+  await withFindingAssignmentGateway(
+    baseDir,
+    () => Promise.resolve(true),
+    async (turn) => {
+      assertEquals(
+        JSON.parse(
+          await turn({
+            ...ref,
+            action: "restore",
+            requestId: crypto.randomUUID(),
+            archiveId,
+          }),
+        ).receipt.status,
+        "succeeded",
+      );
+    },
+  );
+  const traceQuery = {
+    action: "worker_trace_result",
+    kind: ref.kind,
+    id: ref.id,
+    revision: ref.revision,
+    taskId: source.assignedTaskId,
+    stepIndices: [2],
+  };
+  await withFindingAssignmentGateway(
+    baseDir,
+    () => Promise.resolve(false),
+    async (turn) => {
+      const reopened = JSON.parse(await turn(traceQuery));
+      assertEquals(reopened.result, recovered);
+    },
+  );
+  await withFindingAssignmentGateway(
+    baseDir,
+    () => Promise.resolve(false),
+    async (turn) => {
+      assertStringIncludes(await turn(traceQuery), "unavailable");
+    },
+    (hook, input) =>
+      !(hook === "PRE_TOOL_CALL" && input.tool_name === "sentinel_traffic_get"),
+  );
+  await withTidepool(baseDir, async (_list, _provenance, request) => {
+    const result = await request("export", {
+      format: "provenance",
+      revision: state.revision,
+      caseId: ref.id,
+    });
+    assertEquals(result.type, "export");
+    assertEquals(result.caseId, ref.id);
+    assertEquals(JSON.parse(String(result.content)).findingTrafficLinks, [
+      recovered!.link,
+    ]);
+  });
+}
+
 async function testScopedReporterRestart(
   useBatch: boolean,
   denyMember = false,
+  initialPublication?: "resume" | "revoked" | "stale",
 ) {
   const baseDir = await Deno.makeTempDir();
-  const path = resolveSentinelCasePath(baseDir);
+  const path = resolveSentinelCasePath(
+    baseDir,
+    initialPublication ? "retained-finding" : undefined,
+  );
   let planner: ReturnType<typeof createSentinelModelPlanner> | undefined;
   try {
     const time = Date.now();
@@ -5405,6 +5659,20 @@ async function testScopedReporterRestart(
       summary: "The case records a failed verification.",
       requestId: crypto.randomUUID(),
     };
+    if (initialPublication) {
+      await verifyInitialTrafficPublication(
+        baseDir,
+        path,
+        state,
+        source,
+        input,
+        traffic,
+        service.assetId,
+        neighborReceipt,
+        initialPublication,
+      );
+      return;
+    }
     const published = await workerTurn(path, source, [
       [tool(assigned)],
       [tool(report, input), tool(report, input)],
@@ -6025,6 +6293,15 @@ async function testScopedReporterRestart(
     await Deno.remove(baseDir, { recursive: true });
   }
 }
+
+Deno.test("Sentinel resumes a staged finding and traffic receipt through root dispatch", () =>
+  testScopedReporterRestart(false, false, "resume"));
+
+Deno.test("Revoked traffic source policy blocks staged finding recovery across a gateway restart", () =>
+  testScopedReporterRestart(false, false, "revoked"));
+
+Deno.test("A newer case revision cannot replay a staged traffic finding", () =>
+  testScopedReporterRestart(false, false, "stale"));
 
 Deno.test("Sentinel resumes a scoped report worker after committing one traffic link", () =>
   testScopedReporterRestart(false));

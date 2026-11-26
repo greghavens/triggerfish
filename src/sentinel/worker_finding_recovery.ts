@@ -7,9 +7,11 @@ import {
 import {
   hasSentinelWorkerFindingJournal,
   openSentinelWorkerFindingStore,
+  readSentinelStagedTrafficFinding,
   readSentinelWorkerFindingWriteReceipt,
 } from "./worker_finding_store.ts";
 
+import { readSentinelFindingTrafficWriteReceipt } from "./finding_traffic_links.ts";
 export const MAX_SENTINEL_FINDING_RESULT_CHARS = 6000;
 
 export const SENTINEL_RECHECK_CONTEXT_TOOL = "sentinel_finding_recheck_context";
@@ -69,6 +71,10 @@ export function sentinelFindingMutationArguments(
   const keys = name === "sentinel_update_finding_report" &&
       input.evidenceVersion !== undefined
     ? [...fields[name], "evidenceVersion"] as const
+    : name === "sentinel_report_finding" &&
+        (input.trafficEvidenceId !== undefined ||
+          input.trafficDigest !== undefined)
+    ? [...fields[name], "trafficEvidenceId", "trafficDigest"] as const
     : fields[name];
   const { requestId } = input;
   if (
@@ -83,20 +89,60 @@ export function sentinelFindingMutationArguments(
       key === "expectedVersion"
         ? typeof value !== "number" ||
           !Number.isSafeInteger(value) || value < 1
-        : key === "evidenceVersion"
+        : key === "evidenceVersion" || key === "trafficDigest"
         ? typeof value !== "string" || !/^[a-f0-9]{64}$/.test(value)
         : typeof value !== "string" ||
-          !value.trim() || value.length > (key === "title" ? 256 : 4096) ||
+          !value.trim() || value.length > (key === "title"
+              ? 256
+              : key === "trafficEvidenceId"
+              ? 100
+              : 4096) ||
           value.includes("\0")
-    ) return;
+    ) {
+      return;
+    }
     args[key] = value;
   }
   return { ...args, requestId: requestId.toLowerCase() };
 }
 
+export function lookupSentinelPendingTrafficFinding(
+  path: string,
+  scope: Parameters<typeof readSentinelStagedTrafficFinding>[1],
+  requestId: string,
+  snapshotDigest: string,
+) {
+  const staged = readSentinelStagedTrafficFinding(path, scope, requestId);
+  if (!staged || staged.finding.snapshotDigest !== snapshotDigest) return;
+  const args = sentinelFindingMutationArguments("sentinel_report_finding", {
+    ...Object.fromEntries(
+      fields.sentinel_report_finding.map((key) => [key, staged.finding[key]]),
+    ),
+    requestId,
+    trafficEvidenceId: staged.traffic.evidenceId,
+    trafficDigest: staged.traffic.digest,
+  });
+  if (!args) return;
+  return {
+    args,
+    staged,
+    trafficBatch: [{
+      args: {
+        revision: scope.evidenceRevision,
+        evidenceId: staged.traffic.evidenceId,
+        digest: staged.traffic.digest,
+      },
+      stepIndex: staged.traffic.stepIndex,
+      sha256: staged.traffic.resultSha256,
+    }],
+  };
+}
+
 export function lookupSentinelFindingMutation(
   path: string,
-  scope: Parameters<typeof readSentinelWorkerFindingWriteReceipt>[1],
+  scope: Parameters<typeof readSentinelWorkerFindingWriteReceipt>[1] & {
+    runId?: string;
+  },
   name: FindingTool,
   requestId: string,
   snapshotDigest: string,
@@ -143,6 +189,46 @@ export function lookupSentinelFindingMutation(
     ? "sentinel_record_finding_recheck"
     : "sentinel_update_finding_report";
   if (name !== expected) return;
+  if (
+    name === "sentinel_report_finding" && scope.runId &&
+    receipt.kind === "finding"
+  ) {
+    const pending = lookupSentinelPendingTrafficFinding(
+      path,
+      { ...scope, runId: scope.runId },
+      requestId,
+      snapshotDigest,
+    );
+    if (pending) {
+      const link = readSentinelFindingTrafficWriteReceipt(path, {
+        caseId: scope.caseId,
+        evidenceRevision: scope.evidenceRevision,
+        taskId: scope.taskId,
+        assetId: scope.targetId,
+      }, requestId);
+      if (
+        !link || link.findingId !== receipt.id ||
+        link.trafficId !== pending.staged.traffic.evidenceId ||
+        link.trafficDigest !== pending.staged.traffic.digest ||
+        link.sourceStep?.stepIndex !== pending.staged.traffic.stepIndex ||
+        link.sourceStep.sha256 !== pending.staged.traffic.resultSha256
+      ) return;
+      const result = JSON.stringify({
+        _classification: "INTERNAL",
+        record: receipt,
+        link,
+      });
+      return result.length <= MAX_SENTINEL_FINDING_RESULT_CHARS
+        ? {
+          args: pending.args,
+          result,
+          id: receipt.id,
+          trafficBatch: pending.trafficBatch,
+        }
+        : undefined;
+    }
+  }
+
   const args = sentinelFindingMutationArguments(name, {
     ...Object.fromEntries(
       fields[name].map((key) => [key, Reflect.get(receipt, key)]),

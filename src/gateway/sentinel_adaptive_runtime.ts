@@ -180,6 +180,7 @@ import {
 import {
   isSentinelFindingMutation,
   lookupSentinelFindingMutation,
+  lookupSentinelPendingTrafficFinding,
   normalizeSentinelRecheckNote,
   SENTINEL_RECHECK_CONTEXT_TOOL,
 } from "../sentinel/worker_finding_recovery.ts";
@@ -4949,6 +4950,25 @@ export function createSentinelModelPlanner(
     const runId = current.plan.runId;
     const snapshot = current.result?.sharedGraph.snapshot;
     let graphDigest: string | undefined;
+    const lookupPendingTrafficFinding = (
+      taskId: string,
+      targetId: string,
+      requestId: string,
+    ) => {
+      if (!caseId || !runId || !snapshot) return;
+      return lookupSentinelPendingTrafficFinding(
+        snapshotPath,
+        {
+          caseId,
+          runId,
+          taskId,
+          targetId: executionFindingAsset(snapshot, targetId) ?? targetId,
+          evidenceRevision: current.revision,
+        },
+        requestId,
+        graphDigest ??= digestSentinelSnapshot(snapshot),
+      );
+    };
     const lookupMutation = (
       taskId: string,
       targetId: string,
@@ -5290,6 +5310,7 @@ export function createSentinelModelPlanner(
         current.revision,
         eligible,
         lookupMutation,
+        lookupPendingTrafficFinding,
       );
       if (
         !store.modelReviewAvailable(revision, MODEL_ASSIGNMENT_REASON, eligible)
@@ -5569,6 +5590,13 @@ export function createSentinelModelPlanner(
             (!resume ||
               resumedPolicy !== workerHoldPolicyDigest(snapshotPath, latest))
           ) return;
+          const pendingRequest = checkpointStore.pendingTrafficFindingReplay(
+            revision,
+            task.id,
+          );
+          const pendingFinding = pendingRequest && task.nodeId &&
+            lookupPendingTrafficFinding(task.id, task.nodeId, pendingRequest);
+          if (pendingRequest && (!resume || !pendingFinding)) return;
           await worker.execute(
             prompt,
             (event) => {
@@ -5594,6 +5622,13 @@ export function createSentinelModelPlanner(
             undefined,
             {
               resume,
+              ...(pendingFinding && {
+                resumedPendingToolCall: {
+                  id: `recovery-traffic-finding-${pendingRequest}`,
+                  name: "sentinel_report_finding",
+                  args: pendingFinding.args,
+                },
+              }),
               retainedProgress: previousProgress,
               operatingConstraints: constraints && {
                 version: constraints.version,

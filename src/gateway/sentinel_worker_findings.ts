@@ -1,3 +1,6 @@
+import { openSentinelFindingTrafficLinks } from "../sentinel/finding_traffic_links.ts";
+import { readSentinelTrafficReceipt } from "../sentinel/traffic_receipts.ts";
+import { sentinelTrafficAttachmentKey } from "./sentinel_finding_traffic_tool.ts";
 import {
   INCONCLUSIVE_RECHECK_TOOL,
   inconclusiveRecheckArgs,
@@ -102,6 +105,15 @@ export const sentinelFindingWriteTools: readonly ToolDefinition[] = [
       requestId: exactId,
       title: summary,
       summary,
+      trafficEvidenceId: {
+        type: "string",
+        description:
+          "Optional exact retained traffic receipt already opened by this assignment.",
+      },
+      trafficDigest: {
+        type: "string",
+        description: "Exact digest paired with trafficEvidenceId.",
+      },
     },
   },
   {
@@ -238,6 +250,7 @@ export function executeSentinelWorkerFindingTool(
     ExecutionControlReceipt
   >,
   allowReadTarget?: (target: string) => boolean,
+  trafficReads?: ReadonlyMap<string, { stepIndex: number; sha256: string }>,
 ): string {
   const tool = findTool(name);
   if (
@@ -642,6 +655,87 @@ export function executeSentinelWorkerFindingTool(
               observation_id: id,
             });
           };
+          if (
+            initial && typeof title === "string" &&
+            (args.trafficEvidenceId !== undefined ||
+              args.trafficDigest !== undefined)
+          ) {
+            const { trafficEvidenceId, trafficDigest } = args;
+            if (
+              typeof trafficEvidenceId !== "string" ||
+              typeof trafficDigest !== "string"
+            ) return;
+            const traffic = readSentinelTrafficReceipt(
+              scope.snapshotPath,
+              state.revision,
+              {
+                evidenceId: trafficEvidenceId,
+                digest: trafficDigest,
+              },
+              asset,
+            );
+            const step = traffic &&
+              trafficReads?.get(sentinelTrafficAttachmentKey(
+                caseId,
+                state.revision,
+                asset,
+                trafficEvidenceId,
+                trafficDigest,
+                traffic.family,
+              ));
+            if (!traffic || !step) return;
+            // A recoverable compound result includes both receipts. Reserve
+            // space for their fixed fields and generated identifiers.
+            if (
+              JSON.stringify([{ ...receipt, title }, {
+                    caseId,
+                    asset,
+                    trafficEvidenceId,
+                  }]).length +
+                  1200 > MAX_SENTINEL_FINDING_RESULT_CHARS
+            ) return;
+            const staged = store.stageTrafficFinding({ ...receipt, title }, {
+              evidenceId: trafficEvidenceId,
+              digest: trafficDigest,
+              stepIndex: step.stepIndex,
+              resultSha256: step.sha256,
+            });
+            if (!staged) return;
+            const links = openSentinelFindingTrafficLinks(scope.snapshotPath);
+            try {
+              if (
+                !links.recordStagedPublication({
+                  caseId,
+                  evidenceRevision: state.revision,
+                  assetId: asset,
+                  findingId: staged.findingId,
+                  reportVersion: 1,
+                  trafficId: trafficEvidenceId,
+                  trafficDigest,
+                  trafficSource: traffic.family,
+                  authority: {
+                    kind: "assignment",
+                    taskId: scope.assignedTaskId,
+                  },
+                  sourceStep: step,
+                  requestId: receipt.requestId,
+                }, () =>
+                  !signal?.aborted &&
+                  assignedTask(scope)?.id === scope.assignedTaskId)
+              ) return;
+            } finally {
+              links.close();
+            }
+            if (
+              signal?.aborted ||
+              assignedTask(scope)?.id !== scope.assignedTaskId
+            ) return;
+            const saved = store.publishTrafficFinding(
+              receipt.requestId,
+              notify,
+            );
+            return saved && { _classification: "INTERNAL", ...saved };
+          }
           const record = initial && typeof title === "string"
             ? store.recordFinding({ ...receipt, title }, notify)
             : previous && store.recordRecheck({

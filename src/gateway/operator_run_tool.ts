@@ -141,7 +141,11 @@ import {
 import { parseFindingExportFilter } from "../sentinel/assessment_export.ts";
 import { readSentinelFindingLineage } from "../sentinel/finding_lineage.ts";
 import { loadSentinelGraph } from "../sentinel/graph.ts";
-import { isSentinelFindingMutation } from "../sentinel/worker_finding_recovery.ts";
+import {
+  isSentinelFindingMutation,
+  lookupSentinelFindingMutation,
+  lookupSentinelPendingTrafficFinding,
+} from "../sentinel/worker_finding_recovery.ts";
 import { executionFindingAsset } from "../sentinel/worker_finding_evidence.ts";
 import {
   SENTINEL_TRAFFIC_ATTACH,
@@ -7148,6 +7152,7 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
               });
             const savedStep = (
               state: typeof history,
+              stepIndex = index,
             ): SentinelReadTrace | undefined => {
               if (state?.goal.id !== runId) {
                 return;
@@ -7155,18 +7160,18 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
               const review = state.modelReviews.find((item) =>
                 item.taskId === taskId
               )
-                ?.steps[index] ??
+                ?.steps[stepIndex] ??
                 state.modelReviewStates.find((item) =>
                   item.taskId === taskId
                 )
-                  ?.progressSteps?.[index];
+                  ?.progressSteps?.[stepIndex];
               if (review || typeof taskId !== "string") return review;
               const publication = readSentinelWorkflowPublicationStep(
                 path,
                 ref.revision!,
                 runId,
                 taskId,
-                index,
+                stepIndex,
               );
               return publication && {
                 tool: "sentinel_publish_workflow_observation",
@@ -8573,9 +8578,65 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
                 ? "inconclusive_recheck"
                 : "report_amendment";
               if (!receipt || receipt.kind !== kind) return unavailable;
-              const retained = receipt.kind === "report_amendment"
-                ? { _classification: "INTERNAL", amendment: receipt }
-                : { _classification: "INTERNAL", record: receipt };
+              let retained: Record<string, unknown> =
+                receipt.kind === "report_amendment"
+                  ? { _classification: "INTERNAL", amendment: receipt }
+                  : { _classification: "INTERNAL", record: receipt };
+              if (receipt.kind === "finding" && targetId && snapshot) {
+                const writeScope = {
+                  ...scope,
+                  runId,
+                  targetId,
+                  evidenceRevision: ref.revision,
+                };
+                const digest = digestSentinelSnapshot(snapshot);
+                const staged = lookupSentinelPendingTrafficFinding(
+                  path,
+                  writeScope,
+                  receipt.requestId,
+                  digest,
+                );
+                if (staged) {
+                  const source = staged.trafficBatch[0];
+                  const sourceStep = savedStep(history, source.stepIndex);
+                  if (
+                    sourceStep?.tool !== SENTINEL_TRAFFIC_READ ||
+                    sourceStep.outcome !== "returned" ||
+                    sourceStep.trafficRead?.sha256 !== source.sha256 ||
+                    !await authorize(scope, SENTINEL_TRAFFIC_READ, source.args)
+                  ) return unavailable;
+                  const visible = readProjectedSentinelTrafficReceipt(
+                    path,
+                    ref.id,
+                    ref.revision,
+                    source.args,
+                    targetId,
+                  );
+                  if (!visible) return unavailable;
+                  const text = JSON.stringify(visible);
+                  if (
+                    createHash("sha256").update(text).digest("hex") !==
+                      source.sha256 ||
+                    !await authorize(
+                      scope,
+                      SENTINEL_TRAFFIC_READ,
+                      source.args,
+                      text,
+                    )
+                  ) return unavailable;
+                  const compound = lookupSentinelFindingMutation(
+                    path,
+                    writeScope,
+                    "sentinel_report_finding",
+                    receipt.requestId,
+                    digest,
+                  );
+                  if (
+                    !compound || compound.id !== receipt.id
+                  ) return unavailable;
+                  retained = JSON.parse(compound.result);
+                }
+              }
               const text = JSON.stringify(retained);
               const expected = (step as SentinelReadTrace).resultSha256;
               if (

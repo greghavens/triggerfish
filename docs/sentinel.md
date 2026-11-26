@@ -380,6 +380,14 @@ finding's current assignment completes, exhausts retries, or is stopped.
 Existing request IDs
 still reopen their original admission receipt.
 
+A leased worker can include `trafficEvidenceId` and `trafficDigest` in
+`sentinel_report_finding` after opening that exact retained traffic receipt
+for its assigned asset. The finding becomes visible once its traffic link
+is durable. Recovery reauthorizes the saved source and goes through the
+normal tool hooks before completing an interrupted publication. The link
+retains the source assignment and tool step. Archives preserve completed
+publications and exclude unfinished attachments.
+
 The worker finding report shows a separate remediation status as of the selected
 evidence revision. A verified result identifies its exact recheck and evidence.
 A dedicated recheck's committed receipt counts toward that status after

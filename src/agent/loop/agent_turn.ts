@@ -362,6 +362,7 @@ export async function orchestrateAgentTurn(
     resumeMessageIndex = 0,
     resumeClassification,
     resumeToolCalls,
+    resumedPendingToolCall,
     authorizeResumeSources,
     beforeToolBatch,
     toolPersistence,
@@ -407,7 +408,10 @@ export async function orchestrateAgentTurn(
     );
     if (!guard.ok) return guard;
   }
-  if (protectedResume && !resume) {
+  if (
+    (protectedResume && !resume) ||
+    (resumedPendingToolCall && (!resume || !authorizeResumeSources))
+  ) {
     return { ok: false, error: "Invalid agent turn checkpoint" };
   }
   if (
@@ -562,6 +566,7 @@ export async function orchestrateAgentTurn(
     targetClassification,
     signal,
     resume,
+    resumedPendingToolCall,
     beforeToolBatch,
     toolPersistence,
     workerBoundary,

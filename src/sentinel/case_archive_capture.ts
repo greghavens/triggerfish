@@ -1,3 +1,4 @@
+import { readSentinelCaseFindingReceipts } from "./worker_finding_store.ts";
 import { retainPortablePausedGraphCheckpoints } from "./adaptive_store.ts";
 import { isDeepStrictEqual } from "node:util";
 import {
@@ -190,6 +191,11 @@ const evidenceStoreSchemas: Partial<
     versions: [1, 2],
     tables: [
       {
+        name: "staged_traffic_findings",
+        columns: ["requestId", "findingId", "input", "traffic"],
+        optionalTable: true,
+      },
+      {
         name: "receipts",
         columns: ["id", "revision", "findingId", "input", "recordedAt"],
         optionalColumns: ["reportVersion"],
@@ -237,6 +243,11 @@ const evidenceStoreSchemas: Partial<
     applicationId: 0x5346544c,
     versions: [1, 2],
     tables: [
+      {
+        name: "staged_publication_links",
+        columns: ["link_id"],
+        optionalTable: true,
+      },
       {
         name: "traffic_links",
         columns: [
@@ -1000,7 +1011,40 @@ export function captureStoppedSentinelCaseArtifacts(
           source,
           join(directory, name),
           new Set(schema.tables.map(({ name }) => name)),
-          (db) => validateEvidenceSchema(db, schema),
+          (db) => {
+            validateEvidenceSchema(db, schema);
+            if (
+              name === "sentinel-worker-findings.db" &&
+              tableExists(db, "staged_traffic_findings")
+            ) {
+              db.exec(`DELETE FROM staged_traffic_findings
+                WHERE NOT EXISTS (SELECT 1 FROM receipts WHERE id = staged_traffic_findings.findingId
+                  AND input = staged_traffic_findings.input)`);
+            }
+            if (
+              name === "sentinel-finding-traffic-links.db" &&
+              tableExists(db, "staged_publication_links")
+            ) {
+              const staged = db.prepare(`SELECT p.link_id, links.finding_id
+                FROM staged_publication_links p JOIN traffic_links links ON links.id = p.link_id
+                LIMIT 4097`).all();
+              if (staged.length > 4096) {
+                throw new Error("Too many staged Sentinel traffic links.");
+              }
+              const findings = readSentinelCaseFindingReceipts(
+                resolveSentinelCasePath(baseDir, caseId),
+                staged.map(({ finding_id }) => String(finding_id)),
+              );
+              for (const { link_id, finding_id } of staged) {
+                if (findings.has(String(finding_id))) continue;
+                const id = String(link_id);
+                db.prepare(
+                  "DELETE FROM staged_publication_links WHERE link_id = ?",
+                ).run(id);
+                db.prepare("DELETE FROM traffic_links WHERE id = ?").run(id);
+              }
+            }
+          },
         );
         files.push(artifact(directory, name));
       }
