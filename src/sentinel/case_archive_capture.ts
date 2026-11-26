@@ -901,13 +901,16 @@ function scrubAdaptive(
           targetId,
           args,
         ),
-      provenanceNode: (page, text) =>
+      provenanceNode: (page, text, assignmentId, targetId) =>
         matchesPortableSentinelProvenanceNode(
           snapshotPath,
           runId,
           evidenceRevision,
           page,
           text,
+          db,
+          assignmentId,
+          targetId,
         ),
     },
   );

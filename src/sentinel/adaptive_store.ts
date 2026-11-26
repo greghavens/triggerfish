@@ -734,6 +734,8 @@ type PortableWorkerSources = {
   readonly provenanceNode: (
     page: NonNullable<ReturnType<typeof readSentinelProvenanceNodeReference>>,
     text: string,
+    taskId: string,
+    targetId: string,
   ) => boolean;
 };
 
@@ -788,7 +790,7 @@ function portablePausedWorkerProgress(
           page,
           evidenceRevision,
         ) ||
-        !sources?.provenanceNode(page, result.content)
+        !sources?.provenanceNode(page, result.content, taskId, nodeId)
       ) return;
       safe.push({
         tool: SENTINEL_PROVENANCE_NODE_READ,

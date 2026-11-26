@@ -909,7 +909,7 @@ async function verifyPausedGraphWorker(
   pinnedTemplate = false,
   askCheckpoint?: "approved" | "missing",
   trafficCheckpoint = false,
-  provenanceCheckpoint?: "node" | "finding",
+  provenanceCheckpoint?: "node" | "finding" | "adaptive-finding",
 ) {
   const baseDir = await Deno.makeTempDir();
   const caseId = cold ? "portable-worker" : "main";
@@ -928,6 +928,8 @@ async function verifyPausedGraphWorker(
     | { revision: number; evidenceId: string; digest: string }
     | undefined;
   let originalRead: string | undefined;
+  const findingCheckpoint = provenanceCheckpoint === "finding" ||
+    provenanceCheckpoint === "adaptive-finding";
   let exactProvenance: {
     revision: number;
     node: string;
@@ -1008,7 +1010,7 @@ async function verifyPausedGraphWorker(
             const result = JSON.parse(text);
             assertEquals(result.revision, exactProvenance.revision);
             assertEquals(result.node.id, exactProvenance.node);
-            if (provenanceCheckpoint === "finding") {
+            if (findingCheckpoint) {
               assertEquals(result.node.label, "Exact portable finding");
               assertEquals(result.node.findingReviews.length, 1);
               assertEquals(
@@ -1024,6 +1026,21 @@ async function verifyPausedGraphWorker(
               assertEquals(result.totalConnections, 1);
             }
             assertEquals(result.connections.length, 1);
+            if (provenanceCheckpoint === "adaptive-finding") {
+              assertEquals(result.offset, 3);
+              assertEquals(result.totalConnections, 4);
+              const trace = adaptive()?.tasks.find(({ kind, nodeId, status }) =>
+                kind === "trace" && nodeId === heldAsset &&
+                status === "completed"
+              );
+              assert(trace);
+              assertEquals(result.connections[0], {
+                kind: "edge",
+                from: `observation:adaptive:${trace.id}`,
+                to: exactProvenance.node,
+                relation: "references",
+              });
+            }
             if (heldStep) assertEquals(text, originalRead);
             else originalRead = text;
           }
@@ -1175,7 +1192,7 @@ async function verifyPausedGraphWorker(
               label: "Exact portable evidence",
             }]
             : []),
-          ...(provenanceCheckpoint === "finding"
+          ...(findingCheckpoint
             ? [{
               kind: "finding",
               id: "portable-finding",
@@ -1192,11 +1209,13 @@ async function verifyPausedGraphWorker(
               relation: "observed_on",
             }]
             : []),
-          ...(provenanceCheckpoint === "finding"
+          ...(findingCheckpoint
             ? [
               {
                 from: "portable-finding",
-                to: "peer-graph",
+                to: provenanceCheckpoint === "adaptive-finding"
+                  ? heldAsset
+                  : "peer-graph",
                 relation: "affects",
               },
               {
@@ -1269,14 +1288,14 @@ async function verifyPausedGraphWorker(
     if (provenanceCheckpoint) {
       exactProvenance = {
         revision: initial.revision,
-        node: provenanceCheckpoint === "finding"
+        node: findingCheckpoint
           ? "finding:portable-finding"
           : "evidence:portable-source",
-        offset: 0,
+        offset: provenanceCheckpoint === "adaptive-finding" ? 3 : 0,
         limit: 1,
       };
     }
-    if (provenanceCheckpoint === "finding") {
+    if (findingCheckpoint) {
       await withTidepoolSocket(baseDir, async (request) => {
         assertEquals(
           (await request("review_finding", {
@@ -1740,6 +1759,18 @@ Deno.test("Portable Sentinel worker restores an exactly approved local finding r
     "missing",
     false,
     "finding",
+  );
+});
+
+Deno.test("Portable Sentinel worker restores an approved finding page with a sealed adaptive trace link", async () => {
+  await verifyPausedGraphWorker(
+    true,
+    false,
+    undefined,
+    true,
+    "approved",
+    false,
+    "adaptive-finding",
   );
 });
 

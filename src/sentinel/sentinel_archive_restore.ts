@@ -1155,13 +1155,16 @@ function restoreAdaptive(
               targetId,
               args,
             ),
-          provenanceNode: (page, text) =>
+          provenanceNode: (page, text, assignmentId, targetId) =>
             matchesPortableSentinelProvenanceNode(
               join(dirname(assessment), "sentinel.json"),
               runId,
               revision,
               page,
               text,
+              db,
+              assignmentId,
+              targetId,
             ),
         },
       );
