@@ -10,8 +10,11 @@ import { dirname, join } from "@std/path";
 import type { BootstrapResult } from "../../src/gateway/startup/bootstrap.ts";
 import { createTidepoolSentinelHandler } from "../../src/gateway/startup/services/tidepool_sentinel.ts";
 import {
+  recordSentinelIncidentReview,
+  recordSentinelNotificationRetry,
   recordSentinelOperatingConstraints,
   refreshSentinelAssessment,
+  setSentinelIncidentNotifications,
   startSentinelAssessment,
 } from "../../src/sentinel/assessment_store.ts";
 import { resolveSentinelCasePath } from "../../src/sentinel/cases.ts";
@@ -121,6 +124,50 @@ Deno.test("Authenticated Tidepool hides revoked retained alert records and mixed
         incidentId: mixed.sourceId,
       })).total,
       2,
+    );
+
+    const decision = (subjectId: string) => ({
+      kind: "incident",
+      subjectId,
+    });
+    for (
+      const [subject, note] of [
+        [allowed.sourceId, "App-only decision note."],
+        [mixed.sourceId, "Restricted combined decision note."],
+      ]
+    ) {
+      assert(recordSentinelIncidentReview(
+        path,
+        saved.revision,
+        subject,
+        "investigating",
+        note,
+      ));
+    }
+    const permittedDecision = await request(
+      "decision_history",
+      decision(allowed.sourceId),
+    );
+    const priorMixedDecision = await request(
+      "decision_history",
+      decision(mixed.sourceId),
+    );
+    assertEquals(permittedDecision.type, "sentinel_decision_history");
+    const mixedDecisionId =
+      (priorMixedDecision.decisions as { id: number }[])[0].id;
+    assertEquals(
+      (await request("decision_detail", {
+        kind: "incident",
+        decisionId: mixedDecisionId,
+      })).type,
+      "sentinel_decision_detail",
+    );
+    setSentinelIncidentNotifications(path, true);
+    recordSentinelNotificationRetry(path, saved.revision);
+    assertEquals(
+      ((await request("revision")).notificationReceipt as { state: string })
+        .state,
+      "delivered_after_retry",
     );
 
     await Deno.writeTextFile(
@@ -319,6 +366,36 @@ Deno.test("Authenticated Tidepool hides revoked retained alert records and mixed
       ],
     );
     assert(!JSON.stringify(scoped).includes("private-auth"));
+    assertEquals(
+      (await request("decision_history", decision(mixed.sourceId))).type,
+      "error",
+    );
+    assertEquals(
+      (await request("decision_detail", {
+        kind: "incident",
+        decisionId: mixedDecisionId,
+      })).type,
+      "error",
+    );
+    assertEquals(
+      (await request("decision_history", decision(allowed.sourceId))).decisions,
+      permittedDecision.decisions,
+    );
+    const decisionExport = await request("export", { format: "decisions" });
+    assertEquals(
+      JSON.parse(String(decisionExport.content)).incidentReviews.length,
+      1,
+    );
+    assert(
+      !String(decisionExport.content).includes(
+        "Restricted combined decision note.",
+      ),
+    );
+    assertEquals((await request("revision")).notificationReceipt, undefined);
+    assertEquals(
+      (live.notificationSettings as { latest: unknown }).latest,
+      null,
+    );
     const page = await request("incident_page");
     assertEquals(page.total, 1);
     assertEquals(page.nextOffset, null);

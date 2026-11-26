@@ -191,6 +191,53 @@ function retainedTelemetryScope(path: string, revision: number) {
   };
 }
 
+/** Reuse the same saved/current subject scope for a page and its origin rows. */
+function tidepoolDecisionScope(path: string) {
+  const scopes = new Map<
+    number,
+    ReturnType<typeof readSentinelFindingReceiptScope>
+  >();
+  const incidentAssets = new Map<
+    number,
+    ReturnType<typeof readSavedSentinelIncidentAssetScopes>
+  >();
+  return (kind: "finding" | "incident", subject: string, revision: number) => {
+    if (!scopes.has(revision)) {
+      scopes.set(revision, readSentinelFindingReceiptScope(path, revision));
+    }
+    const scope = scopes.get(revision);
+    if (!scope) return false;
+    if (kind === "finding") return scope.allows(subject, "review_finding");
+    if (!incidentAssets.has(revision)) {
+      incidentAssets.set(
+        revision,
+        readSavedSentinelIncidentAssetScopes(path, revision),
+      );
+    }
+    const assets = incidentAssets.get(revision)?.get(subject);
+    return !!assets?.length &&
+      assets.every((asset) =>
+        scope.allows(asset) && scope.allows(asset, "review_incident")
+      );
+  };
+}
+
+/** Aggregate notification receipts have no subject binding for a partial view. */
+function canReadTidepoolNotificationReceipt(path: string, revision: number) {
+  const runId = readSentinelRunIdForRevision(path, revision);
+  if (!runId) return false;
+  return ![
+    readSentinelOperatingConstraints(path, runId, revision),
+    readSentinelOperatingConstraints(path, runId),
+  ].some((policy) =>
+    policy && (
+      policy.constraints.allowedAssetIds !== undefined ||
+      policy.constraints.deniedKinds.includes("review_evidence") ||
+      policy.constraints.deniedKinds.includes("review_incident")
+    )
+  );
+}
+
 function scopedRetainedAssessment(
   path: string,
   saved: NonNullable<ReturnType<typeof readSentinelAssessmentRevision>>,
@@ -993,7 +1040,14 @@ export function createTidepoolSentinelHandler(
             );
           }
           const decision = readSentinelDecision(path, kind, decisionId);
-          if (!decision) {
+          if (
+            !decision ||
+            !tidepoolDecisionScope(path)(
+              kind,
+              decision.subjectId,
+              decision.revision,
+            )
+          ) {
             throw new SentinelAssignmentError(
               "That Sentinel decision is unavailable.",
             );
@@ -1022,12 +1076,20 @@ export function createTidepoolSentinelHandler(
               "Select a finding or incident in a retained evidence revision.",
             );
           }
+          const allowed = tidepoolDecisionScope(path);
+          if (!allowed(kind, subjectId, revision)) {
+            throw new SentinelAssignmentError(
+              "That Sentinel decision history is unavailable.",
+            );
+          }
           const page = readSentinelDecisionHistory(
             path,
             revision,
             kind,
             subjectId,
             before,
+            10,
+            (origin) => allowed(kind, subjectId, origin),
           );
           if (!page) {
             throw new SentinelAssignmentError(
@@ -1506,10 +1568,12 @@ export function createTidepoolSentinelHandler(
             adaptive: scopedHistory ?? adaptive,
             focusId,
             selectedAssessmentReview: focusedReview?.task,
-            notificationReceipt: readSentinelNotificationReceipt(
-              path,
-              revision,
-            ),
+            ...(canReadTidepoolNotificationReceipt(path, revision) && {
+              notificationReceipt: readSentinelNotificationReceipt(
+                path,
+                revision,
+              ),
+            }),
             ...(!scope && (focusedAlert || focusedIncident) &&
               { revisions: readSentinelAssessmentRevisionIndex(path) }),
             ...(priorTask &&
@@ -1711,6 +1775,7 @@ export function createTidepoolSentinelHandler(
             return;
           }
           if (format === "decisions") {
+            const allowed = tidepoolDecisionScope(path);
             send({
               topic: "sentinel",
               type: "export",
@@ -1721,6 +1786,9 @@ export function createTidepoolSentinelHandler(
                 path,
                 caseId,
                 state.revision,
+                (kind, subject, origin) =>
+                  allowed(kind, subject, state.revision) &&
+                  allowed(kind, subject, origin),
               ),
             });
             return;
@@ -2606,6 +2674,7 @@ export function createTidepoolSentinelHandler(
         readSentinelGoalCompletionForState(path, assessment);
       const { admissionAt: _admissionAt, ...publicPlan } = assessment?.plan ??
         {};
+      const notificationSettings = readSentinelNotificationState(path);
       send({
         topic: "sentinel",
         type: "sentinel_state",
@@ -2664,7 +2733,14 @@ export function createTidepoolSentinelHandler(
         topologyAuto,
         notificationSettings: {
           gatewayEnabled: sentinelConfig?.notify_incident_increases === true,
-          ...readSentinelNotificationState(path),
+          enabled: notificationSettings.enabled,
+          latest: notificationSettings.latest && !scope &&
+              canReadTidepoolNotificationReceipt(
+                path,
+                notificationSettings.latest.revision,
+              )
+            ? notificationSettings.latest
+            : null,
         },
         ...(sentinelConfig?.allow_model_access === true && {
           workerSettings: {

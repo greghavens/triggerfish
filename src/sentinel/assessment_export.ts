@@ -78,6 +78,11 @@ export function renderSentinelDecisionHistoryJson(
   path: string,
   caseId: string,
   revision: number,
+  allows?: (
+    kind: "finding" | "incident",
+    subjectId: string,
+    origin: number,
+  ) => boolean,
 ): string {
   const options = { fullHistory: true };
   return JSON.stringify(
@@ -85,8 +90,16 @@ export function renderSentinelDecisionHistoryJson(
       version: 1,
       caseId,
       revision,
-      findingReviews: readSentinelFindingReviews(path, revision, options),
-      incidentReviews: readSentinelIncidentReviews(path, revision, options),
+      findingReviews: readSentinelFindingReviews(path, revision, options)
+        .filter(
+          ({ findingId, revision }) =>
+            allows?.("finding", findingId, revision) !== false,
+        ),
+      incidentReviews: readSentinelIncidentReviews(path, revision, options)
+        .filter(
+          ({ incidentId, revision }) =>
+            allows?.("incident", incidentId, revision) !== false,
+        ),
     },
     null,
     2,

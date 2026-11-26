@@ -4840,6 +4840,7 @@ export function readSentinelDecisionHistory(
   subjectId: string,
   before?: number,
   size = 10,
+  allowsOriginRevision?: (revision: number) => boolean,
 ) {
   const db = openStore(path, false);
   if (!db) return undefined;
@@ -4871,15 +4872,23 @@ export function readSentinelDecisionHistory(
       )
       : revision;
 
+    const allowed = allowsOriginRevision && db.prepare(
+      `SELECT DISTINCT revision FROM ${table}
+      WHERE ${subject} = ? AND revision BETWEEN ? AND ?`,
+    ).all(subjectId, firstRevision, revision)
+      .map((row) => Number(row.revision)).filter(allowsOriginRevision);
     const rows = db.prepare(`
       SELECT id, revision, disposition, note, at FROM ${table}
       WHERE ${subject} = ? AND revision BETWEEN ? AND ? AND id < ?
+        AND (? IS NULL OR revision IN (SELECT value FROM json_each(?)))
       ORDER BY id DESC LIMIT ?
     `).all(
       subjectId,
       firstRevision,
       revision,
       before ?? Number.MAX_SAFE_INTEGER,
+      allowed ? 1 : null,
+      JSON.stringify(allowed ?? []),
       size + 1,
     );
     const decisions = rows.slice(0, size).map((row) => ({

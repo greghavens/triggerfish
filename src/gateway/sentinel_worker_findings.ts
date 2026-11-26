@@ -117,7 +117,8 @@ export function readSentinelFindingReceiptScope(
     runId,
     allows: (
       targetId: string,
-      kind: "review_evidence" | "review_finding" = "review_evidence",
+      kind: "review_evidence" | "review_finding" | "review_incident" =
+        "review_evidence",
     ) => {
       const target = { kind, nodeId: targetId };
       return sentinelOperatingConstraintsAllow(saved, target, snapshot) &&
