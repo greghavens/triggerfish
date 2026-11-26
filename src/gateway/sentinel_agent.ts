@@ -1,3 +1,4 @@
+import { plannerCheckpointReadSelector } from "../sentinel/planner_read_checkpoint.ts";
 import {
   parseSentinelIncidentRecommendation,
   sentinelIncidentDispositions,
@@ -498,7 +499,10 @@ export interface SentinelTurnCheckpointOptions {
   };
   readonly retainedProgress?: readonly SentinelReviewStep[];
   readonly onResumeAccepted?: () => void;
-  readonly beforePlannerToolBatch?: () => void;
+  readonly beforePlannerToolBatch?: (
+    batch: number,
+    calls: readonly { name: string; args: Record<string, unknown> }[],
+  ) => void;
   readonly workerBoundary?: WorkerBoundary;
   readonly plannerRoundIsCurrent?: () => boolean;
   readonly plannerRound?: {
@@ -10093,10 +10097,7 @@ function createAgent(
             async authorizeResumeSources() {
               if (signal.aborted || !checkpointCurrent()) return false;
               if (plannerCheckpointed) {
-                const call = savedCalls?.[0];
-                const args = call &&
-                  sentinelGoalReceiptReadArguments(call.name, call.args);
-                const retained = resume.history.find(({ role }) =>
+                const retained = resume.history.filter(({ role }) =>
                   role === "tool"
                 );
                 const location = locateSentinelCase(options.snapshotPath);
@@ -10104,24 +10105,45 @@ function createAgent(
                 const runId = options.plannerExecutionEvidenceRunId;
                 if (
                   signal.aborted || !checkpointCurrent() ||
-                  savedCalls?.length !== 1 ||
-                  call?.name !== SENTINEL_GOAL_GRAPH_FACT_READ || !args?.id ||
-                  Object.keys(args).length !== 1 || !retained ||
-                  !location || revision === undefined || !runId ||
-                  readSentinelPlannerGraphFacts(
-                      options.snapshotPath,
-                      location.caseId,
-                      runId,
-                      revision,
-                      args,
-                      (id) => currentPlannerReceiptScope(turn, id),
-                      undefined,
-                      operatingConstraints,
-                    ) !== retained.content ||
-                  !checkpointCurrent()
+                  !savedCalls?.length ||
+                  savedCalls.length !== retained.length ||
+                  !location || revision === undefined || !runId
                 ) return false;
-                turn.reads = 1;
-                turn.traceStepCount = 1;
+                for (const [index, call] of savedCalls.entries()) {
+                  const selector = plannerCheckpointReadSelector(
+                    call.name,
+                    call.args,
+                  );
+                  if (!selector || !checkpointCurrent()) return false;
+                  const reopened =
+                    selector.name === SENTINEL_GOAL_GRAPH_FACT_READ
+                      ? readSentinelPlannerGraphFacts(
+                        options.snapshotPath,
+                        location.caseId,
+                        runId,
+                        revision,
+                        selector.args,
+                        (id) => currentPlannerReceiptScope(turn, id),
+                        undefined,
+                        operatingConstraints,
+                      )
+                      : await reopenRepositoryVisibilityVerdict(
+                        runId,
+                        revision,
+                        selector.args.taskId,
+                        selector.args.asset,
+                        selector.args.recheckId,
+                        signal,
+                        () =>
+                          checkpointCurrent() &&
+                          currentPlannerReceiptScope(turn, selector.args.asset),
+                      ).then((result) => result && boundResult(result));
+                  if (
+                    reopened !== retained[index].content || !checkpointCurrent()
+                  ) return false;
+                }
+                turn.reads = savedCalls.length;
+                turn.traceStepCount = savedCalls.length;
                 onResumeAccepted?.();
                 return true;
               }
@@ -11081,9 +11103,9 @@ function createAgent(
           }),
           ...(plannerCheckpointed &&
             checkpointOptions?.beforePlannerToolBatch && {
-            beforeToolBatch: () =>
-              assignmentGuard.checkpoint(
-                checkpointOptions.beforePlannerToolBatch!,
+            beforeToolBatch: (batch, calls) =>
+              assignmentGuard.checkpoint(() =>
+                checkpointOptions.beforePlannerToolBatch!(batch, calls)
               ),
           }),
           onToolDispatchOutcome: onMutationBoundary && (({ tool, outcome }) => {

@@ -1,4 +1,5 @@
 import {
+  plannerCheckpointReadSelector,
   projectPlannerReadCheckpoint,
   reopenPlannerReadCheckpoint,
 } from "../sentinel/planner_read_checkpoint.ts";
@@ -9418,13 +9419,97 @@ export function createSentinelModelPlanner(
         } finally {
           store.close();
         }
-        const projected = retainedRead && projectGraphFact(retainedRead.factId);
-        const resume = retainedRead && projected
-          ? reopenPlannerReadCheckpoint(retainedRead, prompt, projected)
+        const projections = retainedRead?.exchanges.map((exchange) => {
+          if (!runId || !checkpointCurrent()) return;
+          if (exchange.name === "sentinel_graph_facts") {
+            return projectGraphFact(exchange.args.id);
+          }
+          const { asset, taskId, recheckId } = exchange.args;
+          if (
+            !inputs.repositoryVisibilityRechecks?.some((source) =>
+              source.id === recheckId && source.taskId === taskId &&
+              source.assetId === asset
+            )
+          ) return;
+          const proof = readExactSentinelNativeRepositoryVerdict(
+            snapshotPath,
+            runId,
+            state.revision,
+            asset,
+            recheckId,
+          );
+          if (proof?.reference.taskId !== taskId) return;
+          return JSON.stringify({
+            _classification: "INTERNAL",
+            reference: proof.reference,
+            verdict: proof.verdict,
+          });
+        });
+        const resume = retainedRead && projections?.every((part) =>
+            part !== undefined
+          )
+          ? reopenPlannerReadCheckpoint(retainedRead, prompt, projections)
           : undefined;
         if (retainedRead && !resume) return;
         let checkpointSaved = resume !== undefined;
-        let checkpointEligible = resume === undefined;
+        let checkpointEligible = true;
+        const rememberVisibility = (result: string) => {
+          if (
+            !result.startsWith("{") || !matchesRound(state)
+          ) return;
+          const { targetId, reference, verdict } = JSON.parse(result);
+          if (
+            state.plan.runId && typeof reference?.verdictId === "string"
+          ) {
+            const source = inputs.repositoryVisibilityRechecks?.find((
+              { id, taskId, assetId },
+            ) =>
+              id === reference.verdictId && taskId === reference.taskId &&
+              assetId === verdict?.targetId
+            );
+            const proof = source &&
+              readExactSentinelNativeRepositoryVerdict(
+                snapshotPath,
+                state.plan.runId,
+                state.revision,
+                source.assetId,
+                source.id,
+              );
+            if (
+              proof && source && result === JSON.stringify({
+                  _classification: "INTERNAL",
+                  reference: proof.reference,
+                  verdict: proof.verdict,
+                })
+            ) {
+              openedVisibility.set(source.id, {
+                assetId: source.assetId,
+                reference: proof.reference,
+              });
+            }
+            return;
+          }
+          const source = repositoryVisibility.find(({ taskId, assetId }) =>
+            taskId === reference?.taskId && assetId === targetId
+          );
+          if (!source) return;
+          const stored = currentRepositoryVisibility(
+            snapshotPath,
+            state,
+            source.assetId,
+            source.taskId,
+          );
+          if (
+            !stored?.reference || result !== JSON.stringify({
+                ...stored.projection,
+                reference: stored.reference,
+              })
+          ) return;
+          openedVisibility.set(source.taskId, {
+            assetId: source.assetId,
+            reference: stored.reference,
+          });
+        };
         return worker.execute(
           prompt,
           (event) => {
@@ -9764,34 +9849,60 @@ export function createSentinelModelPlanner(
           {
             resume,
             onResumeAccepted() {
-              if (!retainedRead || !projected || !checkpointCurrent()) {
+              if (!retainedRead || !projections || !checkpointCurrent()) {
                 throw new Error("Sentinel planner checkpoint is stale");
               }
-              const { _classification, ...fact } = JSON.parse(projected);
               const audit = openSentinelAdaptiveStore(
                 storePath(snapshotPath),
                 now,
               );
               try {
-                if (
-                  !audit.recordModelPlanRead(roundIdentity, claim, {
-                    tool: "sentinel_graph_facts",
-                    outcome: "returned",
-                    target: retainedRead.factId,
-                    goalReceiptRead: {
-                      args: { id: retainedRead.factId },
-                      sha256: retainedRead.resultSha256,
-                    },
-                    resultSha256: retainedRead.resultSha256,
-                  })
-                ) throw new Error("Sentinel planner checkpoint is stale");
-                openedGraphFacts.set(fact.id, fact);
-                rememberMixedSource(fact.id, fact.targetId);
+                for (
+                  const [index, exchange] of retainedRead.exchanges.entries()
+                ) {
+                  const projection = projections[index];
+                  if (projection === undefined) {
+                    throw new Error(
+                      "Sentinel planner checkpoint is incomplete",
+                    );
+                  }
+                  const target = exchange.name === "sentinel_graph_facts"
+                    ? exchange.args.id
+                    : exchange.args.asset;
+                  if (
+                    !audit.recordModelPlanRead(roundIdentity, claim, {
+                      tool: exchange.name,
+                      outcome: "returned",
+                      target,
+                      ...(exchange.name === "sentinel_graph_facts" && {
+                        goalReceiptRead: {
+                          args: exchange.args,
+                          sha256: exchange.resultSha256,
+                        },
+                      }),
+                      resultSha256: exchange.resultSha256,
+                    })
+                  ) throw new Error("Sentinel planner checkpoint is stale");
+                  if (exchange.name === "sentinel_graph_facts") {
+                    const { _classification, ...fact } = JSON.parse(projection);
+                    openedGraphFacts.set(fact.id, fact);
+                    rememberMixedSource(fact.id, fact.targetId);
+                  } else {
+                    rememberVisibility(projection);
+                  }
+                  recordedReads++;
+                }
               } finally {
                 audit.close();
               }
             },
-            beforePlannerToolBatch() {
+            beforePlannerToolBatch(batch, calls) {
+              const call = calls[0];
+              if (
+                checkpointEligible && batch <= 4 && calls.length === 1 &&
+                plannerCheckpointReadSelector(call.name, call.args)
+              ) return;
+              checkpointEligible = false;
               if (!checkpointSaved) return;
               const audit = openSentinelAdaptiveStore(
                 storePath(snapshotPath),
@@ -9799,7 +9910,7 @@ export function createSentinelModelPlanner(
               );
               try {
                 audit.clearModelPlanReadCheckpoint(roundIdentity, claim);
-                checkpointEligible = false;
+                checkpointSaved = false;
               } finally {
                 audit.close();
               }
@@ -9830,61 +9941,8 @@ export function createSentinelModelPlanner(
             plannerRound: { identity: roundIdentity, attempt: claim },
             onBatchReadReceipt(tool, _stepIndex, result) {
               if (
-                tool !== SENTINEL_SAVED_REPOSITORY_VISIBILITY ||
-                !result.startsWith("{") || !matchesRound(state)
-              ) return;
-              const { targetId, reference, verdict } = JSON.parse(result);
-              if (
-                state.plan.runId && typeof reference?.verdictId === "string"
-              ) {
-                const source = inputs.repositoryVisibilityRechecks?.find((
-                  { id, taskId, assetId },
-                ) =>
-                  id === reference.verdictId && taskId === reference.taskId &&
-                  assetId === verdict?.targetId
-                );
-                const proof = source &&
-                  readExactSentinelNativeRepositoryVerdict(
-                    snapshotPath,
-                    state.plan.runId,
-                    state.revision,
-                    source.assetId,
-                    source.id,
-                  );
-                if (
-                  proof && source && result === JSON.stringify({
-                      _classification: "INTERNAL",
-                      reference: proof.reference,
-                      verdict: proof.verdict,
-                    })
-                ) {
-                  openedVisibility.set(source.id, {
-                    assetId: source.assetId,
-                    reference: proof.reference,
-                  });
-                }
-                return;
-              }
-              const source = repositoryVisibility.find(({ taskId, assetId }) =>
-                taskId === reference?.taskId && assetId === targetId
-              );
-              if (!source) return;
-              const stored = currentRepositoryVisibility(
-                snapshotPath,
-                state,
-                source.assetId,
-                source.taskId,
-              );
-              if (
-                !stored?.reference || result !== JSON.stringify({
-                    ...stored.projection,
-                    reference: stored.reference,
-                  })
-              ) return;
-              openedVisibility.set(source.taskId, {
-                assetId: source.assetId,
-                reference: stored.reference,
-              });
+                tool === SENTINEL_SAVED_REPOSITORY_VISIBILITY
+              ) rememberVisibility(result);
             },
             plannerRoundIsCurrent: checkpointCurrent,
             operatingConstraints: constraints &&

@@ -9293,6 +9293,10 @@ for (
       const savedTool = "sentinel_saved_repository_visibility";
       const wrongVerdict = `worker-recheck:${"d".repeat(64)}`;
       let selectedVerdict = wrongVerdict;
+      let plannerRequests = 0;
+      let suspendedPlanner:
+        | ReturnType<typeof Promise.withResolvers<void>>
+        | undefined;
       let plannerResult: string | undefined;
       let revokeBeforeProposal = false;
       let destinationReads = 0;
@@ -9302,9 +9306,10 @@ for (
       plannerRegistry.register({
         name: "native-repository-verdict-planner",
         supportsStreaming: false,
-        complete(messages) {
+        async complete(messages) {
           const saved = messages.findLast(({ role }) => role === "tool");
           if (!saved) {
+            plannerRequests++;
             const prompt = String(
               messages.findLast(({ role }) => role === "user")?.content,
             );
@@ -9337,6 +9342,7 @@ for (
             });
           }
           plannerResult = String(saved.content);
+          if (suspendedPlanner) await suspendedPlanner.promise;
           if (revokeBeforeProposal) availableCredential = false;
           return Promise.resolve({
             usage,
@@ -9546,12 +9552,64 @@ for (
 
       availableCredential = true;
       revokeBeforeProposal = false;
-      assertEquals(
-        JSON.parse(
-          await round("Use the exact authorized verdict on this same asset."),
-        ),
-        expected,
+      const interruptVerdictRound = async (hint: string) => {
+        suspendedPlanner = Promise.withResolvers<void>();
+        plannerResult = undefined;
+        clock += 65_000;
+        addSentinelCaseHint(path, hint);
+        coordinator = planFromVerdict();
+        try {
+          await waitForCondition(
+            () => plannerResult !== undefined,
+            () => coordinator?.advance(state),
+          );
+          assertEquals(JSON.parse(plannerResult!), expected);
+          assertEquals(followup(), undefined);
+        } finally {
+          coordinator.stop();
+          suspendedPlanner.resolve();
+          suspendedPlanner = undefined;
+        }
+        await waitForCondition(() => !coordinator?.hasInFlightWork(), () => {});
+        clock += 4 * 60_000;
+        plannerResult = undefined;
+        return { plannerRequests, sourcePre, sourcePost };
+      };
+      const beforeDeniedResume = await interruptVerdictRound(
+        "Check current authority on a resumed retained verdict.",
       );
+      availableCredential = false;
+      coordinator = planFromVerdict();
+      try {
+        await waitForCondition(
+          () =>
+            sourcePre > beforeDeniedResume.sourcePre &&
+            !coordinator?.hasInFlightWork(),
+          () => coordinator?.advance(state),
+        );
+        assertEquals(plannerResult, undefined);
+        assertEquals(followup(), undefined);
+        assertEquals(plannerRequests, beforeDeniedResume.plannerRequests);
+      } finally {
+        coordinator.stop();
+      }
+      availableCredential = true;
+      const beforeResume = await interruptVerdictRound(
+        "Use the exact authorized verdict on this same asset.",
+      );
+      coordinator = planFromVerdict();
+      try {
+        await waitForCondition(
+          () => plannerResult !== undefined && !coordinator?.hasInFlightWork(),
+          () => coordinator?.advance(state),
+        );
+        assertEquals(JSON.parse(plannerResult!), expected);
+        assertEquals(plannerRequests, beforeResume.plannerRequests);
+        assert(sourcePre > beforeResume.sourcePre);
+        assert(sourcePost > beforeResume.sourcePost);
+      } finally {
+        coordinator.stop();
+      }
       assertEquals(followup()?.nodeId, "app");
       assertEquals(
         followup()?.plannerRound?.repositoryVisibility,

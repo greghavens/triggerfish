@@ -1720,9 +1720,9 @@ Deno.test("Only a post-authorized exact leased graph edge can be published and r
       assertStringIncludes(blockedPeer.results[0][1], "unavailable");
       assertEquals(await Deno.readTextFile(path), raw);
       const observed = Promise.withResolvers<unknown>();
-      const interruptedRead = Promise.withResolvers<string>();
+      const interruptedRead = Promise.withResolvers<readonly string[]>();
       const released = Promise.withResolvers<void>();
-      const resumedRead = Promise.withResolvers<string>();
+      const resumedRead = Promise.withResolvers<readonly string[]>();
       const plannerHooks: string[] = [];
       let plannerDispatched = 0;
       let plannerNow = Date.now();
@@ -1739,8 +1739,9 @@ Deno.test("Only a post-authorized exact leased graph edge can be published and r
               supportsStreaming: false,
               async complete(messages) {
                 const user = messages.find(({ role }) => role === "user");
-                const received = messages.find(({ role }) => role === "tool");
-                if (!received) {
+                const received = messages.filter(({ role }) => role === "tool")
+                  .map(({ content }) => String(content));
+                if (received.length < 2) {
                   assert(
                     interrupt,
                     "The recovered planner repeated its tool request",
@@ -1748,7 +1749,7 @@ Deno.test("Only a post-authorized exact leased graph edge can be published and r
                   return {
                     content: "",
                     toolCalls: [{
-                      id: "exact-first-read",
+                      id: `exact-read-${received.length}`,
                       type: "function",
                       function: {
                         name: read,
@@ -1759,7 +1760,7 @@ Deno.test("Only a post-authorized exact leased graph edge can be published and r
                   };
                 }
                 if (interrupt) {
-                  interruptedRead.resolve(String(received.content));
+                  interruptedRead.resolve(received);
                   await released.promise;
                   return {
                     content: "{}",
@@ -1767,7 +1768,7 @@ Deno.test("Only a post-authorized exact leased graph edge can be published and r
                     usage: { inputTokens: 1, outputTokens: 1 },
                   };
                 }
-                resumedRead.resolve(String(received.content));
+                resumedRead.resolve(received);
                 observed.resolve(
                   JSON.parse(String(user?.content).split("\n").at(-1)!)
                     .graphFacts,
@@ -1862,7 +1863,7 @@ Deno.test("Only a post-authorized exact leased graph edge can be published and r
         );
       }
       const firstPlanner = plannerFactory(true);
-      let firstResult: string;
+      let firstResult: readonly string[];
       try {
         firstPlanner.advance(state);
         const timeout = setTimeout(
@@ -1877,7 +1878,10 @@ Deno.test("Only a post-authorized exact leased graph edge can be published and r
         } finally {
           clearTimeout(timeout);
         }
-        assertEquals(JSON.parse(firstResult).id, fact.id);
+        assertEquals(firstResult.map((value) => JSON.parse(value).id), [
+          fact.id,
+          fact.id,
+        ]);
       } finally {
         firstPlanner.stop();
         released.resolve();
@@ -1905,7 +1909,7 @@ Deno.test("Only a post-authorized exact leased graph edge can be published and r
           clearTimeout(deadline);
         }
         assertEquals(await resumedRead.promise, firstResult);
-        assertEquals(plannerDispatched, 1);
+        assertEquals(plannerDispatched, 2);
         assert(plannerHooks.includes("resumed:PRE_TOOL_CALL"));
         assert(plannerHooks.includes("resumed:POST_TOOL_RESPONSE"));
         assertEquals(

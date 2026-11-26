@@ -7266,16 +7266,21 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
           JOIN adaptive_model_reads USING (identity, attempt)
           WHERE identity = ? AND attempt = ? AND completed = 0 AND outcome = 0
         `).get(identity, attempt);
-        const time = now();
+        const reads = active?.plannerReads;
         if (
-          typeof active?.plannerReads !== "string" ||
-          time >= Number(active.started) + 30_000 ||
-          !JSON.parse(active.plannerReads).some((step: AdaptivePlannerRead) =>
-            step.tool === SENTINEL_GOAL_GRAPH_FACT_READ &&
-            step.outcome === "returned" &&
-            step.goalReceiptRead?.args.id === exact.factId &&
-            step.goalReceiptRead.sha256 === exact.resultSha256
-          )
+          typeof reads !== "string" ||
+          now() >= Number(active?.started) + 30_000
+        ) return false;
+        const saved = JSON.parse(reads) as AdaptivePlannerRead[];
+        if (
+          !exact.exchanges.every((exchange, index) => {
+            const step = saved[index];
+            return step?.tool === exchange.name &&
+              step.outcome === "returned" &&
+              step.resultSha256 === exchange.resultSha256 &&
+              (exchange.name !== SENTINEL_GOAL_GRAPH_FACT_READ ||
+                step.goalReceiptRead?.args.id === exchange.args.id);
+          })
         ) return false;
         db.exec(`CREATE TABLE IF NOT EXISTS adaptive_model_read_checkpoints (
           identity TEXT PRIMARY KEY, attempt INTEGER NOT NULL, evidenceRevision INTEGER NOT NULL,
@@ -7286,7 +7291,12 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
         )
           .run(evidenceRevision);
         return db.prepare(`
-          INSERT OR IGNORE INTO adaptive_model_read_checkpoints VALUES (?, ?, ?, ?, ?)
+          INSERT INTO adaptive_model_read_checkpoints VALUES (?, ?, ?, ?, ?)
+          ON CONFLICT(identity) DO UPDATE SET attempt = excluded.attempt,
+            projection = excluded.projection
+          WHERE adaptive_model_read_checkpoints.attempt <= excluded.attempt
+            AND adaptive_model_read_checkpoints.evidenceRevision = excluded.evidenceRevision
+            AND adaptive_model_read_checkpoints.promptSha256 = excluded.promptSha256
         `).run(
           identity,
           attempt,
