@@ -778,6 +778,85 @@ export function readSentinelAdaptiveEvidenceMapping(
   }
 }
 
+function summarizeInvestigationQueue(tasks: readonly AdaptiveTask[]) {
+  let queued = 0;
+  let running = 0;
+  let finished = 0;
+  for (const task of tasks) {
+    if (task.status === "queued") queued++;
+    else if (task.status === "running") running++;
+    else finished++;
+  }
+  return { queued, running, finished };
+}
+
+/** Read bounded queue context for an authorized saved revision. */
+export function readSentinelInvestigationFrontier(
+  snapshotPath: string,
+  evidenceRevision: number,
+) {
+  const saved = readSentinelAssessmentRevision(snapshotPath, evidenceRevision);
+  const path = storePath(snapshotPath);
+  if (!saved) return;
+  try {
+    Deno.lstatSync(path);
+  } catch (error) {
+    if (error instanceof Deno.errors.NotFound) return;
+    throw error;
+  }
+  const store = openSentinelAdaptiveStore(path);
+  try {
+    const mapping = store.forEvidence(evidenceRevision);
+    if (!mapping) return;
+    const policy = readSentinelOperatingConstraints(
+      snapshotPath,
+      mapping.goal.id,
+    );
+    const tasks = store.list(mapping.revision).filter((task) =>
+      sentinelOperatingConstraintsAllow(
+        policy?.constraints,
+        task,
+        saved.result.sharedGraph.snapshot,
+      )
+    );
+    const activeIds = new Set(tasks.map(({ id }) => id));
+    const project = ({ id, nodeId, kind, status }: AdaptiveTask) => ({
+      id,
+      ...(nodeId && { nodeId }),
+      kind,
+      status,
+    });
+    return {
+      runId: mapping.goal.id,
+      evidenceRevision,
+      totals: summarizeInvestigationQueue(tasks),
+      queued: tasks.filter(({ status }) => status === "queued")
+        .sort((a, b) =>
+          Number(!!b.prioritized) - Number(!!a.prioritized) ||
+          (b.operatorPriority ?? 5) - (a.operatorPriority ?? 5) ||
+          (a.plannerPriority ?? Number.MAX_SAFE_INTEGER) -
+            (b.plannerPriority ?? Number.MAX_SAFE_INTEGER)
+        )
+        .slice(0, 5).map(project),
+      running: tasks.filter(({ status }) => status === "running")
+        .slice(0, 5).map(project),
+      recentFinished: tasks.filter(({ status }) =>
+        status !== "queued" && status !== "running"
+      ).slice(-5).reverse().map(project),
+      runningWorkers: store.modelReviewStates(mapping.revision)
+        .filter(({ status, taskId }) =>
+          status === "running" && activeIds.has(taskId)
+        )
+        .slice(0, 5).map(({ taskId, attempts }) => ({
+          taskId,
+          attempt: attempts,
+        })),
+    };
+  } finally {
+    store.close();
+  }
+}
+
 export function readSentinelWorkflowPublicationStep(
   snapshotPath: string,
   evidenceRevision: number,
@@ -5924,6 +6003,7 @@ export function createSentinelModelPlanner(
         prerequisites: readonly string[];
       }[] = [];
       let runningWorkerAttempts: { taskId: string; attempt: number }[] = [];
+      let investigationQueueTotals = summarizeInvestigationQueue([]);
       let durableCooldown: number | undefined;
       let claim:
         | ReturnType<
@@ -5939,7 +6019,10 @@ export function createSentinelModelPlanner(
           );
           seedInvestigationId = seed &&
             store.readOperatorAssignmentIntent(seed.requestId)?.taskId;
-          existing = store.list(revisionForStore(state, store))
+          const scopedTasks = store.list(revisionForStore(state, store))
+            .filter(caseOperatingScope(snapshotPath, state.revision));
+          investigationQueueTotals = summarizeInvestigationQueue(scopedTasks);
+          existing = scopedTasks
             .filter(({ nodeId, status }) =>
               (nodeId?.length ?? 0) <= 100 &&
               ["queued", "running", "completed"].includes(status)
@@ -6272,6 +6355,7 @@ export function createSentinelModelPlanner(
             ) => [incidentId, disposition]),
           },
           currentInvestigations: existing,
+          investigationQueueTotals,
           ...(runningWorkerAttempts.length && { runningWorkerAttempts }),
           workerObservations: [] as {
             taskId: string;

@@ -283,6 +283,7 @@ import {
   readSentinelFindingFollowup,
   readSentinelFindingRecheckAttempts,
   readSentinelIntermediateWorkflowObservations,
+  readSentinelInvestigationFrontier,
   readSentinelModelSettings,
   readSentinelOperatorAssetHint,
   readSentinelTaskQueue,
@@ -1081,6 +1082,11 @@ export const operatorRunTool: ToolDefinition = {
       type: "string",
       description: "Search text for graph records or worker history",
     },
+    includeFrontier: {
+      type: "boolean",
+      description:
+        "Include bounded investigation queue totals and exact task IDs in graph_overview.",
+    },
     includeFindingTraffic: {
       type: "boolean",
       description:
@@ -1237,6 +1243,7 @@ export const sentinelOperatorCaseReadParameters = [
   "revision",
   "node",
   "includeFindingTraffic",
+  "includeFrontier",
   "trafficOffset",
   "query",
   "offset",
@@ -2424,6 +2431,11 @@ export function createOperatorRunToolExecutor(options: {
     if (
       (args.includeFindingTraffic !== undefined ||
         args.trafficOffset !== undefined) && action !== "node"
+    ) return unavailable;
+    if (
+      args.includeFrontier !== undefined &&
+      (action !== "graph_overview" || args.includeFrontier !== true ||
+        !canFlowTo("INTERNAL", context?.ceiling ?? "PUBLIC"))
     ) return unavailable;
     if (args.trafficReference !== undefined && action !== "hint") {
       return unavailable;
@@ -9733,17 +9745,26 @@ ${
         if (
           ref.kind !== "sentinel" || ref.revision === undefined ||
           Object.keys(args).some((key) =>
-            !["action", "kind", "id", "revision"].includes(key)
+            !["action", "kind", "id", "revision", "includeFrontier"].includes(
+              key,
+            )
           ) ||
           !await controller.inspect(ref)
         ) return unavailable;
+        const path = resolveSentinelCasePath(options.baseDir, ref.id);
+        const frontier = args.includeFrontier === true
+          ? readSentinelInvestigationFrontier(path, ref.revision)
+          : undefined;
+        if (args.includeFrontier === true && !frontier) return unavailable;
         const result = readSentinelGraphOverview({
-          snapshotPath: resolveSentinelCasePath(options.baseDir, ref.id),
+          snapshotPath: path,
           assessmentRevision: ref.revision,
         }, {});
-        return result.startsWith("Error:")
-          ? unavailable
-          : safeProjection({ run: ref, overview: JSON.parse(result) });
+        return result.startsWith("Error:") ? unavailable : safeProjection({
+          run: ref,
+          overview: JSON.parse(result),
+          ...(frontier && { frontier }),
+        });
       }
       if (
         action === "graph" || action === "findings" || action === "node" ||

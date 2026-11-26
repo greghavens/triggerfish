@@ -963,6 +963,86 @@ Deno.test("planner history digests retain omitted completed assignments and both
   }
 });
 
+Deno.test("Sentinel owner can inspect a bounded queued and running graph frontier", async () => {
+  const directory = await Deno.makeTempDir();
+  const caseId = "frontier";
+  const path = resolveSentinelCasePath(directory, caseId);
+  try {
+    const assets = Array.from({ length: 8 }, (_, index) => ({
+      id: `host-${index}`,
+      kind: "asset",
+      label: `Host ${index}`,
+    }));
+    await Deno.mkdir(dirname(path), { recursive: true, mode: 0o700 });
+    await Deno.writeTextFile(
+      path,
+      JSON.stringify({
+        version: 1,
+        nodes: assets,
+        edges: [],
+      }),
+      { mode: 0o600 },
+    );
+    const state = startSentinelAssessment(path);
+    const runId = state.plan.runId;
+    assert(runId);
+    const revision = adaptiveRevision(state);
+    const store = openSentinelAdaptiveStore(
+      join(dirname(path), "sentinel-adaptive.db"),
+    );
+    let runningId: string;
+    try {
+      store.sync(
+        revision,
+        assets.map(({ id }) => ({
+          kind: "trace",
+          nodeId: id,
+        })),
+        null,
+        { number: state.revision, goal: { id: runId, label: "Review hosts" } },
+      );
+      const done = store.claim(revision);
+      assert(done);
+      assert(store.complete({
+        taskId: done.task.id,
+        leaseToken: done.leaseToken,
+        observation: {},
+      }));
+      const running = store.claim(revision);
+      assert(running);
+      runningId = running.task.id;
+    } finally {
+      store.close();
+    }
+    await withArchivedPlannerRead(
+      directory,
+      async (read) => {
+        const args = {
+          action: "graph_overview",
+          includeFrontier: true,
+          kind: "sentinel",
+          id: caseId,
+          revision: state.revision,
+        };
+        const { frontier } = JSON.parse(await read(args));
+        assertEquals(frontier.totals, { queued: 6, running: 1, finished: 1 });
+        assertEquals(frontier.queued.length, 5);
+        assertEquals(frontier.running.map(({ id }: { id: string }) => id), [
+          runningId,
+        ]);
+        assertEquals(frontier.recentFinished.length, 1);
+        assert((await read(args, true)).includes("withheld"));
+      },
+      undefined,
+      undefined,
+      undefined,
+      true,
+    );
+  } finally {
+    await Deno.remove(directory, { recursive: true });
+  }
+});
+
 Deno.test("planner expands older committed workflow observations and graph facts and gateway reopens the digest after restore", async () => {
   const directory = await Deno.makeTempDir();
   const caseId = "cold-intermediate";
@@ -1034,6 +1114,11 @@ Deno.test("planner expands older committed workflow observations and graph facts
         messages.findLast(({ role }) => role === "user")?.content,
       );
       const input = JSON.parse(user.slice(user.lastIndexOf("\n") + 1));
+      assertEquals(input.investigationQueueTotals, {
+        queued: 0,
+        running: 0,
+        finished: assets.length,
+      });
       assert(
         input.committedObservations.length > 0 &&
           input.committedObservations.length <= 4,
@@ -1267,6 +1352,32 @@ Deno.test("planner expands older committed workflow observations and graph facts
       id: caseId,
       revision: state.revision,
     };
+    const frontierQuery = {
+      ...ref,
+      action: "graph_overview",
+      includeFrontier: true,
+    };
+    let beforeArchive: unknown;
+    await withArchivedPlannerRead(directory, async (read) => {
+      const graph = JSON.parse(await read(frontierQuery));
+      assertEquals(graph.frontier.runId, runId);
+      assertEquals(graph.frontier.evidenceRevision, state.revision);
+      assertEquals(graph.frontier.totals, {
+        queued: 0,
+        running: 0,
+        finished: assets.length,
+      });
+      assertEquals(graph.frontier.recentFinished.length, 5);
+      assert(
+        !(await read({ ...frontierQuery, includeFrontier: undefined }))
+          .includes("frontier"),
+      );
+      assert(
+        (await read({ ...frontierQuery, revision: state.revision + 1 }))
+          .includes("unavailable"),
+      );
+      beforeArchive = graph.frontier;
+    });
     await archiveAndRestoreDigestFixture(directory, path, ref, runId);
     const scope = readAdaptiveSentinel(path, state, "revision");
     assert(scope);
@@ -1361,6 +1472,10 @@ Deno.test("planner expands older committed workflow observations and graph facts
     };
     await withArchivedPlannerRead(directory, async (read) => {
       assertEquals(
+        JSON.parse(await read(frontierQuery)).frontier,
+        beforeArchive,
+      );
+      assertEquals(
         JSON.parse(await read(selection)).result,
         JSON.parse(liveText),
       );
@@ -1407,10 +1522,13 @@ Deno.test("planner expands older committed workflow observations and graph facts
         requestId: crypto.randomUUID(),
         operatorScope: "planner-digest-fixture",
         constraints: {
-          allowedAssetIds: assets.map(({ id }) => id),
+          allowedAssetIds: [assets[0].id],
           deniedKinds: [],
         },
       }));
+      const restricted = JSON.parse(await read(frontierQuery)).frontier;
+      assertEquals(restricted.totals.finished, 1);
+      assertEquals(restricted.recentFinished[0].nodeId, assets[0].id);
       assert((await read(selection)).includes("unavailable"));
       assert(
         (await read({ ...selection, ordinal: 3 })).includes("unavailable"),
