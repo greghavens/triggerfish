@@ -131,6 +131,7 @@ import {
   readSentinelFindingAssetTree,
   readSentinelFindingGroup,
 } from "../sentinel/finding_groups.ts";
+import { parseFindingExportFilter } from "../sentinel/assessment_export.ts";
 import { loadSentinelGraph } from "../sentinel/graph.ts";
 import { isSentinelFindingMutation } from "../sentinel/worker_finding_recovery.ts";
 import { executionFindingAsset } from "../sentinel/worker_finding_evidence.ts";
@@ -1214,6 +1215,11 @@ export const operatorRunTool: ToolDefinition = {
       description:
         "One to sixteen exact selected finding IDs for finding_asset_tree.",
       items: { type: "string" },
+    },
+    findingFilter: {
+      type: "object",
+      description:
+        "Optional finding_groups filter: kind (imported or worker), assetId, query, severity, disposition, findingCategory.",
     },
     includeFacets: {
       type: "boolean",
@@ -3335,16 +3341,20 @@ ${
         return tree ? safeProjection({ tree }) : unavailable;
       }
       if (action === "finding_groups") {
-        const { scopes, limit = 1, includeFacets = false } = args;
+        const { scopes, limit = 1, includeFacets = false, findingFilter } =
+          args;
+        const filter = parseFindingExportFilter(findingFilter);
         if (
           !context?.authenticatedOwnerSessionId ||
           typeof includeFacets !== "boolean" ||
+          (findingFilter !== undefined && !filter) ||
           !canFlowTo("INTERNAL", context.ceiling ?? "PUBLIC") ||
           !Array.isArray(scopes) || scopes.length < 1 || scopes.length > 4 ||
           typeof limit !== "number" || !Number.isSafeInteger(limit) ||
           limit < 1 || limit > 3 ||
           Object.keys(args).some((key) =>
-            !["action", "scopes", "limit", "includeFacets"].includes(key)
+            !["action", "scopes", "limit", "includeFacets", "findingFilter"]
+              .includes(key)
           )
         ) return unavailable;
         const selected = new Map<string, {
@@ -3395,6 +3405,7 @@ ${
             offset,
             limit,
             categoryOffset,
+            filter,
           );
           if (!group) return unavailable;
           groups.push(group);

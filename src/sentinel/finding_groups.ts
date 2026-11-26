@@ -1,6 +1,10 @@
 /** Read one saved case's finding counts and independently bounded entry page. */
 import { redactCredentialText } from "../core/logger/redactor.ts";
 import {
+  type FindingExportFilter,
+  matchesFindingFilter,
+} from "./assessment_export.ts";
+import {
   readSentinelAssessmentRevision,
   readSentinelFindingReviews,
   readSentinelOperatingConstraints,
@@ -61,6 +65,28 @@ function findingFacets(categoryOffset: number) {
   };
 }
 
+function workerEntry(
+  report: NonNullable<
+    ReturnType<
+      ReturnType<typeof openSentinelWorkerFindingStore>["readFindingReport"]
+    >
+  >,
+) {
+  return {
+    source: "worker",
+    id: report.finding.id,
+    title: redactCredentialText(report.title).slice(0, 256),
+    evidenceRevision: report.finding.evidenceRevision,
+    taskId: report.finding.taskId,
+    reportVersion: report.version,
+    ...(report.severity !== undefined && { severity: report.severity }),
+    ...(report.disposition !== undefined &&
+      { disposition: report.disposition }),
+    ...(report.findingCategory &&
+      { findingCategory: report.findingCategory }),
+  };
+}
+
 export function readSentinelFindingGroup(
   path: string,
   caseId: string,
@@ -68,6 +94,7 @@ export function readSentinelFindingGroup(
   offset: number,
   limit: number,
   categoryOffset?: number,
+  filter?: FindingExportFilter,
 ) {
   const state = readSentinelAssessmentRevision(path, revision);
   if (!state) return;
@@ -80,22 +107,101 @@ export function readSentinelFindingGroup(
       ({ findingId, disposition }) => [findingId, disposition],
     ),
   );
-  const graphEntries = imported.slice(offset, offset + limit).map((
-    finding,
-  ) => ({
+  const graphEntry = (finding: typeof imported[number]) => ({
     source: "imported",
     id: finding.id,
     title: redactCredentialText(finding.label).slice(0, 256),
     severity: finding.severity,
     disposition: reviews.get(finding.id) ?? "open",
     evidenceRevision: revision,
-  }));
+  });
+  const graphEntries = imported.slice(offset, offset + limit).map(graphEntry);
   const workerLimit = limit - graphEntries.length;
   const workerOffset = Math.max(0, offset - imported.length);
   const journal = hasSentinelWorkerFindingJournal(path)
     ? openSentinelWorkerFindingStore(path)
     : undefined;
   try {
+    if (filter) {
+      const saved = readSentinelOperatingConstraints(path, runId, revision)
+        ?.constraints;
+      const current = readSentinelOperatingConstraints(path, runId)
+        ?.constraints;
+      const allowed = (
+        kind: "review_finding" | "review_evidence",
+        nodeId: string,
+      ) =>
+        sentinelOperatingConstraintsAllow(saved, { kind, nodeId }, snapshot) &&
+        sentinelOperatingConstraintsAllow(current, { kind, nodeId }, snapshot);
+      const facets = categoryOffset === undefined
+        ? undefined
+        : findingFacets(categoryOffset);
+      const filteredGraph = imported.filter((finding) => {
+        const disposition = reviews.get(finding.id) ?? "open";
+        if (
+          !allowed("review_finding", finding.id) ||
+          !matchesFindingFilter(filter, {
+            kind: "imported",
+            assets: finding.assets,
+            title: finding.label,
+            severity: finding.severity,
+            disposition,
+          })
+        ) return false;
+        facets?.add(finding.severity, disposition);
+        return true;
+      });
+      const workerIds = filter.kind === "imported"
+        ? []
+        : journal?.pageFindingIds(caseId, runId, revision, 0, 4097).ids ?? [];
+      if (workerIds.length > 4096) return;
+      const entries:
+        (ReturnType<typeof graphEntry> | ReturnType<typeof workerEntry>)[] =
+          filteredGraph.slice(offset, offset + limit).map(graphEntry);
+      let workerCount = 0;
+      for (const id of workerIds) {
+        const report = journal?.readFindingReport(id, revision);
+        if (
+          !report || report.finding.caseId !== caseId ||
+          report.finding.runId !== runId
+        ) return;
+        if (
+          !allowed("review_evidence", report.finding.targetId) ||
+          !matchesFindingFilter(filter, {
+            kind: "worker",
+            assets: [report.finding.targetId],
+            title: report.title,
+            summary: report.summary,
+            severity: report.severity,
+            disposition: report.disposition,
+            category: report.findingCategory,
+          })
+        ) continue;
+        facets?.add(
+          report.severity,
+          report.disposition,
+          report.findingCategory,
+        );
+        const index = filteredGraph.length + workerCount++;
+        if (index >= offset && index < offset + limit) {
+          entries.push(workerEntry(report));
+        }
+      }
+      const total = filteredGraph.length + workerCount;
+      return {
+        caseId,
+        runId,
+        revision,
+        total,
+        imported: filteredGraph.length,
+        worker: workerCount,
+        ...(facets && { facets: facets.page() }),
+        entries,
+        nextOffset: offset + entries.length < total
+          ? offset + entries.length
+          : null,
+      };
+    }
     const workers = journal?.pageFindingIds(
       caseId,
       runId,
@@ -110,19 +216,7 @@ export function readSentinelFindingGroup(
         !report || report.finding.caseId !== caseId ||
         report.finding.runId !== runId
       ) return;
-      workerEntries.push({
-        source: "worker",
-        id,
-        title: redactCredentialText(report.title).slice(0, 256),
-        evidenceRevision: report.finding.evidenceRevision,
-        taskId: report.finding.taskId,
-        reportVersion: report.version,
-        ...(report.severity !== undefined && { severity: report.severity }),
-        ...(report.disposition !== undefined &&
-          { disposition: report.disposition }),
-        ...(report.findingCategory &&
-          { findingCategory: report.findingCategory }),
-      });
+      workerEntries.push(workerEntry(report));
     }
     const facets = categoryOffset === undefined
       ? undefined

@@ -383,6 +383,10 @@ With `includeFacets: true`, each group's `facets` reports severity and
 disposition counts for findings allowed by the saved and current scope.
 Each case can page its categories independently with `categoryOffset`
 and `nextCategoryOffset`. The entry page and its offset are unchanged.
+An optional `findingFilter` restricts entries, totals, and facets to the
+same authorized matching findings. It accepts source kind, asset ID,
+severity, disposition, category, and a literal query against redacted
+titles and worker summaries.
 For up to sixteen selected `findingIds`, use `operator_runs finding_asset_tree`
 with `kind: sentinel`, the case `id`, and a saved `revision`. It shows the
 affected assets and their declared in-scope ancestors. Aggregate counts count

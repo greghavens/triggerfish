@@ -298,7 +298,7 @@ const MAX_FINDING_EXPORT_PAGE_SIZE = 16;
 const MAX_FINDING_EXPORT_SELECTION = 4096;
 const MAX_FINDING_EXPORT_BYTES = 256 * 1024;
 
-interface FindingExportFilter {
+export interface FindingExportFilter {
   readonly kind?: "imported" | "worker";
   readonly assetId?: string;
   readonly query?: string;
@@ -353,6 +353,31 @@ export function parseFindingExportFilter(
     ...(typeof assetId === "string" && { assetId }),
     ...(typeof query === "string" && { query: query.trim().toLowerCase() }),
   };
+}
+
+export function matchesFindingFilter(
+  filter: FindingExportFilter,
+  finding: {
+    kind: "imported" | "worker";
+    assets: readonly string[];
+    title: string;
+    summary?: string;
+    severity?: FindingExportFilter["severity"];
+    disposition?: FindingExportFilter["disposition"];
+    category?: string;
+  },
+): boolean {
+  const { kind, assetId, query, severity, disposition, findingCategory } =
+    filter;
+  return (!kind || kind === finding.kind) &&
+    (!assetId || finding.assets.includes(assetId)) &&
+    (!severity || finding.severity === severity) &&
+    (!disposition || finding.disposition === disposition) &&
+    (!findingCategory || finding.category?.toLowerCase() === findingCategory) &&
+    (!query ||
+      [finding.title, finding.summary ?? ""].some((value) =>
+        redactCredentialText(value).toLowerCase().includes(query)
+      ));
 }
 
 interface FindingExportPageRequest {
@@ -528,26 +553,19 @@ function renderFindingExport(
           ))
       ) return;
       if (!explicit) {
-        const { assetId, query, severity, disposition, findingCategory } =
-          selection;
-        const scope = imported ? imported.assets : [report?.finding.targetId];
-        const title = redactCredentialText(
-          imported?.label ?? report?.title ?? "",
-        );
-        const summary = redactCredentialText(report?.summary ?? "");
         if (
-          (severity && (imported?.severity ?? report?.severity) !== severity) ||
-          (findingCategory &&
-            report?.findingCategory?.toLowerCase() !== findingCategory) ||
-          (disposition &&
-            (imported
-                ? dispositions.get(id) ?? "open"
-                : report?.disposition) !== disposition) ||
-          (assetId && !scope.includes(assetId)) ||
-          (query &&
-            ![title, summary].some((value) =>
-              value.toLowerCase().includes(query)
-            ))
+          !matchesFindingFilter(selection, {
+            kind: imported ? "imported" : "worker",
+            assets: imported?.assets ??
+              (report ? [report.finding.targetId] : []),
+            title: imported?.label ?? report?.title ?? "",
+            summary: report?.summary,
+            severity: imported?.severity ?? report?.severity,
+            disposition: imported
+              ? dispositions.get(id) ?? "open"
+              : report?.disposition,
+            category: report?.findingCategory,
+          })
         ) continue;
         if (!page && records.length >= MAX_FINDING_EXPORT_SELECTION) return;
       }

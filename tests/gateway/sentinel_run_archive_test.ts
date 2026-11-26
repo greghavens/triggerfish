@@ -1466,6 +1466,16 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
       includeFacets: true,
       scopes: [{ kind: exact.kind, id: exact.id, revision: exact.revision }],
     };
+    const filteredFacetsRequest = {
+      ...facetRequest,
+      findingFilter: {
+        kind: "worker",
+        severity: "medium",
+        disposition: "confirmed",
+        findingCategory: "RETAINED CONTROL COVERAGE",
+      },
+    };
+    let pinnedFilteredFacets: unknown;
     await withGateway(baseDir, async (turn, approvals, policy) => {
       policy.denyTrafficBefore = true;
       assert(!(await turn(trafficBlob)).includes("🙂"));
@@ -1649,6 +1659,12 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
       ]);
       assertEquals(preArchiveFindingFacets.disposition.confirmed, 2);
       assert(preArchiveFindingFacets.severity.medium >= 1);
+      const filtered = JSON.parse(await turn(filteredFacetsRequest));
+      assertEquals(filtered.findingTotal, 1);
+      assertEquals(filtered.groups[0].facets.total, 1);
+      assertEquals(filtered.groups[0].entries[0].id, workerFinding.id);
+      assertEquals(filtered.groups[0].entries[0].reportVersion, 2);
+      pinnedFilteredFacets = filtered;
       const offsetFacets = JSON.parse(
         await turn({
           ...facetRequest,
@@ -2698,6 +2714,10 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
       assertEquals(
         JSON.parse(await turn(facetRequest)).groups[0].facets,
         preArchiveFindingFacets!,
+      );
+      assertEquals(
+        JSON.parse(await turn(filteredFacetsRequest)),
+        pinnedFilteredFacets,
       );
       const restoredReportHistory = {
         ...trafficScope,

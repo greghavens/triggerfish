@@ -1271,6 +1271,39 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
       assertEquals(facetedGroups[1].facets.categories, []);
       const { facets: _facets, ...plainGroup } = facetedGroups[1];
       assertEquals(plainGroup, findingGroups.groups[1]);
+      const filteredRequest = {
+        ...faceted,
+        findingFilter: { kind: "worker", query: "  WORKER finding  " },
+      };
+      const scopedFiltered = JSON.parse((await turn(filteredRequest)).result);
+      assertEquals(scopedFiltered.findingTotal, 2);
+      assertEquals(scopedFiltered.groups[1].entries[0].id, original.id);
+      assertEquals(scopedFiltered.groups[1].nextOffset, 1);
+      assertEquals(scopedFiltered.groups[1].facets.total, 2);
+      assertEquals(scopedFiltered.groups[1].facets.severity.unknown, 2);
+      const secondFiltered = JSON.parse(
+        (await turn({
+          ...filteredRequest,
+          scopes: [{ ...peer, offset: 1 }],
+        })).result,
+      ).groups[0];
+      assertEquals(secondFiltered.entries[0].id, later.id);
+      assertEquals(secondFiltered.facets.total, 2);
+      assertEquals(secondFiltered.nextOffset, null);
+      const literal = JSON.parse(
+        (await turn({
+          ...filteredRequest,
+          findingFilter: { query: "%Worker" },
+        })).result,
+      );
+      assertEquals(literal.findingTotal, 0);
+      assertStringIncludes(
+        (await turn({
+          ...filteredRequest,
+          findingFilter: { unsupported: true },
+        })).result,
+        "unavailable",
+      );
       denied = "PRE_TOOL_CALL";
       const hiddenFacets = await turn(faceted);
       assert(!hiddenFacets.result.includes('"facets"'));
