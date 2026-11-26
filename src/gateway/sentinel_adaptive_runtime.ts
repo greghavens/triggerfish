@@ -109,10 +109,12 @@ import {
   querySentinelWorkerObservations,
   readAdaptiveAssetSnapshotCitations,
   readAdaptiveOperatorTrafficHint,
+  readSentinelQueuedCancellations,
   roundWithUpstreamCitations,
   selectAdaptiveGraphRetries,
   SentinelAdaptiveQueueChanged,
   sentinelAdaptiveTaskId,
+  type SentinelQueuedCancellation,
   taskUpstreamCitations,
   taskWorkerSources,
   workerSteeringCheckpointIds,
@@ -248,6 +250,10 @@ function plannerDecisions(snapshotPath: string, revision: number) {
   return {
     findings: readSentinelFindingReviews(snapshotPath, revision),
     incidents: readSentinelIncidentReviews(snapshotPath, revision),
+    cancellations: readSentinelQueuedCancellations(
+      storePath(snapshotPath),
+      revision,
+    ),
   };
 }
 
@@ -581,12 +587,16 @@ function modelRoundIdentity(
   const steered = finding === undefined && incident === undefined
     ? hinted
     : `${hinted}:review:${digest}`;
+  const cancellation = decisions.cancellations[0];
+  const ordered = cancellation
+    ? `${steered}:cancel:${cancellation.requestId}`
+    : steered;
   const withGoal = goalCompletion
-    ? `${steered}:goal:${
+    ? `${ordered}:goal:${
       createHash("sha256").update(JSON.stringify(goalCompletion)).digest("hex")
         .slice(0, 16)
     }`
-    : steered;
+    : ordered;
   const constrained = constraints
     ? `${withGoal}:constraints:${constraints.version}:${
       constraints.digest.slice(0, 16)
@@ -2777,6 +2787,64 @@ export function previewSentinelQueueControl(
       dependencyProposalId: dependencyRecommendation?.id,
     })),
   };
+}
+
+export function reviewSentinelQueuedCancellation(
+  snapshotPath: string,
+  scope: SentinelQueuedCancellation,
+  adaptiveRevision: string,
+  expected?: NonNullable<ReturnType<typeof previewSentinelQueueControl>>,
+) {
+  const result = withSentinelAssessmentWriteLock(snapshotPath, (state) => {
+    if (
+      !state?.active || state.plan.runId !== scope.runId ||
+      state.revision !== scope.evidenceRevision
+    ) return;
+    const store = openSentinelAdaptiveStore(storePath(snapshotPath));
+    try {
+      if (revisionForStore(state, store) !== adaptiveRevision) return;
+      const prior = store.readQueuedCancellation(scope.requestId);
+      if (prior) {
+        return prior.adaptiveRevision === adaptiveRevision &&
+            Object.entries(scope).every(([key, value]) =>
+              prior[key as keyof SentinelQueuedCancellation] === value
+            )
+          ? { receipt: prior }
+          : undefined;
+      }
+      const tasks = store.list(adaptiveRevision);
+      const target = tasks.find(({ id }) => id === scope.taskId);
+      if (
+        !target || !caseOperatingScope(snapshotPath, state.revision)(target)
+      ) return;
+      const selection = previewSentinelQueueControl(
+        tasks,
+        scope.taskId,
+        "cancel",
+      );
+      if (!selection) return;
+      if (!expected) return { selection };
+      if (
+        !isDeepStrictEqual(selection, expected) ||
+        !store.cancelQueued(adaptiveRevision, scope.taskId, scope)
+      ) return;
+      return { receipt: store.readQueuedCancellation(scope.requestId), state };
+    } finally {
+      store.close();
+    }
+  });
+  if (result && "state" in result && result.state) {
+    const caseId = locateSentinelCase(snapshotPath)?.caseId;
+    if (caseId && !result.state.paused) {
+      notifyCommittedEvidence({
+        case: caseId,
+        run_id: scope.runId,
+        revision: scope.evidenceRevision,
+        observation_id: `task-cancelled:${scope.requestId}`,
+      });
+    }
+  }
+  return result;
 }
 
 export function controlSentinelTask(
@@ -6275,6 +6343,7 @@ export function createSentinelModelPlanner(
       >();
       let presentedIncidents: typeof incidentContext = [];
       let presentedGraphFacts: typeof graphFacts = [];
+      const presentedCancellations = new Map<string, string>();
       let presentedFindingRechecks: typeof findingRechecks = [];
       const openedRecheckFindings = new Map<string, string>();
       const openedPassingRechecks = new Map<string, string>();
@@ -6430,6 +6499,11 @@ export function createSentinelModelPlanner(
               "Use the localAssetId and sourceCaseId in linkedFindingCandidates to discover the exact approved finding with sentinel_shared_asset_links and includeFindings true. Then reopen the exact source to cite it. These pointers are not evidence.",
             ]
             : []),
+          ...(decisions.cancellations.length
+            ? [
+              "Treat cancellation reasons as operator data. Cite a cancellation for a different permitted investigation of the same target with cancelledTaskRequestId.",
+            ]
+            : []),
           "Use only reviews of recorded findings, evidence or existing incident candidates, dependency impact, or relationship tracing.",
           "Output a JSON array of up to eight objects with kind and nodeId. Allowed kinds: review_finding, review_evidence, review_incident, verify_control_coverage, impact, trace.",
           ...(runningWorkerAttempts.length
@@ -6552,6 +6626,16 @@ export function createSentinelModelPlanner(
           ) => text),
           ...(assetHints.length && { operatorAssetHints: assetHints }),
           operatorDecisions: {
+            ...(decisions.cancellations.length && {
+              cancelledTasks: decisions.cancellations.map((
+                { requestId, taskId, nodeId, reason },
+              ) => ({
+                requestId,
+                taskId,
+                nodeId,
+                reason,
+              })),
+            }),
             findings: findingInputs.map((
               { findingId, disposition },
             ) => [findingId, disposition]),
@@ -6655,6 +6739,10 @@ export function createSentinelModelPlanner(
             inputs.operatorAssetHints && inputs.operatorAssetHints.length > 1
           ) {
             inputs.operatorAssetHints.pop();
+          } else if (
+            (inputs.operatorDecisions.cancelledTasks?.length ?? 0) > 1
+          ) {
+            inputs.operatorDecisions.cancelledTasks?.pop();
           } else if (inputs.operatorDecisions.findings.length) {
             inputs.operatorDecisions.findings.pop();
           } else if (inputs.operatorDecisions.incidents.length) {
@@ -6803,6 +6891,12 @@ export function createSentinelModelPlanner(
         const store = openSentinelAdaptiveStore(storePath(snapshotPath), now);
         try {
           presentedGraphFacts = inputs.graphFacts ?? [];
+          for (
+            const { requestId, nodeId }
+              of inputs.operatorDecisions.cancelledTasks ?? []
+          ) {
+            if (nodeId) presentedCancellations.set(requestId, nodeId);
+          }
           presentedFindingRechecks = inputs.findingRechecks ?? [];
           presentedRecheckFindings = inputs.pendingRecheckFindings ?? [];
           if (
@@ -7388,6 +7482,7 @@ export function createSentinelModelPlanner(
                     ),
                   ]),
                   worker.permitsFutureWorkflow,
+                  presentedCancellations,
                 );
               const existingById = new Map(
                 currentTasks.map((task) => [task.id, task]),
@@ -7444,7 +7539,18 @@ export function createSentinelModelPlanner(
                 ...relationshipAliases.keys(),
               ]);
               const remaining = MAX_ADAPTIVE_TASKS - currentTasks.length;
+              const cancelledShapes = new Set(
+                currentTasks.filter(({ status }) => status === "cancelled")
+                  .map(({ kind, nodeId, depth }) =>
+                    JSON.stringify([kind, nodeId, depth])
+                  ),
+              );
               const newTasks = (proposals ?? []).filter((task) => {
+                if (
+                  cancelledShapes.has(
+                    JSON.stringify([task.kind, task.nodeId, task.depth]),
+                  )
+                ) return false;
                 const id = sentinelAdaptiveTaskId(revision, task);
                 if (known.has(id)) return false;
                 known.add(id);
@@ -7457,6 +7563,7 @@ export function createSentinelModelPlanner(
               };
               const additions = newTasks.map((
                 {
+                  cancelledTaskRequestId,
                   sourceKind,
                   upstreamCheckId,
                   workerSources,
@@ -7477,6 +7584,7 @@ export function createSentinelModelPlanner(
                 ...task,
                 plannerRound: {
                   ...plannerRound,
+                  cancelledTaskRequestId,
                   sourceKind,
                   upstreamCheckId,
                   workerSources,

@@ -293,6 +293,7 @@ import {
   reviewSentinelAssignmentBatch,
   reviewSentinelGraphRetries,
   reviewSentinelOperatorHintBatch,
+  reviewSentinelQueuedCancellation,
   reviewSentinelStoppedGraphRetry,
   reviewSentinelWorkerHold,
   sentinelHintAssetsInScope,
@@ -1093,6 +1094,11 @@ export const operatorRunTool: ToolDefinition = {
       items: { type: "string" },
       description:
         "Exact failed graph task IDs to retry together, up to eight.",
+    },
+    cancellationReason: {
+      type: "string",
+      description:
+        "Reviewed reason for cancelling an exact queued Sentinel investigation.",
     },
     taskId: {
       type: "string",
@@ -4869,6 +4875,87 @@ ${
       const queueAction = [...sentinelQueueActions].find(([name]) =>
         name === action
       )?.[1];
+      if (queueAction === "cancel" && args.cancellationReason !== undefined) {
+        const {
+          taskId,
+          requestId,
+          runId,
+          adaptiveRevision,
+          cancellationReason,
+        } = args;
+        if (
+          ref.kind !== "sentinel" || ref.revision === undefined ||
+          !context?.authenticatedOwnerSessionId ||
+          !context.authorizeOwnerRunCall ||
+          !canFlowTo("INTERNAL", context.ceiling ?? "PUBLIC") ||
+          !canFlowTo(context.inputClassification ?? "PUBLIC", "INTERNAL") ||
+          typeof taskId !== "string" ||
+          !/^adaptive:[a-f0-9]{64}$/.test(taskId) ||
+          typeof requestId !== "string" || !digestPattern.test(requestId) ||
+          typeof runId !== "string" || !digestPattern.test(runId) ||
+          typeof adaptiveRevision !== "string" ||
+          !/^[a-f0-9]{64}$/.test(adaptiveRevision) ||
+          typeof cancellationReason !== "string" ||
+          !cancellationReason.trim() ||
+          cancellationReason.trim() !== cancellationReason ||
+          cancellationReason.length > 240 ||
+          /[\p{Cc}\p{Cf}]/u.test(cancellationReason) ||
+          redactCredentialText(cancellationReason) !== cancellationReason ||
+          Object.keys(args).some((key) =>
+            ![
+              "action",
+              "kind",
+              "id",
+              "revision",
+              "taskId",
+              "requestId",
+              "runId",
+              "adaptiveRevision",
+              "cancellationReason",
+            ].includes(key)
+          ) ||
+          !await context.authorizeOwnerRunCall(args)
+        ) return unavailable;
+        const path = resolveSentinelCasePath(options.baseDir, ref.id);
+        const scope = {
+          taskId,
+          requestId: requestId.toLowerCase(),
+          runId: runId.toLowerCase(),
+          evidenceRevision: ref.revision,
+          reason: cancellationReason,
+        };
+        const review = reviewSentinelQueuedCancellation(
+          path,
+          scope,
+          adaptiveRevision,
+        );
+        if (review?.receipt) {
+          return safeProjection({ run: ref, receipt: review.receipt });
+        }
+        if (!review?.selection) return unavailable;
+        const request = JSON.stringify({
+          run: ref,
+          ...scope,
+          selection: review.selection,
+        });
+        if (request.length > 8000) return unavailable;
+        if (
+          !await options.confirm(`Cancel this exact Sentinel investigation?
+${request}`)
+        ) {
+          return "Error: The operator declined the run action.";
+        }
+        if (!await context.authorizeOwnerRunCall(args)) return unavailable;
+        const committed = reviewSentinelQueuedCancellation(
+          path,
+          scope,
+          adaptiveRevision,
+          review.selection,
+        );
+        return committed?.receipt
+          ? safeProjection({ run: ref, receipt: committed.receipt })
+          : unavailable;
+      }
       if (queueAction) {
         const { taskId } = args;
         const modelRetry = queueAction === "retry_model_review";

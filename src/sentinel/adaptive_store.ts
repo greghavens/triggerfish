@@ -938,7 +938,23 @@ export interface AdaptiveFindingFollowup {
   readonly note: string;
 }
 
+export interface SentinelQueuedCancellation {
+  readonly requestId: string;
+  readonly runId: string;
+  readonly evidenceRevision: number;
+  readonly taskId: string;
+  readonly reason: string;
+}
+
+export interface SentinelQueuedCancellationReceipt
+  extends SentinelQueuedCancellation {
+  readonly adaptiveRevision: string;
+  readonly affectedTaskIds: readonly string[];
+  readonly at: string;
+}
+
 export interface AdaptivePlannerRound {
+  readonly cancelledTaskRequestId?: string;
   readonly stoppedRetry?: {
     readonly sourceTaskId: string;
     readonly stopRequestId: string;
@@ -2311,6 +2327,7 @@ function normalizePlannerRound(round: AdaptivePlannerRound | undefined) {
     priorAssignedTargetCitations,
     carriedAssignedTargetCitations,
     findingFollowup,
+    cancelledTaskRequestId,
     stoppedRetry,
   } = round;
   if (
@@ -2470,6 +2487,11 @@ function normalizePlannerRound(round: AdaptivePlannerRound | undefined) {
   ) throw new Error("Invalid committed observation citation");
   return {
     identity: revisionKey(identity),
+    ...(cancelledTaskRequestId !== undefined && {
+      cancelledTaskRequestId: operatorAssignmentRequestId(
+        cancelledTaskRequestId,
+      ),
+    }),
     ...(stoppedRetry &&
       {
         stoppedRetry: {
@@ -3088,6 +3110,32 @@ export function querySentinelWorkerObservations(
     };
   } finally {
     db.close();
+  }
+}
+
+export function readSentinelQueuedCancellations(
+  path: string,
+  evidenceRevision: number,
+) {
+  try {
+    const db = openPrivateDatabase(path, true);
+    try {
+      return db.prepare(`
+        SELECT activity.note, task.nodeId FROM adaptive_events AS activity
+        JOIN adaptive_tasks AS task ON task.id = activity.taskId AND task.revision = activity.revision
+        WHERE activity.event = 'operator_task_cancellation'
+          AND json_extract(CASE WHEN json_valid(activity.note) THEN activity.note END, '$.evidenceRevision') = ?
+        ORDER BY activity.rowid DESC LIMIT 3
+      `).all(evidenceRevision).map((row) => ({
+        ...JSON.parse(String(row.note)) as SentinelQueuedCancellationReceipt,
+        ...(typeof row.nodeId === "string" && { nodeId: row.nodeId }),
+      }));
+    } finally {
+      db.close();
+    }
+  } catch (error) {
+    if (error instanceof Deno.errors.NotFound) return [];
+    throw error;
   }
 }
 
@@ -8078,11 +8126,29 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
       });
     },
 
-    cancelQueued(revision: string, target: string): boolean {
+    readQueuedCancellation(requestId: string) {
+      const row = db.prepare(`
+        SELECT note FROM adaptive_events WHERE event = 'operator_task_cancellation'
+          AND json_extract(CASE WHEN json_valid(note) THEN note END, '$.requestId') = ?
+        LIMIT 1
+      `).get(requestId);
+      return typeof row?.note === "string"
+        ? JSON.parse(row.note) as SentinelQueuedCancellationReceipt
+        : undefined;
+    },
+
+    cancelQueued(
+      revision: string,
+      target: string,
+      cancellation?: SentinelQueuedCancellation,
+    ): boolean {
       revision = revisionKey(revision);
       const id = taskId(target);
       return transaction(db, () => {
-        if (activeRevision() !== revision) return false;
+        if (
+          activeRevision() !== revision ||
+          (cancellation && this.readQueuedCancellation(cancellation.requestId))
+        ) return false;
         const row = lookup.get(id);
         if (row?.revision !== revision || row.status !== "queued") return false;
         const affected = db.prepare(`
@@ -8114,8 +8180,24 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
             task.attempts,
             time,
             task.id === id
-              ? "Operator cancelled this investigation."
+              ? cancellation?.reason ?? "Operator cancelled this investigation."
               : "A prerequisite was cancelled.",
+          );
+        }
+        if (cancellation) {
+          const receipt: SentinelQueuedCancellationReceipt = {
+            ...cancellation,
+            adaptiveRevision: revision,
+            affectedTaskIds: affected.map(({ id }) => String(id)),
+            at: new Date(time).toISOString(),
+          };
+          event.run(
+            revision,
+            id,
+            "operator_task_cancellation",
+            row.attempts,
+            time,
+            JSON.stringify(receipt),
           );
         }
         return true;

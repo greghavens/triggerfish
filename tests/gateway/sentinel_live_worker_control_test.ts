@@ -17,6 +17,7 @@ import {
   readAdaptiveSentinel,
 } from "../../src/gateway/sentinel_adaptive_runtime.ts";
 import { readSentinelSharedAssetDiscoveries } from "../../src/gateway/sentinel_asset_discoveries.ts";
+import { startSentinelAssessmentCoordinator } from "../../src/gateway/sentinel_assessment_service.ts";
 import { createSentinelSubagent } from "../../src/gateway/sentinel_agent.ts";
 import type { BootstrapResult } from "../../src/gateway/startup/bootstrap.ts";
 import { createTidepoolSentinelHandler } from "../../src/gateway/startup/services/tidepool_sentinel.ts";
@@ -1125,6 +1126,188 @@ Deno.test("Owner gateway restores a portable paused graph worker before reusing 
 
 Deno.test("Owner gateway reauthorizes a portable paused graph worker before exposing its saved result", () =>
   verifyPausedGraphWorker(true, true));
+
+Deno.test("Reviewed queued cancellation wakes Sentinel planning with exact lineage", async () => {
+  const baseDir = await Deno.makeTempDir();
+  const caseId = "operator-cancellation";
+  const path = resolveSentinelCasePath(baseDir, caseId);
+  const reason =
+    "The initial impact review duplicates this service's approved audit.";
+  const requestId = crypto.randomUUID();
+  let ran = 0;
+  let targetId = "";
+  let dependentId = "";
+  let plannerInput: unknown;
+  const planner = createSentinelModelPlanner(path, (_state, taskId) => ({
+    execute(content, send) {
+      if (taskId) {
+        send({
+          type: "response",
+          text: '{"summary":"Reviewed exact alternate route."}',
+          taint: "INTERNAL",
+        });
+        return Promise.resolve();
+      }
+      ran++;
+      assert(typeof content === "string");
+      const inputs = JSON.parse(content.split("\n").at(-1)!);
+      plannerInput = inputs.operatorDecisions?.cancelledTasks;
+      send({
+        type: "response",
+        text: JSON.stringify([
+          {
+            kind: "impact",
+            nodeId: "fixture-service",
+            depth: 1,
+            cancelledTaskRequestId: requestId,
+          },
+          {
+            kind: "trace",
+            nodeId: "fixture-service",
+            depth: 1,
+            cancelledTaskRequestId: requestId,
+          },
+          {
+            kind: "trace",
+            nodeId: "fixture-service",
+            depth: 2,
+            cancelledTaskRequestId: requestId,
+          },
+        ]),
+        taint: "INTERNAL",
+      });
+      return Promise.resolve();
+    },
+    clear() {},
+  }));
+  let coordinator:
+    | ReturnType<typeof startSentinelAssessmentCoordinator>
+    | undefined;
+  try {
+    await Deno.mkdir(dirname(path), { recursive: true });
+    await Deno.writeTextFile(
+      path,
+      JSON.stringify({
+        version: 1,
+        nodes: [{
+          id: "fixture-service",
+          kind: "asset",
+          label: "Fixture service",
+        }],
+        edges: [],
+      }),
+    );
+    const start = startSentinelAssessment(path, {
+      goal: "Review available configuration evidence.",
+    });
+    advanceAdaptiveSentinel(path, start);
+    const first = readAdaptiveSentinel(path, start)!;
+    const store = openSentinelAdaptiveStore(
+      join(dirname(path), "sentinel-adaptive.db"),
+    );
+    try {
+      const seeded = store.sync(first.revision, [{
+        kind: "impact",
+        nodeId: "fixture-service",
+        depth: 1,
+        reason: "Reviewed graph investigation.",
+      }], first.revision);
+      targetId = seeded.find(({ kind, nodeId }) =>
+        kind === "impact" && nodeId === "fixture-service"
+      )!.id;
+      const withDependent = store.sync(first.revision, [{
+        kind: "trace",
+        nodeId: "fixture-service",
+        depth: 1,
+        prerequisites: [targetId],
+        reason: "Waiting for the cancelled investigation.",
+      }], first.revision);
+      dependentId = withDependent.find(({ prerequisites }) =>
+        prerequisites.includes(targetId)
+      )!.id;
+    } finally {
+      store.close();
+    }
+    let allowPlan = false;
+    coordinator = startSentinelAssessmentCoordinator({
+      snapshotPath: path,
+      advanceAdaptive(current) {
+        if (allowPlan) planner.advance(current);
+      },
+      stopAdaptive: () => planner.stop(),
+    });
+    await Promise.resolve();
+    assertEquals(ran, 0);
+    const request = {
+      action: "cancel_task",
+      kind: "sentinel",
+      id: caseId,
+      revision: start.revision,
+      runId: start.plan.runId,
+      adaptiveRevision: first.revision,
+      taskId: targetId,
+      requestId,
+      cancellationReason: reason,
+    };
+    let firstReceipt: unknown;
+    await withOwnerControl(baseDir, async (turn, approvals) => {
+      assert(
+        (await turn({ ...request, revision: start.revision + 1 })).includes(
+          "unavailable",
+        ),
+      );
+      assertEquals(approvals.length, 0);
+      allowPlan = true;
+      firstReceipt = JSON.parse(await turn(request)).receipt;
+      assertEquals(JSON.parse(approvals[0].split("\n").at(-1)!).reason, reason);
+      assertEquals(
+        (firstReceipt as { affectedTaskIds: string[] }).affectedTaskIds,
+        [targetId, dependentId],
+      );
+      await until(() => ran > 0);
+      assertEquals(plannerInput, [{
+        requestId,
+        taskId: targetId,
+        nodeId: "fixture-service",
+        reason,
+      }]);
+      await until(() =>
+        readAdaptiveSentinel(path, start)?.tasks.some(({ plannerRound }) =>
+          plannerRound?.cancelledTaskRequestId === requestId
+        ) === true
+      );
+    });
+    await withOwnerControl(baseDir, async (turn, approvals) => {
+      assertEquals(JSON.parse(await turn(request)).receipt, firstReceipt);
+      assert(
+        (await turn({ ...request, cancellationReason: "Different reason." }))
+          .includes("unavailable"),
+      );
+      assertEquals(approvals.length, 0);
+      const latest = readAdaptiveSentinel(path, start)?.tasks ?? [];
+      assertEquals(
+        latest.find(({ id }) => id === targetId)?.status,
+        "cancelled",
+      );
+      assertEquals(
+        latest.find(({ id }) => id === dependentId)?.status,
+        "cancelled",
+      );
+      assertEquals(
+        latest.filter(({ plannerRound }) =>
+          plannerRound?.cancelledTaskRequestId === requestId
+        )
+          .map(({ kind, depth }) => [kind, depth]),
+        [["trace", 2]],
+      );
+    });
+  } finally {
+    coordinator?.stop();
+    planner.stop();
+    await until(() => !planner.hasInFlightWork());
+    await Deno.remove(baseDir, { recursive: true });
+  }
+});
 
 Deno.test("An enabled idle planner heartbeat resumes from durable case history and respects gateway pause", async () => {
   const baseDir = await Deno.makeTempDir();

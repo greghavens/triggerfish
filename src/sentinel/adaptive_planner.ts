@@ -827,8 +827,10 @@ export function validateSentinelPlanSuggestions(
     asset: string,
     selector: SentinelFutureWorkflowOutcome,
   ) => boolean,
+  cancelledTasks: ReadonlyMap<string, string> = new Map(),
 ):
   | (AdaptiveTaskRequest & {
+    cancelledTaskRequestId?: string;
     sourceKind?: AdaptiveSourceKind;
     workerSources?: readonly AdaptiveWorkerSource[];
     upstreamCheckId?: string;
@@ -867,6 +869,7 @@ export function validateSentinelPlanSuggestions(
   }
   const explicitScope = state.plan.traceNode ?? state.plan.impactAsset;
   const tasks: (AdaptiveTaskRequest & {
+    cancelledTaskRequestId?: string;
     sourceKind?: AdaptiveSourceKind;
     workerSources?: readonly AdaptiveWorkerSource[];
     upstreamCheckId?: string;
@@ -887,6 +890,12 @@ export function validateSentinelPlanSuggestions(
         item.nodeId.includes("\x00"))
     ) continue;
     const { nodeId, kind } = item;
+    const cancelledTaskRequestId = item.cancelledTaskRequestId;
+    if (
+      cancelledTaskRequestId !== undefined &&
+      (typeof cancelledTaskRequestId !== "string" ||
+        cancelledTasks.get(cancelledTaskRequestId) !== nodeId)
+    ) continue;
     const recheckFindingId = item.recheckFindingId;
     if (
       recheckFindingId !== undefined &&
@@ -1236,6 +1245,8 @@ export function validateSentinelPlanSuggestions(
       }
       tasks.push({
         ...task,
+        ...(typeof cancelledTaskRequestId === "string" &&
+          { cancelledTaskRequestId }),
         ...(typeof passingRecheckId === "string" && { passingRecheckId }),
         ...(typeof passingRecheckForFindingId === "string" &&
           { passingRecheckForFindingId }),
