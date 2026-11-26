@@ -188,7 +188,7 @@ export function buildSkillAdministrationToolDefinitions(): readonly ToolDefiniti
   }, {
     name: "inspect_skill_revision",
     description:
-      "Preview one exact workspace skill revision from a previously approved or withdrawn draft. SKILL.revision.md supplies an optional replacement body, and SKILL.revision.description supplies an optional one-line description, beside the approved SKILL.md. The preview preserves all other metadata and leaves the proposed text inactive.",
+      "Preview one exact workspace skill revision from a previously approved or withdrawn draft. Beside SKILL.md, SKILL.revision.md supplies an optional replacement body, SKILL.revision.description an optional description, and SKILL.revision.references.json an optional replacement array of { path, content } reference documents. An empty array removes all references. The preview preserves tool and network grants and leaves the proposed text inactive.",
     parameters: {
       skill_name: {
         type: "string",

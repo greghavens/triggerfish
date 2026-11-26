@@ -1022,6 +1022,8 @@ Deno.test("Approved skill package documents bind exact content without extractin
   const proposal = join(proposals, name + ".md");
   const file = "references/controls/status.txt";
   const reference = "Reference fixture status checkpoint.";
+  const updatedReference = "Reference fixture updated status checkpoint.";
+  const replacement = join(workspace, name, "SKILL.revision.references.json");
   const instructions = "Review the verified service record.";
   const input = (path: string, text = reference) =>
     [
@@ -1036,7 +1038,11 @@ Deno.test("Approved skill package documents bind exact content without extractin
       instructions,
     ].join("\n");
   let blocked: HookType | undefined;
-  const confirm = () => Promise.resolve(true);
+  let mutateDuringReview = false;
+  const confirm = async () => {
+    if (mutateDuringReview) await Deno.writeTextFile(replacement, "[]");
+    return true;
+  };
   const selector = { skill_name: name };
   const read = { ...selector, type: "USER_PROVIDED" };
   const exact = { ...read, file };
@@ -1139,13 +1145,88 @@ Deno.test("Approved skill package documents bind exact content without extractin
         false,
       );
       await Deno.writeTextFile(draft, original);
+      const revisedFiles = JSON.stringify([{
+        path: file,
+        content: updatedReference,
+      }]);
+      await Deno.writeTextFile(replacement, revisedFiles);
+      const proposed = JSON.parse(
+        (await turn("inspect_skill_revision", selector)).result,
+      );
+      assert(proposed.reviewable);
+      const revisionArgs = {
+        ...selector,
+        source_digest: digest,
+        revision_digest: proposed.revision_digest,
+      };
+      assertStringIncludes(
+        JSON.parse((await turn("inspect_skill_document", exact)).result)
+          .content,
+        reference,
+      );
+      mutateDuringReview = true;
+      assertStringIncludes(
+        (await turn("stage_skill_revision", revisionArgs)).result,
+        "changed before staging",
+      );
+      mutateDuringReview = false;
+      await Deno.writeTextFile(replacement, revisedFiles);
+      assertEquals(
+        JSON.parse((await turn("stage_skill_revision", revisionArgs)).result)
+          .status,
+        "PENDING_APPROVAL",
+      );
+      assertEquals(
+        JSON.parse((await turn("inspect_skill_document", exact)).result).found,
+        false,
+      );
+      const revisedApproval = JSON.parse(
+        (await turn("approve_skill", {
+          ...selector,
+          digest: proposed.revision_digest,
+        })).result,
+      ).approval;
+      const updated = JSON.parse(
+        (await turn("inspect_skill_document", exact)).result,
+      );
+      assertEquals(
+        updated.file_digest,
+        await computeSkillHash(updatedReference),
+      );
+      assertEquals(updated.approval_receipt_id, revisedApproval.receiptId);
+      assertStringIncludes(updated.content, updatedReference);
+
+      await Deno.writeTextFile(replacement, "[]");
+      const removal = JSON.parse(
+        (await turn("inspect_skill_revision", selector)).result,
+      );
+      assert(removal.reviewable);
+      await turn("stage_skill_revision", {
+        ...selector,
+        source_digest: proposed.revision_digest,
+        revision_digest: removal.revision_digest,
+      });
+      const removed = JSON.parse(
+        (await turn("approve_skill", {
+          ...selector,
+          digest: removal.revision_digest,
+        })).result,
+      ).approval;
+      assertStringIncludes(
+        (await turn("inspect_skill_document", exact)).result,
+        "reference is unavailable",
+      );
+      const afterRemoval = JSON.parse((await turn("read_skill", read)).result);
+      assertEquals(afterRemoval.requires_tools, []);
+      assertEquals(afterRemoval.network_domains, []);
+      assertStringIncludes(afterRemoval.content, instructions);
       const withdrawn = JSON.parse(
         (await turn("withdraw_skill", {
           ...selector,
-          digest,
+          digest: removal.revision_digest,
         })).result,
       );
-      assertEquals(withdrawn.withdrawal.approvalReceiptId, receipt);
+      assertEquals(withdrawn.withdrawal.approvalReceiptId, removed.receiptId);
       assertEquals(
         JSON.parse((await turn("inspect_skill_document", exact)).result).found,
         false,

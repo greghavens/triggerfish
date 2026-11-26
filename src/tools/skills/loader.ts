@@ -38,6 +38,7 @@ import { parseSkillReferences } from "./reference_documents.ts";
 const log = createLogger("skills");
 const frontmatterPattern = /^---\n([\s\S]*?)(?:\n---|\n\.\.\.)(?=\n|$)/;
 const maxDraftBytes = 32_768;
+const referenceRevisionFile = "SKILL.revision.references.json";
 
 // Re-export SkillSource from core so existing importers via this module continue to work.
 export type { SkillSource } from "../../core/types/skills.ts";
@@ -84,6 +85,7 @@ export interface SkillDraftRevision {
   readonly sourceContent: string;
   readonly replacementBody?: string;
   readonly replacementDescription?: string;
+  readonly replacementReferences?: string;
   readonly content: string;
   readonly digest: string;
 }
@@ -252,7 +254,11 @@ function optionalTextArray(value: unknown): boolean {
 function readWorkspaceSkillText(
   workspace: string,
   path: string,
-  filename: "SKILL.md" | "SKILL.revision.md" | "SKILL.revision.description",
+  filename:
+    | "SKILL.md"
+    | "SKILL.revision.md"
+    | "SKILL.revision.description"
+    | typeof referenceRevisionFile,
 ): string | undefined {
   const markdown = join(path, filename);
   try {
@@ -478,20 +484,45 @@ async function readExactRevision(
     draft.skill.path,
     "SKILL.revision.description",
   );
+  const replacementReferences = readWorkspaceSkillText(
+    workspace,
+    draft.skill.path,
+    referenceRevisionFile,
+  );
   if (
     (replacementBody !== undefined && !replacementBody.trim()) ||
     (replacementBody === undefined &&
       existingPath(join(draft.skill.path, "SKILL.revision.md"))) ||
     (replacementDescription === undefined &&
       existingPath(join(draft.skill.path, "SKILL.revision.description"))) ||
-    (replacementBody === undefined && replacementDescription === undefined)
+    (replacementReferences === undefined &&
+      existingPath(join(draft.skill.path, referenceRevisionFile))) ||
+    (replacementBody === undefined && replacementDescription === undefined &&
+      replacementReferences === undefined)
   ) return;
   const frontmatter = frontmatterPattern.exec(draft.content)?.[0];
   if (!frontmatter) return;
-  const revised = replacementDescription === undefined
+  let revised = replacementDescription === undefined
     ? frontmatter
     : withRevisedDescription(frontmatter, replacementDescription);
   if (!revised) return;
+  if (replacementReferences !== undefined) {
+    try {
+      const references = parseSkillReferences(
+        JSON.parse(replacementReferences),
+      );
+      const metadata = parseFrontmatter(revised);
+      if (!references || !metadata) return;
+      const { files: _, ...rest } = metadata;
+      const expected = references.length === 0
+        ? rest
+        : { ...rest, files: references };
+      revised = `---\n${stringifyYaml(expected).trimEnd()}\n---`;
+      if (!isDeepStrictEqual(parseFrontmatter(revised), expected)) return;
+    } catch {
+      return;
+    }
+  }
   const content = revised + "\n" +
     (replacementBody ?? draft.content.slice(frontmatter.length + 1));
   if (content === draft.content) return;
@@ -506,6 +537,7 @@ async function readExactRevision(
     sourceContent: draft.content,
     replacementBody,
     replacementDescription,
+    replacementReferences,
     content,
     digest,
   };
@@ -539,7 +571,14 @@ function replaceDraftIfCurrent(
           path,
           "SKILL.revision.description",
         ) ===
-          revision.replacementDescription);
+          revision.replacementDescription) &&
+      (revision.replacementReferences === undefined
+        ? !existingPath(join(path, referenceRevisionFile))
+        : readWorkspaceSkillText(
+          workspace,
+          path,
+          referenceRevisionFile,
+        ) === revision.replacementReferences);
   };
   if (!current()) return false;
   const target = join(path, "SKILL.md");
