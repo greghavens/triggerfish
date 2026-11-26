@@ -1452,6 +1452,212 @@ Deno.test("Reviewed queued cancellation wakes Sentinel planning with exact linea
   }
 });
 
+Deno.test("Committed case pause cancels only its exact interactive Sentinel turn", async () => {
+  const baseDir = await Deno.makeTempDir();
+  const firstPath = resolveSentinelCasePath(baseDir, "interactive-first");
+  const secondPath = resolveSentinelCasePath(baseDir, "interactive-second");
+  const mainPath = resolveSentinelCasePath(baseDir);
+  const firstEntered = Promise.withResolvers<AbortSignal>();
+  const secondEntered = Promise.withResolvers<AbortSignal>();
+  const delegatedEntered = Promise.withResolvers<AbortSignal>();
+  const allowFirst = Promise.withResolvers<void>();
+  const allowSecond = Promise.withResolvers<void>();
+  const completedFirst = "Committed first-case context";
+  const stale = "Uncommitted response from paused case";
+  const usage = { inputTokens: 1, outputTokens: 1 };
+  const models = createProviderRegistry();
+  models.register({
+    name: "paused-interactive-fixture",
+    supportsStreaming: false,
+    async complete(messages, _, options) {
+      const prompt = String(
+        messages.findLast(({ role }) => role === "user")?.content,
+      );
+      const signal = options.signal as AbortSignal;
+      const result = (content: string) => ({ content, toolCalls: [], usage });
+      if (prompt.includes("Save earlier case context")) {
+        return result(completedFirst);
+      }
+      if (prompt.includes("Check history after pause")) {
+        assert(JSON.stringify(messages).includes(completedFirst));
+        assertFalse(JSON.stringify(messages).includes(stale));
+        return result("Prior context retained");
+      }
+      const delegated = prompt.includes(
+        "Suspend the delegated interactive turn",
+      );
+      const first = prompt.includes("Suspend the first interactive turn");
+      const entered = delegated
+        ? delegatedEntered
+        : first
+        ? firstEntered
+        : secondEntered;
+      const release = first || delegated ? allowFirst : allowSecond;
+      entered.resolve(signal);
+      await Promise.race([
+        release.promise,
+        new Promise<void>((resolve) =>
+          signal.addEventListener("abort", () => resolve(), { once: true })
+        ),
+      ]);
+      return result(first || delegated ? stale : "Second case kept running");
+    },
+  });
+  models.setDefault("paused-interactive-fixture");
+  const sockets: WebSocket[] = [];
+  let gateway: ReturnType<typeof createGatewayServer> | undefined;
+  try {
+    for (const path of [mainPath, firstPath, secondPath]) {
+      await Deno.mkdir(dirname(path), { recursive: true });
+      await Deno.writeTextFile(
+        path,
+        JSON.stringify({ version: 1, nodes: [], edges: [] }),
+      );
+      startSentinelAssessment(path, { goal: "Review configured case." });
+    }
+    const token = crypto.randomUUID();
+    gateway = createGatewayServer({
+      port: 0,
+      token,
+      chatSession: createChatSession({
+        session: createSession({
+          userId: "owner" as UserId,
+          channelId: "pause-chat" as ChannelId,
+          bumpersEnabled: false,
+        }),
+        providerRegistry: models,
+        hookRunner: {
+          evaluateHook: () =>
+            Promise.resolve({
+              allowed: true,
+              action: "ALLOW",
+              ruleId: null,
+              duration: 0,
+            }),
+        },
+        sentinelSnapshotPath: mainPath,
+        allowSentinelModelAccess: true,
+        resolveSentinelChatCase: (id) =>
+          ({
+            "interactive-first": firstPath,
+            "interactive-second": secondPath,
+          })[id],
+        enableStreaming: false,
+      }),
+    });
+    const { port } = await gateway.start();
+    const connect = async () => {
+      const socket = new WebSocket(
+        `ws://127.0.0.1:${port}/chat?token=${token}`,
+      );
+      sockets.push(socket);
+      await new Promise<void>((resolve, reject) => {
+        socket.addEventListener("open", () => resolve(), { once: true });
+        socket.addEventListener("error", reject, { once: true });
+      });
+      return (content: string) => {
+        const response = Promise.withResolvers<readonly string[]>();
+        const events: string[] = [];
+        const timer = setTimeout(
+          () => response.reject(new Error("No interactive turn end")),
+          4000,
+        );
+        const receive = ({ data }: MessageEvent) => {
+          events.push(String(data));
+          if (JSON.parse(data).type === "turn_end") response.resolve(events);
+        };
+        socket.addEventListener("message", receive);
+        socket.send(JSON.stringify({ type: "message", content }));
+        return response.promise.finally(() => {
+          clearTimeout(timer);
+          socket.removeEventListener("message", receive);
+        });
+      };
+    };
+    const first = await connect();
+    const second = await connect();
+    await first("/sentinel on");
+    await second("/sentinel on");
+    await first("/sentinel case interactive-first");
+    await second("/sentinel case interactive-second");
+    assert(
+      (await first("Save earlier case context")).join("").includes(
+        completedFirst,
+      ),
+    );
+    const interrupted = first("Suspend the first interactive turn");
+    const unrelated = second("Leave the second interactive turn active");
+    const [firstSignal, secondSignal] = await Promise.all([
+      firstEntered.promise,
+      secondEntered.promise,
+    ]);
+    const state = readSentinelAssessment(firstPath)!;
+    const pause = {
+      action: "pause",
+      kind: "sentinel",
+      id: "interactive-first",
+      revision: state.revision,
+      runId: state.plan.runId,
+    };
+    await withOwnerControl(
+      baseDir,
+      async (request, approvals) => {
+        await request(pause);
+        assertEquals(approvals.length, 0);
+        assertFalse(firstSignal.aborted);
+      },
+      undefined,
+      () => false,
+    );
+    await withOwnerControl(baseDir, async (request) => {
+      assert(
+        (await request({ ...pause, revision: state.revision + 1 })).includes(
+          "unavailable",
+        ),
+      );
+      assertFalse(firstSignal.aborted);
+      const outcome = JSON.parse(await request(pause)).run;
+      assertEquals(outcome.status, "paused");
+    });
+    assert(firstSignal.aborted);
+    assertFalse(secondSignal.aborted);
+    const cancelled = await interrupted;
+    assert(cancelled.some((event) => JSON.parse(event).type === "cancelled"));
+    assertFalse(cancelled.join("").includes(stale));
+    allowSecond.resolve();
+    assert((await unrelated).join("").includes("Second case kept running"));
+    assert(
+      (await first("Check history after pause")).join("").includes(
+        "Prior context retained",
+      ),
+    );
+    await withOwnerControl(baseDir, async (request) => {
+      assertEquals(
+        JSON.parse(await request({ ...pause, action: "resume" })).run.status,
+        "running",
+      );
+      const delegated = first(
+        "/sentinel-agent Suspend the delegated interactive turn",
+      );
+      const signal = await delegatedEntered.promise;
+      assertEquals(
+        JSON.parse(await request({ ...pause, action: "cancel" })).run.status,
+        "stopped",
+      );
+      assert(signal.aborted);
+      const cancelled = await delegated;
+      assert(cancelled.some((event) => JSON.parse(event).type === "cancelled"));
+      assertFalse(cancelled.join("").includes(stale));
+    });
+  } finally {
+    allowFirst.resolve();
+    allowSecond.resolve();
+    for (const socket of sockets) socket.close();
+    await gateway?.stop();
+    await Deno.remove(baseDir, { recursive: true });
+  }
+});
+
 Deno.test("An enabled idle planner heartbeat resumes from durable case history and respects gateway pause", async () => {
   const baseDir = await Deno.makeTempDir();
   const path = resolveSentinelCasePath(baseDir);

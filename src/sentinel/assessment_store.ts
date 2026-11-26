@@ -1,3 +1,7 @@
+import {
+  notifySentinelAssessmentInterruption,
+  type SentinelAssessmentInterruption,
+} from "./assessment_interruptions.ts";
 import type {
   CompletedSentinelGraphFollowupBinding,
   CompletedSentinelGraphFollowupReceipt,
@@ -3593,8 +3597,9 @@ export function stopSentinelAssessment(
 ): boolean {
   const db = openStore(path, false);
   if (!db) return false;
+  let interruption: SentinelAssessmentInterruption | undefined;
   try {
-    return transact(db, () => {
+    const applied = transact(db, () => {
       const row = getRow(db);
       if (!row) return false;
       const plan = JSON.parse(row.plan) as AssessmentPlan;
@@ -3604,8 +3609,18 @@ export function stopSentinelAssessment(
       ) return false;
       if (row.active === 0) return expected !== undefined;
       if (row.active !== 1 && row.active !== 2) return false;
-      return markAssessmentInactive(db, row, plan, 0);
+      const stopped = markAssessmentInactive(db, row, plan, 0);
+      if (stopped && plan.runId) {
+        interruption = {
+          runId: plan.runId,
+          revision: row.revision,
+          action: "stopped",
+        };
+      }
+      return stopped;
     });
+    if (interruption) notifySentinelAssessmentInterruption(path, interruption);
+    return applied;
   } finally {
     db.close();
   }
@@ -3805,8 +3820,9 @@ export function pauseSentinelAssessment(
 ): boolean {
   const db = openStore(path, false);
   if (!db) return false;
+  let interruption: SentinelAssessmentInterruption | undefined;
   try {
-    return transact(db, () => {
+    const applied = transact(db, () => {
       const row = getRow(db);
       if (
         row?.active !== 1 ||
@@ -3814,13 +3830,19 @@ export function pauseSentinelAssessment(
         (expectedRunId !== undefined &&
           (JSON.parse(row.plan) as AssessmentPlan).runId !== expectedRunId)
       ) return false;
-      return markAssessmentInactive(
-        db,
-        row,
-        JSON.parse(row.plan) as AssessmentPlan,
-        2,
-      );
+      const plan = JSON.parse(row.plan) as AssessmentPlan;
+      const paused = markAssessmentInactive(db, row, plan, 2);
+      if (paused && plan.runId) {
+        interruption = {
+          runId: plan.runId,
+          revision: row.revision,
+          action: "paused",
+        };
+      }
+      return paused;
     });
+    if (interruption) notifySentinelAssessmentInterruption(path, interruption);
+    return applied;
   } finally {
     db.close();
   }

@@ -1,3 +1,5 @@
+import { readSentinelAssessment } from "../sentinel/assessment_store.ts";
+import { observeSentinelAssessmentInterruption } from "../sentinel/assessment_interruptions.ts";
 /** Select the agent and conversation context for an authenticated chat socket. */
 import {
   extractText,
@@ -34,6 +36,41 @@ interface SentinelModeOptions {
   readonly readOutputLanguage?: (
     path: string,
   ) => SentinelReportLanguage | undefined;
+}
+
+async function executeCaseChat(
+  path: string | undefined,
+  agent: SentinelWorker,
+  message: MessageContent,
+  send: ChatEventSender,
+  signal: AbortSignal,
+) {
+  const initial = path && readSentinelAssessment(path);
+  if (
+    !path || !initial || !initial.active || initial.paused ||
+    !initial.plan.runId
+  ) {
+    return await agent.execute(message, send, signal);
+  }
+  const scoped = new AbortController();
+  const combined = AbortSignal.any([signal, scoped.signal]);
+  const unsubscribe = observeSentinelAssessmentInterruption(path, (event) => {
+    if (
+      event.runId === initial.plan.runId && event.revision >= initial.revision
+    ) {
+      if (!combined.aborted) {
+        scoped.abort(event.action);
+        send({ type: "cancelled" });
+      }
+    }
+  });
+  try {
+    await agent.execute(message, (event) => {
+      if (!combined.aborted) send(event);
+    }, combined);
+  } finally {
+    unsubscribe();
+  }
 }
 
 export function createSentinelSocketMode(
@@ -159,7 +196,13 @@ export function createSentinelSocketMode(
         const worker = options.createAgent(true, snapshotPath);
         workers.add(worker);
         try {
-          await worker.execute(task, sendCurrent, signal);
+          await executeCaseChat(
+            snapshotPath,
+            worker,
+            task,
+            sendCurrent,
+            signal,
+          );
         } finally {
           if (workers.delete(worker)) worker.clear();
         }
@@ -249,7 +292,13 @@ export function createSentinelSocketMode(
           .test(text);
       if (enabled && !modeCommand && !structuredQuery && options.createAgent) {
         agent ??= options.createAgent(false, snapshotPath);
-        await agent.execute(content, sendCurrent, signal);
+        await executeCaseChat(
+          snapshotPath,
+          agent,
+          content,
+          sendCurrent,
+          signal,
+        );
         return true;
       }
 
