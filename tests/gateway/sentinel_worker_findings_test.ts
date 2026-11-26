@@ -1366,6 +1366,24 @@ Deno.test("Leased Sentinel workers report, recheck, and amend findings visible i
       const delayed = queue().find(({ id }) => id === delayedTaskId);
       assertEquals(delayed?.status, "queued");
       assertEquals(delayed?.attempts, 0);
+      assertEquals(await list(first.revision), []);
+      assertEquals(await list(second.revision), []);
+      assertEquals(await list(), []);
+      const matchingRun = readSentinelAssessment(path);
+      assert(matchingRun?.plan.runId);
+      const priorPolicyVersion = readSentinelOperatingConstraints(
+        path,
+        matchingRun.plan.runId,
+      )?.version;
+      assert(priorPolicyVersion);
+      assert(recordSentinelOperatingConstraints(path, {
+        runId: matchingRun.plan.runId,
+        evidenceRevision: matchingRun.revision,
+        expectedVersion: priorPolicyVersion,
+        requestId: crypto.randomUUID(),
+        operatorScope: "owner",
+        constraints: { deniedKinds: [] },
+      }));
     });
 
     assert(finding && check && secondRevision && amendment);
@@ -1870,21 +1888,6 @@ Deno.test("Leased Sentinel workers report, recheck, and amend findings visible i
       });
       assertEquals(JSON.parse(String(earlierCategories.content)).findings, []);
     });
-    const matchingRun = readSentinelAssessment(path);
-    assert(matchingRun?.plan.runId);
-    const priorPolicyVersion = readSentinelOperatingConstraints(
-      path,
-      matchingRun.plan.runId,
-    )?.version;
-    assert(priorPolicyVersion);
-    assert(recordSentinelOperatingConstraints(path, {
-      runId: matchingRun.plan.runId,
-      evidenceRevision: matchingRun.revision,
-      expectedVersion: priorPolicyVersion,
-      requestId: crypto.randomUUID(),
-      operatorScope: "owner",
-      constraints: { deniedKinds: [] },
-    }));
     assert(stopSentinelAssessment(path));
     const latest = startSentinelAssessment(path, { goal: "New assessment" });
     assert(latest.plan.runId !== first.plan.runId);
@@ -5275,6 +5278,21 @@ async function verifyReceiptFamily(
         assertEquals(lineage.type, "sentinel_worker_recheck_lineage");
         assertEquals(lineage.finding, finding);
         assertEquals(lineage.rechecks, [scheduledResult]);
+        assert(recordSentinelOperatingConstraints(path, {
+          runId: updated.plan.runId!,
+          evidenceRevision: updated.revision,
+          expectedVersion: 0,
+          requestId: crypto.randomUUID(),
+          operatorScope: "owner",
+          constraints: { deniedKinds: ["review_evidence"] },
+        }));
+        const revoked = await request("worker_recheck_lineage", {
+          revision: updated.revision,
+          taskId,
+        });
+        assertEquals(revoked.type, "error");
+        assertEquals(revoked.finding, undefined);
+        assertEquals(revoked.rechecks, undefined);
       });
       return;
     }

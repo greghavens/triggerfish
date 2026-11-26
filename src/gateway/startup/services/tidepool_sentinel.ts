@@ -23,6 +23,7 @@ import {
   readSentinelGoalCompletionForState,
 } from "../../sentinel_goal_completion.ts";
 import { executeSentinelInventoryTool } from "../../sentinel_inventory_tool.ts";
+import { readSentinelFindingReceiptScope } from "../../sentinel_worker_findings.ts";
 import {
   hasSentinelWorkerFindingJournal,
   openSentinelWorkerFindingStore,
@@ -52,7 +53,6 @@ import {
   readSentinelIncidentReviews,
   readSentinelNotificationReceipt,
   readSentinelNotificationState,
-  readSentinelRunIdForRevision,
   recordSentinelFindingReview,
   recordSentinelIncidentReview,
   refreshSentinelAssessment,
@@ -205,7 +205,8 @@ export function createTidepoolSentinelHandler(
             typeof taskId !== "string" ||
             !/^adaptive:[a-f0-9]{64}$/.test(taskId)
           ) throw unavailable();
-          const runId = readSentinelRunIdForRevision(path, revision);
+          const scope = readSentinelFindingReceiptScope(path, revision);
+          const runId = scope?.runId;
           const adaptive = runId &&
             readHistoricalAdaptiveSentinel(path, revision);
           const task = adaptive && adaptive.goal.id === runId
@@ -213,7 +214,7 @@ export function createTidepoolSentinelHandler(
             : undefined;
           const findingId = task?.plannerRound?.recheckFindingId;
           if (
-            !task?.nodeId || !findingId ||
+            !task?.nodeId || !findingId || !scope?.allows(task.nodeId) ||
             !hasSentinelWorkerFindingJournal(path)
           ) throw unavailable();
           const store = openSentinelWorkerFindingStore(path);
@@ -222,7 +223,8 @@ export function createTidepoolSentinelHandler(
             if (
               !finding || finding.caseId !== caseId ||
               finding.runId !== runId ||
-              finding.evidenceRevision > revision
+              finding.evidenceRevision > revision ||
+              !scope.allows(finding.targetId)
             ) throw unavailable();
             const rechecks = store.list(revision).filter((record) =>
               record.kind === "recheck" && record.caseId === caseId &&
@@ -260,7 +262,24 @@ export function createTidepoolSentinelHandler(
               "Use a valid finding evidence revision and page.",
             );
           }
-          const results = readSentinelWorkerFindingHistory(path, revision);
+          const scopes = new Map<
+            number,
+            ReturnType<typeof readSentinelFindingReceiptScope>
+          >();
+          const results = readSentinelWorkerFindingHistory(path, revision)
+            .filter((record) => {
+              if (record.caseId !== caseId) return false;
+              const exactRevision = revision ?? record.evidenceRevision;
+              if (!scopes.has(exactRevision)) {
+                scopes.set(
+                  exactRevision,
+                  readSentinelFindingReceiptScope(path, exactRevision),
+                );
+              }
+              const scope = scopes.get(exactRevision);
+              return scope?.runId === record.runId &&
+                scope.allows(record.targetId);
+            });
           const records = results.slice(offset, offset + 10);
           send({
             topic: "sentinel",

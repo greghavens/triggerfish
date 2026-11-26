@@ -100,7 +100,11 @@ export function currentSentinelFindingContext(
     (!scope.assignedTaskId || !!assignedTask(scope));
 }
 
-function findingReceiptScope(path: string, revision: number) {
+/** Bind a finding receipt query to the saved and current policy for its run. */
+export function readSentinelFindingReceiptScope(
+  path: string,
+  revision: number,
+) {
   const runId = readSentinelRunIdForRevision(path, revision);
   if (!runId) return;
   const snapshot = readSentinelAssessmentRevision(path, revision)?.result
@@ -132,7 +136,7 @@ export function currentSentinelFindingReceipts(
   ) return false;
   const { record, records } = JSON.parse(response);
   const caseId = locateSentinelCase(scope.snapshotPath)?.caseId;
-  const policy = findingReceiptScope(scope.snapshotPath, revision);
+  const policy = readSentinelFindingReceiptScope(scope.snapshotPath, revision);
   return !!caseId && !!policy &&
     (!scope.assignedTaskId || !!assignedTask(scope)) &&
     (record ? [record] : records).every((item: {
@@ -504,7 +508,7 @@ export function executeSentinelWorkerFindingTool(
         false,
         (state, caseId, store, target) => {
           const selectedRevision = historicalRevision ?? state.revision;
-          const policy = findingReceiptScope(
+          const policy = readSentinelFindingReceiptScope(
             scope.snapshotPath,
             selectedRevision,
           );
