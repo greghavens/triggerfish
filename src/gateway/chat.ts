@@ -69,8 +69,8 @@ import {
 import {
   operatorRunTool,
   type OperatorRunToolContext,
-  sentinelOperatorCaseConstraintActions,
-  sentinelOperatorCaseConstraintParameters,
+  sentinelOperatorCaseControlActions,
+  sentinelOperatorCaseControlParameters,
   sentinelOperatorCaseReadActions,
   sentinelOperatorCaseReadParameters,
 } from "./operator_run_tool.ts";
@@ -389,18 +389,21 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
                       .includes(action)
                   ? "read"
                   : "write",
-                ...((action === "narrow_constraints" ||
-                  action === "constraints") && {
-                  case_id: typeof call.args?.id === "string" &&
-                      isSentinelCaseId(call.args.id)
-                    ? call.args.id
-                    : null,
-                  evidence_revision: typeof call.args?.revision === "number" &&
-                      Number.isSafeInteger(call.args.revision) &&
-                      call.args.revision > 0
-                    ? call.args.revision
-                    : null,
-                }),
+                ...(call.args?.kind === "sentinel" &&
+                  (action === "narrow_constraints" ||
+                    action === "constraints" || action === "steer") &&
+                  {
+                    case_id: typeof call.args?.id === "string" &&
+                        isSentinelCaseId(call.args.id)
+                      ? call.args.id
+                      : null,
+                    evidence_revision:
+                      typeof call.args?.revision === "number" &&
+                        Number.isSafeInteger(call.args.revision) &&
+                        call.args.revision > 0
+                        ? call.args.revision
+                        : null,
+                  }),
               };
               return config.hookRunner.evaluateHook(hook, {
                 ...context,
@@ -799,12 +802,12 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
       definition: {
         ...operatorRunTool,
         description:
-          "Read saved Sentinel evidence. In the selected active case, inspect restrictions or propose additional task-kind restrictions for operator review.",
+          "Read saved Sentinel evidence. In the selected active case, inspect restrictions or request reviewed task-kind restrictions and targeted worker guidance.",
         parameters: {
           ...Object.fromEntries(
             [
               ...sentinelOperatorCaseReadParameters,
-              ...sentinelOperatorCaseConstraintParameters,
+              ...sentinelOperatorCaseControlParameters,
             ]
               .map((key) => [
                 key,
@@ -815,7 +818,7 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
             ...operatorRunTool.parameters.action,
             enum: [
               ...sentinelOperatorCaseReadActions,
-              ...sentinelOperatorCaseConstraintActions,
+              ...sentinelOperatorCaseControlActions,
             ],
           },
           kind: {
@@ -832,14 +835,14 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
       },
       async execute(args: Record<string, unknown>, signal: AbortSignal) {
         const { action, kind, id, revision, runId } = args;
-        const constraintAction = sentinelOperatorCaseConstraintActions.some((
+        const selectedControl = sentinelOperatorCaseControlActions.some((
           allowed,
         ) => allowed === action);
         const unavailable =
           "Error: The selected Sentinel case revision is unavailable.";
         if (
           kind !== "sentinel" || typeof action !== "string" ||
-          (!constraintAction &&
+          (!selectedControl &&
             !sentinelOperatorCaseReadActions.some((allowed) =>
               allowed === action
             )) ||
@@ -850,8 +853,8 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
             !sentinelOperatorCaseReadParameters.some((allowed) =>
               allowed === key
             ) &&
-            (!constraintAction ||
-              !sentinelOperatorCaseConstraintParameters.some((allowed) =>
+            (!selectedControl ||
+              !sentinelOperatorCaseControlParameters.some((allowed) =>
                 allowed === key
               ))
           )
@@ -867,7 +870,7 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
           const casePath = id === "main"
             ? snapshotPath
             : config.resolveSentinelChatCase?.(id);
-          if (!constraintAction) return !!casePath;
+          if (!selectedControl) return !!casePath;
           if (casePath !== selectedPath) return false;
           const assessment = readSentinelAssessment(selectedPath);
           return assessment?.active === true &&
@@ -881,12 +884,12 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
           current,
         );
         if (
-          constraintAction && !await authority.authorizeOwnerRunCall?.(args)
+          selectedControl && !await authority.authorizeOwnerRunCall?.(args)
         ) return unavailable;
         const result = await execute(args, {
           ...authority,
-          ...(constraintAction &&
-            { authorizeSentinelConstraintNarrowing: current }),
+          ...(selectedControl &&
+            { authorizeSelectedSentinelCase: current }),
           authorizeSentinelCaseRead: (caseId, evidenceRevision) =>
             caseId === id && evidenceRevision === revision && current(),
         });

@@ -145,6 +145,7 @@ async function withOwnerControl(
     typeof createOperatorRunToolExecutor
   >[0]["sentinelProfiles"],
   allowCall: () => boolean = () => true,
+  options: { sentinelMode?: boolean; onConfirm?: () => void } = {},
 ) {
   const approvals: string[] = [];
   const providers = createProviderRegistry();
@@ -154,8 +155,22 @@ async function withOwnerControl(
   providers.register({
     name: "owner-control",
     supportsStreaming: false,
-    complete(messages) {
+    complete(messages, tools) {
       const args = next;
+      if (args && options.sentinelMode) {
+        const definition = (tools as {
+          function?: {
+            name?: string;
+            parameters?: { properties?: { action?: { enum?: string[] } } };
+          };
+        }[]).find((tool) => tool.function?.name === "operator_runs");
+        const actions = definition?.function?.parameters?.properties?.action
+          ?.enum;
+        assert(actions);
+        assert(actions.includes("steer"));
+        assert(!actions.includes("stop"));
+        assert(!actions.includes("hint"));
+      }
       next = undefined;
       if (!args) {
         result = String(
@@ -186,6 +201,10 @@ async function withOwnerControl(
       bumpersEnabled: false,
     }),
     providerRegistry: providers,
+    ...(options.sentinelMode && {
+      sentinelSnapshotPath: resolveSentinelCasePath(baseDir),
+      allowSentinelModelAccess: true,
+    }),
     hookRunner: {
       evaluateHook(hook, { session, input, auditInput }) {
         const allowed = hook !== "PRE_TOOL_CALL" || !input.tool_call ||
@@ -217,6 +236,7 @@ async function withOwnerControl(
       sentinelProfiles,
       confirm(message) {
         approvals.push(message);
+        options.onConfirm?.();
         return Promise.resolve(true);
       },
     }),
@@ -233,8 +253,7 @@ async function withOwnerControl(
       socket.addEventListener("open", () => resolve(), { once: true });
       socket.addEventListener("error", reject, { once: true });
     });
-    await run((args) => {
-      next = args;
+    const turn = (content: string) => {
       result = "";
       const reply = Promise.withResolvers<string>();
       const timer = setTimeout(
@@ -248,13 +267,18 @@ async function withOwnerControl(
       socket.send(
         JSON.stringify({
           type: "message",
-          content: "Use the exact requested Sentinel worker control.",
+          content,
         }),
       );
       return reply.promise.finally(() => {
         clearTimeout(timer);
         socket.removeEventListener("message", receive);
       });
+    };
+    if (options.sentinelMode) await turn("/sentinel on");
+    await run((args) => {
+      next = args;
+      return turn("Use the exact requested Sentinel worker control.");
     }, approvals);
   } finally {
     socket.close();
@@ -494,28 +518,67 @@ Deno.test("Owner socket steers and stops one exact leased worker with a shared T
             "unavailable",
           ),
         );
-        const command = {
-          action: "steer",
-          ...rootScope,
-          requestId: steerId,
-          note: guidance,
-        };
-        assert(
-          (await owner({ ...command, adaptiveRevision: "f".repeat(64) }))
-            .startsWith("Error:"),
-        );
-        assert(
-          (await owner({ ...command, runId: crypto.randomUUID() })).startsWith(
-            "Error:",
-          ),
-        );
         assertEquals(approvals, []);
-        rootSteering = JSON.parse(await owner(command)).receipt;
-        assert(rootSteering);
-        assert(approvals[0].includes(target.id));
-        assert(approvals[0].includes(initial.revision));
-        assertEquals(JSON.parse(await owner(command)).receipt, rootSteering);
       });
+      const command = {
+        action: "steer",
+        ...rootScope,
+        requestId: steerId,
+        note: guidance,
+      };
+      let allowSteering = true;
+      let revokeWhenConfirmed = true;
+      await withOwnerControl(
+        baseDir,
+        async (owner, approvals) => {
+          assert(
+            (await owner({ ...command, adaptiveRevision: "f".repeat(64) }))
+              .startsWith("Error:"),
+          );
+          assert(
+            (await owner({ ...command, runId: crypto.randomUUID() }))
+              .startsWith(
+                "Error:",
+              ),
+          );
+          assert(
+            (await owner({ ...command, action: "stop", note: undefined }))
+              .startsWith("Error:"),
+          );
+          assert(
+            (await owner({ ...command, id: "other-case" })).startsWith(
+              "Error:",
+            ),
+          );
+          assert(
+            (await owner({ ...command, taskId: `adaptive:${"e".repeat(64)}` }))
+              .startsWith("Error:"),
+          );
+          assertEquals(approvals, []);
+          allowSteering = false;
+          await owner(command);
+          assertEquals(approvals, []);
+          allowSteering = true;
+          assert((await owner(command)).startsWith("Error:"));
+          assertEquals(approvals.length, 1);
+          assert(!sawSteering);
+          allowSteering = true;
+          revokeWhenConfirmed = false;
+          rootSteering = JSON.parse(await owner(command)).receipt;
+          assert(rootSteering);
+          assert(approvals[1].includes(target.id));
+          assert(approvals[1].includes(initial.revision));
+          assertEquals(JSON.parse(await owner(command)).receipt, rootSteering);
+        },
+        undefined,
+        () => allowSteering,
+        {
+          sentinelMode: true,
+          onConfirm() {
+            if (revokeWhenConfirmed) allowSteering = false;
+          },
+        },
+      );
       const accepted = await request("worker_steer", steer);
       assertEquals(
         accepted.type,

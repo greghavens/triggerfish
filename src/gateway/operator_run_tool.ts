@@ -1201,12 +1201,14 @@ export const sentinelOperatorCaseReadParameters = [
   "workflowRunNumber",
 ] as const;
 
-export const sentinelOperatorCaseConstraintActions = [
+export const sentinelOperatorCaseControlActions = [
   "constraints",
   "narrow_constraints",
+  "steer",
 ] as const;
 
-export const sentinelOperatorCaseConstraintParameters = [
+export const sentinelOperatorCaseControlParameters = [
+  "adaptiveRevision",
   "version",
   "expectedVersion",
   "requestId",
@@ -1216,7 +1218,7 @@ export const sentinelOperatorCaseConstraintParameters = [
 
 /** Runtime policy for reopening an approved original tool response. */
 export interface OperatorRunToolContext {
-  readonly authorizeSentinelConstraintNarrowing?: () => boolean;
+  readonly authorizeSelectedSentinelCase?: () => boolean;
   readonly authorizeSentinelCaseRead?: (
     caseId: string,
     revision: number,
@@ -2262,9 +2264,9 @@ export function createOperatorRunToolExecutor(options: {
     const authorizeCaseRead = context?.authorizeSentinelCaseRead;
     if (authorizeCaseRead) {
       const { action, id, kind, revision } = args;
-      const selectedRestriction =
-        context.authorizeSentinelConstraintNarrowing !== undefined &&
-        sentinelOperatorCaseConstraintActions.some((allowed) =>
+      const selectedControl =
+        context.authorizeSelectedSentinelCase !== undefined &&
+        sentinelOperatorCaseControlActions.some((allowed) =>
           allowed === action
         );
       if (
@@ -2274,12 +2276,12 @@ export function createOperatorRunToolExecutor(options: {
           !sentinelOperatorCaseReadParameters.some((allowed) =>
             allowed === key
           ) &&
-          (!selectedRestriction ||
-            !sentinelOperatorCaseConstraintParameters.some((allowed) =>
+          (!selectedControl ||
+            !sentinelOperatorCaseControlParameters.some((allowed) =>
               allowed === key
             ))
         ) ||
-        (!selectedRestriction &&
+        (!selectedControl &&
           !sentinelOperatorCaseReadActions.some((allowed) =>
             allowed === action
           )) ||
@@ -5084,6 +5086,7 @@ ${
         }
       }
       if (action === "steer" || action === "stop") {
+        const selectedCase = context?.authorizeSelectedSentinelCase;
         const { runId, adaptiveRevision, taskId, requestId, note } = args;
         if (
           ref.kind !== "sentinel" || ref.revision === undefined ||
@@ -5124,6 +5127,16 @@ ${
           requestId: requestId.toLowerCase(),
           ...(typeof note === "string" && { note: note.trim() }),
         };
+        if (selectedCase) {
+          if (
+            action !== "steer" || !selectedCase() || typeof note !== "string" ||
+            redactCredentialText(note) !== note
+          ) return unavailable;
+          const path = resolveSentinelCasePath(options.baseDir, ref.id);
+          const worker = readHistoricalAdaptiveSentinel(path, ref.revision)
+            ?.modelReviewStates.find((state) => state.taskId === taskId);
+          if (worker?.status !== "running") return unavailable;
+        }
         if (
           !await options.confirm(
             `Approve ${action} for this exact Sentinel assignment?\n${
@@ -5131,6 +5144,12 @@ ${
             }`,
           )
         ) return "Error: The operator declined the run action.";
+        if (
+          selectedCase &&
+          (!await context.authorizeOwnerRunCall?.(args) || !selectedCase())
+        ) {
+          return unavailable;
+        }
         const receipt = providers.sentinel.workerControl(ref, action, target);
         return receipt
           ? safeProjection({ run: ref, runId: target.runId, receipt })
@@ -5259,7 +5278,7 @@ ${
           : unavailable;
       }
       if (action === "constraints" || action === "narrow_constraints") {
-        const selectedCaseOnly = context?.authorizeSentinelConstraintNarrowing;
+        const selectedCaseOnly = context?.authorizeSelectedSentinelCase;
         if (
           ref.kind !== "sentinel" || ref.revision === undefined ||
           typeof args.runId !== "string" || !digestPattern.test(args.runId) ||

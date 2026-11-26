@@ -3846,12 +3846,14 @@ function createAgent(
         const plannerTodo = plannerTodoTools.some(({ name }) =>
           name === toolName
         );
-        const restrictionAction =
+        const selectedCaseAction =
           operatorRunReader && toolName === operatorRunReader.definition.name
             ? call?.args?.action
             : undefined;
-        const restrictionCall = restrictionAction === "constraints" ||
-          restrictionAction === "narrow_constraints";
+        const selectedCaseWrite = selectedCaseAction === "narrow_constraints" ||
+          selectedCaseAction === "steer";
+        const selectedCaseCall = selectedCaseAction === "constraints" ||
+          selectedCaseWrite;
         const scoped = typeof toolName === "string" &&
           (toolName === sentinelInventoryTool.name ||
             toolName === graphOverviewTool.name ||
@@ -3868,7 +3870,7 @@ function createAgent(
             toolName === SENTINEL_DEFENSE_READ || traffic || plannerTodo ||
             digestRead);
         let evidenceRevision = options.assessmentRevision ??
-          (traffic || digestRead || restrictionCall
+          (traffic || digestRead || selectedCaseCall
             ? sentinelTrafficPolicyRevision(call?.args?.revision)
             : undefined);
         if (
@@ -3881,14 +3883,14 @@ function createAgent(
             JSON.parse(context.input.tool_response).evidenceRevision,
           );
         }
-        const policyInput = scoped || restrictionCall
+        const policyInput = scoped || selectedCaseCall
           ? {
             tool_name: toolName,
             case_id: locateSentinelCase(options.snapshotPath)?.caseId ?? null,
             evidence_revision: evidenceRevision ?? null,
             assignment_id: options.assignedTaskId ?? null,
             resource_classification: "INTERNAL",
-            operation_type: restrictionAction === "narrow_constraints" ||
+            operation_type: selectedCaseWrite ||
                 toolName === "todo_write" ||
                 toolName === proposeWorkerGoalTool.name ||
                 toolName === proveWorkerGoalTool.name ||
