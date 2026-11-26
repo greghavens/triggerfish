@@ -437,6 +437,7 @@ import {
   normalizeSentinelFormalGoals,
 } from "../sentinel/formal_goals.ts";
 import {
+  authorizeSentinelProtectedGoalProofs,
   completeSentinelRegisteredGoal,
   digestSentinelGoalProof,
   ensureSentinelFormalGoalContract,
@@ -13088,16 +13089,67 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
           )
         ) return "Error: The operator declined the run action.";
         if (!await authorize(args)) return unavailable;
-        return completeSentinelRegisteredGoal(
+        const goalStillReviewed = () => {
+          const latest = readSentinelGoalCompletionAtRevision(
             path,
-            ref.revision,
-            state.plan.goal ?? null,
-            decision,
-            options.webContainmentConfigured,
-            { runId: state.plan.runId!, digest: goalProofDigest },
-          )
-          ? success()
-          : unavailable;
+            ref.revision!,
+          );
+          return !!latest &&
+            digestSentinelGoalProof(latest) === goalProofDigest &&
+            context.authorizeSentinelCaseRead?.(ref.id, ref.revision!) !==
+              false;
+        };
+        const protectedProofs = await authorizeSentinelProtectedGoalProofs(
+          path,
+          state,
+          proof.observations,
+          async ({ original, reference, verdict }, current) => {
+            const old = await readAuthorizedCaseEvidence(
+              ref.id,
+              path,
+              original.evidenceRevision,
+              original.evidenceId,
+              context,
+              current,
+            );
+            if (!old || !current()) return false;
+            const fresh = await reopenOwnedSentinelRepositoryVisibility(
+              options.readRepositoryVisibility,
+              context,
+              {
+                caseId: ref.id,
+                path,
+                runId: runId.toLowerCase(),
+                revision: verdict.evidenceRevision,
+                assetId: verdict.targetId,
+                taskId: reference.taskId,
+                sourceStepIndex: reference.sourceStepIndex,
+                resultSha256: reference.resultSha256,
+              },
+              current,
+            );
+            return !!fresh &&
+              matchesRepositoryControlSource(old.payload, fresh) &&
+              repositoryControlOutcome(fresh) === verdict.outcome && current();
+          },
+          goalStillReviewed,
+        );
+        if (!goalStillReviewed()) return unavailable;
+        try {
+          return completeSentinelRegisteredGoal(
+              path,
+              ref.revision,
+              state.plan.goal ?? null,
+              decision,
+              options.webContainmentConfigured,
+              { runId: state.plan.runId!, digest: goalProofDigest },
+              protectedProofs,
+            )
+            ? success()
+            : unavailable;
+        } catch {
+          return unavailable;
+        }
       }
       if (
         action === "goals" || action === "append_goals" ||

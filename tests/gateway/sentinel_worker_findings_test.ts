@@ -62,8 +62,10 @@ import {
   readSentinelCaseHints,
 } from "../../src/gateway/sentinel_adaptive_runtime.ts";
 import {
+  digestSentinelGoalProof,
   ensureSentinelFormalGoalContract,
   readSentinelGoalCompletionAtRevision,
+  registerSentinelGoalCompletion,
   reportSentinelGoalCompletion,
 } from "../../src/gateway/sentinel_goal_completion.ts";
 import {
@@ -8164,6 +8166,18 @@ Deno.test("Reviewed cross-case worker review reaches a scoped planner and reopen
 for (
   const scenario of [
     { visibility: "private", repositoryId: 42, outcome: "pass" },
+    {
+      visibility: "private",
+      repositoryId: 42,
+      outcome: "pass",
+      goalPolicy: "automatic",
+    },
+    {
+      visibility: "private",
+      repositoryId: 42,
+      outcome: "pass",
+      goalPolicy: "operator",
+    },
     { visibility: "internal", repositoryId: 42, outcome: "fail" },
     {
       visibility: "private",
@@ -8206,7 +8220,8 @@ for (
 ) {
   const branchMode = "branchMode" in scenario ? scenario.branchMode : undefined;
   const family = branchMode ? "branch protection" : "repository visibility";
-  Deno.test(`Native ${family} remediation checks ${scenario.outcome ?? scenario.denied}`, async () => {
+  const goalPolicy = "goalPolicy" in scenario ? scenario.goalPolicy : undefined;
+  Deno.test(`Native ${family} remediation checks ${goalPolicy ? `${goalPolicy} goal` : scenario.outcome ?? scenario.denied}`, async () => {
     const baseDir = await Deno.makeTempDir();
     const caseId = "native-repository-remediation";
     const path = resolveSentinelCasePath(baseDir, caseId);
@@ -8360,7 +8375,7 @@ for (
             nodeId === "dependent-app" && kind === "impact" &&
             prerequisites.includes(pendingProtectedGate()?.id ?? ""),
         );
-      if (scenario.outcome === "pass" && !branchMode) {
+      if (scenario.outcome === "pass" && !branchMode && !goalPolicy) {
         const gatePlanner = createProviderRegistry();
         gatePlanner.register({
           name: "native-protected-gate-planner",
@@ -9008,7 +9023,7 @@ for (
       if (scenario.outcome !== "pass") return;
       coordinator.stop();
 
-      if (!branchMode) {
+      if (!branchMode && !goalPolicy) {
         coordinator.stop();
         availableCredential = false;
         let schedulerReads = 0;
@@ -9276,12 +9291,27 @@ for (
           if (revokeBeforeProposal) availableCredential = false;
           return Promise.resolve({
             usage,
-            content: JSON.stringify([{
-              kind: "trace",
-              nodeId: "app",
-              depth: 1,
-              repositoryVisibilityRecheckId: selectedVerdict,
-            }]),
+            content: JSON.stringify(
+              goalPolicy
+                ? {
+                  assignments: [],
+                  prioritize: [],
+                  goalObservations: [{
+                    criterionId: "remediated",
+                    evidence: [{
+                      source: "finding_recheck",
+                      reference: selectedVerdict,
+                      detail: "Exact currently authorized protected verdict.",
+                    }],
+                  }],
+                }
+                : [{
+                  kind: "trace",
+                  nodeId: "app",
+                  depth: 1,
+                  repositoryVisibilityRecheckId: selectedVerdict,
+                }],
+            ),
             toolCalls: [],
           });
         },
@@ -9359,6 +9389,81 @@ for (
         coordinator.stop();
         return plannerResult!;
       };
+      if (goalPolicy) {
+        const registered = registerSentinelGoalCompletion(path, [{
+          id: "remediated",
+          description: "Verify the original remediation criterion.",
+          source: "finding_recheck",
+          reference: `pass:${finding.id}`,
+        }], goalPolicy);
+        assertEquals(registered.status, "open");
+        selectedVerdict = receipt.id;
+        availableCredential = true;
+        revokeBeforeProposal = true;
+        await round("Check this exact verdict against the formal goal.");
+        assertEquals(
+          readSentinelGoalCompletionAtRevision(path, state.revision)?.status,
+          "open",
+        );
+        revokeBeforeProposal = false;
+        availableCredential = true;
+        await round("Reopen the authorized verdict for exact goal proof.");
+        const accepted = readSentinelGoalCompletionAtRevision(
+          path,
+          state.revision,
+        );
+        assert(accepted);
+        assertEquals(
+          accepted.status,
+          goalPolicy === "automatic" ? "completed" : "awaiting_confirmation",
+        );
+        assertEquals(
+          accepted.observations[0].evidence[0].reference,
+          receipt.id,
+        );
+        assert(!JSON.stringify(accepted.observations).includes('"outcome"'));
+        assert(!JSON.stringify(accepted.observations).includes(credentialRef));
+        if (goalPolicy === "operator") {
+          const request = {
+            ...runRef,
+            action: "confirm_goal_completion",
+            goalProofDigest: digestSentinelGoalProof(accepted),
+          };
+          await withFindingAssignmentGateway(
+            baseDir,
+            () => Promise.resolve(true),
+            async (turn) => {
+              availableCredential = false;
+              assertStringIncludes(await turn(request), "unavailable");
+              assertEquals(
+                readSentinelGoalCompletionAtRevision(path, state.revision),
+                accepted,
+              );
+              assert(readSentinelAssessment(path)?.active);
+              availableCredential = true;
+              const completed = JSON.parse(await turn(request));
+              assertEquals(completed.status, "completed");
+              assertEquals(JSON.parse(await turn(request)), completed);
+            },
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            false,
+            undefined,
+            (payload) =>
+              Promise.resolve(
+                payload.kind === original.kind &&
+                  payload.repo === original.repo &&
+                  payload.repositoryId === original.repositoryId,
+              ),
+            reader,
+          );
+        }
+        assert(readSentinelAssessment(path)?.completion);
+        assertEquals(fetches, 1);
+        return;
+      }
       availableCredential = true;
       assert(
         !(await round("Consider the exact retained remediation verdict."))

@@ -3637,7 +3637,8 @@ export function readSentinelCompletedGoalTask(
       ...scope.revisions,
     );
     const task = row && decodeTask(row);
-    return task?.plannerRound?.workerNarrativeId ||
+    return task?.factSatisfaction?.protectedRepositoryVerdict ||
+        task?.plannerRound?.workerNarrativeId ||
         task?.plannerRound?.repositoryVisibility ||
         task?.plannerRound?.sourceEvidence?.some(({ contextOnly }) =>
           contextOnly

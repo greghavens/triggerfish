@@ -21,6 +21,7 @@ import { verifyWorkerFindingRecheck } from "../sentinel/worker_finding_evidence.
 import {
   hasSentinelWorkerFindingJournal,
   openSentinelWorkerFindingStore,
+  readSentinelCaseFindingReceipts,
 } from "../sentinel/worker_finding_store.ts";
 import {
   normalizeSentinelGoalGraphFactReference,
@@ -36,6 +37,8 @@ import {
   withSentinelAssessmentWriteLock,
 } from "../sentinel/assessment_store.ts";
 
+import { readExactSentinelNativeRepositoryVerdict } from "./sentinel_native_repository_recheck.ts";
+
 type State = NonNullable<ReturnType<typeof readSentinelAssessment>>;
 type GoalRecord = NonNullable<ReturnType<GoalCompletionStore["read"]>>;
 type Observation = Parameters<GoalCompletionStore["report"]>[1][number];
@@ -45,6 +48,89 @@ type EvidenceSource =
   | "adaptive_task"
   | "finding_recheck"
   | "graph_fact";
+
+type NativeGoalVerdict = NonNullable<
+  ReturnType<typeof readExactSentinelNativeRepositoryVerdict>
+>;
+type ProtectedGoalProofs = ReadonlyMap<string, string>;
+
+function protectedGoalReceipts(
+  path: string,
+  observations: readonly Observation[],
+) {
+  const references = [
+    ...new Set(observations.flatMap(({ evidence }) =>
+      evidence
+        .filter(({ source, reference }) =>
+          source === "finding_recheck" &&
+          /^worker-recheck:[a-f0-9]{64}$/.test(reference)
+        )
+        .map(({ reference }) => reference)
+    )),
+  ];
+  return [...readSentinelCaseFindingReceipts(path, references).values()]
+    .flatMap((record) =>
+      record.kind === "recheck" && record.nativeRepositoryVisibility
+        ? [record]
+        : []
+    );
+}
+
+export function hasSentinelProtectedGoalProofs(
+  path: string,
+  record: GoalRecord,
+) {
+  return protectedGoalReceipts(path, record.observations).length > 0;
+}
+
+export async function authorizeSentinelProtectedGoalProofs(
+  path: string,
+  expected: State,
+  observations: readonly Observation[],
+  authorize: (
+    proof: NativeGoalVerdict,
+    current: () => boolean,
+  ) => Promise<boolean>,
+  allowed: () => boolean,
+): Promise<ProtectedGoalProofs> {
+  const runId = expected.plan.runId;
+  if (!runId) return new Map();
+  const constraints = readSentinelOperatingConstraints(path, runId);
+  const readCurrent = () => {
+    const state = readSentinelAssessment(path);
+    const policy = readSentinelOperatingConstraints(path, runId);
+    return allowed() && !!state?.active && !state.paused &&
+      goalScope(path, expected) === goalScope(path, state) &&
+      policy?.digest === constraints?.digest &&
+      policy?.version === constraints?.version;
+  };
+  const grants = await Promise.all(
+    protectedGoalReceipts(path, observations).flatMap((record) => {
+      if (record.outcome !== "pass") return [];
+      return [(async () => {
+        const read = () =>
+          readExactSentinelNativeRepositoryVerdict(
+            path,
+            runId,
+            expected.revision,
+            record.targetId,
+            record.id,
+          );
+        const proof = read();
+        if (!proof || !readCurrent()) return;
+        const same = () => readCurrent() && isDeepStrictEqual(read(), proof);
+        if (!await authorize(proof, same) || !same()) return;
+        return [
+          record.id,
+          createHash("sha256").update(JSON.stringify(record)).digest("hex"),
+        ] as const;
+      })()];
+    }),
+  );
+  return readCurrent()
+    ? new Map(grants.filter((grant) => grant !== undefined))
+    : new Map();
+}
 
 export function digestSentinelGoalProof(record: GoalRecord): string {
   return createHash("sha256").update(JSON.stringify([
@@ -408,6 +494,7 @@ function goalEvidenceVerifier(
   state: State,
   record: GoalRecord,
   deadlineAt?: number,
+  protectedProofs?: ProtectedGoalProofs,
 ) {
   const rules = new Map(
     record.criteria.map(({ id, requirement }) => [id, requirement]),
@@ -510,6 +597,19 @@ function goalEvidenceVerifier(
         (deadlineAt !== undefined &&
           Date.parse(recheck.validUntil) <= deadlineAt)
       ) return false;
+      if (recheck.nativeRepositoryVisibility) {
+        const proof = readExactSentinelNativeRepositoryVerdict(
+          snapshotPath,
+          runId,
+          state.revision,
+          recheck.targetId,
+          reference,
+        );
+        const digest = createHash("sha256").update(JSON.stringify(recheck))
+          .digest("hex");
+        return !!proof && proof.verdict.outcome === "pass" &&
+          protectedProofs?.get(reference) === digest;
+      }
       const receipt = verifyWorkerFindingRecheck(
         state.result.sharedGraph.snapshot,
         {
@@ -589,7 +689,10 @@ function goalEvidenceVerifier(
   };
 }
 
-function normalizedEvidence(observations: readonly Observation[]) {
+function normalizedEvidence(
+  observations: readonly Observation[],
+  protectedProofs?: ProtectedGoalProofs,
+) {
   if (!Array.isArray(observations) || observations.length > 32) {
     throw new Error("Supply a bounded array of goal evidence observations.");
   }
@@ -611,7 +714,9 @@ function normalizedEvidence(observations: readonly Observation[]) {
           ? source === "graph_evidence"
             ? "Exact evidence node in the pinned Sentinel inventory."
             : source === "finding_recheck"
-            ? "Verified passing remediation recheck for the original Sentinel finding."
+            ? protectedProofs?.has(reference)
+              ? "Exact protected remediation evidence for the original Sentinel finding."
+              : "Verified passing remediation recheck for the original Sentinel finding."
             : source === "graph_fact"
             ? "Verified relationship receipt from the pinned Sentinel graph."
             : "Committed result from an exact Sentinel adaptive task."
@@ -637,8 +742,30 @@ function recordGoalEvidence(
   record: GoalRecord,
   observations: readonly Observation[],
   operatorConfirmed: boolean,
+  protectedProofs?: ProtectedGoalProofs,
 ) {
-  const verify = goalEvidenceVerifier(snapshotPath, state, record);
+  for (
+    const receipt of protectedGoalReceipts(
+      snapshotPath,
+      [...record.observations, ...observations],
+    )
+  ) {
+    if (
+      protectedProofs?.get(receipt.id) !==
+        createHash("sha256").update(JSON.stringify(receipt)).digest("hex")
+    ) {
+      throw new Error(
+        "Current authorization for the protected Sentinel goal evidence is unavailable.",
+      );
+    }
+  }
+  const verify = goalEvidenceVerifier(
+    snapshotPath,
+    state,
+    record,
+    undefined,
+    protectedProofs,
+  );
   if (
     record.status === "completed" && !savedGoalCriteriaVerify(record, verify)
   ) {
@@ -875,6 +1002,7 @@ export function reportSentinelGoalCompletion(
   expectedScope: string,
   observations: readonly Observation[],
   webContainmentConfigured?: boolean,
+  protectedProofs?: ProtectedGoalProofs,
 ) {
   const current = readSentinelAssessment(snapshotPath);
   if (
@@ -895,7 +1023,7 @@ export function reportSentinelGoalCompletion(
     throw new Error("The Sentinel goal is no longer active.");
   }
   if (current.paused) throw new Error("The Sentinel assessment is paused.");
-  const submitted = normalizedEvidence(observations);
+  const submitted = normalizedEvidence(observations, protectedProofs);
   let record: GoalRecord | undefined;
   const assessmentCompleted = completeSentinelAssessmentGoal(
     snapshotPath,
@@ -915,6 +1043,7 @@ export function reportSentinelGoalCompletion(
         registered,
         submitted,
         false,
+        protectedProofs,
       );
       return record.policy === "automatic" && record.status === "completed";
     },
@@ -991,6 +1120,7 @@ export function completeSentinelRegisteredGoal(
   note: string,
   webContainmentConfigured?: boolean,
   approvedProof?: { runId: string; digest: string } | null,
+  protectedProofs?: ProtectedGoalProofs,
 ) {
   const current = readSentinelAssessment(snapshotPath);
   if (current?.revision === revision && current.plan.formalGoals?.length) {
@@ -1016,7 +1146,14 @@ export function completeSentinelRegisteredGoal(
           digestSentinelGoalProof(registered) !== approvedProof.digest)
       ) return false;
       return registered
-        ? recordGoalEvidence(snapshotPath, state, registered, [], true)
+        ? recordGoalEvidence(
+          snapshotPath,
+          state,
+          registered,
+          [],
+          true,
+          protectedProofs,
+        )
           .status === "completed"
         : !hadContract(snapshotPath, state);
     },

@@ -217,7 +217,9 @@ import {
 } from "../sentinel/provenance.ts";
 import type { GoalObservation } from "../core/goal_completion.ts";
 import {
+  authorizeSentinelProtectedGoalProofs,
   ensureSentinelFormalGoalContract,
+  hasSentinelProtectedGoalProofs,
   readSentinelGoalCompletionForState,
   readSentinelWorkerGoalProofReceipt,
   reconcileSentinelAutomaticGoal,
@@ -6288,6 +6290,7 @@ export function createSentinelModelPlanner(
   function abortWorkers() {
     activeFutureCheck?.abort();
     activeProtectedCheck?.abort();
+    activeProtectedGoal?.abort();
     activePlan?.controller.abort();
     for (const controller of activeReviews.keys()) controller.abort();
   }
@@ -8087,6 +8090,58 @@ export function createSentinelModelPlanner(
     }
   }
 
+  let activeProtectedGoal: AbortController | undefined;
+
+  function reconcileProtectedAutomaticGoal(
+    state: State,
+    goal: NonNullable<ReturnType<typeof readSentinelGoalCompletionForState>>,
+  ) {
+    if (activeProtectedGoal || !state.plan.runId) return;
+    const runId = state.plan.runId;
+    const controller = new AbortController();
+    activeProtectedGoal = controller;
+    const signal = AbortSignal.any([
+      controller.signal,
+      AbortSignal.timeout(15_000),
+    ]);
+    Promise.resolve().then(async () => {
+      const agent = createWorker(state, undefined, undefined, "planner");
+      try {
+        const protectedProofs = await authorizeSentinelProtectedGoalProofs(
+          snapshotPath,
+          state,
+          goal.observations,
+          ({ reference, verdict }, current) =>
+            agent.authorizeRepositoryVisibility?.(
+              runId,
+              state.revision,
+              verdict.targetId,
+              reference,
+              signal,
+              current,
+            ) ?? Promise.resolve(false),
+          () => !signal.aborted,
+        );
+        if (
+          !signal.aborted && protectedProofs.size &&
+          reportSentinelGoalCompletion(
+            snapshotPath,
+            goal.scope,
+            [],
+            webContainmentConfigured,
+            protectedProofs,
+          ).assessmentCompleted
+        ) abortWorkers();
+      } finally {
+        agent.clear();
+      }
+    }).catch(() => {
+      // Active recovery waits for the exact current source authorization.
+    }).finally(() => {
+      if (activeProtectedGoal === controller) activeProtectedGoal = undefined;
+    });
+  }
+
   const coordinator = {
     advance(state: State) {
       permitPlannerWake = true;
@@ -8110,11 +8165,18 @@ export function createSentinelModelPlanner(
       );
       if (
         goalCompletion?.policy === "automatic" &&
-        goalCompletion.status === "completed" &&
-        reconcileSentinelAutomaticGoal(snapshotPath, webContainmentConfigured)
+        goalCompletion.status === "completed"
       ) {
-        abortWorkers();
-        return;
+        if (
+          reconcileSentinelAutomaticGoal(snapshotPath, webContainmentConfigured)
+        ) {
+          abortWorkers();
+          return;
+        }
+        if (hasSentinelProtectedGoalProofs(snapshotPath, goalCompletion)) {
+          reconcileProtectedAutomaticGoal(state, goalCompletion);
+          return;
+        }
       }
       const observations = readPlannerObservations(state);
       if (!observations) {
@@ -10347,11 +10409,32 @@ export function createSentinelModelPlanner(
           committed && !rejectedProposal && !signal.aborted &&
           goalCompletion && goalReport
         ) {
+          const savedProofs = new Set(goalCompletion.observations.flatMap(
+            ({ evidence }) => evidence.map(({ reference }) => reference),
+          ));
+          const protectedProofs = await authorizeSentinelProtectedGoalProofs(
+            snapshotPath,
+            state,
+            [...goalCompletion.observations, ...goalReport],
+            ({ reference, verdict }, current) =>
+              (savedProofs.has(verdict.id) || openedVisibility.has(verdict.id))
+                ? worker.authorizeRepositoryVisibility?.(
+                  state.plan.runId!,
+                  state.revision,
+                  verdict.targetId,
+                  reference,
+                  signal,
+                  current,
+                ) ?? Promise.resolve(false)
+                : Promise.resolve(false),
+            () => !signal.aborted,
+          );
           const progress = reportSentinelGoalCompletion(
             snapshotPath,
             goalCompletion.scope,
             goalReport,
             webContainmentConfigured,
+            protectedProofs,
           );
           updatedPlan ||= progress.assessmentCompleted ||
             progress.record.updatedAt !== goalCompletion.updatedAt;
@@ -10413,7 +10496,8 @@ export function createSentinelModelPlanner(
     },
     hasInFlightWork() {
       return activePlan !== undefined || activeReviews.size > 0 ||
-        activeFutureCheck !== undefined || activeProtectedCheck !== undefined;
+        activeFutureCheck !== undefined || activeProtectedCheck !== undefined ||
+        activeProtectedGoal !== undefined;
     },
     stop() {
       permitPlannerWake = false;
