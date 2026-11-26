@@ -49,13 +49,14 @@ async function query(
   deniedHook?: "PRE_TOOL_CALL" | "POST_TOOL_RESPONSE" | "PRE_OUTPUT",
   lease?: InventoryLease,
   checkpoint?: SentinelTurnCheckpointOptions,
+  toolName = inventoryTool,
 ) {
   const policyEvents: PolicyEvent[] = [];
   const hookRunner: HookRunner = {
     evaluateHook(hook, { input, auditInput, session }) {
-      const inventory = input.tool_name === inventoryTool ||
+      const inventory = input.tool_name === toolName ||
         (input.tool_call as { name?: unknown } | undefined)?.name ===
-          inventoryTool;
+          toolName;
       const relevant = inventory || hook === "PRE_OUTPUT";
       if (relevant) {
         policyEvents.push({ hook, input, auditInput, taint: session.taint });
@@ -79,7 +80,7 @@ async function query(
       assert(
         tools?.some((tool) =>
           (tool as { function?: { name?: string } }).function?.name ===
-            inventoryTool
+            toolName
         ),
       );
       const usage = { inputTokens: 1, outputTokens: 1 };
@@ -90,7 +91,7 @@ async function query(
           toolCalls: argumentsList.map((args, index) => ({
             id: `inventory-${index}`,
             type: "function",
-            function: { name: inventoryTool, arguments: JSON.stringify(args) },
+            function: { name: toolName, arguments: JSON.stringify(args) },
           })),
         });
       }
@@ -618,5 +619,142 @@ Deno.test("Sentinel planner coverage gaps enforce the current allowed assets bef
       ["beta"],
     );
     assertEquals(JSON.parse(result.resultFrames[4]).assets, []);
+  });
+});
+
+Deno.test("Leased trace search exposes completed peers only on the exact assigned asset", async () => {
+  await fixture(async ({ main }) => {
+    const state = startSentinelAssessment(main);
+    advanceAdaptiveSentinel(main, state);
+    const revision = adaptiveRevision(state);
+    const store = openSentinelAdaptiveStore(
+      join(dirname(main), "sentinel-adaptive.db"),
+    );
+    try {
+      const peers = store.sync(
+        revision,
+        ["alpha", "beta"].map((nodeId) => ({
+          kind: "trace" as const,
+          depth: 9,
+          nodeId,
+          reason: MODEL_ASSIGNMENT_REASON,
+        })),
+        revision,
+      );
+      const idFor = (nodeId: string) => {
+        const task = peers.find((task) =>
+          task.nodeId === nodeId && task.depth === 9
+        );
+        assert(task);
+        return task.id;
+      };
+      for (const nodeId of ["alpha", "beta"]) {
+        const id = idFor(nodeId);
+        const excluded = new Set(
+          store.list(revision).filter((task) => task.id !== id).map(({ id }) =>
+            id
+          ),
+        );
+        const worker = store.claim(revision, 60, excluded);
+        assert(worker);
+        assert(
+          store.complete({
+            taskId: id,
+            leaseToken: worker.leaseToken,
+            observation: {},
+          }),
+        );
+        const review = store.claimModelReview(
+          revision,
+          MODEL_ASSIGNMENT_REASON,
+          (task) => task.id === id,
+        );
+        assert(review);
+        assert(store.finishModelReview(revision, id, review.token, {
+          note: "Reviewed recorded evidence.",
+          steps: [{
+            tool: "sentinel_assigned_target",
+            target: nodeId,
+            outcome: "returned",
+          }],
+        }));
+      }
+      store.sync(revision, [{
+        kind: "impact",
+        nodeId: "alpha",
+        depth: 10,
+        reason: MODEL_ASSIGNMENT_REASON,
+      }], revision);
+      advanceAdaptiveSentinel(main, state);
+      const consumer = store.claimModelReview(
+        revision,
+        MODEL_ASSIGNMENT_REASON,
+        ({ nodeId, kind, depth }) =>
+          nodeId === "alpha" && kind === "impact" && depth === 10,
+      );
+      assert(consumer);
+      const lease = {
+        assessmentRevision: state.revision,
+        assignedTaskId: consumer.task.id,
+        assignedTaskLeaseToken: consumer.token,
+      };
+      const result = await query(
+        main,
+        [
+          { task: idFor("alpha"), stepIndices: [0] },
+          { task: idFor("beta"), stepIndices: [0] },
+          { query: "sentinel_assigned_target" },
+        ],
+        undefined,
+        lease,
+        undefined,
+        "sentinel_worker_trace_search",
+      );
+      assertEquals(JSON.parse(result.resultFrames[0]).steps[0].target, "alpha");
+      assertStringIncludes(result.resultFrames[1], "unavailable");
+      assertEquals(
+        JSON.parse(result.resultFrames[2]).steps.map(
+          ({ target }: { target: string }) => target,
+        ),
+        ["alpha"],
+      );
+
+      assert(state.plan.runId);
+      const constraints = recordSentinelOperatingConstraints(main, {
+        runId: state.plan.runId,
+        evidenceRevision: state.revision,
+        expectedVersion: 0,
+        requestId: crypto.randomUUID(),
+        operatorScope: "fixture-owner",
+        constraints: { deniedKinds: [], allowedAssetIds: ["alpha"] },
+      });
+      assert(constraints);
+      const planner = await query(
+        main,
+        [
+          { task: idFor("alpha"), stepIndices: [0] },
+          { task: idFor("beta"), stepIndices: [0] },
+        ],
+        undefined,
+        {
+          assessmentRevision: state.revision,
+          plannerExecutionEvidenceRunId: state.plan.runId,
+        },
+        {
+          operatingConstraints: {
+            version: constraints.version,
+            digest: constraints.digest,
+          },
+        },
+        "sentinel_worker_trace_search",
+      );
+      assertEquals(
+        JSON.parse(planner.resultFrames[0]).steps[0].target,
+        "alpha",
+      );
+      assertStringIncludes(planner.resultFrames[1], "unavailable");
+    } finally {
+      store.close();
+    }
   });
 });

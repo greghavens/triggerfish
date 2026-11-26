@@ -5485,6 +5485,22 @@ async function verifyPlannerArchive(
         "PRE_TOOL_CALL",
         "POST_TOOL_RESPONSE",
       ]);
+      if (mode === "direct") {
+        policy.denyWorkerSourceAfter = false;
+        assert(run.runId);
+        const prior = readSentinelOperatingConstraints(path, run.runId);
+        assert(recordSentinelOperatingConstraints(path, {
+          evidenceRevision: run.revision,
+          runId: run.runId,
+          requestId: crypto.randomUUID(),
+          expectedVersion: prior?.version ?? 0,
+          operatorScope: "fixture-current-owner",
+          constraints: { deniedKinds: [], allowedAssetIds: ["app"] },
+        }));
+        const deniedTrace = await turn({ ...resultRead, ordinal: 12 });
+        assertStringIncludes(deniedTrace, "unavailable");
+        assert(!deniedTrace.includes(observedTaskId!));
+      }
       if (mode === "coverage-rollup") {
         assertStringIncludes(
           await turn({ ...resultRead, ordinal: 11 }),

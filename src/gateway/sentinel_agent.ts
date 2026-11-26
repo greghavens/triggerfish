@@ -170,6 +170,7 @@ import {
   readSentinelGitHubWorkflowReadReceipt,
   readSentinelLinkedSourcesForRevision,
   readSentinelOperatingConstraints,
+  readSentinelRunIdForRevision,
   recordSentinelWorkerGoalProposal,
   type SentinelGitHubWorkflowReadReceipt,
   type SentinelReviewStep,
@@ -2855,14 +2856,47 @@ function validateSavedGoalState(
 
 function workerTraceMatches(
   options: ProvenanceScope,
+  revision: number,
   graph: NonNullable<ReturnType<typeof readSentinelProvenance>>["graph"],
   args: SentinelWorkerTraceSearchArgs,
   workerRead = options.assignedTaskLeaseToken !== undefined,
 ) {
+  let eligibleTasks: ReadonlySet<string> | undefined;
+  if (workerRead) {
+    const path = options.snapshotPath;
+    const history = readHistoricalAdaptiveSentinel(path, revision);
+    const exact = readSentinelAssessmentRevision(path, revision);
+    const snapshot = exact?.result.sharedGraph.snapshot;
+    if (
+      !history || !snapshot ||
+      readSentinelRunIdForRevision(path, revision) !== history.goal.id
+    ) return [];
+    const { assignedTaskId, assignedTaskLeaseToken } = options;
+    const assignedAsset = assignedTaskId &&
+      history.tasks.find(({ id }) => id === assignedTaskId)?.nodeId;
+    if (
+      (assignedTaskId && !assignedAsset) ||
+      (assignedTaskLeaseToken &&
+        !liveProgressConsumer(options, revision))
+    ) return [];
+    const constraints = readSentinelOperatingConstraints(path, history.goal.id)
+      ?.constraints;
+    eligibleTasks = new Set(
+      history.tasks.filter(({ nodeId }) =>
+        (!assignedAsset || assignedAsset === nodeId) &&
+        sentinelOperatingConstraintsAllow(
+          constraints,
+          { kind: "review_evidence", nodeId },
+          snapshot,
+        )
+      ).map(({ id }) => id),
+    );
+  }
   const requested = args.stepIndices ? new Set(args.stepIndices) : undefined;
   return graph.searchReviewSteps(args.query ?? "", args.task).filter(
     ({ taskId, tool, index }) =>
       (args.task !== undefined || taskId !== options.assignedTaskId) &&
+      (!eligibleTasks || eligibleTasks.has(taskId)) &&
       (!workerRead || tool !== liveWorkflowStatusTool.name) &&
       (!requested || requested.has(index)),
   );
@@ -2892,7 +2926,12 @@ function peerProgressMatches(
   if (
     !history || !assetId || !current?.plan.runId ||
     current.plan.runId !== history.goal.id ||
-    !sentinelHintAssetsInScope(path, current, [assetId])
+    !sentinelHintAssetsInScope(path, current, [assetId]) ||
+    !sentinelOperatingConstraintsAllow(
+      readSentinelOperatingConstraints(path, history.goal.id)?.constraints,
+      { kind: "review_evidence", nodeId: assetId },
+      current.result?.sharedGraph.snapshot,
+    )
   ) return;
   const term = args.query?.trim().toLowerCase() ?? "";
   return history.tasks.flatMap((task) => {
@@ -2994,8 +3033,8 @@ function validateSavedWorkerTracePage(
   const steps = args.liveProgress
     ? consumer &&
       peerProgressMatches(options.snapshotPath, revision, consumer, args)
-    : workerTraceMatches(options, retained.graph, args);
-  if (!steps) return false;
+    : workerTraceMatches(options, revision, retained.graph, args);
+  if (!steps || saved.totalSteps > steps.length) return false;
   const allowed = new Map(
     steps.map((
       step,
@@ -3022,8 +3061,8 @@ export function reopenSentinelWorkerTraceSearch(
   if ("error" in retained) return;
   const steps = saved.args.liveProgress
     ? taskId && peerProgressMatches(path, revision, taskId, saved.args)
-    : workerTraceMatches(options, retained.graph, saved.args, true);
-  if (!steps) return;
+    : workerTraceMatches(options, revision, retained.graph, saved.args, true);
+  if (!steps || saved.totalSteps > steps.length) return;
   const page = saved.rows.map((row) =>
     steps.find(({ taskId, index }) =>
       taskId === row.taskId && index === row.index
@@ -3109,7 +3148,13 @@ export function searchSentinelWorkerTraces(
           consumer,
           filters,
         )
-      : workerTraceMatches(options, provenance.graph, filters, workerRead);
+      : workerTraceMatches(
+        options,
+        provenance.revision,
+        provenance.graph,
+        filters,
+        workerRead,
+      );
     if (!steps) {
       return "Error: Peer progress requires a current assignment lease and exact asset.";
     }
@@ -5229,6 +5274,9 @@ function createAgent(
         }
       }
       if (name === "sentinel_worker_trace_search") {
+        if (canReadPlannerCase && !currentPlannerReceiptScope(turn)) {
+          return "Error: The worker trace evidence scope is unavailable.";
+        }
         return searchSentinelWorkerTraces(
           options,
           args,
