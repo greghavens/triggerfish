@@ -10,9 +10,19 @@ import {
   type UserId,
 } from "../../src/core/types/session.ts";
 import { createAgentEventScheduler } from "../../src/scheduler/service_agent_events.ts";
-import { startSentinelAssessment } from "../../src/sentinel/assessment_store.ts";
+import {
+  completeSentinelAssessmentGoal,
+  startSentinelAssessment,
+} from "../../src/sentinel/assessment_store.ts";
+import { advanceAdaptiveSentinel } from "../../src/gateway/sentinel_adaptive_runtime.ts";
+import {
+  adaptiveRevision,
+  MODEL_ASSIGNMENT_REASON,
+} from "../../src/sentinel/adaptive_planner.ts";
+import { openSentinelAdaptiveStore } from "../../src/sentinel/adaptive_store.ts";
+import { openSentinelWorkerFindingStore } from "../../src/sentinel/worker_finding_store.ts";
 import { resolveSentinelCasePath } from "../../src/sentinel/cases.ts";
-import { dirname } from "@std/path";
+import { dirname, join } from "@std/path";
 
 Deno.test("Reviewed event subscription dispatches committed case metadata only once across restart", async () => {
   const baseDir = await Deno.makeTempDir();
@@ -186,7 +196,8 @@ Deno.test("Reviewed event subscription dispatches committed case metadata only o
       subscriptionSettings: {
         id: "new-main-review",
         agent: "review-agent",
-        kinds: ["task_created"],
+        kinds: ["task_created", "finding", "goal_completed", "tool_completed"],
+        tool: "sentinel_assigned_target",
         caseId: "main",
         merge: "by_case",
         maxConcurrent: 1,
@@ -214,6 +225,71 @@ Deno.test("Reviewed event subscription dispatches committed case metadata only o
       }),
     );
     const started = startSentinelAssessment(path);
+    const runId = started.plan.runId;
+    assert(runId);
+    advanceAdaptiveSentinel(path, started);
+    const revision = adaptiveRevision(started);
+    const queue = openSentinelAdaptiveStore(
+      join(dirname(path), "sentinel-adaptive.db"),
+    );
+    let taskId: string;
+    try {
+      queue.sync(revision, [{
+        kind: "trace",
+        nodeId: "local",
+        depth: 9,
+        reason: MODEL_ASSIGNMENT_REASON,
+      }], revision);
+      advanceAdaptiveSentinel(path, started);
+      const claim = queue.claimModelReview(
+        revision,
+        MODEL_ASSIGNMENT_REASON,
+        (task) => task.nodeId === "local",
+      );
+      assert(claim);
+      taskId = claim.task.id;
+      assert(queue.finishModelReview(revision, taskId, claim.token, {
+        note: "Committed private review summary.",
+        steps: [{
+          tool: "sentinel_assigned_target",
+          outcome: "returned",
+          target: "local",
+        }],
+      }));
+    } finally {
+      queue.close();
+    }
+    const findings = openSentinelWorkerFindingStore(path);
+    let findingId: string;
+    try {
+      const finding = findings.recordFinding({
+        caseId: "main",
+        runId,
+        evidenceRevision: started.revision,
+        taskId,
+        targetId: "local",
+        graphFindingId: "local-finding",
+        controlId: "local-control",
+        evidenceId: "local-evidence",
+        snapshotDigest: "a".repeat(64),
+        requestId: crypto.randomUUID(),
+        evaluatedAt: new Date().toISOString(),
+        observedAt: new Date().toISOString(),
+        validUntil: new Date(Date.now() + 60_000).toISOString(),
+        title: "Local event fixture",
+        summary: "Committed private finding summary.",
+      });
+      assert(finding);
+      findingId = finding.id;
+    } finally {
+      findings.close();
+    }
+    assert(completeSentinelAssessmentGoal(
+      path,
+      started.revision,
+      started.plan.goal ?? null,
+      "Committed private goal conclusion.",
+    ));
     scheduler.start();
     const seen = await manage({ action: "agent_event_subscriptions" });
     assertEquals(
@@ -223,7 +299,13 @@ Deno.test("Reviewed event subscription dispatches committed case metadata only o
     assertEquals(messages.length, 1);
     assertStringIncludes(messages[0], '"kind":"task_created"');
     assertStringIncludes(messages[0], started.plan.runId!);
+    assertStringIncludes(messages[0], '"kind":"finding"');
+    assertStringIncludes(messages[0], findingId);
+    assertStringIncludes(messages[0], '"kind":"goal_completed"');
+    assertStringIncludes(messages[0], '"kind":"tool_completed"');
+    assertStringIncludes(messages[0], `${taskId}:0`);
     assert(!messages[0].includes("private case asset label"));
+    assert(!messages[0].includes("Committed private"));
     scheduler.stop();
     scheduler.start();
     assertEquals(messages.length, 1);
