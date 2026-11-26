@@ -202,6 +202,9 @@ async function verifyInventoryImport(transport: "stdio" | "native HTTPS") {
         deny === "response" && hook === "POST_TOOL_RESPONSE" &&
           (context.input.tool_name === connectorTool ||
             context.input.tool_name === projectTool) ||
+        deny === "second-page" && hook === "POST_TOOL_RESPONSE" &&
+          context.input.tool_name === connectorTool &&
+          String(context.input.tool_response).includes("second.safe.example") ||
         deny === "output" && hook === "PRE_OUTPUT";
       return Promise.resolve({
         allowed: !blocked,
@@ -460,13 +463,81 @@ async function verifyInventoryImport(transport: "stdio" | "native HTTPS") {
         "succeeded",
       );
       assertEquals((await calls()).length, 4);
-      const latest = readSentinelAssessment(path)!;
+      let latest = readSentinelAssessment(path)!;
       assert(
         (await turn({ ...request, requestId: crypto.randomUUID() })).includes(
           "unavailable",
         ),
       );
       assertEquals((await calls()).length, 4);
+      const paged = {
+        ...request,
+        revision: latest.revision,
+        sourceSelection: "abcdef0123456789abcdef01",
+        pageCount: 3,
+        requestId: crypto.randomUUID(),
+      };
+      const beforeMulti = await Deno.readTextFile(path);
+      for (
+        const changes of [
+          { pageCount: 11 },
+          { page: 999 },
+          { pageCount: null },
+        ]
+      ) {
+        assertStringIncludes(
+          await turn({ ...paged, ...changes }),
+          "unavailable",
+        );
+      }
+      assertEquals((await calls()).length, 4);
+      deny = "second-page";
+      assertStringIncludes(await turn(paged), "unavailable");
+      assertEquals((await calls()).length, 6);
+      assertEquals(await Deno.readTextFile(path), beforeMulti);
+      deny = "";
+      const firstMulti = JSON.parse(await turn(paged));
+      assertEquals(firstMulti.receipt.status, "succeeded");
+      assertEquals(firstMulti.receipt.pageCount, 3);
+      assertEquals(firstMulti.imported, 2);
+      const multiSnapshot = await Deno.readTextFile(path);
+      assertStringIncludes(multiSnapshot, "first.safe.example");
+      assertStringIncludes(multiSnapshot, "second.safe.example");
+      assertStringIncludes(multiSnapshot, "subdomain page 2 record 1");
+      assert(!multiSnapshot.includes("unrelated.example"));
+      const approvedCalls = await calls();
+      assertEquals(
+        approvedCalls.slice(6).map(
+          (
+            { asset_type, pageIndex }: {
+              asset_type: string;
+              pageIndex: number;
+            },
+          ) => [asset_type, pageIndex],
+        ),
+        [
+          ["subdomain", 1],
+          ["subdomain", 2],
+          ["app", 1],
+          ["asset", 1],
+        ],
+      );
+      assert(
+        approvedCalls.slice(6).every(({ filter }: {
+          filter: { project: string[] };
+        }) => filter.project[0] === paged.sourceSelection),
+      );
+      assertEquals(JSON.parse(await turn(paged)).receipt, firstMulti.receipt);
+      assertStringIncludes(
+        await turn({ ...paged, pageCount: 1 }),
+        "unavailable",
+      );
+      assertStringIncludes(
+        await turn({ ...paged, pageCount: 2 }),
+        "unavailable",
+      );
+      assertEquals(await calls(), approvedCalls);
+      latest = readSentinelAssessment(path)!;
       const saved = await Deno.readTextFile(path);
       revoke = true;
       confirmations = 0;
@@ -477,7 +548,7 @@ async function verifyInventoryImport(transport: "stdio" | "native HTTPS") {
         sourceSelection: "Fiber verification",
         requestId: crypto.randomUUID(),
       })).includes("unavailable"));
-      assertEquals((await calls()).length, 7);
+      assertEquals((await calls()).length, approvedCalls.length + 3);
       assertEquals((await calls()).at(-1).filter, {
         task: ["Fiber verification"],
       });
@@ -493,7 +564,7 @@ async function verifyInventoryImport(transport: "stdio" | "native HTTPS") {
         }),
         "unavailable",
       );
-      assertEquals((await calls()).length, 7);
+      assertEquals((await calls()).length, approvedCalls.length + 3);
     });
   } finally {
     try {

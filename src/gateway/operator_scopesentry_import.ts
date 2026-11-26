@@ -1,4 +1,4 @@
-/** Review and publish a bounded page from an existing classified inventory connector. */
+/** Review and publish a bounded selection from an existing classified inventory connector. */
 import type { OperatorRunRef } from "../core/operator_runs.ts";
 import {
   canFlowTo,
@@ -135,6 +135,7 @@ export async function executeOperatorScopeSentryImport(
   const dimension = args.sourceDimension;
   const sourceId = assetText(args.sourceSelection, 160);
   const page = args.page ?? 1;
+  const pageCount = args.pageCount === undefined ? 1 : args.pageCount;
   const { requestId } = args;
   const revision = ref.revision;
   if (
@@ -144,6 +145,8 @@ export async function executeOperatorScopeSentryImport(
     (dimension === "project" && !/^[a-f\d]{24}$/i.test(sourceId)) ||
     typeof page !== "number" || !Number.isSafeInteger(page) || page < 1 ||
     page > 1000 ||
+    typeof pageCount !== "number" || !Number.isSafeInteger(pageCount) ||
+    pageCount < 1 || pageCount > 10 || page + pageCount - 1 > 1000 ||
     typeof requestId !== "string" ||
     !/^[a-f\d]{8}(?:-[a-f\d]{4}){3}-[a-f\d]{12}$/.test(requestId) ||
     Object.keys(args).some((key) =>
@@ -155,6 +158,7 @@ export async function executeOperatorScopeSentryImport(
         "sourceDimension",
         "sourceSelection",
         "page",
+        "pageCount",
         "requestId",
       ].includes(key)
     ) ||
@@ -176,6 +180,7 @@ export async function executeOperatorScopeSentryImport(
     dimension,
     sourceId,
     page,
+    ...(pageCount > 1 && { pageCount }),
     caseId: ref.id,
     runId,
     revision,
@@ -194,7 +199,11 @@ export async function executeOperatorScopeSentryImport(
   };
   const classification = exposed();
   const current = async () => {
-    if (!classification || !await context.authorizeOwnerRunCall?.(args)) {
+    if (
+      !classification ||
+      !canFlowTo(context.inputClassification ?? "PUBLIC", classification) ||
+      !await context.authorizeOwnerRunCall?.(args)
+    ) {
       return false;
     }
     const current = readSentinelOperatingConstraints(path, runId);
@@ -214,7 +223,7 @@ export async function executeOperatorScopeSentryImport(
     if (!saved) return;
     return Object.entries(source).every(([key, value]) =>
         saved[key as keyof typeof source] === value
-      )
+      ) && saved.pageCount === source.pageCount
       ? saved
       : unavailable;
   };
@@ -258,29 +267,34 @@ export async function executeOperatorScopeSentryImport(
     ) return declined;
     const pages = [];
     for (const kind of scopeSentryKinds) {
-      const query = {
-        asset_type: kind,
-        filter: { [dimension]: [sourceId] },
-        pageIndex: page,
-        pageSize: 100,
-      };
-      if (
-        !await current() ||
-        !await context.authorizeInventoryConnectorCall?.({
-          name: tool,
-          args: query,
-        }) ||
-        !await current()
-      ) {
-        return unavailable;
+      for (let pageIndex = page; pageIndex < page + pageCount; pageIndex++) {
+        const query = {
+          asset_type: kind,
+          filter: { [dimension]: [sourceId] },
+          pageIndex,
+          pageSize: 100,
+        };
+        if (
+          !await current() ||
+          !await context.authorizeInventoryConnectorCall?.({
+            name: tool,
+            args: query,
+          }) ||
+          !await current()
+        ) return unavailable;
+        const text = await connector.execute(tool, query);
+        if (
+          !text || text.length > 500_000 || !await current() ||
+          !await context.authorizeSavedResponse(tool, text, classification) ||
+          !await current()
+        ) return unavailable;
+        const data = JSON.parse(text);
+        if (!Array.isArray(data?.list) || data.list.length > query.pageSize) {
+          return unavailable;
+        }
+        pages.push({ kind, page: pageIndex, text });
+        if (data.list.length < query.pageSize) break;
       }
-      const text = await connector.execute(tool, query);
-      if (
-        !text || text.length > 500_000 || !await current() ||
-        !await context.authorizeSavedResponse(tool, text, classification) ||
-        !await current()
-      ) return unavailable;
-      pages.push({ kind, page, text });
     }
     const staged = stageScopeSentryInventory(
       previous,

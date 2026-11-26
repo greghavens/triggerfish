@@ -1641,6 +1641,11 @@ export const operatorRunTool: ToolDefinition = {
       description:
         "Exact ScopeSentry project ID or task name for a reviewed inventory import",
     },
+    pageCount: {
+      type: "integer",
+      description:
+        "Maximum consecutive pages per asset kind for a reviewed inventory import. Defaults to one and is capped at ten.",
+    },
     page: {
       type: "integer",
       description: "One-based page of the selected retained inventory",

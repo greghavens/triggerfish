@@ -44,6 +44,20 @@ export function fixtureInventoryResult(
         : { result: { All: page } };
       return { content: [{ type: "text", text: JSON.stringify(data) }] };
     }
+    if (
+      authorized && pageSize === 100 &&
+      filter?.project?.[0] === "abcdef0123456789abcdef01"
+    ) {
+      const list = asset_type !== "subdomain" ? [] : pageIndex === 1
+        ? [
+          { host: "first.safe.example", type: "A" },
+          ...Array.from({ length: 99 }, () => ({ host: "unrelated.example" })),
+        ]
+        : pageIndex === 2
+        ? [{ host: "second.safe.example", type: "A" }]
+        : [];
+      return { content: [{ type: "text", text: JSON.stringify({ list }) }] };
+    }
     const selected = filter?.project?.[0] === "0123456789abcdef01234567" ||
       filter?.task?.[0] === "Fiber verification";
     const list = !selected || !authorized || pageSize !== 100 || pageIndex !== 1
