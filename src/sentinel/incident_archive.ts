@@ -4,6 +4,7 @@ import {
   readSentinelAssessmentRevision,
   readSentinelIncidentReviews,
 } from "./assessment_store.ts";
+import type { TelemetryAlert } from "./telemetry.ts";
 import { loadSentinelGraph } from "./graph.ts";
 import {
   compareSentinelIncidentPriority,
@@ -167,10 +168,16 @@ export function readSavedSentinelIncidentPage(
   path: string,
   revision: number,
   offset: number,
+  scope?: {
+    allowAlert: (alert: TelemetryAlert) => boolean;
+    allowFinding: (id: string) => boolean;
+  },
 ) {
   const report = readSavedIncidentCorrelation(path, revision);
   if (!report) return undefined;
-  const { candidates } = report;
+  const candidates = scope
+    ? report.candidates.filter(({ alerts }) => alerts.every(scope.allowAlert))
+    : report.candidates;
   const page = candidates.toSorted(compareSentinelIncidentPriority).slice(
     offset,
     offset + 10,
@@ -189,7 +196,8 @@ export function readSavedSentinelIncidentPage(
         ...incident,
         alertCount: alerts.length,
         reportedAssets: (reportedAssets ?? []).slice(0, 25),
-        findingIds: findingIds.slice(0, 25),
+        findingIds: (scope ? findingIds.filter(scope.allowFinding) : findingIds)
+          .slice(0, 25),
         evidenceIds: evidenceIds.slice(0, 25),
       },
     })),

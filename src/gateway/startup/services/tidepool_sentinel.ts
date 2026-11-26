@@ -1,3 +1,4 @@
+import { sentinelOperatingConstraintsAllow } from "../../../sentinel/operating_constraints.ts";
 import type { ChatSession } from "../../chat_session_interface.ts";
 /** Authenticated Tidepool operations for the gateway-owned Sentinel assessment. */
 import { taskUpstreamCitations } from "../../../sentinel/adaptive_store.ts";
@@ -8,6 +9,7 @@ import {
 } from "../../sentinel_asset_discoveries.ts";
 import {
   matchesSentinelUpstreamCheck,
+  sentinelTelemetryAssetResolver,
   sentinelUpstreamChecks,
 } from "../../../sentinel/defense_coverage.ts";
 import { sentinelOutputLanguages } from "../../../core/config_types.ts";
@@ -53,6 +55,8 @@ import {
   readSentinelIncidentReviews,
   readSentinelNotificationReceipt,
   readSentinelNotificationState,
+  readSentinelOperatingConstraints,
+  readSentinelRunIdForRevision,
   recordSentinelFindingReview,
   recordSentinelIncidentReview,
   refreshSentinelAssessment,
@@ -113,6 +117,7 @@ import {
 import {
   sentinelAlertKey,
   sentinelAlertReference,
+  type TelemetryAlert,
 } from "../../../sentinel/telemetry.ts";
 import {
   buildSentinelProvenance,
@@ -142,6 +147,29 @@ import {
 } from "../../sentinel_topology_sync.ts";
 import type { SentinelCoordinatorLookup } from "../../sentinel_case_manager.ts";
 import type { BootstrapResult } from "../bootstrap.ts";
+
+function retainedTelemetryScope(path: string, revision: number) {
+  const runId = readSentinelRunIdForRevision(path, revision);
+  const policy = runId
+    ? readSentinelOperatingConstraints(path, runId)?.constraints
+    : undefined;
+  if (
+    policy?.allowedAssetIds === undefined &&
+    !policy?.deniedKinds.includes("review_evidence")
+  ) return;
+  const snapshot = readSentinelAssessmentRevision(path, revision)?.result
+    .sharedGraph.snapshot;
+  const resolve = snapshot && sentinelTelemetryAssetResolver(snapshot, policy);
+  return {
+    allowAlert: (alert: TelemetryAlert) => !!resolve?.(alert),
+    allowFinding: (nodeId: string) =>
+      sentinelOperatingConstraintsAllow(
+        policy,
+        { kind: "review_evidence", nodeId },
+        snapshot,
+      ),
+  };
+}
 
 export function createTidepoolSentinelHandler(
   bootstrap: BootstrapResult,
@@ -971,7 +999,12 @@ export function createTidepoolSentinelHandler(
               "Select a retained evidence revision and history page.",
             );
           }
-          const page = readSavedSentinelIncidentPage(path, revision, offset);
+          const page = readSavedSentinelIncidentPage(
+            path,
+            revision,
+            offset,
+            retainedTelemetryScope(path, revision),
+          );
           if (!page) {
             throw new SentinelAssignmentError(
               "No full alert feed was saved for this evidence revision.",
@@ -1006,8 +1039,15 @@ export function createTidepoolSentinelHandler(
             incidentId,
             true,
           );
+          const scope = retainedTelemetryScope(path, revision);
+          const unavailable = "The retained incident evidence is unavailable.";
           if ("error" in incident) {
-            throw new SentinelAssignmentError(incident.error);
+            throw new SentinelAssignmentError(
+              scope ? unavailable : incident.error,
+            );
+          }
+          if (scope && !incident.members.every(scope.allowAlert)) {
+            throw new SentinelAssignmentError(unavailable);
           }
           const { members } = incident;
           const page = members.slice(offset, offset + 10).map((alert) => ({
@@ -1039,12 +1079,14 @@ export function createTidepoolSentinelHandler(
               "Select a retained evidence revision.",
             );
           }
-          const alerts = readSentinelAssessmentAlerts(path, revision);
-          if (!alerts) {
+          const retained = readSentinelAssessmentAlerts(path, revision);
+          if (!retained) {
             throw new SentinelAssignmentError(
               "No full alert feed was saved for this evidence revision.",
             );
           }
+          const scope = retainedTelemetryScope(path, revision);
+          const alerts = scope ? retained.filter(scope.allowAlert) : retained;
           const upstreamCheck = message.upstreamCheck;
           const check = sentinelUpstreamChecks.find(({ id }) =>
             id === upstreamCheck
