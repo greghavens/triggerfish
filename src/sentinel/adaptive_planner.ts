@@ -6,6 +6,7 @@ import {
   type AdaptivePeerFindingCitation,
   type AdaptivePlannerRound,
   type AdaptivePriorAssignedTargetCitation,
+  type AdaptiveReviewedAssignmentSource,
   type AdaptiveSourceKind,
   type AdaptiveTask,
   type AdaptiveTaskRequest,
@@ -829,9 +830,14 @@ export function validateSentinelPlanSuggestions(
   ) => boolean,
   cancelledTasks: ReadonlyMap<string, string> = new Map(),
   analystObservations: ReadonlyMap<number, string> = new Map(),
+  resolveGraphSources?: (
+    asset: string,
+    ids: readonly string[],
+  ) => readonly AdaptiveReviewedAssignmentSource[] | undefined,
 ):
   | (AdaptiveTaskRequest & {
     analystObservationHintId?: number;
+    sourceEvidence?: readonly AdaptiveReviewedAssignmentSource[];
     cancelledTaskRequestId?: string;
     sourceKind?: AdaptiveSourceKind;
     workerSources?: readonly AdaptiveWorkerSource[];
@@ -872,6 +878,7 @@ export function validateSentinelPlanSuggestions(
   const explicitScope = state.plan.traceNode ?? state.plan.impactAsset;
   const tasks: (AdaptiveTaskRequest & {
     analystObservationHintId?: number;
+    sourceEvidence?: readonly AdaptiveReviewedAssignmentSource[];
     cancelledTaskRequestId?: string;
     sourceKind?: AdaptiveSourceKind;
     workerSources?: readonly AdaptiveWorkerSource[];
@@ -933,6 +940,26 @@ export function validateSentinelPlanSuggestions(
         !Number.isSafeInteger(dependency) || !accepted.has(dependency)
       )
     ) continue;
+    let sourceEvidence;
+    if (item.graphFactIds !== undefined) {
+      const ids = item.graphFactIds;
+      if (
+        kind !== "trace" || item.depth !== 1 ||
+        !Array.isArray(ids) || ids.length < 2 || ids.length > 4 ||
+        new Set(ids).size !== ids.length ||
+        ids.some((id) =>
+          typeof id !== "string" ||
+          graphFacts.get(id)?.targetId !== nodeId
+        ) ||
+        Object.keys(item).some((key) =>
+          !["kind", "nodeId", "depth", "graphFactIds", "dependsOn"].includes(
+            key,
+          )
+        )
+      ) continue;
+      sourceEvidence = resolveGraphSources?.(nodeId, [...ids].sort());
+      if (!sourceEvidence) continue;
+    }
     const graphFactId = item.graphFactId;
     const graphFact = typeof graphFactId === "string"
       ? graphFacts.get(graphFactId)
@@ -1173,6 +1200,7 @@ export function validateSentinelPlanSuggestions(
       ...new Set([
         ...dependencies.map((dependency) => accepted.get(dependency)!),
         ...(graphFact ? [graphFact.taskId] : []),
+        ...(sourceEvidence?.map(({ taskId }) => taskId) ?? []),
         ...(committed ? [committed.sourceTaskId] : []),
         ...(typeof source === "string" ? [source] : []),
         ...(workerSources?.map(({ taskId }) => taskId) ?? []),
@@ -1219,6 +1247,7 @@ export function validateSentinelPlanSuggestions(
       if (typeof source === "string") task = { ...task, reviewedFrom: source };
       const id = sentinelAdaptiveTaskId(revision, {
         ...task,
+        ...(sourceEvidence && { plannerRound: { sourceEvidence } }),
         ...(futureWorkflowOutcome && { futureWorkflowOutcome }),
         ...(committed && requiredWorkflowOutcome && {
           requiredWorkflowOutcome,
@@ -1261,6 +1290,7 @@ export function validateSentinelPlanSuggestions(
       }
       tasks.push({
         ...task,
+        ...(sourceEvidence && { sourceEvidence }),
         ...(typeof analystObservationHintId === "number" &&
           { analystObservationHintId }),
         ...(typeof cancelledTaskRequestId === "string" &&

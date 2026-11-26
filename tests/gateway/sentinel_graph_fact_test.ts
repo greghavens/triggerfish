@@ -4016,16 +4016,35 @@ Deno.test("Sentinel publishes a retained control outcome from the assigned asset
             send({
               type: "response",
               text: JSON.stringify(
-                [mitigation, otherMitigation, resolution, foreignResolution]
-                  .map(
-                    (graphRelationship) => ({
+                [
+                  ...[
+                    mitigation,
+                    otherMitigation,
+                    resolution,
+                    foreignResolution,
+                  ]
+                    .map((graphRelationship) => ({
                       kind: "trace",
                       nodeId: "app",
                       depth: 1,
                       graphFactOnly: true,
                       graphRelationship,
-                    }),
-                  ),
+                    })),
+                  ...[
+                    ["app", [mitigationFact.id, dnsFact.id]],
+                    ["app", [mitigationFact.id, mitigationFact.id]],
+                    ["other", [mitigationFact.id, dnsFact.id]],
+                    ["app", [
+                      mitigationFact.id,
+                      "worker-graph-fact:" + "0".repeat(64),
+                    ]],
+                  ].map(([nodeId, graphFactIds]) => ({
+                    kind: "trace",
+                    nodeId,
+                    depth: 1,
+                    graphFactIds,
+                  })),
+                ],
               ),
               taint: "INTERNAL",
             });
@@ -4072,6 +4091,55 @@ Deno.test("Sentinel publishes a retained control outcome from the assigned asset
           (task) => task.plannerRound?.graphFactOnly,
         );
         assertEquals(factAssignments.length, 2);
+        const combined = store.list(revision).filter(
+          (task) => task.plannerRound?.sourceEvidence,
+        );
+        assertEquals(combined.length, 1);
+        const followup = combined[0];
+        assertEquals(followup.nodeId, "app");
+        assertEquals(followup.prerequisites, [producer.assignedTaskId]);
+        const sources = followup.plannerRound!.sourceEvidence!;
+        assertEquals(
+          sources,
+          [mitigationFact, dnsFact].map((fact) => ({
+            id: fact.id,
+            taskId: producer.assignedTaskId,
+            evidenceRevision: state.revision,
+            digest: fact.resultSha256,
+            sourceStepIndex: fact.sourceStepIndex,
+          })).sort((a, b) => a.id.localeCompare(b.id)),
+        );
+        await ownerFacts(baseDir, async (query) => {
+          const node = `task:adaptive:${followup.id}`;
+          const detail = JSON.parse(
+            await query({
+              action: "node",
+              id: "main",
+              revision: state.revision,
+              node,
+            }),
+          ).page;
+          assertEquals(
+            detail.connections.filter(({ from, relation }: {
+              from: string;
+              relation: string;
+            }) => from === node && relation === "references")
+              .map(({ to }: { to: string }) => to).sort(),
+            sources.map(({ id }) => `observation:adaptive:${id}`).sort(),
+          );
+          for (const source of sources) {
+            const record = JSON.parse(
+              await query({
+                id: "main",
+                revision: state.revision,
+                factId: source.id,
+              }),
+            ).page.fact;
+            assertEquals(record.resultSha256, source.digest);
+            assertEquals(record.sourceStepIndex, source.sourceStepIndex);
+            assertEquals(record.taskId, source.taskId);
+          }
+        });
         for (
           const [graphRelationship, fact] of [[mitigation, mitigationFact], [
             resolution,

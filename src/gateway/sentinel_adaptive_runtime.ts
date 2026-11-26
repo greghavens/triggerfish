@@ -109,6 +109,7 @@ import {
   type AdaptivePeerFindingVerification,
   type AdaptivePriorAssignedTargetCitation,
   type AdaptiveRecheckBaseline,
+  type AdaptiveReviewedAssignmentSource,
   type AdaptiveTask,
   type AdaptiveTaskRequest,
   type AdaptiveVerificationReviewCandidate,
@@ -295,13 +296,31 @@ function graphFactProvenance(
       .map((fact) => [fact.id, fact]),
   );
   for (const { nodeId, plannerRound, factSatisfaction } of tasks) {
-    const id = factSatisfaction?.graphFactId ?? plannerRound?.graphFactId;
-    if (!nodeId || !id || facts.has(id)) continue;
-    const fact = readSentinelWorkerGraphFact(snapshotPath, {
-      ...scope,
-      targetId: nodeId,
-    }, id);
-    if (fact) facts.set(id, fact);
+    if (!nodeId) continue;
+    const primary = factSatisfaction?.graphFactId ?? plannerRound?.graphFactId;
+    const ids = reviewedSourcesVisible(snapshotPath, evidenceRevision, {
+        nodeId,
+        plannerRound,
+      })
+      ? plannerRound?.sourceEvidence?.flatMap(({ id }) =>
+        id.startsWith("worker-graph-fact:") ? [id] : []
+      ) ?? []
+      : [];
+    if (primary) {
+      ids.push(primary);
+    }
+    for (const id of ids) {
+      if (facts.has(id)) {
+        continue;
+      }
+      const fact = readSentinelWorkerGraphFact(snapshotPath, {
+        ...scope,
+        targetId: nodeId,
+      }, id);
+      if (fact) {
+        facts.set(id, fact);
+      }
+    }
   }
   return [...facts.values()];
 }
@@ -2719,6 +2738,122 @@ export function submitSentinelAssignmentIntent(
   return committed?.receipt;
 }
 
+/** Reopen exact local source metadata under the saved and latest run policy. */
+function readRetainedReviewedAssignmentSources(
+  path: string,
+  revision: number,
+  target: string,
+  ids: readonly string[],
+): AdaptiveReviewedAssignmentSource[] | undefined {
+  const caseId = locateSentinelCase(path)?.caseId;
+  const runId = readSentinelRunIdForRevision(path, revision);
+  const snapshot = readSentinelAssessmentRevision(path, revision)?.result
+    .sharedGraph.snapshot;
+  if (!caseId || !runId || !snapshot) return;
+  const saved = readSentinelOperatingConstraints(path, runId, revision)
+    ?.constraints;
+  const latest = readSentinelOperatingConstraints(path, runId);
+  const latestRevision = latest?.constraints.allowedAssetIds === undefined
+    ? revision
+    : readSentinelLatestRunRevision(path, runId) ?? latest.evidenceRevision;
+  const latestSnapshot = latestRevision === revision
+    ? snapshot
+    : readSentinelRunIdForRevision(path, latestRevision) === runId
+    ? readSentinelAssessmentRevision(path, latestRevision)?.result.sharedGraph
+      .snapshot
+    : undefined;
+  const allows = (kind: "trace" | "review_evidence", nodeId: string) =>
+    sentinelOperatingConstraintsAllow(saved, { kind, nodeId }, snapshot) &&
+    sentinelOperatingConstraintsAllow(
+      latest?.constraints,
+      { kind, nodeId },
+      latestSnapshot,
+    );
+  const allowNode = (nodeId: string) => allows("review_evidence", nodeId);
+  if (!allows("trace", target) || !allowNode(target)) return;
+  const allowFact = sentinelGraphFactScopeFilter(snapshot, allowNode);
+  const scope = { caseId, runId, evidenceRevision: revision };
+  const result: AdaptiveReviewedAssignmentSource[] = [];
+  for (const id of ids) {
+    if (id.startsWith("worker-graph-fact:")) {
+      const selection = readSentinelCaseGraphFacts(
+        path,
+        scope,
+        { id },
+        allowFact,
+      );
+      const fact = selection && "fact" in selection && selection.fact;
+      if (!fact || fact.targetId !== target) return;
+      result.push({
+        id,
+        taskId: fact.taskId,
+        evidenceRevision: fact.evidenceRevision,
+        digest: fact.resultSha256,
+        sourceStepIndex: fact.sourceStepIndex,
+      });
+    } else {
+      if (!hasSentinelWorkerFindingJournal(path)) return;
+      const journal = openSentinelWorkerFindingStore(path);
+      try {
+        const report = journal.readFindingReport(id, revision);
+        const finding = report?.finding;
+        const evidence = finding &&
+          snapshot.nodes.find(({ id }) => id === finding.evidenceId);
+        if (
+          !finding || finding.caseId !== caseId || finding.runId !== runId ||
+          finding.evidenceRevision !== revision ||
+          finding.targetId !== target ||
+          !findingRecheckStillApplies(snapshot, finding) ||
+          evidence?.kind !== "evidence" ||
+          evidence.executionSource || evidence.nativeWorkflowSource ||
+          !allowNode(evidence.id)
+        ) return;
+        result.push({
+          id,
+          taskId: finding.taskId,
+          evidenceRevision: finding.evidenceRevision,
+          digest: createHash("sha256").update(
+            JSON.stringify([finding, report.version]),
+          ).digest("hex"),
+        });
+      } finally {
+        journal.close();
+      }
+    }
+  }
+  return result;
+}
+
+export function readSentinelReviewedAssignmentSources(
+  path: string,
+  state: State,
+  target: string,
+  ids: readonly string[],
+) {
+  return state.active &&
+      state.plan.runId === readSentinelRunIdForRevision(path, state.revision)
+    ? readRetainedReviewedAssignmentSources(path, state.revision, target, ids)
+    : undefined;
+}
+
+/** Check the whole saved selection before exposing any member. */
+function reviewedSourcesVisible(
+  path: string,
+  revision: number,
+  task: Pick<AdaptiveTask, "nodeId" | "plannerRound">,
+) {
+  const sources = task.plannerRound?.sourceEvidence;
+  return !sources || (task.nodeId !== undefined && isDeepStrictEqual(
+    sources,
+    readRetainedReviewedAssignmentSources(
+      path,
+      revision,
+      task.nodeId,
+      sources.map(({ id }) => id),
+    ),
+  ));
+}
+
 export function reviewSentinelAssignmentBatch(
   path: string,
   batch: AdaptiveGraphAssignmentBatch,
@@ -2734,6 +2869,20 @@ export function reviewSentinelAssignmentBatch(
     try {
       const revision = revisionForStore(state, store);
       if (revision !== batch.adaptiveRevision) return;
+      for (const selection of batch.assignments) {
+        const sources = selection.sourceEvidence;
+        if (
+          sources && (selection.kind !== "trace" || !isDeepStrictEqual(
+            sources,
+            readSentinelReviewedAssignmentSources(
+              path,
+              state,
+              selection.nodeId,
+              sources.map(({ id }) => id),
+            ),
+          ))
+        ) return;
+      }
       const prior = store.readOperatorAssignmentBatch(batch.requestId);
       if (prior) {
         const { receipts: _receipts, ...stored } = prior;
@@ -2760,12 +2909,23 @@ export function reviewSentinelAssignmentBatch(
         ) {
           throw new SentinelAssignmentError("Select exact local graph assets.");
         }
-        const task = validatedOperatorTask(
+        let task = validatedOperatorTask(
           path,
           state,
           selection.kind,
           selection.nodeId,
         );
+        if (selection.sourceEvidence) {
+          task = {
+            ...task,
+            depth: 1,
+            plannerRound: {
+              identity: `operator:${batch.requestId}`,
+              attempt: 1,
+              sourceEvidence: selection.sourceEvidence,
+            },
+          };
+        }
         const current = queue.get(sentinelAdaptiveTaskId(revision, task));
         const token = createHash("sha256").update(JSON.stringify([
           "sentinel-reviewed-assignment-batch",
@@ -3503,6 +3663,7 @@ function decisionAllowsClaim(snapshotPath: string, revision: number) {
   return (task: AdaptiveTask) =>
     allowed(task) &&
     (task.reason === OPERATOR_ASSIGNMENT_REASON || !decisionHold(task)) &&
+    reviewedSourcesVisible(snapshotPath, revision, task) &&
     (!task.plannerRound?.findingFollowup || (() => {
       const current = readSentinelAssessment(snapshotPath);
       const source = task.plannerRound.findingFollowup;
@@ -3741,6 +3902,19 @@ function annotateDecisionHolds(
       task.status === "queued" && task.reason !== OPERATOR_ASSIGNMENT_REASON
         ? holdFor(task)
         : undefined;
+    const plannerRound = task.plannerRound;
+    if (
+      plannerRound?.sourceEvidence &&
+      !reviewedSourcesVisible(snapshotPath, revision, task)
+    ) {
+      const { sourceEvidence: _revoked, ...visibleRound } = plannerRound;
+      return {
+        ...task,
+        plannerRound: visibleRound,
+        heldForDecision: !!decisionHold,
+        decisionHold,
+      };
+    }
     return { ...task, heldForDecision: !!decisionHold, decisionHold };
   });
 }
@@ -4975,7 +5149,10 @@ function parseModelReview(
     ) return undefined;
     note = output.summary.trim().slice(0, 1500);
     if (
-      !task.plannerRound?.findingFollowup && Array.isArray(output.followUps) &&
+      !task.plannerRound?.findingFollowup &&
+      !(task.reason === OPERATOR_ASSIGNMENT_REASON &&
+        task.plannerRound?.sourceEvidence) &&
+      Array.isArray(output.followUps) &&
       output.followUps.length <= 2
     ) {
       const observation = task.observation as
@@ -5840,6 +6017,11 @@ export function createSentinelModelPlanner(
               "Reopen committedObservation.observationId exactly with sentinel_intermediate_workflow_observation before relying on it.",
             ]
             : []),
+          ...(task.plannerRound?.sourceEvidence
+            ? [
+              "Reopen every sourceEvidence member in this assignment. Use sentinel_graph_facts with id for a graph fact and sentinel_worker_findings with receiptId for a worker finding. Cite exact retained sources in the investigation.",
+            ]
+            : []),
           ...(task.plannerRound?.findingFollowup
             ? [
               "Review this findingFollowup using the exact receipt in sentinel_worker_findings and the approved note as guidance for retained evidence analysis.",
@@ -5880,6 +6062,7 @@ export function createSentinelModelPlanner(
           recheckFindingId: task.plannerRound?.recheckFindingId,
           recheckNote: task.plannerRound?.recheckNote,
           findingFollowup: task.plannerRound?.findingFollowup,
+          sourceEvidence: task.plannerRound?.sourceEvidence,
           committedObservation: task.plannerRound?.committedObservation,
           peerFindingCitations: task.plannerRound?.peerFindingCitations?.map(
             ({ mappingSources: _mappingSources, ...citation }) => citation,
@@ -7086,7 +7269,7 @@ export function createSentinelModelPlanner(
             ]
             : []),
           "For a prerequisite whose only requirement is a passing remediation recheck, use a depth-one trace with passingRecheckId from findingRechecks or an exact sentinel_worker_findings read on the same target. The scheduler revalidates the exact receipt before satisfying the task.",
-          "To cite a committed relationship for the exact same target, set graphFactId to the matching record from graphFacts. For work whose sole criterion is that receipt, use a depth-one trace with graphFactOnly true. To wait for a receipt, specify graphRelationship {from, to, relation} for an exact current edge instead of graphFactId. For an asset-scoped verifies edge, requireCurrentPass true accepts only the latest valid pass. Omit from to let a newer valid pass satisfy the same control requirement.",
+          "Use graphFactId to cite an exact same-target receipt, or graphFactIds (2–4) to combine receipts in one depth-one trace. For fact-only settlement use a depth-one trace with graphFactOnly and graphFactId, or wait for a graphRelationship {from,to,relation}. A verifies edge with requireCurrentPass accepts the latest valid pass only. Omit from to allow a newer pass for the same control.",
           "To cite a carried record, copy its exact priorAssignedTargetCitation and use the current carrier task as sourceTaskId with sourceKind worker_result. Keep the cited targetId unchanged.",
           "To adjust the current queue, return an object with assignments (the same array) and prioritize (up to eight exact IDs from reprioritizable tasks in priority order). Include only tasks relevant to the latest goal and evidence. Return empty arrays when no changes are needed.",
           "Include an optional retire array of up to eight objects with id and reason for obsolete reprioritizable tasks that should be held for operator review. Never prioritize and retire the same task. Explain each reason in no more than 300 characters.",
@@ -8097,6 +8280,13 @@ export function createSentinelModelPlanner(
                   worker.permitsFutureWorkflow,
                   presentedCancellations,
                   presentedAnalystObservations,
+                  (asset, ids) =>
+                    readSentinelReviewedAssignmentSources(
+                      snapshotPath,
+                      current,
+                      asset,
+                      ids,
+                    ),
                 );
               const existingById = new Map(
                 currentTasks.map((task) => [task.id, task]),
@@ -8188,6 +8378,7 @@ export function createSentinelModelPlanner(
               const additions = newTasks.map((
                 {
                   analystObservationHintId,
+                  sourceEvidence,
                   cancelledTaskRequestId,
                   sourceKind,
                   upstreamCheckId,
@@ -8207,25 +8398,27 @@ export function createSentinelModelPlanner(
                 },
               ) => ({
                 ...task,
-                plannerRound: {
-                  ...plannerRound,
-                  hintId: analystObservationHintId ?? plannerRound.hintId,
-                  cancelledTaskRequestId,
-                  sourceKind,
-                  upstreamCheckId,
-                  workerSources,
-                  peerFindingCitations,
-                  graphFactId,
-                  graphFactOnly,
-                  graphRelationship,
-                  githubWorkflowCitation,
-                  committedObservation,
-                  requiredWorkflowOutcome,
-                  futureWorkflowOutcome,
-                  recheckFindingId,
-                  passingRecheckId,
-                  passingRecheckForFindingId,
-                },
+                plannerRound: sourceEvidence
+                  ? { identity: roundIdentity, attempt: claim, sourceEvidence }
+                  : {
+                    ...plannerRound,
+                    hintId: analystObservationHintId ?? plannerRound.hintId,
+                    cancelledTaskRequestId,
+                    sourceKind,
+                    upstreamCheckId,
+                    workerSources,
+                    peerFindingCitations,
+                    graphFactId,
+                    graphFactOnly,
+                    graphRelationship,
+                    githubWorkflowCitation,
+                    committedObservation,
+                    requiredWorkflowOutcome,
+                    futureWorkflowOutcome,
+                    recheckFindingId,
+                    passingRecheckId,
+                    passingRecheckForFindingId,
+                  },
               }));
               const additionsById = new Map(
                 additions.map((

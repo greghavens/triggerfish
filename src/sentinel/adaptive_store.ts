@@ -964,12 +964,22 @@ export interface AdaptiveRecheckBaseline {
   readonly constraintsDigest: string | null;
 }
 
+/** A retained fact or finding frozen by reviewed assignment admission. */
+export interface AdaptiveReviewedAssignmentSource {
+  readonly id: string;
+  readonly taskId: string;
+  readonly evidenceRevision: number;
+  readonly digest: string;
+  readonly sourceStepIndex?: number;
+}
+
 export interface AdaptivePlannerRound {
   readonly cancelledTaskRequestId?: string;
   readonly stoppedRetry?: {
     readonly sourceTaskId: string;
     readonly stopRequestId: string;
   };
+  readonly sourceEvidence?: readonly AdaptiveReviewedAssignmentSource[];
   readonly findingFollowup?: AdaptiveFindingFollowup;
   readonly passingRecheckId?: string;
   readonly passingRecheckForFindingId?: string;
@@ -1480,6 +1490,7 @@ export interface AdaptiveTaskNote {
 
 type RelationshipTaskIdentity = Pick<
   AdaptivePlannerRound,
+  | "sourceEvidence"
   | "graphFactOnly"
   | "graphFactId"
   | "graphRelationship"
@@ -2172,6 +2183,9 @@ export function sentinelAdaptiveTaskId(
           request.plannerRound.stoppedRetry.stopRequestId,
         ]]
         : []),
+      ...(receipt.sourceEvidence
+        ? [["reviewed_source_evidence", receipt.sourceEvidence]]
+        : []),
       ...(request.plannerRound?.findingFollowup
         ? [[
           "finding_followup",
@@ -2364,6 +2378,7 @@ function normalizePlannerRound(round: AdaptivePlannerRound | undefined) {
     priorAssignedTargetCitations,
     carriedAssignedTargetCitations,
     findingFollowup,
+    sourceEvidence,
     cancelledTaskRequestId,
     stoppedRetry,
   } = round;
@@ -2396,6 +2411,38 @@ function normalizePlannerRound(round: AdaptivePlannerRound | undefined) {
       )
     )
   ) throw new Error("Invalid stopped Sentinel worker retry");
+  if (
+    sourceEvidence !== undefined && (
+      (!/^operator:[a-f0-9-]{36}$/.test(identity) &&
+        !/^[a-f0-9]{64}(?::|$)/.test(identity)) ||
+      (identity.startsWith("operator:") && attempt !== 1) ||
+      Object.keys(round).some((key) =>
+        !["identity", "attempt", "sourceEvidence"].includes(key)
+      ) ||
+      !Array.isArray(sourceEvidence) || sourceEvidence.length < 2 ||
+      sourceEvidence.length > 4 ||
+      new Set(sourceEvidence.map(({ id }) => id)).size !==
+        sourceEvidence.length ||
+      sourceEvidence.some((entry) =>
+        Object.keys(entry).some((key) =>
+          !["id", "taskId", "evidenceRevision", "digest", "sourceStepIndex"]
+            .includes(key)
+        ) ||
+        !/^worker-(?:graph-fact|finding):[a-f0-9]{64}$/.test(entry.id) ||
+        (!identity.startsWith("operator:") &&
+          !entry.id.startsWith("worker-graph-fact:")) ||
+        (entry.id.startsWith("worker-graph-fact:") !==
+          (entry.sourceStepIndex !== undefined)) ||
+        !/^adaptive:[a-f0-9]{64}$/.test(entry.taskId) ||
+        !Number.isSafeInteger(entry.evidenceRevision) ||
+        entry.evidenceRevision < 1 ||
+        !/^[a-f0-9]{64}$/.test(entry.digest) ||
+        (entry.sourceStepIndex !== undefined &&
+          (!Number.isSafeInteger(entry.sourceStepIndex) ||
+            entry.sourceStepIndex < 0 || entry.sourceStepIndex >= 16))
+      )
+    )
+  ) throw new Error("Invalid Sentinel reviewed assignment sources");
   if (
     findingFollowup !== undefined && (
       !/^operator:[a-f0-9-]{36}$/.test(identity) ||
@@ -2547,6 +2594,7 @@ function normalizePlannerRound(round: AdaptivePlannerRound | undefined) {
           stopRequestId: stoppedRetry.stopRequestId,
         },
       }),
+    ...(sourceEvidence && { sourceEvidence }),
     ...(findingFollowup && {
       findingFollowup: {
         findingId: findingFollowup.findingId,
@@ -2636,6 +2684,10 @@ function normalizeTask(revision: string, request: AdaptiveTaskRequest) {
       "Stopped worker retry requires independent read-only graph work",
     );
   }
+  if (
+    plannerRound?.sourceEvidence &&
+    (identity.kind !== "trace" || identity.depth !== 1)
+  ) throw new Error("Reviewed assignment evidence requires a one-hop trace");
   if (
     plannerRound?.findingFollowup &&
     (identity.kind !== "trace" || identity.depth !== 1 ||
@@ -3646,6 +3698,7 @@ export interface AdaptiveOperatorAssignmentIntentReceipt {
   readonly recheckNote?: string;
   readonly recheckBaseline?: AdaptiveRecheckBaseline;
   readonly passingRecheckForFindingId?: string;
+  readonly sourceEvidence?: readonly AdaptiveReviewedAssignmentSource[];
   readonly findingFollowup?: AdaptiveFindingFollowup;
   readonly graphRelationship?: SentinelGraphFactRequirement;
   readonly prioritizeNext?: true;
@@ -3657,6 +3710,7 @@ export interface AdaptiveOperatorAssignmentIntentReceipt {
 export interface AdaptiveGraphAssignment {
   readonly kind: "trace" | "impact";
   readonly nodeId: string;
+  readonly sourceEvidence?: readonly AdaptiveReviewedAssignmentSource[];
   readonly prioritizeNext?: true;
   readonly priorityRank?: number;
 }
@@ -4843,6 +4897,9 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
     LEFT JOIN adaptive_model_reviews AS review ON review.taskId = task.id
     WHERE task.revision = ? AND (task.reason = ? OR task.kind = 'review_incident'
       OR json_type(task.plannerRound, '$.findingFollowup') = 'object'
+      OR (task.kind = 'trace'
+        AND json_extract(task.plannerRound, '$.identity') GLOB 'operator:*'
+        AND json_type(task.plannerRound, '$.sourceEvidence') = 'array')
       OR json_type(task.plannerRound, '$.stoppedRetry') = 'object'
       OR (task.kind = 'review_evidence'
         AND json_extract(task.plannerRound, '$.identity') GLOB 'operator:*'
@@ -5062,6 +5119,8 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
       kind: task.kind,
       ...(task.nodeId !== undefined && { nodeId: task.nodeId }),
       ...(task.depth !== undefined && { depth: task.depth }),
+      ...(task.plannerRound?.sourceEvidence &&
+        { sourceEvidence: task.plannerRound.sourceEvidence }),
       ...(task.plannerRound?.findingFollowup &&
         { findingFollowup: task.plannerRound.findingFollowup }),
       ...(task.plannerRound?.graphRelationship && {
@@ -8069,6 +8128,10 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
             (selection.kind !== "trace" && selection.kind !== "impact") ||
             input.task.kind !== selection.kind ||
             input.task.nodeId !== selection.nodeId ||
+            !isDeepStrictEqual(
+              input.task.plannerRound?.sourceEvidence,
+              selection.sourceEvidence,
+            ) ||
             input.prioritize !== selection.prioritizeNext ||
             input.priorityRank !== selection.priorityRank;
         }) ||

@@ -1608,6 +1608,22 @@ function addAdaptive(
     }
 
     const id = derivedRef("task", origin, task.id);
+    for (const source of task.plannerRound?.sourceEvidence ?? []) {
+      const fact = factNodes.get(source.id);
+      if (
+        fact && fact.targetId === task.nodeId &&
+        fact.taskId === source.taskId &&
+        fact.evidenceRevision === source.evidenceRevision &&
+        fact.resultSha256 === source.digest &&
+        fact.sourceStepIndex === source.sourceStepIndex
+      ) {
+        index.addEdge(
+          id,
+          derivedRef("observation", origin, source.id),
+          "references",
+        );
+      }
+    }
     const futureReceiptId = futureWorkflowSatisfactions.get(task.id);
     if (futureReceiptId && workflowObservations.has(futureReceiptId)) {
       index.addEdge(

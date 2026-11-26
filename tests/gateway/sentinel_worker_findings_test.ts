@@ -572,6 +572,353 @@ async function withFindingAssignmentGateway(
   }
 }
 
+Deno.test("Reviewed mixed-source assignment retains exact graph and finding lineage across gateway restore", async () => {
+  const baseDir = await Deno.makeTempDir();
+  const caseId = "mixed-source-review";
+  const path = resolveSentinelCasePath(baseDir, caseId);
+  let planner: ReturnType<typeof createSentinelModelPlanner> | undefined;
+  try {
+    const now = Date.now();
+    const relationship = { from: "app", to: "other", relation: "depends_on" };
+    await Deno.mkdir(dirname(path), { recursive: true });
+    await Deno.writeTextFile(
+      path,
+      JSON.stringify({
+        version: 1,
+        nodes: [
+          { id: "app", kind: "asset", label: "Assigned application" },
+          { id: "other", kind: "asset", label: "Different application" },
+          {
+            id: "gap",
+            kind: "finding",
+            label: "Control gap",
+            severity: "high",
+          },
+          { id: "control", kind: "control", label: "Review control" },
+          {
+            id: "check",
+            kind: "evidence",
+            label: "Saved failed control check",
+            controlVerification: {
+              outcome: "fail",
+              observedAt: new Date(now - 60_000).toISOString(),
+              validUntil: new Date(now + 3_600_000).toISOString(),
+            },
+          },
+        ],
+        edges: [
+          relationship,
+          { from: "check", to: "app", relation: "observed_on" },
+          { from: "gap", to: "app", relation: "affects" },
+          { from: "control", to: "gap", relation: "mitigates" },
+          { from: "check", to: "control", relation: "verifies" },
+        ],
+      }),
+    );
+    const state = startSentinelAssessment(path);
+    const runId = state.plan.runId;
+    assert(runId);
+    const graphWorker = assignedLease(path, state, "review_evidence");
+    const findingWorker = assignedLease(path, state, "impact");
+    const graphResult = await workerTurn(path, graphWorker, [
+      [tool(assigned)],
+      [tool("sentinel_publish_graph_fact", {
+        ...relationship,
+        requestId: crypto.randomUUID(),
+      })],
+    ]);
+    const parsedFact = JSON.parse(graphResult.results[1][0]);
+    assert(parsedFact.id);
+    const findingResult = await workerTurn(path, findingWorker, [
+      [tool(assigned)],
+      [tool(report, {
+        graphFindingId: "gap",
+        controlId: "control",
+        evidenceId: "check",
+        title: "Retained failed control check",
+        summary: "The verified local check failed.",
+        requestId: crypto.randomUUID(),
+      })],
+    ]);
+    const { record: finding } = JSON.parse(findingResult.results[1][0]);
+    assert(finding.id);
+    const revision = adaptiveRevision(state);
+    const store = openSentinelAdaptiveStore(
+      join(dirname(path), "sentinel-adaptive.db"),
+    );
+    try {
+      for (const lease of [graphWorker, findingWorker]) {
+        assert(store.finishModelReview(
+          revision,
+          lease.assignedTaskId,
+          lease.assignedTaskLeaseToken,
+          { note: "Committed the exact scoped observation.", steps: [] },
+        ));
+      }
+    } finally {
+      store.close();
+    }
+    const ref = { kind: "sentinel", id: caseId, revision: state.revision };
+    const batch = {
+      ...ref,
+      action: "assign_batch",
+      runId,
+      adaptiveRevision: revision,
+      requestId: crypto.randomUUID(),
+      assignments: [{
+        taskKind: "trace",
+        node: "app",
+        sourceIds: [parsedFact.id, finding.id],
+      }],
+    };
+    const archiveId = crypto.randomUUID();
+    let reviews = 0;
+    let revoke = false;
+    let allowed = true;
+    let reviewed: {
+      receipts: {
+        taskId: string;
+        sourceEvidence: {
+          id: string;
+          taskId: string;
+          evidenceRevision: number;
+          digest: string;
+          sourceStepIndex?: number;
+        }[];
+      }[];
+    };
+    const confirm = () => {
+      reviews++;
+      if (revoke) allowed = false;
+      return Promise.resolve(true);
+    };
+    await withFindingAssignmentGateway(baseDir, confirm, async (turn) => {
+      assertEquals(
+        JSON.parse(await turn({ ...ref, action: "pause" })).run.status,
+        "paused",
+      );
+      const beforeReview = reviews;
+      for (
+        const invalid of [
+          { ...batch, revision: state.revision + 1 },
+          {
+            ...batch,
+            assignments: [{ ...batch.assignments[0], node: "other" }],
+          },
+          {
+            ...batch,
+            assignments: [{
+              ...batch.assignments[0],
+              sourceIds: [parsedFact.id, parsedFact.id],
+            }],
+          },
+        ]
+      ) {
+        assertStringIncludes(await turn(invalid), "unavailable");
+      }
+      assertEquals(reviews, beforeReview);
+      const before = readAdaptiveSentinel(path, state)?.tasks;
+      revoke = true;
+      assertStringIncludes(await turn(batch), "unavailable");
+      assertEquals(reviews, beforeReview + 1);
+      assertEquals(readAdaptiveSentinel(path, state)?.tasks, before);
+      revoke = false;
+      allowed = true;
+      reviewed = JSON.parse(await turn(batch)).receipt;
+      const sources = reviewed.receipts[0].sourceEvidence;
+      assertEquals(sources.map(({ id }) => id), [parsedFact.id, finding.id]);
+      assertEquals(sources.map(({ taskId }) => taskId), [
+        graphWorker.assignedTaskId,
+        findingWorker.assignedTaskId,
+      ]);
+      assertEquals(sources.map(({ evidenceRevision }) => evidenceRevision), [
+        state.revision,
+        state.revision,
+      ]);
+      assertEquals(sources[0].digest, parsedFact.resultSha256);
+      assertEquals(sources[0].sourceStepIndex, parsedFact.sourceStepIndex);
+      assert(/^[a-f0-9]{64}$/.test(sources[1].digest));
+    }, (hook, input) =>
+      allowed || hook !== "PRE_TOOL_CALL" ||
+      (input.tool_call as { args?: { action?: string } } | undefined)
+          ?.args?.action !== "assign_batch");
+    assert(reviewed!);
+    await withFindingAssignmentGateway(baseDir, confirm, async (turn) => {
+      const beforeReplay = reviews;
+      assertEquals(JSON.parse(await turn(batch)).receipt, reviewed);
+      assertStringIncludes(
+        await turn({
+          ...batch,
+          assignments: [{
+            ...batch.assignments[0],
+            sourceIds: [...batch.assignments[0].sourceIds].reverse(),
+          }],
+        }),
+        "unavailable",
+      );
+      assertEquals(reviews, beforeReplay);
+      assertEquals(
+        JSON.parse(await turn({ ...ref, runId, action: "cancel" })).run.status,
+        "stopped",
+      );
+      assertEquals(
+        JSON.parse(
+          await turn({
+            ...ref,
+            runId,
+            action: "archive",
+            requestId: archiveId,
+          }),
+        ).receipt.status,
+        "succeeded",
+      );
+    });
+    await Deno.rename(dirname(path), join(baseDir, "pre-mixed-source-restore"));
+    await withFindingAssignmentGateway(baseDir, confirm, async (turn) => {
+      assertEquals(
+        JSON.parse(
+          await turn({
+            ...ref,
+            runId,
+            action: "restore",
+            archiveId,
+            requestId: crypto.randomUUID(),
+          }),
+        ).receipt.status,
+        "succeeded",
+      );
+      assert(readSentinelAssessment(path)?.paused);
+      const beforeReplay = reviews;
+      assertEquals(JSON.parse(await turn(batch)).receipt, reviewed);
+      assertEquals(reviews, beforeReplay);
+      assertEquals(
+        JSON.parse(await turn({ ...ref, action: "resume" })).run.status,
+        "running",
+      );
+    });
+    let projected: unknown;
+    let readResults: string[] = [];
+    const receipt = reviewed.receipts[0];
+    const providers = createProviderRegistry();
+    providers.register({
+      name: "mixed-source-review",
+      supportsStreaming: false,
+      complete(messages) {
+        const results = messages.filter(({ role }) => role === "tool");
+        const usage = { inputTokens: 1, outputTokens: 1 };
+        if (results.length) {
+          readResults = results.map(({ content }) => String(content));
+          return Promise.resolve({
+            content:
+              '{"summary":"Reviewed both scoped sources.","followUps":[]}',
+            usage,
+            toolCalls: [],
+          });
+        }
+        const prompt = String(
+          messages.findLast(({ role }) => role === "user")?.content,
+        );
+        const payload = JSON.parse(prompt.split("\n").at(-1)!);
+        projected = payload.sourceEvidence;
+        return Promise.resolve({
+          content: "",
+          usage,
+          toolCalls: [
+            tool("sentinel_graph_facts", { id: parsedFact.id }),
+            tool(findings, { receiptId: finding.id }),
+          ].map(({ name, args }, index) => ({
+            id: `mixed-source-${index}`,
+            type: "function",
+            function: { name, arguments: JSON.stringify(args) },
+          })),
+        });
+      },
+    });
+    providers.setDefault("mixed-source-review");
+    const current = readSentinelAssessment(path);
+    assert(current);
+    const sourceHooks: string[] = [];
+    planner = createSentinelModelPlanner(
+      path,
+      (_state, id, lease) =>
+        id === receipt.taskId
+          ? createSentinelSubagent({
+            snapshotPath: path,
+            assessmentRevision: state.revision,
+            assignedTaskId: id,
+            assignedTaskLeaseToken: lease,
+            providerRegistry: providers,
+            allowModelAccess: true,
+            hookRunner: {
+              evaluateHook(hook, { input }) {
+                const name = input.tool_name ??
+                  (input.tool_call as { name?: string } | undefined)?.name;
+                if (name === findings || name === "sentinel_graph_facts") {
+                  sourceHooks.push(`${hook}:${name}`);
+                }
+                return Promise.resolve({
+                  allowed: true,
+                  action: "ALLOW",
+                  duration: 0,
+                  ruleId: null,
+                });
+              },
+            },
+          })
+          : { execute: () => Promise.resolve(), clear() {} },
+    );
+    planner.advance(current);
+    const completed = () =>
+      readAdaptiveSentinel(path, current)?.modelReviews
+        .find(({ taskId }) => taskId === receipt.taskId);
+    await waitForCondition(
+      () => completed() !== undefined,
+      () => planner!.advance(current),
+    );
+    assertEquals(projected, receipt.sourceEvidence);
+    assertEquals(readResults.length, 2);
+    assertEquals(JSON.parse(readResults[0]), parsedFact);
+    assertEquals(JSON.parse(readResults[1]).record, finding);
+    assertEquals(completed()?.summary, "Reviewed both scoped sources.");
+    assertEquals(completed()?.steps.map(({ tool }) => tool), [
+      "sentinel_graph_facts",
+      findings,
+    ]);
+    for (const name of ["sentinel_graph_facts", findings]) {
+      assert(sourceHooks.includes(`PRE_TOOL_CALL:${name}`));
+      assert(sourceHooks.includes(`POST_TOOL_RESPONSE:${name}`));
+    }
+    const node = `task:adaptive:${receipt.taskId}`;
+    const exactNode = { ...ref, action: "node", node };
+    await withFindingAssignmentGateway(baseDir, confirm, async (turn) => {
+      assertStringIncludes(await turn(exactNode), parsedFact.id);
+      assertEquals(
+        JSON.parse(
+          await turn({
+            ...ref,
+            action: "narrow_constraints",
+            runId,
+            requestId: crypto.randomUUID(),
+            expectedVersion: 0,
+            allowedAssetIds: ["app"],
+            deniedKinds: [],
+          }),
+        ).record.constraints.allowedAssetIds,
+        ["app"],
+      );
+      assertStringIncludes(await turn(batch), "unavailable");
+      const scopedNode = await turn(exactNode);
+      const page = JSON.parse(scopedNode).page;
+      assertEquals(page.node.id, node);
+      assert(!scopedNode.includes(parsedFact.id));
+      assert(!scopedNode.includes(finding.id));
+    });
+  } finally {
+    planner?.stop();
+    await Deno.remove(baseDir, { recursive: true });
+  }
+});
+
 Deno.test("Leased Sentinel workers report, recheck, and amend findings visible in authenticated Tidepool", async () => {
   const baseDir = await Deno.makeTempDir();
   const path = resolveSentinelCasePath(baseDir);

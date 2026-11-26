@@ -326,6 +326,7 @@ import {
   readSentinelOperatorAssetHint,
   readSentinelProvenance,
   readSentinelRecheckBaseline,
+  readSentinelReviewedAssignmentSources,
   readSentinelTaskQueue,
   readSentinelWorkflowPublicationStep,
   reviewSentinelAssignmentBatch,
@@ -1103,6 +1104,12 @@ export const operatorRunTool: ToolDefinition = {
           node: { type: "string" },
           prioritizeNext: { type: "boolean" },
           priorityRank: { type: "integer" },
+          sourceIds: {
+            type: "array",
+            description:
+              "Two to four distinct exact retained local facts or findings for a trace on the same asset.",
+            items: { type: "string" },
+          },
         },
       },
     },
@@ -6192,12 +6199,29 @@ ${request}`)
             ].includes(key)
           ) || !await controller.inspect(ref)
         ) return unavailable;
+        const path = resolveSentinelCasePath(options.baseDir, ref.id);
+        const state = readSentinelAssessment(path);
+        const authorizeSource = (id: string) =>
+          authorize(
+            id.startsWith("worker-graph-fact:")
+              ? {
+                ...ref,
+                action: "facts",
+                factId: id,
+              }
+              : {
+                ...ref,
+                action: "finding_receipt",
+                receiptId: id,
+              },
+          );
         const selected: AdaptiveGraphAssignment[] = [];
         for (const item of assignments) {
           if (!item || typeof item !== "object" || Array.isArray(item)) {
             return unavailable;
           }
-          const { taskKind, node, prioritizeNext, priorityRank } = item;
+          const { taskKind, node, prioritizeNext, priorityRank, sourceIds } =
+            item;
           if (
             (taskKind !== "trace" && taskKind !== "impact") ||
             typeof node !== "string" || !node.trim() || node.length > 100 ||
@@ -6209,21 +6233,61 @@ ${request}`)
                 !Number.isSafeInteger(priorityRank) ||
                 priorityRank < 0 || priorityRank > 10 ||
                 prioritizeNext === true)) ||
+            (sourceIds !== undefined && (
+              taskKind !== "trace" || !Array.isArray(sourceIds) ||
+              sourceIds.length < 2 || sourceIds.length > 4 ||
+              new Set(sourceIds).size !== sourceIds.length ||
+              sourceIds.some((id) =>
+                typeof id !== "string" ||
+                !/^worker-(?:graph-fact|finding):[a-f0-9]{64}$/.test(id)
+              )
+            )) ||
             Object.keys(item).some((key) =>
-              !["taskKind", "node", "prioritizeNext", "priorityRank"].includes(
+              ![
+                "taskKind",
+                "node",
+                "prioritizeNext",
+                "priorityRank",
+                "sourceIds",
+              ].includes(
                 key,
               )
             )
           ) return unavailable;
+          if (sourceIds) {
+            for (const id of sourceIds) {
+              if (!await authorizeSource(id)) return unavailable;
+            }
+          }
+          const sourceEvidence = sourceIds === undefined || !state ||
+              state.revision !== ref.revision ||
+              state.plan.runId !== runId.toLowerCase()
+            ? undefined
+            : readSentinelReviewedAssignmentSources(
+              path,
+              state,
+              node,
+              sourceIds,
+            );
+          if (sourceIds !== undefined && !sourceEvidence) return unavailable;
+          for (const source of sourceEvidence ?? []) {
+            if (
+              !await context.authorizeSavedResponse(
+                operatorRunTool.name,
+                safeProjection({ ...source }),
+                "INTERNAL",
+              )
+            ) return unavailable;
+          }
           selected.push({
             kind: taskKind,
             nodeId: node,
+            ...(sourceEvidence && { sourceEvidence }),
             ...(prioritizeNext === true && { prioritizeNext: true }),
             ...(typeof priorityRank === "number" &&
               { priorityRank: priorityRank || 5 }),
           });
         }
-        const path = resolveSentinelCasePath(options.baseDir, ref.id);
         const batch = {
           requestId: requestId.toLowerCase(),
           runId: runId.toLowerCase(),
@@ -6250,6 +6314,19 @@ ${request}`)
         ) {
           return unavailable;
         }
+        for (const selection of selected) {
+          for (const source of selection.sourceEvidence ?? []) {
+            if (
+              !await authorizeSource(source.id) ||
+              !await context.authorizeSavedResponse(
+                operatorRunTool.name,
+                safeProjection({ ...source }),
+                "INTERNAL",
+              )
+            ) return unavailable;
+          }
+        }
+        if (selectedCase && !selectedCase()) return unavailable;
         const committed = reviewSentinelAssignmentBatch(path, batch, true);
         return committed?.receipt
           ? safeProjection({ run: ref, receipt: committed.receipt })
