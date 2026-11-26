@@ -498,6 +498,17 @@ Deno.test("Reviewed event subscription dispatches committed case metadata only o
     assertStringIncludes(messages[3], '"kind":"finding"');
     assertStringIncludes(messages[3], closedFindingId);
     assert(!messages[3].includes("Private historical finding"));
+    for (const run of [closed, replacement]) {
+      assertStringIncludes(
+        messages[3],
+        JSON.stringify({
+          kind: "task_created",
+          receipt: run.plan.runId,
+          caseId: "main",
+          recordedAt: run.plan.runStartedAt,
+        }),
+      );
+    }
     scheduler.stop();
     scheduler.start();
     await manage({ action: "agent_event_subscriptions" });

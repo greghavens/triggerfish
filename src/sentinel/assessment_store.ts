@@ -867,6 +867,7 @@ function saveAssessmentRunRevision(
   revision: number,
   {
     runId,
+    runStartedAt,
     timeoutSeconds,
     modelProfile,
     modelFallbackProfiles,
@@ -877,6 +878,7 @@ function saveAssessmentRunRevision(
   }: Pick<
     AssessmentPlan,
     | "runId"
+    | "runStartedAt"
     | "timeoutSeconds"
     | "modelProfile"
     | "modelFallbackProfiles"
@@ -890,7 +892,8 @@ function saveAssessmentRunRevision(
   db.exec(`CREATE TABLE IF NOT EXISTS assessment_run_revisions (
     revision INTEGER PRIMARY KEY, runId TEXT NOT NULL, timeoutSeconds INTEGER,
     modelProfile TEXT, plannerHeartbeatSeconds INTEGER, linkedCaseSources TEXT,
-    childDescription TEXT, modelFallbackProfiles TEXT, inventoryCoverageEnabled INTEGER
+    childDescription TEXT, modelFallbackProfiles TEXT, inventoryCoverageEnabled INTEGER,
+    runStartedAt INTEGER
   )`);
   const columns = db.prepare("PRAGMA table_info(assessment_run_revisions)")
     .all().map(({ name }) => name);
@@ -929,10 +932,19 @@ function saveAssessmentRunRevision(
       "ALTER TABLE assessment_run_revisions ADD COLUMN inventoryCoverageEnabled INTEGER",
     );
   }
+  if (!columns.includes("runStartedAt")) {
+    db.exec(
+      "ALTER TABLE assessment_run_revisions ADD COLUMN runStartedAt INTEGER",
+    );
+  }
   db.prepare(
-    `INSERT OR IGNORE INTO assessment_run_revisions
-      (revision, runId, timeoutSeconds, modelProfile, plannerHeartbeatSeconds, linkedCaseSources, childDescription, modelFallbackProfiles, inventoryCoverageEnabled)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO assessment_run_revisions
+      (revision, runId, timeoutSeconds, modelProfile, plannerHeartbeatSeconds, linkedCaseSources, childDescription, modelFallbackProfiles, inventoryCoverageEnabled, runStartedAt)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(revision) DO UPDATE SET runStartedAt = excluded.runStartedAt
+      WHERE assessment_run_revisions.runId = excluded.runId
+        AND assessment_run_revisions.runStartedAt IS NULL
+        AND excluded.runStartedAt IS NOT NULL`,
   ).run(
     revision,
     runId,
@@ -945,6 +957,7 @@ function saveAssessmentRunRevision(
     inventoryCoverageEnabled === undefined
       ? null
       : Number(inventoryCoverageEnabled),
+    runStartedAt ?? null,
   );
 }
 
@@ -1758,6 +1771,9 @@ export function startSentinelAssessment(
             throw new Error(
               "The selected Sentinel category version is unavailable",
             );
+          }
+          if (row) {
+            saveAssessmentRunRevision(db, row.revision, JSON.parse(row.plan));
           }
           const startedAt = Date.now();
           const asJson = JSON.stringify({
@@ -4010,6 +4026,48 @@ export function readSentinelAssessmentHistory(path: string) {
       updatedAt: String(updatedAt),
       summary: (JSON.parse(String(result)) as Result).summary,
     }));
+  } finally {
+    db.close();
+  }
+}
+
+/** Read run-start timestamps from exact retained revisions and the current plan. */
+export function readSentinelRunStartEvents(path: string) {
+  const db = openStore(path, false);
+  if (!db) return [];
+  try {
+    const events = new Map<string, number>();
+    const retain = (runId: unknown, startedAt: unknown) => {
+      if (
+        typeof runId === "string" && constraintUuid.test(runId) &&
+        typeof startedAt === "number" && Number.isSafeInteger(startedAt) &&
+        startedAt > 0
+      ) events.set(runId, startedAt);
+    };
+    if (
+      hasTable(db, "assessment_run_revisions") &&
+      db.prepare("PRAGMA table_info(assessment_run_revisions)").all().some(
+        ({ name }) => name === "runStartedAt",
+      )
+    ) {
+      for (
+        const row of db.prepare(`
+        SELECT runId, MIN(runStartedAt) AS startedAt
+        FROM assessment_run_revisions WHERE runStartedAt IS NOT NULL
+        GROUP BY runId HAVING MIN(runStartedAt) = MAX(runStartedAt)
+        ORDER BY startedAt, runId
+      `).all()
+      ) retain(row.runId, row.startedAt);
+    }
+    const current = getRow(db);
+    if (current) {
+      const plan = JSON.parse(current.plan) as AssessmentPlan;
+      retain(plan.runId, plan.runStartedAt);
+    }
+    return Array.from(
+      events,
+      ([receipt, recordedAt]) => ({ receipt, recordedAt }),
+    );
   } finally {
     db.close();
   }

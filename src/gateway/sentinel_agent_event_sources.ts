@@ -6,6 +6,7 @@ import {
   readSentinelAssessment,
   readSentinelCaseStatus,
   readSentinelGoalCompletionEvents,
+  readSentinelRunStartEvents,
 } from "../sentinel/assessment_store.ts";
 import {
   listSentinelCaseIds,
@@ -42,14 +43,10 @@ export function sentinelAgentEventSources(
         const status = readSentinelCaseStatus(path, true);
         const runId = status?.discovery?.runId;
         if (!status || !runId) continue;
-        const startedAt = status.discovery?.startedAt;
-        if (startedAt && kinds.has("task_created")) {
-          publish({
-            kind: "task_created",
-            receipt: runId,
-            caseId,
-            recordedAt: Date.parse(startedAt),
-          });
+        if (kinds.has("task_created")) {
+          for (const start of readSentinelRunStartEvents(path)) {
+            publish({ kind: "task_created", caseId, ...start });
+          }
         }
         if (status.status === "timed_out" && kinds.has("timeout")) {
           publish({
