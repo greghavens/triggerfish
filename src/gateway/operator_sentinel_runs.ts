@@ -19,6 +19,7 @@ import {
   readSentinelAssessment,
   readSentinelAssessmentRevision,
   readSentinelCaseStatus,
+  readSentinelChildDescription,
   readSentinelLinkedSourcesForRevision,
   readSentinelLinkedStartSeed,
   readSentinelModelProfileForRevision,
@@ -51,6 +52,7 @@ export function createOperatorSentinelRuns(
   linkedCaseSources(
     ref: OperatorRunRef,
   ): readonly SentinelLinkedCaseSource[] | undefined;
+  childDescription(ref: OperatorRunRef): string | undefined;
   startSeed(ref: OperatorRunRef): SentinelLinkedSeedTask | undefined;
   matchesStartGoal(ref: OperatorRunRef, goal?: string): boolean;
   matchesStartTimeout(ref: OperatorRunRef, timeoutSeconds?: number): boolean;
@@ -61,6 +63,7 @@ export function createOperatorSentinelRuns(
       input: Omit<OperatorRunLinkInput, "right">;
       graphDigest: string;
       childGoal?: string;
+      childDescription?: string;
       seedTask?: SentinelLinkedSeedTask;
       timeoutSeconds?: number;
       modelProfile?: SelectedModelProfile;
@@ -117,7 +120,7 @@ export function createOperatorSentinelRuns(
     };
     const summary: OperatorRunSummary = {
       ref: publicRef,
-      label: ref.id,
+      label: readSentinelChildDescription(path, publicRef.revision) ?? ref.id,
       status: publicRef.revision === status.revision ? status.status : "saved",
       classification: "INTERNAL",
       evidence: [{
@@ -254,6 +257,12 @@ export function createOperatorSentinelRuns(
       const path = pathFor(ref);
       return path && ref.revision !== undefined
         ? readSentinelModelProfileForRevision(path, ref.revision)
+        : undefined;
+    },
+    childDescription(ref) {
+      const path = pathFor(ref);
+      return path && ref.revision !== undefined
+        ? readSentinelChildDescription(path, ref.revision)
         : undefined;
     },
     startSeed(ref) {

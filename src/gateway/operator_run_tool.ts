@@ -166,6 +166,7 @@ import {
   sentinelFindingDispositions,
   sentinelIncidentDispositions,
   type SentinelReviewStep,
+  validSentinelChildDescription,
 } from "../sentinel/assessment_store.ts";
 import { resolveSentinelCaseMembership } from "../sentinel/case_membership.ts";
 import {
@@ -644,6 +645,10 @@ export const operatorRunTool: ToolDefinition = {
       enum: ["sentinel", "workflow", "delegated", "scheduled"],
     },
     targetId: { type: "string", description: "Exact linked run ID" },
+    childDescription: {
+      type: "string",
+      description: "Optional display title for a linked Sentinel assessment.",
+    },
     childGoal: {
       type: "string",
       description: "Optional objective for a linked Sentinel assessment start.",
@@ -7882,6 +7887,7 @@ export function createOperatorRunToolExecutor(options: {
           targetId,
           requestId,
           childGoal,
+          childDescription,
           seedTask: rawSeedTask,
           timeoutSeconds,
           modelProfile: namedProfile,
@@ -7906,6 +7912,7 @@ export function createOperatorRunToolExecutor(options: {
               "targetId",
               "requestId",
               "childGoal",
+              "childDescription",
               "seedTask",
               "timeoutSeconds",
               "modelProfile",
@@ -7918,6 +7925,9 @@ export function createOperatorRunToolExecutor(options: {
               !sourceCases.length || sourceCases.length > 4)) ||
           (rawSeedTask !== undefined &&
             (targetKind !== "sentinel" || !seedTask)) ||
+          (childDescription !== undefined &&
+            (targetKind !== "sentinel" ||
+              !validSentinelChildDescription(childDescription))) ||
           (childGoal !== undefined &&
             (targetKind !== "sentinel" || typeof childGoal !== "string" ||
               !childGoal.trim() || childGoal.length > 500)) ||
@@ -8017,6 +8027,7 @@ export function createOperatorRunToolExecutor(options: {
               link.origin !== "spawn" || link.requestId !== request ||
               other.id !== targetId || other.revision === undefined ||
               !providers.sentinel.matchesStartGoal(other, childGoal) ||
+              providers.sentinel.childDescription(other) !== childDescription ||
               !isDeepStrictEqual(
                 providers.sentinel.startSeed(other),
                 seedTask,
@@ -8060,6 +8071,7 @@ export function createOperatorRunToolExecutor(options: {
                 requestId: request,
                 ...(graphDigest && { graphDigest }),
                 ...(childGoal !== undefined && { childGoal }),
+                ...(childDescription !== undefined && { childDescription }),
                 ...(seedTask && { seedTask }),
                 ...(timeoutSeconds !== undefined && { timeoutSeconds }),
                 ...(modelProfile && { modelProfile }),
@@ -8095,6 +8107,7 @@ export function createOperatorRunToolExecutor(options: {
               ...link,
               graphDigest,
               childGoal,
+              childDescription,
               seedTask,
               timeoutSeconds,
               modelProfile,

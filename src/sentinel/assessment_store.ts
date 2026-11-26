@@ -99,6 +99,7 @@ export type AssessmentPlan =
     readonly modelProfile?: SelectedModelProfile;
     readonly plannerHeartbeatSeconds?: number;
     readonly linkedCaseSources?: readonly SentinelLinkedCaseSource[];
+    readonly childDescription?: string;
     readonly formalGoals?: readonly SentinelFormalGoal[];
     readonly activeFormalGoalIds?: readonly string[];
     readonly completedFormalGoalIds?: readonly string[];
@@ -716,6 +717,7 @@ function saveAssessmentRunRevision(
     modelProfile,
     plannerHeartbeatSeconds,
     linkedCaseSources,
+    childDescription,
   }: Pick<
     AssessmentPlan,
     | "runId"
@@ -723,12 +725,14 @@ function saveAssessmentRunRevision(
     | "modelProfile"
     | "plannerHeartbeatSeconds"
     | "linkedCaseSources"
+    | "childDescription"
   >,
 ) {
   if (!runId) return;
   db.exec(`CREATE TABLE IF NOT EXISTS assessment_run_revisions (
     revision INTEGER PRIMARY KEY, runId TEXT NOT NULL, timeoutSeconds INTEGER,
-    modelProfile TEXT, plannerHeartbeatSeconds INTEGER, linkedCaseSources TEXT
+    modelProfile TEXT, plannerHeartbeatSeconds INTEGER, linkedCaseSources TEXT,
+    childDescription TEXT
   )`);
   const columns = db.prepare("PRAGMA table_info(assessment_run_revisions)")
     .all().map(({ name }) => name);
@@ -752,10 +756,15 @@ function saveAssessmentRunRevision(
       "ALTER TABLE assessment_run_revisions ADD COLUMN linkedCaseSources TEXT",
     );
   }
+  if (!columns.includes("childDescription")) {
+    db.exec(
+      "ALTER TABLE assessment_run_revisions ADD COLUMN childDescription TEXT",
+    );
+  }
   db.prepare(
     `INSERT OR IGNORE INTO assessment_run_revisions
-      (revision, runId, timeoutSeconds, modelProfile, plannerHeartbeatSeconds, linkedCaseSources)
-      VALUES (?, ?, ?, ?, ?, ?)`,
+      (revision, runId, timeoutSeconds, modelProfile, plannerHeartbeatSeconds, linkedCaseSources, childDescription)
+      VALUES (?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     revision,
     runId,
@@ -763,6 +772,7 @@ function saveAssessmentRunRevision(
     modelProfile ? JSON.stringify(modelProfile) : null,
     plannerHeartbeatSeconds ?? null,
     linkedCaseSources ? JSON.stringify(linkedCaseSources) : null,
+    childDescription ?? null,
   );
 }
 
@@ -1299,6 +1309,14 @@ export function publishedSentinelGraphDigest(path: string): string | undefined {
     : createHash("sha256").update(graph).digest("hex");
 }
 
+/** A linked assessment title is exact, bounded, and safe to render on one line. */
+export function validSentinelChildDescription(value: unknown): value is string {
+  return typeof value === "string" && !!value.trim() && value.length <= 160 &&
+    !Array.from(value).some((char) =>
+      char.charCodeAt(0) < 32 || char === "\x7f"
+    );
+}
+
 export function startSentinelAssessment(
   path: string,
   plan: AssessmentPlan = {},
@@ -1309,6 +1327,7 @@ export function startSentinelAssessment(
     caseId: string;
     graphDigest: string;
     seedTask?: SentinelLinkedSeedTask;
+    childDescription?: string;
     timeoutSeconds?: number;
     modelProfile?: SelectedModelProfile;
     plannerHeartbeatSeconds?: number;
@@ -1319,6 +1338,12 @@ export function startSentinelAssessment(
     plan.formalGoals !== undefined || plan.activeFormalGoalIds !== undefined ||
     plan.completedFormalGoalIds !== undefined
   ) throw new Error("Formal Sentinel goals require an approved goal proposal");
+  const childDescription = linkedStart?.childDescription;
+  if (
+    plan.childDescription !== undefined ||
+    (childDescription !== undefined &&
+      !validSentinelChildDescription(childDescription))
+  ) throw new Error("Invalid linked Sentinel description");
   const linkedCaseSources = parseSentinelLinkedCaseSources(
     linkedStart?.linkedCaseSources,
   );
@@ -1387,6 +1412,7 @@ export function startSentinelAssessment(
             runId: crypto.randomUUID(),
             ...(modelProfile && { modelProfile }),
             ...(linkedCaseSources && { linkedCaseSources }),
+            ...(childDescription !== undefined && { childDescription }),
             ...(plannerHeartbeatSeconds !== undefined &&
               { plannerHeartbeatSeconds }),
             ...(timeoutSeconds !== undefined && {
@@ -2248,6 +2274,32 @@ export function readSentinelOperatingConstraintVersion(
 ): SentinelOperatingConstraintRecord | undefined {
   if (!Number.isSafeInteger(version) || version < 1) return undefined;
   return operatingConstraintRecords(path, runId, 1, undefined, version)[0];
+}
+
+/** Read the title for this exact saved assessment revision. */
+export function readSentinelChildDescription(
+  path: string,
+  revision: number,
+): string | undefined {
+  const db = openStore(path, false);
+  if (!db) return;
+  try {
+    const current = getRow(db);
+    const description: unknown = current?.revision === revision
+      ? (JSON.parse(current.plan) as AssessmentPlan).childDescription
+      : hasTable(db, "assessment_run_revisions")
+      ? db.prepare(
+        "SELECT * FROM assessment_run_revisions WHERE revision = ?",
+      ).get(revision)?.childDescription
+      : undefined;
+    if (description == null) return;
+    if (!validSentinelChildDescription(description)) {
+      throw new Error("Invalid saved linked Sentinel description");
+    }
+    return description;
+  } finally {
+    db.close();
+  }
 }
 
 /** Reopen the approved first assignment and its durable request identity. */

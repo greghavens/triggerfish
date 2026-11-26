@@ -42,6 +42,7 @@ import {
   MAX_SENTINEL_RUN_TIMEOUT_SECONDS,
   readSentinelAssessmentRevision,
   SENTINEL_ASSESSMENT_TIMED_OUT,
+  validSentinelChildDescription,
 } from "./assessment_store.ts";
 import { readNativeWorkflowCitation } from "./native_workflow_evidence.ts";
 import { validateArchivedSourceSnapshots } from "./archive_source_snapshots.ts";
@@ -331,6 +332,7 @@ function restoreAssessment(
       );
     }
     const {
+      childDescription,
       timeoutSeconds,
       deadlineAt,
       modelProfile,
@@ -338,6 +340,10 @@ function restoreAssessment(
     } = object(
       JSON.parse(row.plan),
     );
+    if (
+      childDescription !== undefined &&
+      !validSentinelChildDescription(childDescription)
+    ) throw new Error("Invalid archived linked Sentinel description");
     const linkedCaseSources = object(JSON.parse(row.plan)).linkedCaseSources;
     if (
       linkedCaseSources !== undefined &&

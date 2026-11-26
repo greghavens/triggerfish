@@ -3051,11 +3051,13 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
         edges: [],
       };
       await Deno.writeTextFile(childPath, JSON.stringify(childGraph));
+      const childDescription = "Child logging review";
       const childGoal = "Verify logging coverage on the child asset.";
       const seedTask = { kind: "trace", nodeId: "child-asset" };
       const sentinelSpawn = {
         ...spawn,
         childGoal,
+        childDescription,
         seedTask,
         targetKind: "sentinel",
         targetId: childCase,
@@ -3065,7 +3067,11 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
       for (
         const invalid of [
           { ...spawn, childGoal },
+          { ...spawn, childDescription },
           { ...spawn, seedTask },
+          { ...sentinelSpawn, childDescription: " " },
+          { ...sentinelSpawn, childDescription: "Review\nLogging" },
+          { ...sentinelSpawn, childDescription: "x".repeat(161) },
           { ...sentinelSpawn, seedTask: { ...seedTask, kind: "run_command" } },
           { ...sentinelSpawn, seedTask: { ...seedTask, command: "fixture" } },
           { ...sentinelSpawn, childGoal: " " },
@@ -3144,6 +3150,7 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
       assertEquals(readSentinelAssessment(childPath), undefined);
       const linkedSentinel = JSON.parse((await turn(sentinelSpawn)).result);
       assertEquals(linkedSentinel.run.status, "running");
+      assertEquals(linkedSentinel.run.label, childDescription);
       assertEquals(linkedSentinel.run.ref, {
         kind: "sentinel",
         id: childCase,
@@ -3156,10 +3163,12 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
         confirmations.at(-1)!.split("\n").at(-1)!,
       );
       assertEquals(childApproval.childGoal, childGoal);
+      assertEquals(childApproval.childDescription, childDescription);
       assertEquals(childApproval.seedTask, seedTask);
       const childState = readSentinelAssessment(childPath);
       assert(childState);
       assertEquals(childState.plan.goal, childGoal);
+      assertEquals(childState.plan.childDescription, childDescription);
       assert(readSentinelAssessment(path)?.plan.goal !== childGoal);
       const readSeed = () =>
         readAdaptiveSentinel(childPath, childState)?.tasks.filter(
@@ -3213,6 +3222,7 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
       await withGateway(async (reopenTurn) => {
         const reopened = JSON.parse((await reopenTurn(sentinelSpawn)).result);
         assertEquals(reopened.link, linkedSentinel.link);
+        assertEquals(reopened.run.label, childDescription);
         assertEquals(
           reopened.run.details.runId,
           linkedSentinel.run.details.runId,
@@ -3221,6 +3231,8 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
           const different of [
             { ...sentinelSpawn, childGoal: "Check a different control." },
             { ...sentinelSpawn, childGoal: undefined },
+            { ...sentinelSpawn, childDescription: undefined },
+            { ...sentinelSpawn, childDescription: childDescription + "." },
             { ...sentinelSpawn, seedTask: undefined },
             { ...sentinelSpawn, seedTask: { ...seedTask, kind: "impact" } },
           ]
@@ -3260,6 +3272,16 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
         duringConfirmation = undefined;
       }
       assert(readSentinelAssessment(childPath)?.active);
+      for (const revision of [1, 2]) {
+        const titled = JSON.parse(
+          (await turn({
+            action: "inspect",
+            ...linkedSentinel.run.ref,
+            revision,
+          })).result,
+        ).run;
+        assertEquals(titled.label, childDescription);
+      }
       const newestCancel = { ...cancelSentinel, revision: 2 };
       assertEquals(
         JSON.parse((await turn(newestCancel)).result).run.status,
@@ -3374,6 +3396,7 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
           const restoredRun = JSON.parse(
             (await restartTurn({ ...lifecycle, action: "inspect" })).result,
           ).run;
+          assertEquals(restoredRun.label, childDescription);
           assertEquals(restoredRun.status, "timed_out");
           assertEquals(
             restoredRun.details.deadlineAt,
