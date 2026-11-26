@@ -3,6 +3,7 @@ import {
   MAX_TRAFFIC_COMPOSITION_JOURNAL_BYTES,
 } from "./finding_traffic_composition.ts";
 import {
+  decodeSentinelFindingTrafficLink,
   decodeSentinelTrafficLinkAnnotation,
   MAX_FINDING_TRAFFIC_BATCH,
 } from "./finding_traffic_links.ts";
@@ -686,6 +687,14 @@ function validateAuxiliary(
           throw new Error("Foreign Sentinel archive traffic set scope");
         }
       }
+    }
+    if (tables.has("traffic_links")) {
+      requireColumns(db, "traffic_links", ["recorded_at"]);
+      const links = db.prepare("SELECT * FROM traffic_links LIMIT 4097").all();
+      if (links.length > 4096) {
+        throw new Error("Invalid archived Sentinel traffic link count");
+      }
+      for (const row of links) decodeSentinelFindingTrafficLink(row, caseId);
     }
     if (tables.has("traffic_link_batches")) {
       requireColumns(db, "traffic_link_batches", [

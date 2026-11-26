@@ -120,6 +120,7 @@ import {
   SENTINEL_TRAFFIC_SEARCH,
   sentinelLinkedTrafficPayloadArgs,
   sentinelTrafficAttachArgs,
+  sentinelTrafficAttachBatchArgs,
   sentinelTrafficLinksArgs,
   sentinelTrafficPageReference,
   sentinelTrafficReadArgs,
@@ -250,6 +251,7 @@ import {
   reopenSentinelLinkedTrafficPayload,
   sentinelFindingTrafficAttachTool,
   sentinelFindingTrafficListTool,
+  sentinelReporterTrafficAttachTool,
 } from "./sentinel_finding_traffic_tool.ts";
 import {
   executeSentinelTrafficTool,
@@ -1123,6 +1125,10 @@ interface ActiveTurn {
   readonly approvalConstraints?:
     SentinelTurnCheckpointOptions["operatingConstraints"];
   readonly approvedTraffic: Set<string>;
+  readonly approvedReporterTraffic: Map<
+    string,
+    { stepIndex: number; sha256: string }
+  >;
   readonly stagedGraphFacts: ReturnType<typeof stageSentinelGraphFacts>;
   reads: number;
   workers: number;
@@ -3668,6 +3674,10 @@ function createAgent(
         "sentinel_attach_finding_traffic",
         "sentinel_update_finding_report",
       ].includes(name)
+    ).map((tool) =>
+      tool.name === sentinelFindingTrafficAttachTool.name
+        ? sentinelReporterTrafficAttachTool
+        : tool
     )
     : availableTools;
   const mutationTools = new Set([
@@ -4143,6 +4153,7 @@ function createAgent(
           canReadPlannerCase
             ? (assetId) => currentPlannerReceiptScope(turn, assetId)
             : undefined,
+          reporter ? turn.approvedReporterTraffic : undefined,
         );
       }
       if (isSentinelTrafficTool(name)) {
@@ -5141,7 +5152,18 @@ function createAgent(
       }
       if (turn && !failed && name === sentinelTrafficGetTool.name) {
         const key = approvedSentinelTrafficAttachmentKey(result);
-        if (key) turn.approvedTraffic.add(key);
+        if (key) {
+          turn.approvedTraffic.add(key);
+          if (
+            reporter && turn.traceStepCount < 16 &&
+            !turn.approvedReporterTraffic.has(key)
+          ) {
+            turn.approvedReporterTraffic.set(key, {
+              stepIndex: turn.traceStepCount,
+              sha256: createHash("sha256").update(result).digest("hex"),
+            });
+          }
+        }
       }
       const liveStatus = !failed && name === liveWorkflowStatusTool.name &&
           options.assessmentRevision !== undefined
@@ -5242,7 +5264,7 @@ function createAgent(
         : !failed && name === SENTINEL_ASSET_DISCOVERY_SUBMIT
         ? JSON.parse(result).id
         : !failed && name === SENTINEL_TRAFFIC_ATTACH
-        ? JSON.parse(result).link?.id
+        ? (JSON.parse(result).link?.id ?? JSON.parse(result).id)
         : !failed && name === publishWorkflowObservationTool.name
         ? (JSON.parse(result) as { id: string }).id
         : !failed && name === sentinelPublishGraphFact.name
@@ -6082,6 +6104,7 @@ function createAgent(
             },
           }),
           approvedTraffic: new Set(),
+          approvedReporterTraffic: new Map(),
           stagedGraphFacts: [],
           trace,
           onBatchReadReceipt,
@@ -6633,6 +6656,15 @@ function createAgent(
                   const key = approvedSentinelTrafficAttachmentKey(saved);
                   if (!key) return false;
                   turn.approvedTraffic.add(key);
+                  if (
+                    reporter && stepIndex < 16 &&
+                    !turn.approvedReporterTraffic.has(key)
+                  ) {
+                    turn.approvedReporterTraffic.set(key, {
+                      stepIndex,
+                      sha256: createHash("sha256").update(saved).digest("hex"),
+                    });
+                  }
                   continue;
                 }
                 if (
@@ -6798,7 +6830,8 @@ function createAgent(
               const input = name === sentinelPublishGraphFact.name
                 ? sentinelGraphPublicationArguments(args)
                 : name === SENTINEL_TRAFFIC_ATTACH
-                ? sentinelTrafficAttachArgs(args)
+                ? sentinelTrafficAttachArgs(args) ??
+                  (reporter ? sentinelTrafficAttachBatchArgs(args) : undefined)
                 : isSentinelFindingMutation(name)
                 ? sentinelFindingMutationArguments(name, args)
                 : undefined;
@@ -6811,7 +6844,8 @@ function createAgent(
             const recoverable = reporter ||
               (new Set(
                     calls.map(({ name }, index) =>
-                      isRepeatableSentinelReceiptRead(name)
+                      (name === SENTINEL_TRAFFIC_READ ||
+                          isRepeatableSentinelReceiptRead(name))
                         ? `${name}:${journalRequests[index]?.argsDigest}`
                         : name
                     ),

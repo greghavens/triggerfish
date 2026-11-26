@@ -67,6 +67,7 @@ import {
   sentinelLinkedTrafficPayloadArgs,
   sentinelLinkedTrafficPayloadReference,
   sentinelTrafficAttachArgs,
+  sentinelTrafficAttachBatchArgs,
   sentinelTrafficLinkPageReference,
   sentinelTrafficLinksArgs,
   sentinelTrafficPageReference,
@@ -139,6 +140,11 @@ export type SentinelJournalMutationLookup = (
   readonly result: string;
   readonly source?: { stepIndex: number; sha256: string };
   readonly traffic?: ReturnType<typeof sentinelTrafficReadArgs>;
+  readonly trafficBatch?: readonly {
+    readonly args: NonNullable<ReturnType<typeof sentinelTrafficReadArgs>>;
+    readonly stepIndex: number;
+    readonly sha256: string;
+  }[];
 } | undefined;
 
 export function sentinelGraphPublicationArguments(input: unknown) {
@@ -256,7 +262,10 @@ function normalizeWorkerCheckpoint(
   ];
   const seen = new Map<string, readonly [string, number]>();
   const sourceResults: string[] = [];
-  const trafficReads: ReturnType<typeof sentinelTrafficReadArgs>[] = [];
+  const trafficReads = new Map<
+    number,
+    NonNullable<ReturnType<typeof sentinelTrafficReadArgs>>
+  >();
   let batches = 0;
   let guidance = 0;
   for (let index = 0; index < exchanges.length; index++) {
@@ -306,7 +315,8 @@ function normalizeWorkerCheckpoint(
         (!workflow && !published && !journalWrite && !recheckContext &&
           !trafficRead && !trafficSearch && !trafficLinks && !goalReceiptRead &&
           name !== ASSIGNED_TARGET_CHECKPOINT_TOOL) ||
-        (!isRepeatableSentinelReceiptRead(name) && seen.has(name)) ||
+        (!trafficRead && !isRepeatableSentinelReceiptRead(name) &&
+          seen.has(name)) ||
         typeof call?.id !== "string" ||
         !/^[A-Za-z0-9._:-]{1,128}$/.test(call.id) || providerIds.has(call.id) ||
         (call.type !== undefined && call.type !== "function") ||
@@ -328,6 +338,7 @@ function normalizeWorkerCheckpoint(
           | ReturnType<typeof sentinelGraphPublicationArguments>
           | ReturnType<typeof sentinelFindingMutationArguments>
           | ReturnType<typeof sentinelTrafficAttachArgs>
+          | ReturnType<typeof sentinelTrafficAttachBatchArgs>
           | ReturnType<typeof sentinelAssetDiscoveryArguments>
           | ReturnType<typeof sentinelGoalProposalArguments>
           | ReturnType<typeof sentinelGoalProofArguments>;
@@ -336,7 +347,8 @@ function normalizeWorkerCheckpoint(
           claimed = finding
             ? sentinelFindingMutationArguments(finding, offered)
             : trafficAttach
-            ? sentinelTrafficAttachArgs(offered)
+            ? sentinelTrafficAttachArgs(offered) ??
+              sentinelTrafficAttachBatchArgs(offered)
             : discovery
             ? sentinelAssetDiscoveryArguments(offered, targetId)
             : goalProof
@@ -354,10 +366,16 @@ function normalizeWorkerCheckpoint(
           !claimed || !saved || !isDeepStrictEqual(claimed, saved.args) ||
           tool.content !== saved.result ||
           (trafficAttach &&
-            (!saved.traffic ||
-              !trafficReads.some((read) =>
-                isDeepStrictEqual(read, saved.traffic)
-              ))) ||
+            (saved.trafficBatch
+              ? saved.trafficBatch.some(({ args, stepIndex, sha256 }) =>
+                !isDeepStrictEqual(trafficReads.get(stepIndex), args) ||
+                createHash("sha256").update(sourceResults[stepIndex] ?? "")
+                    .digest("hex") !== sha256
+              )
+              : !saved.traffic ||
+                !Array.from(trafficReads.values()).some((read) =>
+                  isDeepStrictEqual(read, saved.traffic)
+                ))) ||
           (saved.source &&
             (!source || !seen.has(ASSIGNED_TARGET_CHECKPOINT_TOOL) ||
               saved.source.sha256 !==
@@ -493,7 +511,7 @@ function normalizeWorkerCheckpoint(
           )
         ) return;
         args = input;
-        trafficReads.push(input);
+        trafficReads.set(sourceResults.length, input);
       } else if (recheckContext) {
         let input: ReturnType<typeof sentinelRecheckContextArgs>;
         try {
@@ -535,7 +553,7 @@ function normalizeWorkerCheckpoint(
       const signature = `${name}:${
         JSON.stringify(args, Object.keys(args).sort())
       }`;
-      const repeatable = linkedPayloadRead ||
+      const repeatable = trafficRead || linkedPayloadRead ||
         isRepeatableSentinelReceiptRead(name);
       const key = repeatable ? signature : name;
       if (seen.has(key)) return;
@@ -9095,7 +9113,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
               batch.push({
                 ...verified,
                 tool,
-                callId: `recovery-${tool}`,
+                callId: `recovery-${tool}-${earlierResults.length + index}`,
                 id: undefined,
               });
               continue;

@@ -47,11 +47,15 @@ import {
   SENTINEL_TRAFFIC_SEARCH,
   sentinelLinkedTrafficPayloadArgs,
   sentinelTrafficAttachArgs,
+  sentinelTrafficAttachBatchArgs,
   sentinelTrafficBlobArgs,
   sentinelTrafficReadArgs,
   sentinelTrafficSearchArgs,
 } from "../sentinel/traffic_recovery.ts";
-import { readSentinelFindingTrafficWriteReceipt } from "../sentinel/finding_traffic_links.ts";
+import {
+  readSentinelFindingTrafficAssignmentBatch,
+  readSentinelFindingTrafficWriteReceipt,
+} from "../sentinel/finding_traffic_links.ts";
 import {
   readProjectedSentinelTrafficReceipt,
   reopenProjectedSentinelTrafficBlob,
@@ -4300,6 +4304,57 @@ export function createSentinelModelPlanner(
           : undefined;
       }
       if (tool === SENTINEL_TRAFFIC_ATTACH) {
+        const batch = readSentinelFindingTrafficAssignmentBatch(snapshotPath, {
+          caseId,
+          runId: current.plan.runId,
+          evidenceRevision: current.revision,
+          taskId,
+          assetId: targetId,
+        }, requestId);
+        if (batch) {
+          const trafficBatch = [];
+          for (const link of batch.links) {
+            const args = {
+              revision: current.revision,
+              evidenceId: link.trafficId,
+              digest: link.trafficDigest,
+            };
+            const projected = readProjectedSentinelTrafficReceipt(
+              snapshotPath,
+              caseId,
+              current.revision,
+              args,
+              targetId,
+            );
+            if (
+              !link.sourceStep ||
+              projected?.receipt.family !== link.trafficSource ||
+              link.sourceStep.sha256 !== createHash("sha256")
+                  .update(JSON.stringify(projected)).digest("hex")
+            ) return;
+            trafficBatch.push({ args, ...link.sourceStep });
+          }
+          const args = sentinelTrafficAttachBatchArgs({
+            revision: current.revision,
+            findingId: batch.links[0].findingId,
+            reportVersion: batch.links[0].reportVersion,
+            requestId,
+            trafficRefs: batch.links.map((link) => ({
+              evidenceId: link.trafficId,
+              digest: link.trafficDigest,
+              ...(link.evidenceRole !== undefined &&
+                { evidenceRole: link.evidenceRole }),
+              ...(link.evidenceNote !== undefined &&
+                { evidenceNote: link.evidenceNote }),
+            })),
+          });
+          return args && {
+            id: batch.id,
+            args,
+            trafficBatch,
+            result: JSON.stringify({ _classification: "INTERNAL", ...batch }),
+          };
+        }
         const link = readSentinelFindingTrafficWriteReceipt(snapshotPath, {
           caseId,
           evidenceRevision: current.revision,

@@ -79,6 +79,7 @@ export interface SentinelFindingTrafficLinkInput {
   readonly evidenceNote?: string;
   readonly sourceHint?: { readonly id: number; readonly runId: string };
   readonly authority: SentinelFindingTrafficAuthority;
+  readonly sourceStep?: { readonly stepIndex: number; readonly sha256: string };
   readonly requestId: string;
 }
 
@@ -192,6 +193,7 @@ function normalize(
     trafficSource,
     trafficDigest,
     sourceHint,
+    sourceStep,
     authority,
     requestId,
   } = input;
@@ -205,7 +207,14 @@ function normalize(
     !sentinelTrafficSources.includes(trafficSource) ||
     typeof trafficDigest !== "string" || !digest.test(trafficDigest) ||
     typeof requestId !== "string" || !uuid.test(requestId) ||
-    !authority || (sourceHint !== undefined &&
+    !authority || (sourceStep !== undefined &&
+      (authority.kind !== "assignment" || !sourceStep ||
+        Object.keys(sourceStep).length !== 2 ||
+        !Number.isSafeInteger(sourceStep.stepIndex) ||
+        sourceStep.stepIndex < 0 ||
+        sourceStep.stepIndex >= 16 || typeof sourceStep.sha256 !== "string" ||
+        !digest.test(sourceStep.sha256))) ||
+    (sourceHint !== undefined &&
       (authority.kind !== "assignment" || !sourceHint ||
         Object.keys(sourceHint).length !== 2 || !positive(sourceHint.id) ||
         typeof sourceHint.runId !== "string" ||
@@ -228,6 +237,12 @@ function normalize(
     ...annotation,
     ...(sourceHint !== undefined &&
       { sourceHint: { id: sourceHint.id, runId: sourceHint.runId } }),
+    ...(sourceStep !== undefined && {
+      sourceStep: {
+        stepIndex: sourceStep.stepIndex,
+        sha256: sourceStep.sha256,
+      },
+    }),
     authority: authority.kind === "assignment"
       ? { kind: "assignment", taskId: authority.taskId }
       : { kind: "operator" },
@@ -326,8 +341,14 @@ function prepareTrafficBatch(
     inputs.length < 2 || inputs.length > MAX_FINDING_TRAFFIC_BATCH
   ) return;
   const canonical = inputs.map((input) => normalize(input, caseId));
-  const { findingId, assetId, evidenceRevision, recheckId, reportVersion } =
-    canonical[0];
+  const {
+    findingId,
+    assetId,
+    evidenceRevision,
+    recheckId,
+    reportVersion,
+    authority,
+  } = canonical[0];
   if (
     canonical.some((input) =>
       input.findingId !== findingId ||
@@ -335,7 +356,11 @@ function prepareTrafficBatch(
       input.evidenceRevision !== evidenceRevision ||
       input.recheckId !== recheckId ||
       input.reportVersion !== reportVersion ||
-      input.authority.kind !== "operator"
+      input.authority.kind !== authority.kind ||
+      (authority.kind === "assignment" &&
+        (input.authority.kind !== "assignment" ||
+          input.authority.taskId !== authority.taskId || !input.sourceStep ||
+          recheckId !== undefined || input.sourceHint !== undefined))
     ) ||
     new Set(canonical.map(({ trafficId }) => trafficId)).size !==
       canonical.length
@@ -344,6 +369,45 @@ function prepareTrafficBatch(
     JSON.stringify([runId, canonical]),
   ).digest("hex");
   return { canonical, binding, saved: undefined };
+}
+
+function sameBatchSource(
+  link: SentinelFindingTrafficLink,
+  expected: SentinelFindingTrafficLinkInput,
+) {
+  return link.authority.kind === "assignment" &&
+    expected.authority.kind === "assignment" &&
+    link.authority.taskId === expected.authority.taskId &&
+    link.requestId === expected.requestId &&
+    link.sourceStep?.stepIndex === expected.sourceStep?.stepIndex &&
+    link.sourceStep?.sha256 === expected.sourceStep?.sha256;
+}
+
+function identifier(serialized: string) {
+  return "finding-traffic-link:" +
+    createHash("sha256").update(serialized).digest("hex");
+}
+/** Validate an archived or live immutable attachment before using its references. */
+export function decodeSentinelFindingTrafficLink(
+  row: Readonly<Record<string, unknown>>,
+  caseId: string,
+): SentinelFindingTrafficLink {
+  const input = normalize(JSON.parse(String(row.input)), caseId);
+  const id = identifier(JSON.stringify(input));
+  if (
+    id !== row.id || input.requestId !== row.request_id ||
+    input.evidenceRevision !== row.revision ||
+    input.findingId !== row.finding_id ||
+    typeof row.recorded_at !== "number" ||
+    !Number.isSafeInteger(row.recorded_at)
+  ) {
+    throw new Error("Invalid Sentinel finding traffic receipt");
+  }
+  return {
+    ...input,
+    id,
+    recordedAt: new Date(Number(row.recorded_at)).toISOString(),
+  };
 }
 
 function openLinks(snapshotPath: string, readOnly: boolean, now: () => number) {
@@ -379,31 +443,8 @@ function openLinks(snapshotPath: string, readOnly: boolean, now: () => number) {
     throw error;
   }
 
-  function identifier(serialized: string) {
-    return "finding-traffic-link:" +
-      createHash("sha256").update(serialized).digest("hex");
-  }
-  type Row = NonNullable<
-    ReturnType<ReturnType<DatabaseSync["prepare"]>["get"]>
-  >;
-  function decode(row: Row): SentinelFindingTrafficLink {
-    const input = normalize(JSON.parse(String(row.input)), caseId!);
-    const id = identifier(JSON.stringify(input));
-    if (
-      id !== row.id || input.requestId !== row.request_id ||
-      input.evidenceRevision !== row.revision ||
-      input.findingId !== row.finding_id ||
-      typeof row.recorded_at !== "number" ||
-      !Number.isSafeInteger(row.recorded_at)
-    ) {
-      throw new Error("Invalid Sentinel finding traffic receipt");
-    }
-    return {
-      ...input,
-      id,
-      recordedAt: new Date(Number(row.recorded_at)).toISOString(),
-    };
-  }
+  const decode = (row: Readonly<Record<string, unknown>>) =>
+    decodeSentinelFindingTrafficLink(row, caseId!);
 
   function annotationsForLink(
     linkId: string,
@@ -616,11 +657,64 @@ function openLinks(snapshotPath: string, readOnly: boolean, now: () => number) {
         link.recheckId !== recheckId ||
         link.trafficId !== expected.trafficId ||
         link.trafficDigest !== expected.trafficDigest ||
-        link.trafficSource !== expected.trafficSource
+        link.trafficSource !== expected.trafficSource ||
+        (expected.sourceStep && !sameBatchSource(link, expected))
       ) return;
       saved.push(link);
     }
     return { canonical, binding, saved };
+  }
+
+  function readAssignmentBatch(
+    scope: {
+      caseId: string;
+      runId: string;
+      evidenceRevision: number;
+      taskId: string;
+      assetId: string;
+    },
+    requestId: string,
+  ) {
+    if (
+      scope.caseId !== caseId || !uuid.test(requestId) ||
+      !hasTable(db, batchTable)
+    ) return;
+    const batch = db.prepare(
+      "SELECT * FROM traffic_link_batches WHERE request_id = ?",
+    ).get(requestId);
+    if (
+      batch?.run_id !== scope.runId ||
+      batch.revision !== scope.evidenceRevision
+    ) return;
+    const ids = JSON.parse(String(batch.link_ids));
+    if (
+      !Array.isArray(ids) || ids.length < 2 ||
+      ids.length > MAX_FINDING_TRAFFIC_BATCH ||
+      !ids.every((id) => typeof id === "string" && linkIdPattern.test(id)) ||
+      new Set(ids).size !== ids.length
+    ) return;
+    const lookup = db.prepare("SELECT * FROM traffic_links WHERE id = ?");
+    const links = [];
+    for (const id of ids) {
+      const row = lookup.get(id);
+      const link = row && decode(row);
+      if (
+        !link || link.authority.kind !== "assignment" ||
+        link.authority.taskId !== scope.taskId || !link.sourceStep ||
+        link.assetId !== scope.assetId || link.findingId !== batch.finding_id ||
+        link.evidenceRevision !== scope.evidenceRevision
+      ) return;
+      links.push(link);
+    }
+    const prepared = prepareTrafficBatch(
+      scope.caseId,
+      requestId,
+      scope.runId,
+      links,
+    );
+    return prepared?.binding === batch.binding
+      ? { id: `finding-traffic-batch:${batch.binding}`, links }
+      : undefined;
   }
 
   function recordBatch(
@@ -651,7 +745,8 @@ function openLinks(snapshotPath: string, readOnly: boolean, now: () => number) {
           if (
             !link || link.assetId !== input.assetId ||
             link.trafficDigest !== input.trafficDigest ||
-            link.trafficSource !== input.trafficSource
+            link.trafficSource !== input.trafficSource ||
+            (input.sourceStep && !sameBatchSource(link, input))
           ) throw batchRejected;
           links.push(link);
         }
@@ -854,6 +949,7 @@ function openLinks(snapshotPath: string, readOnly: boolean, now: () => number) {
 
     inspectBatch,
     recordBatch,
+    readAssignmentBatch,
     /** The caller must gate case and lease for every request, including retries. */
     record(
       raw: SentinelFindingTrafficLinkInput,
@@ -1007,6 +1103,18 @@ export function readSentinelFindingTrafficWriteReceipt(
   return readFindingTrafficLinks(
     snapshotPath,
     (links) => links.readAssignmentRequest(scope, requestId),
+  );
+}
+
+/** Reopen an exact committed attachment batch for its original leased assignment. */
+export function readSentinelFindingTrafficAssignmentBatch(
+  snapshotPath: string,
+  scope: Parameters<ReturnType<typeof openLinks>["readAssignmentBatch"]>[0],
+  requestId: string,
+) {
+  return readFindingTrafficLinks(
+    snapshotPath,
+    (links) => links.readAssignmentBatch(scope, requestId),
   );
 }
 

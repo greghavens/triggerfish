@@ -39,6 +39,7 @@ import {
 } from "../sentinel/worker_finding_store.ts";
 import {
   sentinelLinkedTrafficPayloadArgs,
+  sentinelTrafficAttachBatchArgs,
   sentinelTrafficLinksArgs,
   sentinelTrafficPayloadOffsetParameter,
   sentinelTrafficPayloadPartParameter,
@@ -327,6 +328,131 @@ function listForScope(
   return "Error: Use an exact finding filter to narrow the traffic link page.";
 }
 
+export const sentinelReporterTrafficAttachTool: ToolDefinition = {
+  ...sentinelFindingTrafficAttachTool,
+  description: sentinelFindingTrafficAttachTool.description +
+    " Use trafficRefs instead of evidenceId and digest to attach two to four receipts atomically.",
+  parameters: {
+    ...sentinelFindingTrafficAttachTool.parameters,
+    evidenceId: {
+      ...sentinelFindingTrafficAttachTool.parameters.evidenceId,
+      required: false,
+    },
+    digest: {
+      ...sentinelFindingTrafficAttachTool.parameters.digest,
+      required: false,
+    },
+    trafficRefs: {
+      type: "array",
+      description:
+        "Ordered exact traffic evidenceId and digest pairs from this reporter's prior reads. Each may supply an evidenceRole or evidenceNote.",
+      items: { type: "object" },
+    },
+  },
+};
+
+type TrafficReadStep = { readonly stepIndex: number; readonly sha256: string };
+
+function attachReporterBatch(
+  scope: Scope,
+  caseId: string,
+  runId: string,
+  assetId: string,
+  taskId: string,
+  raw: Record<string, unknown>,
+  approved: ReadonlyMap<string, TrafficReadStep>,
+  signal?: AbortSignal,
+): string {
+  const args = sentinelTrafficAttachBatchArgs(raw);
+  if (!args || !hasSentinelWorkerFindingJournal(scope.snapshotPath)) {
+    return unavailable;
+  }
+  const inputs: SentinelFindingTrafficLinkInput[] = [];
+  for (const [index, member] of args.trafficRefs.entries()) {
+    const { evidenceId, digest, ...annotation } = member;
+    const family = sentinelTrafficSources.find((source) =>
+      approved.has(
+        attachmentKey(
+          caseId,
+          args.revision,
+          assetId,
+          evidenceId,
+          digest,
+          source,
+        ),
+      )
+    );
+    const sourceStep = family && approved.get(
+      attachmentKey(caseId, args.revision, assetId, evidenceId, digest, family),
+    );
+    if (!sourceStep) return requiredReceipt;
+    const receipt = readSentinelTrafficReceipt(
+      scope.snapshotPath,
+      args.revision,
+      { evidenceId, digest },
+      assetId,
+    );
+    if (receipt?.family !== family || !receipt) return unavailable;
+    const hash = createHash("sha256").update(
+      JSON.stringify(["sentinel-traffic-link-batch", args.requestId, index]),
+    ).digest("hex");
+    const requestId = `${hash.slice(0, 8)}-${hash.slice(8, 12)}-4${
+      hash.slice(13, 16)
+    }-8${hash.slice(17, 20)}-${hash.slice(20, 32)}`;
+    inputs.push({
+      caseId,
+      evidenceRevision: args.revision,
+      assetId,
+      findingId: args.findingId,
+      reportVersion: args.reportVersion,
+      trafficId: evidenceId,
+      trafficSource: receipt.family,
+      trafficDigest: receipt.digest,
+      ...annotation,
+      sourceStep,
+      authority: { kind: "assignment", taskId },
+      requestId,
+    });
+  }
+  const findings = openSentinelWorkerFindingStore(scope.snapshotPath);
+  try {
+    const original = findings.readFinding(args.findingId);
+    if (
+      original?.caseId !== caseId || original.runId !== runId ||
+      original.targetId !== assetId ||
+      original.evidenceRevision !== args.revision
+    ) {
+      return unavailable;
+    }
+    const journal = openSentinelFindingTrafficLinks(scope.snapshotPath);
+    try {
+      const links = journal.recordBatch(
+        args.requestId,
+        runId,
+        inputs,
+        () =>
+          !signal?.aborted && assignedAsset(scope, args.revision) === assetId &&
+          findings.readFindingReport(args.findingId, args.revision)?.version ===
+            args.reportVersion,
+      );
+      const exact = links && journal.readAssignmentBatch({
+        caseId,
+        runId,
+        evidenceRevision: args.revision,
+        taskId,
+        assetId,
+      }, args.requestId);
+      return exact
+        ? JSON.stringify({ _classification: "INTERNAL", ...exact })
+        : unavailable;
+    } finally {
+      journal.close();
+    }
+  } finally {
+    findings.close();
+  }
+}
+
 function attachForScope(
   scope: Scope,
   caseId: string,
@@ -443,6 +569,7 @@ export function executeSentinelFindingTrafficTool(
   approvedTraffic: ReadonlySet<string>,
   signal?: AbortSignal,
   allowPayloadAsset?: (id: string) => boolean,
+  reporterTrafficReads?: ReadonlyMap<string, TrafficReadStep>,
 ): string {
   const {
     snapshotPath,
@@ -455,7 +582,9 @@ export function executeSentinelFindingTrafficTool(
     assignedTaskLeaseToken !== undefined;
   const attach = name === sentinelFindingTrafficAttachTool.name;
   const definition = attach
-    ? sentinelFindingTrafficAttachTool
+    ? reporterTrafficReads
+      ? sentinelReporterTrafficAttachTool
+      : sentinelFindingTrafficAttachTool
     : sentinelFindingTrafficListTool;
   const { revision } = args;
   if (
@@ -484,6 +613,21 @@ export function executeSentinelFindingTrafficTool(
           ))
       ) return unavailable;
       if (attach) {
+        if ("trafficRefs" in args) {
+          return reporterTrafficReads && subject && assignedTaskId &&
+              state.plan.runId
+            ? attachReporterBatch(
+              scope,
+              caseId,
+              state.plan.runId,
+              subject,
+              assignedTaskId,
+              args,
+              reporterTrafficReads,
+              signal,
+            )
+            : unavailable;
+        }
         return subject && assignedTaskId && state.plan.runId
           ? attachForScope(
             scope,

@@ -3941,16 +3941,22 @@ Deno.test("Gateway publication requires the exact saved workflow attempt and evi
 Deno.test("Gateway operator discovers and queues one exact native remediation recheck", () =>
   verifyReceiptFamily("native workflow result", true));
 
-Deno.test("Sentinel schedules one scoped report worker from a committed finding across restart", async () => {
+async function testScopedReporterRestart(
+  useBatch: boolean,
+  denyMember = false,
+) {
   const baseDir = await Deno.makeTempDir();
   const path = resolveSentinelCasePath(baseDir);
   let planner: ReturnType<typeof createSentinelModelPlanner> | undefined;
   try {
     const time = Date.now();
     const hosts = ["service.example", "neighbor.example"];
-    const entries = hosts.map((host) => ({
-      startedDateTime: new Date(time - 1000).toISOString(),
-      request: { url: `https://${host}/review`, method: "GET" },
+    const entries = [...hosts, ...(useBatch ? [hosts[0]] : [])].map((
+      host,
+      index,
+    ) => ({
+      startedDateTime: new Date(time - 1000 - index).toISOString(),
+      request: { url: `https://${host}/review/${index}`, method: "GET" },
       response: { status: 403, content: { text: "Reviewed response." } },
     }));
     const { observations } = importSentinelHar({
@@ -4001,17 +4007,28 @@ Deno.test("Sentinel schedules one scoped report worker from a committed finding 
     );
     const state = startSentinelAssessment(path);
     const source = assignedLease(path, state, "impact", service.assetId);
-    const [traffic] = hosts.map((host) => {
-      const receipt = readSentinelTrafficReceiptPage(path, state.revision, {
-        origin: `https://${host}`,
-      })?.receipts[0];
-      assert(receipt);
-      return {
-        revision: state.revision,
-        evidenceId: receipt.evidenceId,
-        digest: receipt.digest,
-      };
-    });
+    const trafficRecords = readSentinelTrafficReceiptPage(
+      path,
+      state.revision,
+      {
+        origin: `https://${hosts[0]}`,
+      },
+    )?.receipts.map(({ evidenceId, digest }) => ({
+      revision: state.revision,
+      evidenceId,
+      digest,
+    }));
+    assertEquals(trafficRecords?.length, useBatch ? 2 : 1);
+    assert(trafficRecords);
+    const [traffic] = trafficRecords;
+    const neighborReceipt = readSentinelTrafficReceiptPage(
+      path,
+      state.revision,
+      {
+        origin: `https://${hosts[1]}`,
+      },
+    )?.receipts[0];
+    assert(neighborReceipt);
     const input = {
       graphFindingId: "gap",
       controlId: "control",
@@ -4084,26 +4101,82 @@ Deno.test("Sentinel schedules one scoped report worker from a committed finding 
             tool("sentinel_traffic_search", { revision: state.revision }),
           ];
         } else if (results.length === 2) {
-          assertEquals(JSON.parse(String(results[0].content)).record, finding);
+          assertEquals(
+            JSON.parse(String(results[0].content)).record,
+            finding,
+          );
           const page = JSON.parse(String(results[1].content));
           assertEquals(
             page.receipts.map(({ evidenceId }: { evidenceId: string }) =>
               evidenceId
             ),
-            [
-              traffic.evidenceId,
-            ],
+            trafficRecords.map(({ evidenceId }) => evidenceId),
           );
-          batch = [tool("sentinel_traffic_get", traffic)];
-        } else if (results.length === 3) {
+          batch = trafficRecords.map((record) =>
+            tool("sentinel_traffic_get", record)
+          );
+        } else if (results.length === 2 + trafficRecords.length) {
           assertEquals(
             JSON.parse(String(results[2].content)).receipt.digest,
             traffic.digest,
           );
           offeredAttachments++;
-          batch = [tool("sentinel_attach_finding_traffic", attachment)];
-        } else if (results.length === 4) {
-          const { link } = JSON.parse(String(results[3].content));
+          const {
+            evidenceId: _evidenceId,
+            digest: _digest,
+            evidenceRole,
+            evidenceNote,
+            ...scope
+          } = attachment;
+          batch = [tool(
+            "sentinel_attach_finding_traffic",
+            useBatch
+              ? {
+                ...scope,
+                trafficRefs: trafficRecords.map((
+                  { evidenceId, digest },
+                  index,
+                ) => ({
+                  evidenceId: denyMember && index === 1
+                    ? neighborReceipt.evidenceId
+                    : evidenceId,
+                  digest: denyMember && index === 1
+                    ? neighborReceipt.digest
+                    : digest,
+                  evidenceRole,
+                  evidenceNote,
+                })),
+              }
+              : attachment,
+          )];
+        } else if (results.length === 3 + trafficRecords.length) {
+          if (denyMember) {
+            assertStringIncludes(
+              String(results.at(-1)?.content),
+              "Open that exact",
+            );
+            return Promise.resolve({
+              content:
+                '{"summary":"Out-of-scope batch denied.","followUps":[]}',
+              usage: { inputTokens: 1, outputTokens: 1 },
+              toolCalls: [],
+            });
+          }
+          const savedAttachment = JSON.parse(String(results.at(-1)?.content));
+          const link = useBatch
+            ? savedAttachment.links[0]
+            : savedAttachment.link;
+          if (useBatch) {
+            assert(
+              /^finding-traffic-batch:[a-f0-9]{64}$/.test(savedAttachment.id),
+            );
+            assertEquals(
+              savedAttachment.links.map((
+                item: { sourceStep: { stepIndex: number } },
+              ) => item.sourceStep.stepIndex),
+              [2, 3],
+            );
+          }
           assertEquals(link.trafficDigest, traffic.digest);
           assertEquals(link.authority, {
             kind: "assignment",
@@ -4113,16 +4186,21 @@ Deno.test("Sentinel schedules one scoped report worker from a committed finding 
             revision: state.revision,
             findingId: finding.id,
           })];
-        } else if (results.length === 5) {
-          const { evidenceVersion } = JSON.parse(String(results[4].content));
+        } else if (results.length === 4 + trafficRecords.length) {
+          const { evidenceVersion } = JSON.parse(
+            String(results.at(-1)?.content),
+          );
           batch = [
             tool(amend, { ...reportWrite, evidenceVersion: "0".repeat(64) }),
             tool(amend, { ...reportWrite, evidenceVersion }),
           ];
         } else {
-          assertStringIncludes(String(results[5].content), "unavailable");
+          assertStringIncludes(
+            String(results.at(-2)?.content),
+            "unavailable",
+          );
           assertEquals(
-            JSON.parse(String(results[6].content)).amendment.taskId,
+            JSON.parse(String(results.at(-1)?.content)).amendment.taskId,
             reporter.id,
           );
         }
@@ -4162,7 +4240,9 @@ Deno.test("Sentinel schedules one scoped report worker from a committed finding 
               if (
                 hook === "POST_TOOL_RESPONSE" &&
                 typeof input.tool_response === "string" &&
-                input.tool_response.includes('"link"') &&
+                input.tool_response.includes(
+                  useBatch ? '"links"' : '"link"',
+                ) &&
                 !interruptedAfterAttachment
               ) {
                 interruptedAfterAttachment = true;
@@ -4210,6 +4290,26 @@ Deno.test("Sentinel schedules one scoped report worker from a committed finding 
       );
     planner = createSentinelModelPlanner(path, createWorker);
     planner.advance(state);
+    if (denyMember) {
+      await waitFor(() =>
+        readAdaptiveSentinel(path, state)?.modelReviewStates.find(
+          ({ taskId }) => taskId === reporter.id,
+        )?.progressSteps?.some((step) =>
+          step.tool === "sentinel_attach_finding_traffic" &&
+          step.outcome === "error"
+        ) === true
+      );
+      assertEquals(offeredAttachments, 1);
+      assertEquals(executions, 1);
+      assertEquals(interruptedAfterAttachment, false);
+      await withTidepool(baseDir, async (_list, provenance) => {
+        assertEquals(
+          (await provenance(state.revision)).findingTrafficLinks ?? [],
+          [],
+        );
+      });
+      return;
+    }
     await waitFor(() =>
       interruptedAfterAttachment &&
       readAdaptiveSentinel(path, state)?.modelReviewStates.find(
@@ -4262,7 +4362,21 @@ Deno.test("Sentinel schedules one scoped report worker from a committed finding 
     await withTidepool(baseDir, async (_list, provenance, request) => {
       const exported = await provenance(state.revision);
       const links = exported.findingTrafficLinks ?? [];
-      assertEquals(links.length, 1);
+      assertEquals(links.length, useBatch ? 2 : 1);
+      if (useBatch) {
+        assertEquals(links.map(({ authority }) => authority), [
+          { kind: "assignment", taskId: reporter.id },
+          { kind: "assignment", taskId: reporter.id },
+        ]);
+        assertEquals(
+          links.map(({ sourceStep }) => sourceStep?.stepIndex).sort(),
+          [
+            2,
+            3,
+          ],
+        );
+        return;
+      }
       assert(
         review()?.steps.some((step) =>
           step.tool === "sentinel_attach_finding_traffic" &&
@@ -4276,9 +4390,12 @@ Deno.test("Sentinel schedules one scoped report worker from a committed finding 
       assertEquals(links[0].evidenceRole, attachment.evidenceRole);
       assertEquals(links[0].evidenceNote, attachment.evidenceNote);
       assert(saved);
-      const evidenceVersion =
-        sentinelFindingTrafficEvidenceVersion(path, state.revision, finding.id)
-          .digest;
+      const evidenceVersion = sentinelFindingTrafficEvidenceVersion(
+        path,
+        state.revision,
+        finding.id,
+      )
+        .digest;
       let annotationId: string | undefined;
       let withdrawalId: string | undefined;
       const pagedCase = {
@@ -4420,7 +4537,16 @@ Deno.test("Sentinel schedules one scoped report worker from a committed finding 
     planner?.stop();
     await Deno.remove(baseDir, { recursive: true });
   }
-});
+}
+
+Deno.test("Sentinel resumes a scoped report worker after committing one traffic link", () =>
+  testScopedReporterRestart(false));
+
+Deno.test("Sentinel resumes a scoped report worker after committing an atomic traffic batch", () =>
+  testScopedReporterRestart(true));
+
+Deno.test("Sentinel rejects every reporter batch link when one member is outside the assigned asset", () =>
+  testScopedReporterRestart(true, true));
 
 Deno.test("Sentinel planner queues a cold finding only after an authorized exact read", async () => {
   const baseDir = await Deno.makeTempDir();

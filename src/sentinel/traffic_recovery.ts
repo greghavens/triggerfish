@@ -3,7 +3,10 @@ import {
   type SentinelTrafficReceiptQuery,
   validSentinelTrafficReceiptQuery,
 } from "./traffic_receipts.ts";
-import { sentinelTrafficEvidenceAnnotation } from "./finding_traffic_links.ts";
+import {
+  MAX_FINDING_TRAFFIC_BATCH,
+  sentinelTrafficEvidenceAnnotation,
+} from "./finding_traffic_links.ts";
 
 export const SENTINEL_TRAFFIC_LINKS = "sentinel_finding_traffic_links";
 export const SENTINEL_TRAFFIC_SEARCH = "sentinel_traffic_search";
@@ -304,5 +307,48 @@ export function sentinelTrafficAttachArgs(value: unknown) {
     ...annotation,
     ...(sourceHintId !== undefined && { sourceHintId }),
     requestId: requestId.toLowerCase(),
+  };
+}
+
+/** Canonical arguments for the reporter-only atomic attachment operation. */
+export function sentinelTrafficAttachBatchArgs(value: unknown) {
+  const input = record(value);
+  if (!input || Object.keys(input).length !== 5) return;
+  const { trafficRefs, ...scope } = input;
+  if (
+    !Array.isArray(trafficRefs) || trafficRefs.length < 2 ||
+    trafficRefs.length > MAX_FINDING_TRAFFIC_BATCH
+  ) return;
+  const members = [];
+  for (const raw of trafficRefs) {
+    const ref = record(raw);
+    if (
+      !ref ||
+      Object.keys(ref).some((key) =>
+        !["evidenceId", "digest", "evidenceRole", "evidenceNote"].includes(key)
+      )
+    ) return;
+    const item = sentinelTrafficAttachArgs({ ...scope, ...ref });
+    if (
+      !item || item.recheckId !== undefined || item.sourceHintId !== undefined
+    ) return;
+    const { evidenceId, digest, evidenceRole, evidenceNote } = item;
+    members.push({
+      evidenceId,
+      digest,
+      ...(evidenceRole !== undefined && { evidenceRole }),
+      ...(evidenceNote !== undefined && { evidenceNote }),
+    });
+  }
+  if (
+    new Set(members.map(({ evidenceId }) => evidenceId)).size !== members.length
+  ) return;
+  const first = sentinelTrafficAttachArgs({ ...scope, ...members[0] })!;
+  return {
+    revision: first.revision,
+    findingId: first.findingId,
+    reportVersion: first.reportVersion,
+    requestId: first.requestId,
+    trafficRefs: members,
   };
 }
