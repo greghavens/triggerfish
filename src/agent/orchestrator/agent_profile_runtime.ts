@@ -20,7 +20,8 @@ export function withAgentProfileRuntime(
     }
     if (!settings.skills) return true;
     if (name === "list_skills" || name === "skill_discover") return false;
-    return (name !== "read_skill" && name !== "inspect_skill_document") ||
+    return (name !== "read_skill" && name !== "inspect_skill_document" &&
+      name !== "list_skill_usage") ||
       !args ||
       (typeof args.skill_name === "string" &&
         settings.skills.includes(args.skill_name));

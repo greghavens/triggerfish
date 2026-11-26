@@ -1,7 +1,9 @@
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { join } from "@std/path";
 import { createProviderRegistry } from "../../src/agent/llm.ts";
+import { createMessageStore } from "../../src/core/conversation/conversation_store.ts";
 import type { HookType } from "../../src/core/policy/rules.ts";
+import { createMemoryStorage } from "../../src/core/storage/memory.ts";
 import {
   type ChannelId,
   createSession,
@@ -53,9 +55,11 @@ Deno.test("Owner gateway discovers live skill grants and blocks pending draft ac
   const tools = resolveToolsForProfile("cli");
   assert(tools.some(({ name }) => name === "list_skills"));
   assert(tools.some(({ name }) => name === "inspect_skill_document"));
+  assert(tools.some(({ name }) => name === "list_skill_usage"));
   assert(
     !filterToolsForRole(tools, false).some(({ name }) =>
-      name === "list_skills" || name === "inspect_skill_document"
+      name === "list_skills" || name === "inspect_skill_document" ||
+      name === "list_skill_usage"
     ),
   );
   assert(
@@ -117,6 +121,9 @@ Deno.test("Owner gateway discovers live skill grants and blocks pending draft ac
     }),
     taint: "INTERNAL" as const,
   };
+  const storage = createMemoryStorage();
+  const messageStore = createMessageStore(storage);
+  let historyLoads = 0;
   const execute = createSkillToolExecutor({
     skillLoader: {
       async discover() {
@@ -138,6 +145,10 @@ Deno.test("Owner gateway discovers live skill grants and blocks pending draft ac
     skillScanner: createSkillScanner(),
     skillContextTracker: tracker,
     getSessionTaint: () => session.taint,
+    loadOwnerSkillHistory: () => {
+      historyLoads++;
+      return createMessageStore(storage).loadSession(session.id);
+    },
   });
 
   const registry = createProviderRegistry();
@@ -179,6 +190,7 @@ Deno.test("Owner gateway discovers live skill grants and blocks pending draft ac
       session,
       providerRegistry: registry,
       tools,
+      messageStore,
       enableStreaming: false,
       targetClassification: "INTERNAL",
       hookRunner: {
@@ -301,6 +313,10 @@ Deno.test("Owner gateway discovers live skill grants and blocks pending draft ac
     );
     assertStringIncludes(document.content, "Bundled fixture instructions");
     assertEquals(tracker.getActive(), null);
+    assertEquals(
+      JSON.parse((await turn("list_skill_usage", inspect)).result).calls,
+      [],
+    );
     assertStringIncludes(
       (await turn("inspect_skill_document", {
         type: "BUNDLED",
@@ -343,6 +359,37 @@ Deno.test("Owner gateway discovers live skill grants and blocks pending draft ac
       "---\nname: shared\nversion: 1.0.0\nclassification_ceiling: CONFIDENTIAL\n---\nBundled fixture instructions",
     );
     assertEquals(tracker.getActive()?.source, "bundled");
+
+    deny = "POST_TOOL_RESPONSE";
+    await turn("read_skill", inspect);
+    deny = "PRE_TOOL_CALL";
+    const beforeHistoryDenial = historyLoads;
+    await turn("list_skill_usage", inspect);
+    assertEquals(historyLoads, beforeHistoryDenial);
+    deny = "POST_TOOL_RESPONSE";
+    assertEquals(
+      (await turn("list_skill_usage", inspect)).result,
+      "Tool response withheld by policy.",
+    );
+    deny = "PRE_OUTPUT";
+    assert(
+      !(await turn("list_skill_usage", inspect)).messages.includes("response"),
+    );
+    deny = undefined;
+    const stored = (await messageStore.loadSession(session.id)).filter((row) =>
+      row.tool_name === "read_skill" && row.tool_args?.type === "BUNDLED"
+    );
+    assertEquals(stored.length, 1);
+    assertEquals(
+      JSON.parse((await turn("list_skill_usage", inspect)).result),
+      {
+        calls: [{
+          message_id: stored[0].message_id,
+          accessed_at: stored[0].timestamp,
+        }],
+        _classification: "INTERNAL",
+      },
+    );
   } finally {
     if (socket.readyState < WebSocket.CLOSING) {
       const closed = Promise.withResolvers<void>();

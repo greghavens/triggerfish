@@ -29,6 +29,7 @@ import { enforceSkillClassificationCeiling } from "./enforcer.ts";
 import { computeSkillHash, verifySkillIntegrity } from "./integrity.ts";
 import { createLogger } from "../../core/logger/logger.ts";
 import { fenceExternalMetadata } from "../../core/security/prompt_fencing.ts";
+import type { ConversationRecord } from "../../core/conversation/conversation_types.ts";
 
 const log = createLogger("skill-tools");
 
@@ -46,6 +47,7 @@ export interface SkillToolContext {
   /** If provided, skill content is scanned at activation time. */
   readonly skillScanner?: SkillScanner;
   readonly getConfirmPrompt?: () => (prompt: string) => Promise<boolean>;
+  readonly loadOwnerSkillHistory?: () => Promise<readonly ConversationRecord[]>;
 }
 
 function buildReadSkillDef(): ToolDefinition {
@@ -101,6 +103,14 @@ export function buildSkillAdministrationToolDefinitions(): readonly ToolDefiniti
         type: "integer",
         description: "Maximum number of skills to return, from 1 to 100",
       },
+    },
+  }, {
+    name: "list_skill_usage",
+    description:
+      "List recent authorized loads of one skill from the current owner conversation. Returns exact saved message references and timestamps.",
+    parameters: {
+      ...buildReadSkillDef().parameters,
+      limit: { type: "integer", description: "Maximum entries, from 1 to 50" },
     },
   }, {
     name: "inspect_skill_document",
@@ -230,6 +240,58 @@ function skillType(source: SkillSource): SkillType {
 function validSkillSelector(value: unknown): value is string {
   return typeof value === "string" && value.length <= 128 &&
     enforceSkillName(value).ok;
+}
+
+async function executeSkillUsage(
+  ctx: SkillToolContext,
+  input: Record<string, unknown>,
+  dispatch?: ToolExecutionContext,
+): Promise<string> {
+  const isCurrentOwner = dispatch?.isCurrentInteractiveOwner;
+  if (
+    !isCurrentOwner?.() || !ctx.loadOwnerSkillHistory || !ctx.getSessionTaint
+  ) {
+    return "Error: Skill history requires the active owner session.";
+  }
+  const { skill_name, type, limit = 25 } = input;
+  if (
+    Object.keys(input).some((key) =>
+      !["skill_name", "type", "limit"].includes(key)
+    ) ||
+    !validSkillSelector(skill_name) ||
+    (type !== "BUNDLED" && type !== "USER_PROVIDED") ||
+    typeof limit !== "number" || !Number.isSafeInteger(limit) ||
+    limit < 1 || limit > 50
+  ) return "Error: Invalid skill history selector.";
+
+  const history = await ctx.loadOwnerSkillHistory();
+  if (!isCurrentOwner()) return "Error: The owner session is no longer active.";
+  const taint = ctx.getSessionTaint();
+  const calls = [];
+  for (const row of history.toReversed()) {
+    if (
+      row.role !== "tool_call" || row.tool_name !== "read_skill" ||
+      row.tool_args?.type !== type ||
+      row.tool_args?.skill_name !== skill_name ||
+      !canFlowTo(row.classification, taint)
+    ) continue;
+    try {
+      const receipt = JSON.parse(row.content);
+      if (
+        receipt?.found !== true || receipt.type !== type ||
+        receipt.skill_name !== skill_name
+      ) continue;
+    } catch {
+      continue;
+    }
+    calls.push({
+      message_id: row.message_id,
+      accessed_at: row.timestamp,
+      ...(row.lineage_id && { lineage_id: row.lineage_id }),
+    });
+    if (calls.length >= limit) break;
+  }
+  return JSON.stringify({ calls, _classification: taint });
 }
 
 async function executeListSkills(
@@ -651,6 +713,9 @@ export function createSkillToolExecutor(
     }
     if (name === "list_skills") {
       return await executeListSkills(ctx, input, context);
+    }
+    if (name === "list_skill_usage") {
+      return await executeSkillUsage(ctx, input, context);
     }
     const inspecting = name === "inspect_skill_document";
     if (name !== "read_skill" && !inspecting) return null;

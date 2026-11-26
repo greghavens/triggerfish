@@ -160,6 +160,7 @@ export function buildAgentToolExecutors(
   state: MainSessionState,
   triggerStore: ReturnType<typeof createTriggerStore>,
   skillLoader: Awaited<ReturnType<typeof discoverSkills>>["loader"],
+  messageStore: CoreInfraResult["messageStore"],
 ): {
   claudeExecutor: ReturnType<typeof createClaudeToolExecutor>;
   mainKeychain: ReturnType<typeof createKeychain>;
@@ -189,6 +190,7 @@ export function buildAgentToolExecutors(
       getSessionTaint: () => state.session.taint,
       skillScanner: createSkillScanner(),
       getConfirmPrompt: () => state.activeConfirmPrompt,
+      loadOwnerSkillHistory: () => messageStore.loadSession(state.session.id),
     }),
     skillContextTracker,
   };
@@ -209,6 +211,7 @@ export async function buildSkillAndAgentExecutors(
     state,
     coreInfra.triggerStore,
     skillLoader,
+    coreInfra.messageStore,
   );
   return {
     skillLoader,
