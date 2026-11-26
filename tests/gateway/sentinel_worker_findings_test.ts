@@ -6075,6 +6075,141 @@ Deno.test("A clean Sentinel recheck turn without an exact result records a faile
 Deno.test("Stopping an exact recheck preserves its staged evidence without publishing remediation", () =>
   verifyReceiptFamily("native workflow result", "stop-after-result"));
 
+async function verifyNativeFindingTrafficReadScope(
+  path: string,
+  state: State,
+  findingId: string,
+  linkId: string,
+) {
+  const name = "sentinel_finding_traffic_links";
+  let args: Record<string, unknown> = { revision: state.revision };
+  let result = "";
+  let revokeOnResponse = false;
+  const registry = createProviderRegistry();
+  registry.register({
+    name: "finding-traffic-scope",
+    supportsStreaming: false,
+    complete(messages) {
+      const last = messages.at(-1);
+      const done = last?.role === "tool";
+      if (done) result = String(last.content);
+      return Promise.resolve({
+        content: done ? "Reviewed retained evidence." : "",
+        usage: { inputTokens: 1, outputTokens: 1 },
+        toolCalls: done ? [] : [{
+          id: crypto.randomUUID(),
+          type: "function",
+          function: { name, arguments: JSON.stringify(args) },
+        }],
+      });
+    },
+  });
+  registry.setDefault("finding-traffic-scope");
+  const setPolicy = (
+    expectedVersion: number,
+    deniedKinds: ["review_evidence"] | [],
+  ) =>
+    assert(recordSentinelOperatingConstraints(path, {
+      runId: state.plan.runId!,
+      evidenceRevision: state.revision,
+      expectedVersion,
+      requestId: crypto.randomUUID(),
+      operatorScope: "owner",
+      constraints: { deniedKinds },
+    }));
+  const token = crypto.randomUUID();
+  const gateway = createGatewayServer({
+    token,
+    port: 0,
+    chatSession: createChatSession({
+      session: createSession({
+        userId: "owner" as UserId,
+        channelId: "finding-traffic-scope" as ChannelId,
+        bumpersEnabled: false,
+      }),
+      providerRegistry: registry,
+      sentinelSnapshotPath: path,
+      allowSentinelModelAccess: true,
+      hookRunner: {
+        evaluateHook(hook, { input }) {
+          if (
+            revokeOnResponse && hook === "POST_TOOL_RESPONSE" &&
+            input.tool_name === name
+          ) {
+            setPolicy(0, ["review_evidence"]);
+            revokeOnResponse = false;
+          }
+          return Promise.resolve({
+            allowed: true,
+            action: "ALLOW",
+            ruleId: null,
+            duration: 0,
+          });
+        },
+      },
+    }),
+  });
+  const { port } = await gateway.start();
+  const socket = new WebSocket(`ws://127.0.0.1:${port}/chat?token=${token}`);
+  const closed = Promise.withResolvers<void>();
+  socket.addEventListener("close", () => closed.resolve(), { once: true });
+  try {
+    await new Promise<void>((resolve, reject) => {
+      socket.addEventListener("open", () => resolve(), { once: true });
+      socket.addEventListener("error", reject, { once: true });
+    });
+    const turn = async (selected: Record<string, unknown>) => {
+      args = { revision: state.revision, ...selected };
+      result = "";
+      const completed = Promise.withResolvers<void>();
+      const timer = setTimeout(
+        () => completed.reject(new Error("No Sentinel response")),
+        3000,
+      );
+      const receive = ({ data }: MessageEvent) => {
+        const frame = JSON.parse(data);
+        if (frame.type === "error") completed.reject(new Error(frame.message));
+        if (frame.type === "turn_end") completed.resolve();
+      };
+      socket.addEventListener("message", receive);
+      try {
+        socket.send(JSON.stringify({
+          type: "message",
+          content: "/sentinel-agent Read the retained finding traffic.",
+        }));
+        await completed.promise;
+        return result;
+      } finally {
+        clearTimeout(timer);
+        socket.removeEventListener("message", receive);
+      }
+    };
+    const payload = {
+      findingId,
+      trafficLinkId: linkId,
+      payloadPart: "response",
+    };
+    assert(
+      JSON.parse(await turn({ findingId })).links.some((link: { id: string }) =>
+        link.id === linkId
+      ),
+    );
+    const retained = JSON.parse(await turn(payload));
+    assertEquals(retained.link.id, linkId);
+    assert(retained.payload);
+    revokeOnResponse = true;
+    assertStringIncludes(await turn(payload), "withheld by policy");
+    assertStringIncludes(await turn(payload), "unavailable");
+    assertStringIncludes(await turn({ findingId }), "unavailable");
+    assertEquals(JSON.parse(await turn({})).links, []);
+    setPolicy(1, []);
+  } finally {
+    socket.close();
+    await closed.promise;
+    await gateway.stop();
+  }
+}
+
 async function verifyInitialTrafficPublication(
   baseDir: string,
   path: string,
@@ -6424,6 +6559,14 @@ async function verifyInitialTrafficPublication(
     listSentinelFindingTrafficLinks(path).sort(byId),
     attached.toSorted(byId),
   );
+  if (hinted === "set") {
+    await verifyNativeFindingTrafficReadScope(
+      path,
+      state,
+      recovered.record.id,
+      attached[0].id,
+    );
+  }
   const readTidepoolLinks = async () => {
     let links: SentinelFindingTrafficLink[] = [];
     await withTidepool(baseDir, async (_list, _provenance, request) => {

@@ -281,6 +281,7 @@ import {
 import {
   allowsSentinelGraphFindingTrafficPage,
   approvedSentinelTrafficAttachmentKey,
+  currentSentinelFindingTrafficRead,
   executeSentinelFindingTrafficTool,
   reopenSentinelLinkedTrafficPayload,
   sentinelFindingTrafficAttachTool,
@@ -1292,6 +1293,7 @@ interface ActiveTurn {
   readonly readGraph: ReadGraph;
   findingContextRevision?: number;
   findingReceiptRevision?: number;
+  findingTrafficRead?: Readonly<Record<string, unknown>>;
   requireCurrentFindingReceiptRevision?: boolean;
   pendingTelemetryFence?: {
     readonly tool: string;
@@ -5082,6 +5084,18 @@ function createAgent(
             turn.requireCurrentFindingReceiptRevision,
           ))
         ) return { ...result, allowed: false, action: "BLOCK" };
+        if (
+          result.allowed && name === "POST_TOOL_RESPONSE" &&
+          toolName === sentinelFindingTrafficListTool.name &&
+          typeof context.input.tool_response === "string" &&
+          context.input.tool_response.startsWith("{") &&
+          turn?.findingTrafficRead &&
+          !currentSentinelFindingTrafficRead(
+            options.snapshotPath,
+            turn.findingTrafficRead,
+            context.input.tool_response,
+          )
+        ) return { ...result, allowed: false, action: "BLOCK" };
         if (name === "PRE_TOOL_CALL" && plannerControl) {
           const permits = result.action === "REQUIRE_APPROVAL" ||
             (result.action === "ALLOW" && result.allowed);
@@ -5446,6 +5460,9 @@ function createAgent(
             !turn.readGoalScopedReceipts.has(args.findingId))
         ) {
           return "Error: Read the exact finding receipt before attaching traffic.";
+        }
+        if (name === sentinelFindingTrafficListTool.name) {
+          turn.findingTrafficRead = args;
         }
         return executeSentinelFindingTrafficTool(
           options,

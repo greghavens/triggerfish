@@ -164,6 +164,7 @@ export interface SentinelFindingTrafficLinkFilter {
   readonly findingId?: string;
   readonly recheckId?: string;
   readonly assetId?: string;
+  readonly allowedAssetIds?: readonly string[];
   readonly evidenceRevision?: number;
   readonly limit?: number;
   readonly offset?: number;
@@ -1048,6 +1049,7 @@ function openLinks(snapshotPath: string, readOnly: boolean, now: () => number) {
         findingId,
         recheckId,
         assetId,
+        allowedAssetIds,
         evidenceRevision,
         limit = 20,
         offset = 0,
@@ -1074,6 +1076,7 @@ function openLinks(snapshotPath: string, readOnly: boolean, now: () => number) {
         db.prepare(`SELECT * FROM traffic_links
         WHERE (? IS NULL OR finding_id = ?) AND (? IS NULL OR revision = ?)
           AND (? IS NULL OR json_extract(input, '$.assetId') = ?)
+          AND (? IS NULL OR json_extract(input, '$.assetId') IN (SELECT value FROM json_each(?)))
           AND (? IS NULL OR id = ?)
           AND (? IS NULL OR json_extract(input, '$.recheckId') = ?)
         ORDER BY rowid DESC LIMIT ? OFFSET ?`).all(
@@ -1083,6 +1086,8 @@ function openLinks(snapshotPath: string, readOnly: boolean, now: () => number) {
           evidenceRevision ?? null,
           assetId ?? null,
           assetId ?? null,
+          allowedAssetIds === undefined ? null : 1,
+          JSON.stringify(allowedAssetIds ?? []),
           id ?? null,
           id ?? null,
           recheckId ?? null,
