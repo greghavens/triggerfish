@@ -296,6 +296,7 @@ import {
   reviewSentinelQueuedCancellation,
   reviewSentinelStoppedGraphRetry,
   reviewSentinelWorkerHold,
+  reviewSentinelWorkerStopRationale,
   sentinelHintAssetsInScope,
   submitSentinelAssignmentIntent,
   updateSentinelWorkerLimit,
@@ -373,6 +374,12 @@ import {
   readSentinelGoalCompletionAtRevision,
   readSentinelWorkerGoalProofTraceReceipt,
 } from "./sentinel_goal_completion.ts";
+
+function validSentinelCancellationReason(value: unknown): value is string {
+  return typeof value === "string" && !!value.trim() &&
+    value.trim() === value && value.length <= 240 &&
+    !/[\p{Cc}\p{Cf}]/u.test(value) && redactCredentialText(value) === value;
+}
 
 const sentinelQueueActions = new Map(
   [
@@ -1098,7 +1105,7 @@ export const operatorRunTool: ToolDefinition = {
     cancellationReason: {
       type: "string",
       description:
-        "Reviewed reason for cancelling an exact queued Sentinel investigation.",
+        "Reviewed reason for cancelling queued Sentinel work or stopping one graph worker.",
     },
     taskId: {
       type: "string",
@@ -4896,12 +4903,7 @@ ${
           typeof runId !== "string" || !digestPattern.test(runId) ||
           typeof adaptiveRevision !== "string" ||
           !/^[a-f0-9]{64}$/.test(adaptiveRevision) ||
-          typeof cancellationReason !== "string" ||
-          !cancellationReason.trim() ||
-          cancellationReason.trim() !== cancellationReason ||
-          cancellationReason.length > 240 ||
-          /[\p{Cc}\p{Cf}]/u.test(cancellationReason) ||
-          redactCredentialText(cancellationReason) !== cancellationReason ||
+          !validSentinelCancellationReason(cancellationReason) ||
           Object.keys(args).some((key) =>
             ![
               "action",
@@ -5747,6 +5749,81 @@ ${JSON.stringify({ run: ref, runId: exactRunId, adaptiveRevision, ...scope })}`,
         const committed = reviewSentinelWorkerHold(
           path,
           exactRunId,
+          adaptiveRevision,
+          scope,
+          review.preview,
+        );
+        return committed?.receipt
+          ? safeProjection({ run: ref, receipt: committed.receipt })
+          : unavailable;
+      }
+      if (action === "stop" && args.cancellationReason !== undefined) {
+        const {
+          runId,
+          adaptiveRevision,
+          taskId,
+          requestId,
+          attempt,
+          cancellationReason,
+        } = args;
+        if (
+          ref.kind !== "sentinel" || ref.revision === undefined ||
+          !context?.authenticatedOwnerSessionId ||
+          !context.authorizeOwnerRunCall ||
+          !canFlowTo("INTERNAL", context.ceiling ?? "PUBLIC") ||
+          !canFlowTo(context.inputClassification ?? "PUBLIC", "INTERNAL") ||
+          typeof runId !== "string" || !digestPattern.test(runId) ||
+          typeof adaptiveRevision !== "string" ||
+          !/^[a-f0-9]{64}$/.test(adaptiveRevision) ||
+          typeof taskId !== "string" ||
+          !/^adaptive:[a-f0-9]{64}$/.test(taskId) ||
+          typeof requestId !== "string" || !digestPattern.test(requestId) ||
+          typeof attempt !== "number" || !Number.isSafeInteger(attempt) ||
+          attempt < 1 ||
+          !validSentinelCancellationReason(cancellationReason) ||
+          Object.keys(args).some((key) =>
+            ![
+              "action",
+              "kind",
+              "id",
+              "revision",
+              "runId",
+              "adaptiveRevision",
+              "taskId",
+              "requestId",
+              "attempt",
+              "cancellationReason",
+            ].includes(key)
+          ) ||
+          !await context.authorizeOwnerRunCall(args)
+        ) return unavailable;
+        const path = resolveSentinelCasePath(options.baseDir, ref.id);
+        const scope = {
+          runId: runId.toLowerCase(),
+          taskId,
+          requestId: requestId.toLowerCase(),
+          evidenceRevision: ref.revision,
+          stoppedAttempt: attempt,
+          reason: cancellationReason,
+        };
+        const review = reviewSentinelWorkerStopRationale(
+          path,
+          adaptiveRevision,
+          scope,
+        );
+        if (review?.receipt) {
+          return safeProjection({ run: ref, receipt: review.receipt });
+        }
+        if (!review?.preview) return unavailable;
+        if (
+          !await options.confirm(
+            `Stop this exact Sentinel graph worker?
+${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
+          )
+        ) return "Error: The operator declined the run action.";
+        if (!await context.authorizeOwnerRunCall(args)) return unavailable;
+        const committed = reviewSentinelWorkerStopRationale(
+          path,
           adaptiveRevision,
           scope,
           review.preview,

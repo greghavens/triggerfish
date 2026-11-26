@@ -836,7 +836,11 @@ Deno.test("Owner socket steers and stops one exact leased worker with a shared T
   }
 });
 
-async function verifyPausedGraphWorker(cold: boolean, denySavedRead = false) {
+async function verifyPausedGraphWorker(
+  cold: boolean,
+  denySavedRead = false,
+  stopAt?: "running" | "paused",
+) {
   const baseDir = await Deno.makeTempDir();
   const caseId = cold ? "portable-worker" : "main";
   const path = resolveSentinelCasePath(baseDir, caseId);
@@ -996,6 +1000,139 @@ async function verifyPausedGraphWorker(cold: boolean, denySavedRead = false) {
       attempt: 1,
       requestId: crypto.randomUUID(),
     };
+    if (stopAt) {
+      releasePeer.resolve();
+      const peer = status.tasks.find(({ nodeId }) => nodeId === "peer-graph")!;
+      await until(() =>
+        adaptive()?.modelReviewStates.some(({ taskId, status }) =>
+          taskId === peer.id && status === "completed"
+        ) === true
+      );
+
+      const reason =
+        "The existing service audit already covers the assigned check.";
+      const stop = {
+        ...pause,
+        action: "stop",
+        requestId: crypto.randomUUID(),
+        cancellationReason: reason,
+      };
+      let planningInput: unknown;
+      let mayPlan = false;
+      const followupPlanner = createSentinelModelPlanner(
+        path,
+        (_state, taskId) => ({
+          execute(content, send) {
+            assert(typeof content === "string");
+            if (!taskId) {
+              planningInput =
+                JSON.parse(content.split("\n").at(-1)!).operatorDecisions
+                  .cancelledTasks;
+            }
+            send({
+              type: "response",
+              text: taskId
+                ? '{"summary":"Reviewed scoped graph."}'
+                : JSON.stringify([
+                  {
+                    kind: held.kind,
+                    nodeId: held.nodeId,
+                    depth: held.depth,
+                    cancelledTaskRequestId: stop.requestId,
+                  },
+                  {
+                    kind: "trace",
+                    nodeId: "held-graph",
+                    depth: 2,
+                    cancelledTaskRequestId: stop.requestId,
+                  },
+                ]),
+              taint: "INTERNAL",
+            });
+            return Promise.resolve();
+          },
+          clear() {},
+        }),
+        () => workerPool(path),
+        () => Date.now() + 120_000,
+      );
+      planners.push(followupPlanner);
+      const coordinator = startSentinelAssessmentCoordinator({
+        snapshotPath: path,
+        advanceAdaptive(current) {
+          if (mayPlan) followupPlanner.advance(current);
+        },
+        stopAdaptive: () => followupPlanner.stop(),
+      });
+      let savedReceipt: unknown;
+      try {
+        await Promise.resolve();
+        await withOwnerControl(baseDir, async (request, approvals) => {
+          if (stopAt === "paused") {
+            assertEquals(
+              JSON.parse(await request(pause)).receipt.action,
+              "pause_assignment",
+            );
+          }
+          const expected = approvals.length;
+          assert(
+            (await request({ ...stop, attempt: 2 })).includes("unavailable"),
+          );
+          assertEquals(approvals.length, expected);
+          mayPlan = true;
+          savedReceipt = JSON.parse(await request(stop)).receipt;
+          assertEquals(
+            JSON.parse(approvals.at(-1)!.split("\n").at(-1)!).reason,
+            reason,
+          );
+          assertEquals(
+            adaptive()?.modelReviewStates.find(({ taskId }) =>
+              taskId === held.id
+            )?.status,
+            "stopped",
+          );
+          release.resolve();
+          releasePeer.resolve();
+          await until(() => planningInput !== undefined);
+          assertEquals(planningInput, [{
+            requestId: stop.requestId,
+            taskId: held.id,
+            nodeId: "held-graph",
+            reason,
+          }]);
+          await until(() =>
+            adaptive()?.tasks.some(({ plannerRound }) =>
+              plannerRound?.cancelledTaskRequestId === stop.requestId
+            ) === true
+          );
+          assertEquals(
+            adaptive()?.tasks.filter(({ plannerRound }) =>
+              plannerRound?.cancelledTaskRequestId === stop.requestId
+            ).map(({ kind, depth }) => [kind, depth]),
+            [["trace", 2]],
+          );
+        });
+        await withOwnerControl(baseDir, async (request, approvals) => {
+          assertEquals(JSON.parse(await request(stop)).receipt, savedReceipt);
+          assert(
+            (await request({ ...stop, cancellationReason: "Changed." }))
+              .includes("unavailable"),
+          );
+          const { cancellationReason: _reason, ...resume } = stop;
+          assert((await request({
+            ...resume,
+            action: "resume_assignment",
+            requestId: crypto.randomUUID(),
+          })).includes("unavailable"));
+          assertEquals(approvals.length, 0);
+        });
+        assertEquals(sourceCalls.get("held-graph"), 1);
+        assertEquals(reused, false);
+      } finally {
+        coordinator.stop();
+      }
+      return;
+    }
     let pauseReceipt: unknown;
     await withOwnerControl(baseDir, async (request, approvals) => {
       assert((await request({ ...pause, attempt: 2 })).includes("unavailable"));
@@ -1126,6 +1263,12 @@ Deno.test("Owner gateway restores a portable paused graph worker before reusing 
 
 Deno.test("Owner gateway reauthorizes a portable paused graph worker before exposing its saved result", () =>
   verifyPausedGraphWorker(true, true));
+
+Deno.test("Owner gateway feeds the reviewed rationale for a stopped running graph worker to the planner", () =>
+  verifyPausedGraphWorker(false, false, "running"));
+
+Deno.test("Owner gateway feeds the reviewed rationale for a stopped paused graph worker to the planner", () =>
+  verifyPausedGraphWorker(false, false, "paused"));
 
 Deno.test("Reviewed queued cancellation wakes Sentinel planning with exact lineage", async () => {
   const baseDir = await Deno.makeTempDir();

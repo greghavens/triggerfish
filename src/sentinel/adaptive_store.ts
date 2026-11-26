@@ -944,6 +944,7 @@ export interface SentinelQueuedCancellation {
   readonly evidenceRevision: number;
   readonly taskId: string;
   readonly reason: string;
+  readonly stoppedAttempt?: number;
 }
 
 export interface SentinelQueuedCancellationReceipt
@@ -6898,6 +6899,99 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
           );
         }
         return result?.receipt;
+      });
+    },
+
+    reviewModelStopRationale(
+      revision: string,
+      scope: SentinelQueuedCancellation & { readonly stoppedAttempt: number },
+      policyDigest: string,
+      eligible: (task: AdaptiveTask) => boolean,
+      expected?: string,
+    ) {
+      return transaction(db, () => {
+        const { requestId, taskId: id, stoppedAttempt: attempt, reason } =
+          scope;
+        if (activeRevision() !== revision) return;
+        const prior = this.readQueuedCancellation(requestId);
+        if (prior) {
+          return prior.adaptiveRevision === revision &&
+              Object.entries(scope).every(([key, value]) =>
+                prior[key as keyof SentinelQueuedCancellation] === value
+              )
+            ? { receipt: prior }
+            : undefined;
+        }
+        const row = lookup.get(id);
+        if (
+          row?.revision !== revision || row.status !== "completed" ||
+          (row.kind !== "trace" && row.kind !== "impact") ||
+          !eligible(decodeTask(row)) || mutationPending(revision, id) ||
+          this.modelReviewControls(revision, id).stopped
+        ) return;
+        const time = now();
+        const review = db.prepare(
+          "SELECT token, attempts, noteId FROM adaptive_model_reviews WHERE taskId = ?",
+        ).get(id);
+        if (!review || review.noteId !== null) return;
+        const hold = lastWorkerHold.get(revision, id);
+        const paused = hold?.event === "model_review_paused";
+        const token = typeof review.token === "string" ? review.token : null;
+        if (
+          paused
+            ? token !== null || Number(review.attempts) !== attempt - 1 ||
+              JSON.parse(String(hold.note)).scope.attempt !== attempt
+            : !token || Number(review.attempts) !== attempt ||
+              !this.activeModelReviewTask(revision, id, token)
+        ) return;
+        const binding = createHash("sha256").update(JSON.stringify([
+          scope,
+          policyDigest,
+          token,
+          paused ? hold.note : null,
+        ])).digest("hex");
+        if (expected === undefined) return { preview: binding };
+        if (expected !== binding) return;
+        const control = assignmentControls.request(
+          { requestId, revision, taskId: id, action: "stop", note: reason },
+          time,
+          () => attempt,
+        );
+        if (!control?.created) return;
+        if (token) {
+          if (!assignmentLeases.release(id, token, attempt, time)) {
+            throw new Error("Assignment lease changed during stop");
+          }
+        } else {
+          db.prepare(
+            "UPDATE adaptive_model_reviews SET attempts = ? WHERE taskId = ?",
+          )
+            .run(attempt, id);
+        }
+        event.run(
+          revision,
+          id,
+          "model_review_stop_requested",
+          attempt,
+          time,
+          requestId,
+        );
+        event.run(revision, id, "model_review_stopped", attempt, time, null);
+        const receipt: SentinelQueuedCancellationReceipt = {
+          ...scope,
+          adaptiveRevision: revision,
+          affectedTaskIds: [id],
+          at: new Date(time).toISOString(),
+        };
+        event.run(
+          revision,
+          id,
+          "operator_task_cancellation",
+          attempt,
+          time,
+          JSON.stringify(receipt),
+        );
+        return { receipt, applied: true as const };
       });
     },
 

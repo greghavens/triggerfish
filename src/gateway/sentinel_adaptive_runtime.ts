@@ -2591,6 +2591,38 @@ export function reviewSentinelWorkerHold(
   });
 }
 
+export function reviewSentinelWorkerStopRationale(
+  snapshotPath: string,
+  adaptiveRevision: string,
+  scope: SentinelQueuedCancellation & { readonly stoppedAttempt: number },
+  expected?: string,
+) {
+  const result = withSentinelAssessmentWriteLock(snapshotPath, (state) => {
+    if (
+      !state?.active || state.paused ||
+      state.revision !== scope.evidenceRevision ||
+      state.plan.runId !== scope.runId
+    ) return;
+    const store = openSentinelAdaptiveStore(storePath(snapshotPath));
+    try {
+      if (revisionForStore(state, store) !== adaptiveRevision) return;
+      return store.reviewModelStopRationale(
+        adaptiveRevision,
+        scope,
+        workerHoldPolicyDigest(snapshotPath, state),
+        caseOperatingScope(snapshotPath, state.revision),
+        expected,
+      );
+    } finally {
+      store.close();
+    }
+  });
+  if (result && "applied" in result) {
+    notifySentinelCancellation(snapshotPath, scope);
+  }
+  return result;
+}
+
 export function requestSentinelWorkerControl(
   snapshotPath: string,
   revision: string,
@@ -2789,6 +2821,21 @@ export function previewSentinelQueueControl(
   };
 }
 
+function notifySentinelCancellation(
+  snapshotPath: string,
+  scope: SentinelQueuedCancellation,
+) {
+  const caseId = locateSentinelCase(snapshotPath)?.caseId;
+  if (caseId) {
+    notifyCommittedEvidence({
+      case: caseId,
+      run_id: scope.runId,
+      revision: scope.evidenceRevision,
+      observation_id: `task-cancelled:${scope.requestId}`,
+    });
+  }
+}
+
 export function reviewSentinelQueuedCancellation(
   snapshotPath: string,
   scope: SentinelQueuedCancellation,
@@ -2833,16 +2880,8 @@ export function reviewSentinelQueuedCancellation(
       store.close();
     }
   });
-  if (result && "state" in result && result.state) {
-    const caseId = locateSentinelCase(snapshotPath)?.caseId;
-    if (caseId && !result.state.paused) {
-      notifyCommittedEvidence({
-        case: caseId,
-        run_id: scope.runId,
-        revision: scope.evidenceRevision,
-        observation_id: `task-cancelled:${scope.requestId}`,
-      });
-    }
+  if (result && "state" in result && result.state && !result.state.paused) {
+    notifySentinelCancellation(snapshotPath, scope);
   }
   return result;
 }
@@ -7543,8 +7582,16 @@ export function createSentinelModelPlanner(
                 ...relationshipAliases.keys(),
               ]);
               const remaining = MAX_ADAPTIVE_TASKS - currentTasks.length;
+              const stoppedIds = new Set(
+                store.modelReviewStates(revision)
+                  .filter(({ status }) => status === "stopped").map((
+                    { taskId },
+                  ) => taskId),
+              );
               const cancelledShapes = new Set(
-                currentTasks.filter(({ status }) => status === "cancelled")
+                currentTasks.filter(({ id, status }) =>
+                  status === "cancelled" || stoppedIds.has(id)
+                )
                   .map(({ kind, nodeId, depth }) =>
                     JSON.stringify([kind, nodeId, depth])
                   ),
