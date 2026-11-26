@@ -297,6 +297,7 @@ import {
   sentinelTrafficTools,
 } from "./sentinel_traffic_tool.ts";
 import {
+  currentSentinelFindingContext,
   executeSentinelWorkerFindingTool,
   isSentinelWorkerFindingTool,
   sentinelFindingReadTools,
@@ -1288,6 +1289,7 @@ interface ActiveTurn {
   readonly controller: AbortController;
   readonly signal: AbortSignal;
   readonly readGraph: ReadGraph;
+  findingContextRevision?: number;
   pendingTelemetryFence?: {
     readonly tool: string;
     readonly revision?: unknown;
@@ -5050,6 +5052,17 @@ function createAgent(
             ) return { ...result, allowed: false, action: "BLOCK" };
           }
         }
+        if (
+          result.allowed && name === "POST_TOOL_RESPONSE" &&
+          toolName === SENTINEL_RECHECK_CONTEXT_TOOL &&
+          typeof context.input.tool_response === "string" &&
+          context.input.tool_response.startsWith("{") &&
+          (!turn || !currentSentinelFindingContext(
+            options,
+            context.input.tool_response,
+            options.assessmentRevision ?? turn.findingContextRevision,
+          ))
+        ) return { ...result, allowed: false, action: "BLOCK" };
         if (name === "PRE_TOOL_CALL" && plannerControl) {
           const permits = result.action === "REQUIRE_APPROVAL" ||
             (result.action === "ALLOW" && result.allowed);
@@ -5590,6 +5603,11 @@ function createAgent(
           name === SENTINEL_GOAL_RECHECK_READ;
         if (plannerRead && !currentPlannerReceiptScope(turn)) {
           return "Error: The planner case is unavailable.";
+        }
+        if (name === SENTINEL_RECHECK_CONTEXT_TOOL) {
+          turn.findingContextRevision = readSentinelAssessment(
+            options.snapshotPath,
+          )?.revision;
         }
         const result = executeSentinelWorkerFindingTool(
           options,

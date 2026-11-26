@@ -81,6 +81,7 @@ import {
   type SentinelFormalGoal,
 } from "../../src/sentinel/formal_goals.ts";
 import { resolveSentinelCaseMembership } from "../../src/sentinel/case_membership.ts";
+import { digestSentinelSnapshot } from "../../src/sentinel/shared_inventory.ts";
 import { resolveSentinelCasePath } from "../../src/sentinel/cases.ts";
 import { importSentinelHar } from "../../src/sentinel/har.ts";
 import {
@@ -7792,3 +7793,169 @@ Deno.test("A dedicated recheck can prove a formal goal only after successful set
 
 Deno.test("A stopped dedicated recheck cannot prove a formal goal using its staged passing receipt", () =>
   verifyReceiptFamily("native workflow result", "goal-stop"));
+
+Deno.test("Interactive Sentinel recheck context rejects withdrawn case access", async () => {
+  const baseDir = await Deno.makeTempDir();
+  const path = resolveSentinelCasePath(baseDir);
+  try {
+    await Deno.mkdir(dirname(path), { recursive: true });
+    await Deno.writeTextFile(
+      path,
+      JSON.stringify({
+        version: 1,
+        nodes: [
+          { id: "app", kind: "asset", label: "Allowed application" },
+          { id: "other", kind: "asset", label: "Other application" },
+        ],
+        edges: [],
+      }),
+    );
+    const state = startSentinelAssessment(path, {
+      goal: "Review retained control evidence",
+    });
+    assert(state.plan.runId);
+    const snapshot = state.result?.sharedGraph.snapshot;
+    assert(snapshot);
+    const journal = openSentinelWorkerFindingStore(path);
+    const time = Date.now();
+    const original = journal.recordFinding({
+      caseId: "main",
+      runId: state.plan.runId,
+      evidenceRevision: state.revision,
+      taskId: "original-worker",
+      targetId: "app",
+      graphFindingId: "previous-failure",
+      controlId: "control",
+      evidenceId: "retained-result",
+      snapshotDigest: digestSentinelSnapshot(snapshot),
+      observedAt: new Date(time - 1000).toISOString(),
+      evaluatedAt: new Date(time).toISOString(),
+      validUntil: new Date(time + 60000).toISOString(),
+      requestId: crypto.randomUUID(),
+      title: "Retained control finding",
+      summary: "Authorized original observation.",
+    });
+    journal.close();
+    assert(original);
+    let result = "";
+    let revokeOnResponse = false;
+    let permitted = 0;
+    const registry = createProviderRegistry();
+    registry.register({
+      name: "interactive-finding-context",
+      supportsStreaming: false,
+      complete(messages) {
+        const last = messages.at(-1);
+        const response = last?.role === "tool";
+        if (response) result = String(last.content);
+        return Promise.resolve({
+          content: response ? "Reviewed the retained context." : "",
+          usage: { inputTokens: 1, outputTokens: 1 },
+          toolCalls: response ? [] : [{
+            id: crypto.randomUUID(),
+            type: "function",
+            function: {
+              name: context,
+              arguments: JSON.stringify({ findingId: original.id }),
+            },
+          }],
+        });
+      },
+    });
+    registry.setDefault("interactive-finding-context");
+    const chat = createChatSession({
+      session: createSession({
+        userId: "owner" as UserId,
+        channelId: "interactive-finding-context" as ChannelId,
+        bumpersEnabled: false,
+      }),
+      providerRegistry: registry,
+      sentinelSnapshotPath: path,
+      allowSentinelModelAccess: true,
+      hookRunner: {
+        evaluateHook(hook, { input }) {
+          if (
+            hook === "POST_TOOL_RESPONSE" && input.tool_name === context &&
+            typeof input.tool_response === "string" &&
+            input.tool_response.startsWith("{")
+          ) {
+            permitted++;
+            if (revokeOnResponse) {
+              assert(recordSentinelOperatingConstraints(path, {
+                runId: state.plan.runId!,
+                evidenceRevision: state.revision,
+                expectedVersion: 0,
+                requestId: crypto.randomUUID(),
+                operatorScope: "owner",
+                constraints: { allowedAssetIds: ["other"], deniedKinds: [] },
+              }));
+            }
+          }
+          return Promise.resolve({
+            allowed: true,
+            action: "ALLOW",
+            ruleId: null,
+            duration: 0,
+          });
+        },
+      },
+    });
+    const token = crypto.randomUUID();
+    const gateway = createGatewayServer({ token, port: 0, chatSession: chat });
+    const { port } = await gateway.start();
+    const socket = new WebSocket(`ws://127.0.0.1:${port}/chat?token=${token}`);
+    const closed = Promise.withResolvers<void>();
+    socket.addEventListener("close", () => closed.resolve(), { once: true });
+    try {
+      await new Promise<void>((resolve, reject) => {
+        socket.addEventListener("open", () => resolve(), { once: true });
+        socket.addEventListener("error", reject, { once: true });
+      });
+      const turn = async (content: string) => {
+        const completed = Promise.withResolvers<void>();
+        const timer = setTimeout(
+          () => completed.reject(new Error("No Sentinel response")),
+          3000,
+        );
+        const receive = ({ data }: MessageEvent) => {
+          const frame = JSON.parse(data);
+          if (frame.type === "error") {
+            completed.reject(new Error(`${content}: ${frame.message}`));
+          }
+          if (frame.type === "turn_end") completed.resolve();
+        };
+        socket.addEventListener("message", receive);
+        try {
+          socket.send(JSON.stringify({ type: "message", content }));
+          await completed.promise;
+        } finally {
+          clearTimeout(timer);
+          socket.removeEventListener("message", receive);
+        }
+      };
+      await turn("/sentinel on");
+      await turn("Read this retained finding for remediation.");
+      assertEquals(JSON.parse(result).finding.id, original.id);
+      revokeOnResponse = true;
+      await turn("Review the same finding again.");
+      assertEquals(result, "Tool response withheld by policy.");
+      revokeOnResponse = false;
+      await turn("Read the same exact finding a third time.");
+      assertStringIncludes(result, "unavailable");
+      assert(stopSentinelAssessment(path));
+      const next = startSentinelAssessment(path);
+      assert(next.plan.runId && next.plan.runId !== state.plan.runId);
+      await turn("/sentinel off");
+      await turn("/sentinel on");
+      await turn("Read the earlier run's exact finding.");
+      assertStringIncludes(result, "unavailable");
+      assertEquals(permitted, 2);
+    } finally {
+      socket.close();
+      await closed.promise;
+      await gateway.stop();
+    }
+  } finally {
+    await Deno.remove(baseDir, { recursive: true });
+  }
+});

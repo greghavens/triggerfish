@@ -14,6 +14,7 @@ import { digestSentinelSnapshot } from "../sentinel/shared_inventory.ts";
 import { notifyCommittedEvidence } from "../core/evidence_task_progression.ts";
 import { sentinelFindingTrafficEvidenceVersion } from "../sentinel/finding_traffic_links.ts";
 import { readSentinelFindingPageReference } from "../sentinel/worker_goal_recovery.ts";
+import { SENTINEL_RECHECK_CONTEXT_TOOL } from "../sentinel/worker_finding_recovery.ts";
 import {
   type ExecutionControlReceipt,
   executionReceiptSupportsCheck,
@@ -63,6 +64,41 @@ import {
 import type { SentinelAgentOptions } from "./sentinel_agent.ts";
 
 import { sentinelOperatingConstraintsAllow } from "../sentinel/operating_constraints.ts";
+
+function allowedFindingContext(
+  path: string,
+  state: NonNullable<ReturnType<typeof readSentinelAssessment>>,
+  caseId: string,
+  finding: {
+    readonly caseId: string;
+    readonly runId: string;
+    readonly evidenceRevision: number;
+    readonly targetId: string;
+  },
+) {
+  return finding.caseId === caseId && finding.runId === state.plan.runId &&
+    finding.evidenceRevision <= state.revision &&
+    sentinelOperatingConstraintsAllow(
+      readSentinelOperatingConstraints(path, finding.runId)?.constraints,
+      { kind: "review_evidence", nodeId: finding.targetId },
+      state.result?.sharedGraph.snapshot,
+    );
+}
+
+/** Fence a completed context response against changes during root hooks. */
+export function currentSentinelFindingContext(
+  scope: Scope,
+  response: string,
+  contextRevision: number | undefined,
+) {
+  const { finding } = JSON.parse(response);
+  const caseId = locateSentinelCase(scope.snapshotPath)?.caseId;
+  const state = readSentinelAssessment(scope.snapshotPath);
+  return !!caseId && !!state && state.revision === contextRevision &&
+    !!finding &&
+    allowedFindingContext(scope.snapshotPath, state, caseId, finding) &&
+    (!scope.assignedTaskId || !!assignedTask(scope));
+}
 
 /** Keep historical policy context scoped to the assigned asset. */
 function recheckConstraintProjection(
@@ -193,7 +229,7 @@ export const sentinelFindingReadTools: readonly ToolDefinition[] = [
     },
   },
   {
-    name: "sentinel_finding_recheck_context",
+    name: SENTINEL_RECHECK_CONTEXT_TOOL,
     description:
       "Read a saved worker finding and current admissible verification for the original asset and control.",
     parameters: { findingId: exactId },
@@ -507,7 +543,7 @@ export function executeSentinelWorkerFindingTool(
 
     const { findingId, graphFindingId, controlId, evidenceId, requestId } =
       args;
-    if (name === "sentinel_finding_recheck_context") {
+    if (name === SENTINEL_RECHECK_CONTEXT_TOOL) {
       if (typeof findingId !== "string") return unavailable;
       return projectResult(
         withFindingJournal(
@@ -522,9 +558,14 @@ export function executeSentinelWorkerFindingTool(
             const direct = target !== undefined &&
               task?.kind === "review_evidence";
             if (
-              !finding || finding.caseId !== caseId ||
-              target && (finding.runId !== state.plan.runId ||
-                  !direct && finding.targetId !== target)
+              !finding ||
+              !allowedFindingContext(
+                scope.snapshotPath,
+                state,
+                caseId,
+                finding,
+              ) ||
+              (target && !direct && finding.targetId !== target)
             ) return;
             const check = direct
               ? receiptRecheckCandidate(
@@ -624,9 +665,11 @@ export function executeSentinelWorkerFindingTool(
                 }
                 : report && { reportVersion: report.version }),
               current: check ?? null,
-              rechecks: store.list().filter((item) =>
-                item.kind === "recheck" && item.findingId === finding.id
-              ).slice(0, 5),
+              rechecks: store.listFindingRechecks(finding.id, state.revision)
+                .filter((item) =>
+                  item.caseId === caseId && item.runId === finding.runId &&
+                  item.targetId === finding.targetId
+                ).slice(0, 5),
             };
           },
         ),
