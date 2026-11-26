@@ -4056,7 +4056,7 @@ ${
         return safeProjection({ pages });
       }
       if (
-        (action === "inspect" || action === "pause") &&
+        (action === "inspect" || action === "pause" || action === "cancel") &&
         args.kind === "owner_chat"
       ) {
         const { ownerRecoverySessionId, ceiling, authorizeOwnerRunCall } =
@@ -4079,8 +4079,48 @@ ${
           if (!state) return unavailable;
           const project = (status: typeof state) =>
             safeProjection({ run: { ...ref, ...status } });
-          if (action === "inspect" || state.status === "paused") {
-            return project(state);
+          const stopping = action === "cancel";
+          if (
+            action === "inspect" ||
+            (stopping ? state.status === "stopped" : state.status === "paused")
+          ) return project(state);
+          if (stopping) {
+            if (
+              !authorizeOwnerRunCall || state.status === "completed" ||
+              !await options.confirm(
+                `Stop this exact owner chat execution?${"\n"}${
+                  JSON.stringify(ref)
+                }`,
+              )
+            ) return unavailable;
+            if (!await authorizeOwnerRunCall(args)) return unavailable;
+            using lock = lockAgentRecovery(recoveryPath, key);
+            if (
+              !lock || !isDeepStrictEqual(recovery.inspectStatus(key), state)
+            ) {
+              return unavailable;
+            }
+            const traces = openExecutionTraces(backgroundTracePath);
+            try {
+              const trace = traces.readRun(
+                "owner_chat",
+                key,
+                ceiling ?? "INTERNAL",
+              );
+              if (
+                trace?.status !== "running" ||
+                trace.scope.sessionId !== ownerRecoverySessionId ||
+                trace.scope.sourceId !== ref.id ||
+                !recovery.recordStop(key)
+              ) return unavailable;
+              traces.cancelRun("owner_chat", key, ceiling ?? "INTERNAL");
+              const stopped = recovery.inspectStatus(key);
+              return stopped?.status === "stopped"
+                ? project(stopped)
+                : unavailable;
+            } finally {
+              traces.close();
+            }
           }
           if (
             !authorizeOwnerRunCall || state.committedBatch === 0 ||

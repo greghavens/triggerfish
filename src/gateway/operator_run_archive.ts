@@ -574,11 +574,20 @@ export async function executeOperatorRunArchive(
                 );
                 const trace = openTrace();
                 try {
-                  const saved = trace.readRun(
+                  let saved = trace.readRun(
                     "owner_chat",
                     ownerKey,
                     "RESTRICTED",
                   );
+                  const stopped = record.status === "finished" &&
+                    record.stoppedAt !== undefined;
+                  if (stopped && saved?.status === "running") {
+                    saved = trace.cancelRun(
+                      "owner_chat",
+                      ownerKey,
+                      ownerArchiveCeiling,
+                    );
+                  }
                   const traceSnapshot = saved &&
                     trace.archiveSnapshot(
                       "owner_chat",
@@ -588,7 +597,10 @@ export async function executeOperatorRunArchive(
                     );
                   if (
                     record.status === "finished"
-                      ? traceSnapshot?.run.status !== "completed"
+                      ? stopped
+                        ? traceSnapshot?.run.status !== "interrupted" ||
+                          traceSnapshot.run.operatorCancelled !== true
+                        : traceSnapshot?.run.status !== "completed"
                       : saved && (!traceSnapshot || saved.status !== "running")
                   ) return;
                   const archivedTrace = traceSnapshot &&

@@ -58,6 +58,7 @@ export interface RecoverableState extends RecoveryState {
 
 export type FinishedAgentRecoveryRecord = RecoveryState & {
   readonly status: "finished";
+  readonly stoppedAt?: string;
 };
 
 export type AgentRecoveryRecord =
@@ -372,16 +373,28 @@ export function installFinishedRecovery(
   record: FinishedAgentRecoveryRecord,
   schema: "main" | "archive_recovery" = "main",
 ): boolean {
-  const { key, binding, committedBatch, status } = record;
+  const { key, binding, committedBatch, status, stoppedAt } = record;
   if (
     status !== "finished" || !digestPattern.test(key) ||
     !digestPattern.test(binding) || !Number.isSafeInteger(committedBatch) ||
-    committedBatch < 0 || committedBatch > MAX_BATCH
+    committedBatch < 0 || committedBatch > MAX_BATCH ||
+    (stoppedAt !== undefined && (typeof stoppedAt !== "string" ||
+      !Number.isFinite(Date.parse(stoppedAt)) ||
+      new Date(Date.parse(stoppedAt)).toISOString() !== stoppedAt))
   ) return false;
   const inserted = db.prepare(`
     INSERT INTO ${schema}.recoveries (key, binding, status, committedBatch)
     VALUES (?, ?, 'finished', ?) ON CONFLICT(key) DO NOTHING
   `).run(key, binding, committedBatch).changes === 1;
+  if (inserted && stoppedAt !== undefined) {
+    db.prepare(`INSERT INTO ${schema}.recovery_stops VALUES (?, ?)`)
+      .run(key, stoppedAt);
+  }
+  if (
+    !inserted &&
+    db.prepare(`SELECT stoppedAt FROM ${schema}.recovery_stops WHERE key = ?`)
+        .get(key)?.stoppedAt !== stoppedAt
+  ) return false;
   return inserted || db.prepare(`
     SELECT 1 FROM ${schema}.recoveries
     WHERE key = ? AND binding = ? AND committedBatch = ? AND status = 'finished'
@@ -437,6 +450,10 @@ export class AgentRecoveryStore {
   #createControlTables() {
     ensureExecutionChecklists(this.#db);
     this.#db.exec(`
+      CREATE TABLE IF NOT EXISTS recovery_stops (
+        key TEXT PRIMARY KEY REFERENCES recoveries(key),
+        stoppedAt TEXT NOT NULL
+      );
       CREATE TABLE IF NOT EXISTS recovery_pauses (
         key TEXT PRIMARY KEY REFERENCES recoveries(key)
       );
@@ -481,7 +498,7 @@ export class AgentRecoveryStore {
 
   inspectStatus(key: string) {
     const row = this.#db.prepare(`
-      SELECT status, committedBatch, pendingBatch,
+      SELECT status, committedBatch, pendingBatch, recovery_stops.stoppedAt,
         EXISTS (SELECT 1 FROM recovery_pauses WHERE key = recoveries.key) AS paused,
         EXISTS (SELECT 1 FROM recovery_read_batches
           WHERE key = recoveries.key AND batch = recoveries.pendingBatch) AS retryableRead,
@@ -489,10 +506,13 @@ export class AgentRecoveryStore {
           WHERE key = recoveries.key AND batch = recoveries.pendingBatch) AS guarded,
         EXISTS (SELECT 1 FROM recovery_authorized_calls
           WHERE key = recoveries.key AND batch = recoveries.pendingBatch) AS dispatched
-      FROM recoveries WHERE key = ?
+      FROM recoveries LEFT JOIN recovery_stops USING (key) WHERE key = ?
     `).get(validateKey(key));
     if (!row) return;
     const batch = { committedBatch: Number(row.committedBatch) };
+    if (typeof row.stoppedAt === "string") {
+      return { ...batch, status: "stopped" as const, stoppedAt: row.stoppedAt };
+    }
     if (row.status === "finished") {
       return { ...batch, status: "completed" as const };
     }
@@ -520,8 +540,10 @@ export class AgentRecoveryStore {
 
   read(key: string): AgentRecoveryRecord | undefined {
     const row = this.#db.prepare(`
-      SELECT recoveries.*, recovery_pauses.key IS NOT NULL AS paused
+      SELECT recoveries.*, recovery_pauses.key IS NOT NULL AS paused,
+        recovery_stops.stoppedAt
       FROM recoveries LEFT JOIN recovery_pauses USING (key)
+        LEFT JOIN recovery_stops USING (key)
       WHERE recoveries.key = ?
     `).get(
       validateKey(key),
@@ -532,6 +554,9 @@ export class AgentRecoveryStore {
       binding: String(row.binding),
       committedBatch: Number(row.committedBatch),
     };
+    if (typeof row.stoppedAt === "string") {
+      return { ...state, status: "finished", stoppedAt: row.stoppedAt };
+    }
     if (row.status === "finished") return { ...state, status: "finished" };
     const recoverable = {
       ...state,
@@ -560,6 +585,24 @@ export class AgentRecoveryStore {
   }
 
   /** Pause an idle execution. The caller must hold its recovery lock. */
+  /** Stop a fenced recovery admission without resolving any unknown action. */
+  recordStop(key: string): boolean {
+    key = validateKey(key);
+    return this.#transaction(() => {
+      const recorded = this.#db.prepare(`
+        INSERT INTO recovery_stops (key, stoppedAt)
+        SELECT key, ? FROM recoveries WHERE key = ? AND status <> 'finished'
+        ON CONFLICT(key) DO NOTHING
+      `).run(new Date().toISOString(), key);
+      if (recorded.changes !== 1) return false;
+      this.#db.prepare(
+        "UPDATE recoveries SET status = 'finished' WHERE key = ?",
+      )
+        .run(key);
+      return true;
+    });
+  }
+
   pauseAtCommittedCheckpoint(
     key: string,
     allowBeforeFirstAction = false,

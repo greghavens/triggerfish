@@ -748,6 +748,67 @@ Deno.test("gateway resumes a saved credential-backed result and blocks revoked o
       );
       assertEquals(legacy.run.nextAction, "reconcile_unknown");
     });
+    const stoppedRef = { kind: "owner_chat", id: uncertainId };
+    const stoppedTrace = archiveRequest({
+      action: "execution_traces",
+      traceRole: "owner_chat",
+      id: uncertainId,
+    });
+    const stopAction = archiveRequest({ action: "cancel", ...stoppedRef });
+    const stoppedArchiveId = crypto.randomUUID();
+    let stoppedStatus: unknown;
+    let interruptedHistory: unknown;
+    let traceBeforeReview: unknown;
+    const beforeStop = approvals;
+    await withGateway("mutate_interrupt", async (socket) => {
+      assertStringIncludes(await turn(socket, stopAction), "unavailable");
+    }, createSession({ userId: session.userId, channelId: session.channelId }));
+    assertEquals(approvals, beforeStop);
+    await withGateway("mutate_interrupt", async (socket) => {
+      traceBeforeReview = JSON.parse(await turn(socket, stoppedTrace));
+      revokeOnOperatorApproval = true;
+      try {
+        assertStringIncludes(await turn(socket, stopAction), "unavailable");
+      } finally {
+        revokeOnOperatorApproval = false;
+      }
+      assertEquals((await readExecution(uncertainId))?.status, "pending");
+      assertEquals(mutations, 1);
+      assertEquals(approvals, beforeStop + 1);
+    });
+    await withGateway("mutate_interrupt", async (socket) => {
+      const prior = JSON.parse(await turn(socket, stoppedTrace));
+      assertEquals(prior, traceBeforeReview);
+      const stopped = JSON.parse(await turn(socket, stopAction));
+      stoppedStatus = stopped;
+      assertEquals(stopped.run.status, "stopped");
+      assertEquals(stopped.run.committedBatch, 0);
+      assertEquals(JSON.parse(await turn(socket, stopAction)), stopped);
+      assertEquals(approvals, beforeStop + 2);
+      const retained = JSON.parse(await turn(socket, stoppedTrace));
+      interruptedHistory = retained;
+      assertEquals(retained.run.operatorCancelled, true);
+      assertEquals(retained.run.status, "interrupted");
+      assertEquals(retained.page, prior.page);
+      assertStringIncludes(
+        await turn(socket, request(uncertainId)),
+        "stopped by its owner",
+      );
+      assertEquals(mutations, 1);
+      assertEquals(
+        JSON.parse(
+          await turn(
+            socket,
+            archiveRequest({
+              action: "archive",
+              ...stoppedRef,
+              requestId: stoppedArchiveId,
+            }),
+          ),
+        ).receipt.status,
+        "succeeded",
+      );
+    });
     approvalRuleId = "fixture-mutation-approval";
     await withGateway("reconcile_interrupt", async (socket, reached) => {
       send(socket, request(reconciledId));
@@ -1246,6 +1307,32 @@ Deno.test("gateway resumes a saved credential-backed result and blocks revoked o
       assertEquals(exactReads, 1);
     });
 
+    await withGateway("mutate_interrupt", async (socket) => {
+      const callsBefore = mutations;
+      const restoreStopped = archiveRequest({
+        action: "restore",
+        ...stoppedRef,
+        archiveId: stoppedArchiveId,
+        requestId: crypto.randomUUID(),
+      });
+      const restored = JSON.parse(await turn(socket, restoreStopped));
+      assertEquals(restored.receipt.status, "succeeded");
+      assertEquals(JSON.parse(await turn(socket, restoreStopped)), restored);
+      assertEquals(
+        JSON.parse(await turn(socket, inspectRecovery(uncertainId))),
+        stoppedStatus,
+      );
+      assertEquals(
+        JSON.parse(await turn(socket, stoppedTrace)),
+        interruptedHistory,
+      );
+      assertStringIncludes(
+        await turn(socket, request(uncertainId, true)),
+        "stopped by its owner",
+      );
+      assertEquals(mutations, callsBefore);
+    });
+
     const approvalExecution = crypto.randomUUID();
     const approvalKey = assignmentRecoveryKey(session.id, approvalExecution);
     let archivedApprovalId = "";
@@ -1381,6 +1468,43 @@ Deno.test("gateway resumes a saved credential-backed result and blocks revoked o
         "already finished",
       );
       assertEquals(exactReads, 2);
+    });
+
+    const stoppedReadId = crypto.randomUUID();
+    await withGateway("exact_interrupt", async (socket, reached) => {
+      send(socket, request(stoppedReadId));
+      await reached;
+      assertEquals((await readExecution(stoppedReadId))?.committedBatch, 1);
+    });
+    await withGateway("exact_resume", async (socket) => {
+      const before = exactReads;
+      const retainedRead = archiveRequest({
+        action: "execution_trace_payload",
+        traceRole: "owner_chat",
+        id: stoppedReadId,
+        ordinal: 1,
+      });
+      const source = JSON.parse(await turn(socket, retainedRead));
+      const stopped = JSON.parse(
+        await turn(
+          socket,
+          archiveRequest({
+            action: "cancel",
+            kind: "owner_chat",
+            id: stoppedReadId,
+          }),
+        ),
+      );
+      assertEquals(stopped.run.status, "stopped");
+      assertEquals(stopped.run.committedBatch, 1);
+      const retained = JSON.parse(await turn(socket, retainedRead));
+      assertEquals(retained.step, source.step);
+      assertEquals(retained.payload, source.payload);
+      assertStringIncludes(
+        await turn(socket, request(stoppedReadId)),
+        "stopped by its owner",
+      );
+      assertEquals(exactReads, before);
     });
 
     assert(

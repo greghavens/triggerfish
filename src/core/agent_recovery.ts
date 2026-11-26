@@ -328,6 +328,12 @@ export async function runRecoverableAgentTurn(
       };
     }
     if (admission.status === "finished") {
+      if (admission.stoppedAt) {
+        return {
+          ok: false,
+          error: "This recovery execution was stopped by its owner.",
+        };
+      }
       return { ok: false, error: "This execution already finished." };
     }
     if (admission.status === "paused" && !control?.resumePaused) {
