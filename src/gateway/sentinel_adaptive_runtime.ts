@@ -1,3 +1,4 @@
+import { readReviewedModelRetryPolicy } from "../core/model_monitor.ts";
 import {
   DEFAULT_BASE_DELAY_MS,
   DEFAULT_MAX_RETRIES,
@@ -8063,15 +8064,24 @@ export function createSentinelModelPlanner(
           );
           return modelFailure;
         };
+        const retryPolicy = () =>
+          location
+            ? readReviewedModelRetryPolicy(location.baseDir) ??
+              { maxRetries: 0, baseDelayMs: 0 }
+            : {
+              maxRetries: DEFAULT_MAX_RETRIES,
+              baseDelayMs: DEFAULT_BASE_DELAY_MS,
+            };
         try {
           for (let retry = 0;; retry++) {
             const modelFailure = await executeAttempt(retry);
             if (
-              modelFailure !== true || retry >= DEFAULT_MAX_RETRIES ||
-              review || !currentLease()
+              modelFailure !== true || review || !currentLease()
             ) break;
+            const { maxRetries, baseDelayMs } = retryPolicy();
+            if (retry >= maxRetries) break;
             try {
-              const deadline = Date.now() + DEFAULT_BASE_DELAY_MS * 2 ** retry;
+              const deadline = Date.now() + baseDelayMs * 2 ** retry;
               for (let remaining = deadline - Date.now(); remaining > 0;) {
                 // An owner can stop a lease in another gateway connection
                 // without aborting this controller. Poll the durable lease.
@@ -8088,6 +8098,7 @@ export function createSentinelModelPlanner(
               return;
             }
             if (!currentLease()) return;
+            if (retry >= retryPolicy().maxRetries) break;
           }
         } finally {
           checkpointStore.close();

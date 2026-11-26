@@ -4953,6 +4953,8 @@ for (
     "handled",
     "revoked",
     "exhausted",
+    "policy-off",
+    "policy-one",
     "approved-provenance",
     "revoked-provenance",
     "approved-traffic",
@@ -4984,6 +4986,12 @@ for (
     const toolApprovalInbox = provenance || traffic
       ? createToolApprovalService(join(baseDir, "saved-read-approvals.db"))
       : undefined;
+    const reviewedPolicy = scenario === "policy-off"
+      ? { retries: 0, delayMs: 0 }
+      : scenario === "policy-one"
+      ? { retries: 1, delayMs: 160 }
+      : undefined;
+    const failureTimes: number[] = [];
     const recover = scenario === "recovered" ||
       scenario === "approved-provenance" || scenario === "approved-traffic";
     let exactTraffic:
@@ -5026,6 +5034,7 @@ for (
           });
         }
         modelTurns++;
+        failureTimes.push(performance.now());
         savedResults.push(saved.content);
         if (provenance) {
           const parsed = JSON.parse(String(saved.content));
@@ -5190,6 +5199,22 @@ for (
         store.close();
       }
       advanceAdaptiveSentinel(path, state);
+      if (reviewedPolicy) {
+        await withOwnerControl(baseDir, async (owner, approvals) => {
+          const response = await owner({
+            action: "set_model_retry_policy",
+            expectedVersion: 0,
+            requestId: crypto.randomUUID(),
+            modelRetryCount: reviewedPolicy.retries,
+            modelRetryDelayMs: reviewedPolicy.delayMs,
+          });
+          assert(!response.startsWith("Error:"), response);
+          assertEquals(approvals.length, 1);
+          const { retryPolicy } = JSON.parse(response);
+          assertEquals(retryPolicy.retries, reviewedPolicy.retries);
+          assertEquals(retryPolicy.delayMs, reviewedPolicy.delayMs);
+        });
+      }
       planner.advance(state);
       if (toolApprovalInbox) {
         await withOwnerControl(
@@ -5281,9 +5306,13 @@ for (
       assert(savedResults.every((saved) => saved === savedResults[0]));
       assertEquals(
         modelTurns,
-        recover ? 2 : scenario === "exhausted" ? 3 : 1,
+        recover || scenario === "policy-one"
+          ? 2
+          : scenario === "exhausted"
+          ? 3
+          : 1,
       );
-      if (recover || scenario === "exhausted") {
+      if (recover || scenario === "exhausted" || scenario === "policy-one") {
         assert(
           savedChecks >= modelTurns,
           "Each saved result must be reauthorized",
@@ -5291,10 +5320,13 @@ for (
       }
       if (
         scenario === "permanent" || scenario === "exhausted" ||
-        scenario === "handled"
+        scenario === "handled" || reviewedPolicy !== undefined
       ) {
         assertEquals(review?.status, "exhausted");
         assertEquals(review?.attempts, 1);
+      }
+      if (reviewedPolicy?.retries) {
+        assert(failureTimes[1] - failureTimes[0] >= reviewedPolicy.delayMs);
       }
       if (recover) assertEquals(review?.status, "completed");
       if (scenario === "revoked") assertEquals(savedChecks, 2);

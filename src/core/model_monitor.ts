@@ -24,6 +24,23 @@ function count(value: unknown): number {
     : 0;
 }
 
+/** Resolve the reviewed process-wide model retry settings. */
+export function readReviewedModelRetryPolicy(baseDir: string) {
+  try {
+    const policy = modelMonitor(baseDir).retryPolicy();
+    const { retries, delayMs } = policy;
+    if (
+      typeof retries !== "number" || !Number.isSafeInteger(retries) ||
+      retries < 0 || retries > 8 ||
+      typeof delayMs !== "number" || !Number.isSafeInteger(delayMs) ||
+      delayMs < 0 || delayMs > 5000
+    ) return;
+    return { maxRetries: retries, baseDelayMs: delayMs };
+  } catch {
+    return undefined;
+  }
+}
+
 export function modelMonitor(baseDir: string) {
   const path = join(baseDir, "model-monitor.db");
   function ensureFile() {

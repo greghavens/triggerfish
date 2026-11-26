@@ -1,5 +1,9 @@
 import { parseClassification } from "../../core/types/classification.ts";
-import { type ModelCallScope, modelMonitor } from "../../core/model_monitor.ts";
+import {
+  type ModelCallScope,
+  modelMonitor,
+  readReviewedModelRetryPolicy,
+} from "../../core/model_monitor.ts";
 import { isTransientModelAvailabilityError } from "./retry.ts";
 import type {
   LlmProvider,
@@ -179,16 +183,6 @@ export function monitorProviderRegistry(
         registry.registerClassificationOverride(level, wrap(provider));
       },
     } satisfies LlmProviderRegistry,
-    retryPolicy() {
-      try {
-        const policy = monitor.retryPolicy();
-        return {
-          maxRetries: Number(policy.retries),
-          baseDelayMs: Number(policy.delayMs),
-        };
-      } catch {
-        return undefined;
-      }
-    },
+    retryPolicy: () => readReviewedModelRetryPolicy(baseDir),
   };
 }
