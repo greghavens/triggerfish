@@ -1,3 +1,4 @@
+import { readAgentProfile } from "../core/agent_profiles.ts";
 import {
   MAX_PLANNER_CHECKPOINT_READS,
   plannerCheckpointReadSelector,
@@ -6025,6 +6026,9 @@ function parsePlannerResponse(raw: string) {
   }
 }
 
+// Concurrent finding reporters share this limit across case coordinators in the gateway.
+const activeReporters = new Map<string, number>();
+
 /** Run optional, bounded model planning against an immutable evidence revision. */
 export function createSentinelModelPlanner(
   snapshotPath: string,
@@ -6917,7 +6921,18 @@ export function createSentinelModelPlanner(
       );
       const allowed = decisionAllowsClaim(snapshotPath, current.revision);
       const byId = new Map(queue.map((item) => [item.id, item]));
-      const eligible = (task: AdaptiveTask) =>
+      const reporterProfile = location && queue.some((task) =>
+          task.kind === "report_finding"
+        )
+        ? readAgentProfile(location.baseDir, "sentinel-reporter")?.definition
+        : undefined;
+      const reporterAdmission = reporterProfile?.role === "reporter"
+        ? reporterProfile.automaticAdmission
+        : undefined;
+      const reporterCount = location && activeReporters.get(location.baseDir);
+      const mayReport = !reporterAdmission || reporterAdmission.enabled &&
+          (reporterCount ?? 0) < reporterAdmission.maxConcurrent;
+      const currentTask = (task: AdaptiveTask) =>
         !reviewing.has(task.id) && allowed(task) &&
         (protectedTransition
           ? protectedTransition.taskId === task.id
@@ -6925,10 +6940,12 @@ export function createSentinelModelPlanner(
       store.reconcileWorkerPublications(
         revision,
         current.revision,
-        eligible,
+        currentTask,
         lookupMutation,
         lookupPendingTrafficFinding,
       );
+      const eligible = (task: AdaptiveTask) =>
+        (task.kind !== "report_finding" || mayReport) && currentTask(task);
       if (
         !store.modelReviewAvailable(
           revision,
@@ -6974,6 +6991,17 @@ export function createSentinelModelPlanner(
       task,
       constraintVersion: constraints?.version,
     });
+    if (task.kind === "report_finding" && location) {
+      const { baseDir } = location;
+      const releaseWorker = release;
+      activeReporters.set(baseDir, (activeReporters.get(baseDir) ?? 0) + 1);
+      release = () => {
+        const remaining = (activeReporters.get(baseDir) ?? 1) - 1;
+        if (remaining) activeReporters.set(baseDir, remaining);
+        else activeReporters.delete(baseDir);
+        releaseWorker?.();
+      };
+    }
     const signal = AbortSignal.any([
       controller.signal,
       AbortSignal.timeout(30_000),

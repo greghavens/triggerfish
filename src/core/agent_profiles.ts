@@ -9,6 +9,11 @@ const profileId = /^[a-z][a-z0-9_-]{0,63}$/;
 const requestId = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/;
 const toolId = /^[a-zA-Z][a-zA-Z0-9_.:-]{0,127}$/;
 
+export interface AgentAutomaticAdmission {
+  readonly enabled: boolean;
+  readonly maxConcurrent: number;
+}
+
 export interface AgentProfileDefinition {
   readonly name: string;
   readonly description: string;
@@ -21,6 +26,7 @@ export interface AgentProfileDefinition {
   readonly timeoutWrapupTurns?: number;
   readonly tools?: readonly string[];
   readonly skills?: readonly string[];
+  readonly automaticAdmission?: AgentAutomaticAdmission;
 }
 
 export interface AgentProfileRevision {
@@ -54,6 +60,19 @@ function settingList(value: unknown) {
   return [...new Set<string>(value)].sort();
 }
 
+function automaticAdmission(
+  value: unknown,
+): AgentAutomaticAdmission | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return;
+  const { enabled, maxConcurrent, ...extra } = value as Record<string, unknown>;
+  if (
+    Object.keys(extra).length || typeof enabled !== "boolean" ||
+    typeof maxConcurrent !== "number" || !Number.isSafeInteger(maxConcurrent) ||
+    maxConcurrent < 1 || maxConcurrent > 16
+  ) return;
+  return { enabled, maxConcurrent };
+}
+
 export function parseAgentProfileDefinition(
   value: unknown,
 ): AgentProfileDefinition | undefined {
@@ -71,6 +90,7 @@ export function parseAgentProfileDefinition(
     timeoutWrapupTurns,
     tools,
     skills,
+    automaticAdmission: admission,
   } = fields;
   if (
     Object.keys(fields).some((key) =>
@@ -86,6 +106,7 @@ export function parseAgentProfileDefinition(
         "timeoutWrapupTurns",
         "tools",
         "skills",
+        "automaticAdmission",
       ].includes(key)
     )
   ) return;
@@ -96,6 +117,7 @@ export function parseAgentProfileDefinition(
   const timeout = safeText(timeoutWrapupPrompt, 4000, true);
   const visibleTools = settingList(tools);
   const visibleSkills = settingList(skills);
+  const reviewedAdmission = automaticAdmission(admission);
   if (
     !parsedName || parsedDescription === undefined || !parsedPrompt ||
     !isAgentProfileId(role) ||
@@ -103,6 +125,7 @@ export function parseAgentProfileDefinition(
     (timeoutWrapupPrompt !== undefined && timeout === undefined) ||
     (tools !== undefined && !visibleTools) ||
     (skills !== undefined && !visibleSkills) ||
+    (admission !== undefined && (role !== "reporter" || !reviewedAdmission)) ||
     (maxTurns !== undefined &&
       (typeof maxTurns !== "number" || !Number.isInteger(maxTurns) ||
         maxTurns < 1 || maxTurns > 32)) ||
@@ -127,6 +150,7 @@ export function parseAgentProfileDefinition(
     ...(typeof timeoutWrapupTurns === "number" && { timeoutWrapupTurns }),
     ...(visibleTools && { tools: visibleTools }),
     ...(visibleSkills && { skills: visibleSkills }),
+    ...(reviewedAdmission && { automaticAdmission: reviewedAdmission }),
   };
 }
 

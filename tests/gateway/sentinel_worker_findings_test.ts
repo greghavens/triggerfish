@@ -13447,6 +13447,8 @@ async function testScopedReporterRestart(
     initialPublication ? "retained-finding" : undefined,
   );
   let planner: ReturnType<typeof createSentinelModelPlanner> | undefined;
+  const configureReporter = !useBatch && !initialPublication && !hinted &&
+    !verifyReporterTrace;
   try {
     const time = Date.now();
     const hosts = ["service.example", "neighbor.example"];
@@ -13947,6 +13949,13 @@ async function testScopedReporterRestart(
         }
         assert(!names.includes("sentinel_live_workflow_status"));
         assert(!names.includes(report));
+        if (configureReporter) {
+          assert(!names.includes("sentinel_worker_trace_search"));
+          assertStringIncludes(
+            JSON.stringify(messages),
+            "Apply reviewed reporter guidance.",
+          );
+        }
         const results = messages.filter(({ role }) => role === "tool");
         let batch: ReturnType<typeof tool>[] = [];
         if (!results.length) {
@@ -14153,6 +14162,61 @@ async function testScopedReporterRestart(
         ({ taskId }) => taskId === reporter.id,
       );
     planner = createSentinelModelPlanner(path, createWorker);
+    if (configureReporter) {
+      const set = (enabled: boolean, expectedVersion: number) => ({
+        action: "set_agent_profile",
+        id: "sentinel-reporter",
+        expectedVersion,
+        requestId: crypto.randomUUID(),
+        profileSettings: {
+          name: "Finding reporter",
+          description: "Review exact finding report evidence",
+          role: "reporter",
+          prompt: "Apply reviewed reporter guidance.",
+          automaticAdmission: { enabled, maxConcurrent: 1 },
+          tools: [
+            "sentinel_worker_findings",
+            "sentinel_traffic_search",
+            "sentinel_traffic_get",
+            "sentinel_attach_finding_traffic",
+            "sentinel_update_finding_report",
+            "sentinel_finding_recheck_context",
+            "sentinel_finding_traffic_links",
+          ],
+        },
+      });
+      const disabled = set(false, 0);
+      let declined = 0;
+      await withFindingAssignmentGateway(
+        baseDir,
+        () => {
+          declined++;
+          return Promise.resolve(false);
+        },
+        async (turn) => {
+          assertStringIncludes(await turn(disabled), "unavailable");
+          assertEquals(declined, 1);
+        },
+      );
+      await withFindingAssignmentGateway(
+        baseDir,
+        () => Promise.resolve(true),
+        async (turn) => {
+          assertEquals(JSON.parse(await turn(disabled)).profile.version, 1);
+          planner!.advance(state);
+          await waitFor(() => !planner!.hasInFlightWork());
+          assertEquals(executions, 0);
+          assertEquals(
+            readAdaptiveSentinel(path, state)?.modelReviewStates.find(
+              ({ taskId }) => taskId === reporter.id,
+            )?.attempts ?? 0,
+            0,
+          );
+          assertStringIncludes(await turn(set(true, 0)), "unavailable");
+          assertEquals(JSON.parse(await turn(set(true, 1))).profile.version, 2);
+        },
+      );
+    }
     planner.advance(state);
     if (denyMember) {
       await waitFor(() =>
