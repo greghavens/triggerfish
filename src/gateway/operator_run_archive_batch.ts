@@ -1,7 +1,14 @@
-/** Reviewed admission of exact stopped Sentinel runs through the existing archive service. */
+/** Reviewed admission of exact Sentinel run archival and restoration. */
 
 import { createHash } from "node:crypto";
-import { join } from "@std/path";
+import { dirname, join } from "@std/path";
+import { DatabaseSync } from "node:sqlite";
+import { withVerifiedRunArchive } from "../core/run_archive.ts";
+import {
+  permittedSentinelRestoreArtifacts,
+  requiredSentinelRestoreArtifacts,
+} from "../sentinel/sentinel_archive_restore.ts";
+import { parseSentinelLinkedCaseSources } from "../sentinel/linked_case_sources.ts";
 import type { OperatorRunRef } from "../core/operator_runs.ts";
 import {
   lockRunArchiveAction,
@@ -23,25 +30,34 @@ interface ArchiveTarget {
   readonly id: string;
   readonly revision: number;
   readonly runId: string;
+  readonly archiveId?: string;
 }
 
-function targets(raw: unknown): ArchiveTarget[] | undefined {
+function targets(raw: unknown, restore: boolean): ArchiveTarget[] | undefined {
   if (!Array.isArray(raw) || raw.length < 1 || raw.length > 8) return;
   const result: ArchiveTarget[] = [];
   const seen = new Set<string>();
   for (const item of raw) {
     if (!item || typeof item !== "object" || Array.isArray(item)) return;
-    const { kind, id, revision, runId } = item;
+    const { kind, id, revision, runId, archiveId } = item;
     if (
       kind !== "sentinel" || typeof id !== "string" || !isSentinelCaseId(id) ||
       seen.has(id) || !Number.isSafeInteger(revision) || revision < 1 ||
       typeof runId !== "string" || !uuid.test(runId) ||
+      (restore && (typeof archiveId !== "string" || !uuid.test(archiveId))) ||
       Object.keys(item).some((key) =>
-        !["kind", "id", "revision", "runId"].includes(key)
+        !["kind", "id", "revision", "runId", ...(restore ? ["archiveId"] : [])]
+          .includes(key)
       )
     ) return;
     seen.add(id);
-    result.push({ kind, id, revision, runId: runId.toLowerCase() });
+    result.push({
+      kind,
+      id,
+      revision,
+      runId: runId.toLowerCase(),
+      ...(restore && { archiveId: archiveId.toLowerCase() }),
+    });
   }
   return result;
 }
@@ -60,29 +76,103 @@ function archiveRequestId(group: string, target: ArchiveTarget): string {
   ].join("-");
 }
 
-function childFirst(
+interface ArchiveDependency {
+  readonly kind: string;
+  readonly id: string;
+  readonly revision?: number;
+  readonly runId?: string;
+}
+
+function orderedTargets(
   chosen: readonly ArchiveTarget[],
-  parent: (target: ArchiveTarget) => OperatorRunRef | undefined,
+  sources: ReadonlyMap<string, readonly ArchiveDependency[]>,
+  restore: boolean,
 ): ArchiveTarget[] {
-  const preceding = chosen.map((child) => {
-    const ref = parent(child);
-    return chosen.findIndex((target) =>
-      ref?.kind === "sentinel" && ref.id === target.id &&
-      ref.revision === target.revision
+  const dependsOn = (dependent: ArchiveTarget, source: ArchiveTarget) =>
+    sources.get(dependent.id)?.some((ref) =>
+      ref.kind === source.kind && ref.id === source.id &&
+      ref.revision === source.revision &&
+      (ref.runId === undefined || ref.runId === source.runId)
     );
-  });
-  const visited = new Set<number>();
+  const visited = new Set<string>();
   const ordered: ArchiveTarget[] = [];
-  const visit = (index: number) => {
-    if (visited.has(index)) return;
-    visited.add(index);
-    preceding.forEach((prior, child) => {
-      if (prior === index) visit(child);
-    });
-    ordered.push(chosen[index]);
+  const visit = (target: ArchiveTarget) => {
+    if (visited.has(target.id)) return;
+    visited.add(target.id);
+    for (const other of chosen) {
+      if (restore ? dependsOn(target, other) : dependsOn(other, target)) {
+        visit(other);
+      }
+    }
+    ordered.push(target);
   };
-  chosen.forEach((_, i) => visit(i));
+  chosen.forEach(visit);
   return ordered;
+}
+
+async function archivedSources(
+  directory: string,
+  target: ArchiveTarget,
+  receipt: RunArchiveActionRecord | undefined,
+): Promise<ArchiveDependency[] | undefined> {
+  if (!target.archiveId || !receipt?.archiveDigest) return;
+  try {
+    return await withVerifiedRunArchive(
+      join(directory, target.archiveId),
+      directory,
+      {
+        expectedKind: "sentinel",
+        permittedNames: permittedSentinelRestoreArtifacts,
+        requiredNames: requiredSentinelRestoreArtifacts,
+      },
+      ({ manifest, artifactPath }) => {
+        const { kind, id, revision, runId } = manifest.identity;
+        if (
+          kind !== target.kind || id !== target.id ||
+          revision !== target.revision || runId !== target.runId ||
+          createHash("sha256").update(JSON.stringify(manifest)).digest(
+              "hex",
+            ) !==
+            receipt.archiveDigest
+        ) return;
+        const path = artifactPath("sentinel-assessment.db");
+        if (!path) return;
+        const db = new DatabaseSync(path, { readOnly: true });
+        try {
+          db.exec("PRAGMA trusted_schema = OFF");
+          const row = db.prepare("SELECT plan FROM assessment WHERE id = 1")
+            .get();
+          if (typeof row?.plan !== "string") return;
+          const plan = JSON.parse(row.plan);
+          const linked = parseSentinelLinkedCaseSources(plan.linkedCaseSources);
+          if (plan.linkedCaseSources !== undefined && !linked) return;
+          return [
+            ...(plan.spawnParent ? [plan.spawnParent as OperatorRunRef] : []),
+            ...(linked ?? []).map(({ caseId, revision, runId }) => ({
+              kind: "sentinel",
+              id: caseId,
+              revision,
+              runId,
+            })),
+          ];
+        } finally {
+          db.close();
+        }
+      },
+    );
+  } catch {
+    return;
+  }
+}
+
+async function hasDestination(path: string) {
+  try {
+    await Deno.lstat(dirname(path));
+    return true;
+  } catch (error) {
+    if (error instanceof Deno.errors.NotFound) return false;
+    throw error;
+  }
 }
 
 export async function executeOperatorRunArchiveBatch(input: {
@@ -95,7 +185,9 @@ export async function executeOperatorRunArchiveBatch(input: {
   readonly parent: (target: ArchiveTarget) => OperatorRunRef | undefined;
 }) {
   const { baseDir, args, ownerSessionId, ceiling, authorize, confirm } = input;
-  const chosen = targets(args.runTargets);
+  const restore = args.action === "restore_runs";
+  if (!restore && args.action !== "archive_runs") return;
+  const chosen = targets(args.runTargets, restore);
   if (
     typeof args.requestId !== "string" || !uuid.test(args.requestId) ||
     !chosen ||
@@ -104,7 +196,7 @@ export async function executeOperatorRunArchiveBatch(input: {
     )
   ) return;
   const requestId = args.requestId.toLowerCase();
-  const group = { action: "archive_runs", requestId, runTargets: chosen };
+  const group = { action: args.action, requestId, runTargets: chosen };
   const binding = JSON.stringify(group);
   const directory = join(baseDir, "data", "run-archives");
   if (!await authorize(group)) return;
@@ -116,29 +208,46 @@ export async function executeOperatorRunArchiveBatch(input: {
   using lock = lockRunArchiveAction(directory, requestId);
   if (!lock) return;
   const journal = openRunArchiveActions(join(directory, "actions.db"));
-  const archiveArgs = (target: ArchiveTarget) => ({
-    action: "archive",
+  const itemArgs = (target: ArchiveTarget) => ({
+    action: restore ? "restore" : "archive",
     ...target,
     requestId: archiveRequestId(requestId, target),
   });
-  const eligible = async (target: ArchiveTarget) => {
-    if (!await authorize(archiveArgs(target))) return false;
-    const current = readSentinelAssessment(
-      resolveSentinelCasePath(baseDir, target.id),
-    );
-    return !!current && !current.active && !current.paused &&
-      !current.deadlineReviewPending && current.revision === target.revision &&
-      current.plan.runId === target.runId;
+  const eligible = async (
+    target: ArchiveTarget,
+  ): Promise<ArchiveDependency[] | undefined> => {
+    if (!await authorize(itemArgs(target))) return;
+    const path = resolveSentinelCasePath(baseDir, target.id);
+    if (restore) {
+      if (await hasDestination(path)) return;
+      return archivedSources(
+        directory,
+        target,
+        journal.readArchived(target.archiveId!),
+      );
+    }
+    const current = readSentinelAssessment(path);
+    if (
+      !current || current.active || current.paused ||
+      current.deadlineReviewPending || current.revision !== target.revision ||
+      current.plan.runId !== target.runId
+    ) return;
+    const parent = input.parent(target);
+    return parent ? [parent] : [];
   };
   try {
     let approved = journal.readBatch(requestId);
     if (approved && approved.binding !== binding) return;
     if (!approved) {
       const ready: ArchiveTarget[] = [];
+      const dependencies = new Map<string, ArchiveDependency[]>();
       for (const target of chosen) {
-        if (await eligible(target)) ready.push(target);
+        const sources = await eligible(target);
+        if (!sources) continue;
+        ready.push(target);
+        dependencies.set(target.id, sources);
       }
-      const planned = childFirst(ready, input.parent);
+      const planned = orderedTargets(ready, dependencies, restore);
       if (!planned.length) {
         return {
           requestId,
@@ -150,7 +259,9 @@ export async function executeOperatorRunArchiveBatch(input: {
       }
       if (
         !await confirm(
-          `Archive these exact stopped Sentinel runs in order?\n${
+          `${
+            restore ? "Restore" : "Archive"
+          } these exact Sentinel runs in order?\n${
             JSON.stringify({ requestId, targets: planned })
           }`,
         )
@@ -168,7 +279,7 @@ export async function executeOperatorRunArchiveBatch(input: {
     for (const id of approved.eligible) {
       const target = chosen.find((item) => item.id === id);
       if (!target) return;
-      const call = archiveArgs(target);
+      const call = itemArgs(target);
       if (!await authorize(group) || !await authorize(call)) continue;
       const result = await executeOperatorRunArchive(
         baseDir,

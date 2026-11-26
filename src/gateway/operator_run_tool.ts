@@ -404,6 +404,7 @@ export const operatorRunTool: ToolDefinition = {
         "restore",
         "archive_history",
         "archive_runs",
+        "restore_runs",
         "approval_history",
         "execution_traces",
         "execution_trace_payload",
@@ -1143,7 +1144,7 @@ export const operatorRunTool: ToolDefinition = {
     runTargets: {
       type: "array",
       description:
-        "Exact workflow runs or Sentinel case, revision and run IDs. Archive batches accept stopped Sentinel runs only.",
+        "Exact workflow runs or Sentinel case, revision, and run IDs. Restore batches also require each exact Sentinel archive ID.",
       items: {
         type: "object",
         properties: {
@@ -1151,6 +1152,7 @@ export const operatorRunTool: ToolDefinition = {
           id: { type: "string" },
           revision: { type: "integer" },
           runId: { type: "string" },
+          archiveId: { type: "string" },
         },
         required: ["kind", "id"],
         additionalProperties: false,
@@ -3549,7 +3551,7 @@ ${
           })
           : unavailable;
       }
-      if (action === "archive_runs") {
+      if (action === "archive_runs" || action === "restore_runs") {
         const ceiling = context?.ceiling ?? "PUBLIC";
         if (
           !context?.authenticatedOwnerSessionId ||

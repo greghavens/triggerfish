@@ -5750,6 +5750,92 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
         }
       }, reopenedWorkflows);
 
+      const restoreParent = {
+        ...archiveParent,
+        archiveId: batch.outcomes[0].receipt.archiveId,
+      };
+      const restoreLeaf = {
+        ...archiveLeaf,
+        archiveId: batch.outcomes[2].receipt.archiveId,
+      };
+      const missingRestore = {
+        ...unavailableArchive,
+        archiveId: crypto.randomUUID(),
+      };
+      const leafPath = resolveSentinelCasePath(baseDir, archiveLeaf.id);
+      await Deno.rename(
+        dirname(leafPath),
+        join(baseDir, "detached-batch-leaf"),
+      );
+      await Deno.rename(
+        dirname(childPath),
+        join(baseDir, "detached-batch-parent"),
+      );
+      const restoreBatch = {
+        action: "restore_runs",
+        requestId: crypto.randomUUID(),
+        runTargets: [restoreLeaf, missingRestore, restoreParent],
+      };
+      const beforeRestoreBatch = confirmations.length;
+      let restoredBatch: unknown;
+      await withGateway(async (reconnected) => {
+        denied = "PRE_TOOL_CALL";
+        await reconnected(restoreBatch);
+        denied = undefined;
+        assertEquals(confirmations.length, beforeRestoreBatch);
+        assertEquals(readSentinelAssessment(childPath), undefined);
+        assertEquals(readSentinelAssessment(leafPath), undefined);
+        const restored = JSON.parse((await reconnected(restoreBatch)).result);
+        restoredBatch = restored;
+        assertEquals(
+          JSON.parse(confirmations.at(-1)!.split("\n").at(-1)!).targets,
+          [restoreParent, restoreLeaf],
+        );
+        assertEquals(
+          restored.outcomes.map(({ status }: { status: string }) => status),
+          ["succeeded", "unavailable", "succeeded"],
+        );
+        assertEquals(restored.outcomes[1], {
+          target: missingRestore,
+          status: "unavailable",
+        });
+        assertEquals(readSentinelAssessment(childPath)?.paused, true);
+        assertEquals(readSentinelAssessment(leafPath)?.paused, true);
+        assertEquals(
+          readSentinelAssessment(leafPath)?.plan.spawnParent,
+          {
+            kind: "sentinel",
+            id: archiveParent.id,
+            revision: archiveParent.revision,
+          },
+        );
+      }, reopenedWorkflows);
+      await withGateway(async (reconnected) => {
+        assertEquals(
+          JSON.parse((await reconnected(restoreBatch)).result),
+          restoredBatch,
+        );
+        assertStringIncludes(
+          (await reconnected({
+            ...restoreBatch,
+            runTargets: [restoreLeaf],
+          })).result,
+          "unavailable",
+        );
+        const collision = JSON.parse(
+          (await reconnected({
+            ...restoreBatch,
+            requestId: crypto.randomUUID(),
+          })).result,
+        );
+        assert(
+          collision.outcomes.every(({ status }: { status: string }) =>
+            status === "unavailable"
+          ),
+        );
+        assertEquals(confirmations.length, beforeRestoreBatch + 1);
+      }, reopenedWorkflows);
+
       const deadlineCase = "deadline-child";
       const deadlinePath = resolveSentinelCasePath(baseDir, deadlineCase);
       await Deno.mkdir(dirname(deadlinePath), { recursive: true, mode: 0o700 });
