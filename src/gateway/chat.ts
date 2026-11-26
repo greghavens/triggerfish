@@ -39,6 +39,7 @@ import {
   createSentinelSubagent,
   isSentinelNativeGraphRead,
   readScopedSentinelConsoleGraph,
+  SENTINEL_ASSESSMENT_READ,
   sentinelScopedGraphReadActions,
 } from "./sentinel_agent.ts";
 import {
@@ -955,6 +956,8 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
           if (
             !sourcePath || !sourceRun || !current() ||
             resolveCase() !== sourcePath ||
+            (directRead?.name === SENTINEL_ASSESSMENT_READ &&
+              readSentinelAssessment(sourcePath)?.revision !== revision) ||
             readSentinelRunIdForRevision(sourcePath, revision) !==
               sourceRun
           ) return false;

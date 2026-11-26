@@ -206,7 +206,12 @@ Deno.test("Authenticated Sentinel chat reads exact approved cross-case graph fin
     | "sentinel_defense"
     | "sentinel_incident_alerts"
     | undefined;
-  let localGraph: "sentinel_trace" | "sentinel_provenance_node" | undefined;
+  let localGraph:
+    | "sentinel_trace"
+    | "sentinel_provenance_node"
+    | "sentinel_assessment"
+    | undefined;
+  let revokeAssessmentDuringResponse = false;
   let forensicGraph = false;
   let rejectExecutorCeiling = false;
   let dispatched = 0;
@@ -412,6 +417,16 @@ Deno.test("Authenticated Sentinel chat reads exact approved cross-case graph fin
           ) {
             assertEquals(input.case_id, "approved");
             assertEquals(input.evidence_revision, approved.revision);
+          }
+          if (
+            revokeAssessmentDuringResponse && hook === "POST_TOOL_RESPONSE" &&
+            input.tool_name === "sentinel_assessment" &&
+            typeof input.tool_response === "string" &&
+            input.tool_response.includes("cloudtrail_logging_stopped")
+          ) {
+            await Promise.resolve();
+            constraintsAllowed = false;
+            revokeAssessmentDuringResponse = false;
           }
           if (selectsTool || hook === "PRE_OUTPUT") hooks.push(hook);
           if (
@@ -628,6 +643,48 @@ Deno.test("Authenticated Sentinel chat reads exact approved cross-case graph fin
     );
 
     await turn("/sentinel case approved");
+    localGraph = "sentinel_assessment";
+    await turn("Read neutral assessment task progress", {});
+    assert(
+      JSON.parse(result).tasks.some(({ id }: { id: string }) =>
+        id === "incident_correlation"
+      ),
+    );
+    await turn("Summarize authorized retained case evidence", { task: "case" });
+    assertEquals(JSON.parse(result).observation.facts.summary.matchedAlerts, 2);
+    assert(!result.includes(restrictedAlert.subject));
+    await turn("Discover incidents only in authorized assessment scope", {
+      task: "incident_correlation",
+    });
+    assertEquals(JSON.parse(result).observation.facts.summary.candidates, 1);
+    assert(!result.includes(restrictedAlert.subject));
+    await turn("Summarize only authorized saved detection evidence", {
+      task: "defense_coverage",
+    });
+    const scopedAssessment = JSON.parse(result).observation.facts;
+    assertEquals(
+      scopedAssessment.upstreamChecks.find(({ id }: { id: string }) =>
+        id === "cloudtrail_logging_stopped"
+      ).matchCount,
+      1,
+    );
+    assert(!result.includes("asset-c"));
+    assert(
+      hooks.includes("PRE_TOOL_CALL") && hooks.includes("POST_TOOL_RESPONSE") &&
+        hooks.includes("PRE_OUTPUT"),
+    );
+    revokeAssessmentDuringResponse = true;
+    const withheldAssessment = await turn("Withdraw scope while summarizing", {
+      task: "defense_coverage",
+    });
+    assert(!revokeAssessmentDuringResponse);
+    assert(!result.includes("cloudtrail_logging_stopped"));
+    assert(
+      withheldAssessment.every((frame) =>
+        !frame.includes("cloudtrail_logging_stopped")
+      ),
+    );
+    constraintsAllowed = true;
     localGraph = "sentinel_trace";
     await turn("Use the native direct asset graph", { node: "asset-a" });
     assertStringIncludes(result, secretLabel);
@@ -663,14 +720,21 @@ Deno.test("Authenticated Sentinel chat reads exact approved cross-case graph fin
       node: graphNode,
     });
     assertStringIncludes(result, secretLabel);
+    localGraph = "sentinel_assessment";
+    await turn("Refresh the authorized assessment rollup", {
+      task: "defense_coverage",
+    });
+    assertStringIncludes(result, "cloudtrail_logging_stopped");
     localGraph = undefined;
     captureModelContext = true;
     await turn("Check context while graph authority remains current.");
     assertStringIncludes(modelContext, secretLabel);
+    assertStringIncludes(modelContext, "cloudtrail_logging_stopped");
     captureModelContext = true;
     revokeBeforeContext = true;
     await turn(revokeContextRequest);
     assert(!modelContext.includes(secretLabel));
+    assert(!modelContext.includes("cloudtrail_logging_stopped"));
     constraintsAllowed = true;
 
     await turn("/sentinel off");

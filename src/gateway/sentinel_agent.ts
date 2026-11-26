@@ -178,13 +178,21 @@ import {
   withSentinelAssessmentWriteLock,
 } from "../sentinel/assessment_store.ts";
 import { executionFindingAsset } from "../sentinel/worker_finding_evidence.ts";
-import { readSavedSentinelIncident } from "../sentinel/incident_archive.ts";
+import {
+  readSavedSentinelIncident,
+  readSavedSentinelIncidentAssetScopes,
+  readSavedSentinelIncidentCandidates,
+} from "../sentinel/incident_archive.ts";
+import { compareSentinelIncidentPriority } from "../sentinel/incident_correlation.ts";
 import { sentinelAlertsPath } from "../sentinel/paths.ts";
 import {
   sentinelAlertReference,
   type TelemetryAlert,
 } from "../sentinel/telemetry.ts";
-import { parseSentinelTelemetryAlert } from "../sentinel/case_report.ts";
+import {
+  buildSentinelCaseReport,
+  parseSentinelTelemetryAlert,
+} from "../sentinel/case_report.ts";
 import {
   assessSentinelDefenseCoverage,
   sentinelTelemetryAssetResolver,
@@ -878,8 +886,9 @@ const sharedTopologySourceTool: ToolDefinition = {
   },
 };
 
+export const SENTINEL_ASSESSMENT_READ = "sentinel_assessment";
 const assessmentTool: ToolDefinition = {
-  name: "sentinel_assessment",
+  name: SENTINEL_ASSESSMENT_READ,
   description:
     "Read the shared defensive assessment and its recorded worker observations.",
   parameters: {
@@ -3876,8 +3885,147 @@ export const sentinelScopedGraphReadActions = [
   "traces",
 ] as const;
 
+async function readScopedSentinelAssessment(
+  path: string,
+  revision: number,
+  args: Record<string, unknown>,
+): Promise<string> {
+  if (
+    (args.task !== undefined && typeof args.task !== "string") ||
+    Object.keys(args).some((key) => key !== "task")
+  ) return "Error: Supply an optional exact assessment task ID.";
+  const current = readSentinelAssessment(path);
+  const saved = readSentinelAssessmentRevision(path, revision);
+  const runId = readSentinelRunIdForRevision(path, revision);
+  if (!saved || !runId || !current || current.revision !== revision) {
+    return "Error: The selected Sentinel assessment is unavailable.";
+  }
+  try {
+    const snapshot = saved.result.sharedGraph.snapshot;
+    const policy = readSentinelOperatingConstraints(path, runId)?.constraints;
+    const allowed = (nodeId: string) =>
+      sentinelOperatingConstraintsAllow(policy, {
+        kind: "review_evidence",
+        nodeId,
+      }, snapshot);
+    const tasks = saved.result.tasks.filter(({ requiredInput }) =>
+      requiredInput === undefined || requiredInput === "alert_feed" ||
+      requiredInput === "graph_snapshot" || allowed(requiredInput)
+    );
+    const status = { revision, active: current.active };
+    if (args.task === undefined) {
+      const taskIds = new Set(tasks.map(({ id }) => id));
+      return boundResult({
+        ...status,
+        tasks,
+        transitions: saved.result.transitions.filter(({ task }) =>
+          taskIds.has(task)
+        ),
+      });
+    }
+    const task = tasks.find(({ id }) => id === args.task);
+    if (!task) return "Error: The requested assessment task is unavailable.";
+    if (task.status !== "completed") return boundResult({ ...status, task });
+    const previous = saved.result.sharedGraph.observations.find(
+      (item) => item.task === task.id,
+    );
+    if (!previous) return boundResult({ ...status, task });
+    const { id, worker } = previous;
+    let facts: unknown;
+    if (task.id === "defense_coverage") {
+      const web = previous.facts.webContainment as
+        | { status?: string }
+        | undefined;
+      const text = await readDefenseCoverage(
+        {
+          snapshotPath: path,
+          assessmentRevision: revision,
+          webContainmentConfigured: web?.status === "configured"
+            ? true
+            : web?.status === "disabled"
+            ? false
+            : undefined,
+        },
+        {},
+        {},
+      );
+      if (text.startsWith("Error:")) return text;
+      facts = JSON.parse(text);
+    } else if (task.id === "incident_correlation") {
+      const scopes = readSavedSentinelIncidentAssetScopes(path, revision);
+      const incidents = readSavedSentinelIncidentCandidates(path, revision)
+        .filter(({ id }) => {
+          const assets = scopes?.get(id);
+          return !!assets?.length && assets.every(allowed);
+        }).sort(compareSentinelIncidentPriority);
+      facts = {
+        summary: { candidates: incidents.length },
+        candidates: incidents.slice(0, 5).map(
+          ({ id, asset, severity, startedAt, endedAt, alertCount }) => ({
+            id,
+            asset,
+            severity,
+            startedAt,
+            endedAt,
+            alertCount,
+          }),
+        ),
+        evidenceTool: SENTINEL_INCIDENT_ALERTS_READ,
+      };
+    } else if (task.id === "case" && snapshot) {
+      const graph = scopedSentinelInventoryGraph(
+        path,
+        revision,
+        loadSentinelGraph(snapshot),
+      );
+      const retained = readSentinelAssessmentAlerts(path, revision);
+      const allowsAlert = sentinelTelemetryEvidenceFilter(path, revision, {});
+      if (!retained || !allowsAlert) {
+        return "Error: The selected Sentinel assessment evidence is unavailable.";
+      }
+      const alerts = retained.filter((item, index) =>
+        allowsAlert(parseSentinelTelemetryAlert(item, index + 1))
+      );
+      facts = {
+        summary: buildSentinelCaseReport(graph, alerts).summary,
+        evidenceTools: [SENTINEL_DEFENSE_READ, SENTINEL_REPORT_READ],
+      };
+    } else {
+      const name = task.id === "impact"
+        ? SENTINEL_IMPACT_READ
+        : task.id === "trace"
+        ? SENTINEL_TRACE_READ
+        : SENTINEL_COVERAGE_READ;
+      const selector = task.requiredInput && task.id !== "coverage"
+        ? {
+          node: task.requiredInput,
+          depth: typeof previous.facts.depth === "number"
+            ? Math.min(previous.facts.depth, MAX_TRACE_DEPTH)
+            : undefined,
+        }
+        : { limit: 3 };
+      const text = await readSentinelGraphProjection(
+        path,
+        revision,
+        name,
+        selector,
+        true,
+      );
+      if (text.startsWith("Error:")) return text;
+      facts = JSON.parse(text);
+    }
+    return boundResult({
+      ...status,
+      task,
+      observation: { id, task: task.id, worker, facts },
+    });
+  } catch {
+    return "Error: The selected Sentinel assessment evidence is unavailable.";
+  }
+}
+
 export function isSentinelNativeGraphRead(name: unknown) {
-  return name === graphOverviewTool.name ||
+  return name === assessmentTool.name || name === graphOverviewTool.name ||
     name === SENTINEL_PROVENANCE_NODE_READ ||
     name === SENTINEL_PROVENANCE_SEARCH ||
     name === SENTINEL_PATH_READ ||
@@ -3897,6 +4045,13 @@ export async function readScopedSentinelConsoleGraph(
     return "Error: This graph tool is unavailable in Sentinel.";
   }
   const options = { snapshotPath, assessmentRevision, scopeCaseGraph: true };
+  if (name === assessmentTool.name) {
+    return await readScopedSentinelAssessment(
+      snapshotPath,
+      assessmentRevision,
+      args,
+    );
+  }
   if (name === graphOverviewTool.name) {
     return readSentinelGraphOverview(options, args);
   }
@@ -4498,7 +4653,8 @@ function createAgent(
         const inventoryGraphRead = isSentinelInventoryFindingRead(toolName) ||
           isSentinelInventoryNeighborhoodRead(toolName);
         const scoped = typeof toolName === "string" &&
-          (toolName === sentinelInventoryTool.name || provenanceRead ||
+          (toolName === assessmentTool.name ||
+            toolName === sentinelInventoryTool.name || provenanceRead ||
             inventoryGraphRead ||
             isSentinelWorkerFindingTool(toolName) ||
             isSentinelGraphFactTool(toolName) ||
