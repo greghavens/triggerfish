@@ -5521,6 +5521,17 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
       approved = true;
       assertEquals(currentRetryStates(), initiallyFailed);
       duringConfirmation = () => {
+        denied = "PRE_TOOL_CALL";
+      };
+      try {
+        assertStringIncludes((await turn(retryRequest)).result, "unavailable");
+      } finally {
+        duringConfirmation = undefined;
+        denied = undefined;
+      }
+      assertEquals(confirmations.length, beforeRetryReview + 2);
+      assertEquals(currentRetryStates(), initiallyFailed);
+      duringConfirmation = () => {
         assert(
           resumeSentinelAssessment(retryPath, undefined, retryState.revision),
         );

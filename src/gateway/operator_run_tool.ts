@@ -5510,7 +5510,9 @@ ${
       }
       if (action === "retry_graph_tasks") {
         const { runId, adaptiveRevision, requestId, taskIds } = args;
+        const authorize = context?.authorizeOwnerRunCall;
         if (
+          !authorize || !context?.authenticatedOwnerSessionId ||
           ref.kind !== "sentinel" || ref.revision === undefined ||
           !canFlowTo("INTERNAL", context?.ceiling ?? "INTERNAL") ||
           typeof runId !== "string" || !digestPattern.test(runId) ||
@@ -5562,6 +5564,7 @@ ${
         ) {
           return "Error: The operator declined the run action.";
         }
+        if (!await authorize(args)) return unavailable;
         const committed = reviewSentinelGraphRetries(
           path,
           scope,
