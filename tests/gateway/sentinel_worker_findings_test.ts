@@ -12081,7 +12081,7 @@ async function verifyInitialTrafficPublication(
   traffic: readonly { revision: number; evidenceId: string; digest: string }[],
   assetId: string,
   neighbor: { evidenceId: string; digest: string },
-  mode: "resume" | "revoked" | "stale",
+  mode: "resume" | "revoked" | "stale" | "committed",
   hinted: boolean | "set",
 ) {
   const input = {
@@ -12096,6 +12096,7 @@ async function verifyInitialTrafficPublication(
     runId: state.plan.runId,
   };
   const batch = traffic.length > 1;
+  const crashAfterCommit = mode === "committed";
   const hintId = hinted
     ? await (async () => {
       const sources = traffic.map(({ evidenceId, digest }) => ({
@@ -12237,10 +12238,12 @@ async function verifyInitialTrafficPublication(
   const findingDb = new DatabaseSync(
     join(dirname(path), "sentinel-worker-findings.db"),
   );
-  findingDb.exec(
-    `CREATE TRIGGER interrupt_composite_finding BEFORE INSERT ON receipts
+  if (!crashAfterCommit) {
+    findingDb.exec(
+      `CREATE TRIGGER interrupt_composite_finding BEFORE INSERT ON receipts
     BEGIN SELECT RAISE(ABORT, 'interrupt between link and finding'); END`,
-  );
+    );
+  }
   findingDb.close();
   await Deno.writeTextFile(
     join(baseDir, "traffic-finding-fixture.json"),
@@ -12261,29 +12264,41 @@ async function verifyInitialTrafficPublication(
       stdout: "null",
       stderr: "piped",
     }).output();
+    if (phase === "commit-crash") {
+      assertEquals(
+        result.signal,
+        "SIGKILL",
+        new TextDecoder().decode(result.stderr),
+      );
+      return;
+    }
     assert(result.success, new TextDecoder().decode(result.stderr));
   };
-  await launch("interrupt");
-  assertEquals(readSentinelWorkerFindingHistory(path), []);
-  assertEquals(listSentinelFindingTrafficLinks(path), []);
-  const linksDb = new DatabaseSync(
-    join(dirname(path), "sentinel-finding-traffic-links.db"),
-    { readOnly: true },
-  );
-  try {
-    assertEquals(
-      linksDb.prepare("SELECT COUNT(*) AS count FROM staged_publication_links")
-        .get()?.count,
-      traffic.length,
+  if (!crashAfterCommit) {
+    await launch("interrupt");
+    assertEquals(readSentinelWorkerFindingHistory(path), []);
+    assertEquals(listSentinelFindingTrafficLinks(path), []);
+    const linksDb = new DatabaseSync(
+      join(dirname(path), "sentinel-finding-traffic-links.db"),
+      { readOnly: true },
     );
-  } finally {
-    linksDb.close();
+    try {
+      assertEquals(
+        linksDb.prepare(
+          "SELECT COUNT(*) AS count FROM staged_publication_links",
+        )
+          .get()?.count,
+        traffic.length,
+      );
+    } finally {
+      linksDb.close();
+    }
+    const reopened = new DatabaseSync(
+      join(dirname(path), "sentinel-worker-findings.db"),
+    );
+    reopened.exec("DROP TRIGGER interrupt_composite_finding");
+    reopened.close();
   }
-  const reopened = new DatabaseSync(
-    join(dirname(path), "sentinel-worker-findings.db"),
-  );
-  reopened.exec("DROP TRIGGER interrupt_composite_finding");
-  reopened.close();
   const expireFixtureLease = () => {
     const expired = new DatabaseSync(
       join(dirname(path), "sentinel-adaptive.db"),
@@ -12296,9 +12311,23 @@ async function verifyInitialTrafficPublication(
       expired.close();
     }
   };
-  expireFixtureLease();
+  if (!crashAfterCommit) expireFixtureLease();
   if (mode === "resume") {
     await launch("reclaim-crash");
+    expireFixtureLease();
+  }
+  if (crashAfterCommit) {
+    await launch("commit-crash");
+    const committed = JSON.parse(
+      await Deno.readTextFile(
+        join(baseDir, "traffic-finding-committed-before-checkpoint.json"),
+      ),
+    );
+    assertEquals(readSentinelWorkerFindingHistory(path), [committed.record]);
+    assertEquals(
+      listSentinelFindingTrafficLinks(path).map(({ id }) => id).sort(),
+      committed.links.map(({ id }: { id: string }) => id).sort(),
+    );
     expireFixtureLease();
   }
   if (mode === "stale") {
@@ -12313,19 +12342,24 @@ async function verifyInitialTrafficPublication(
     assertEquals(listSentinelFindingTrafficLinks(path), []);
     return;
   }
-  await launch(mode);
+  const resumePhase = crashAfterCommit ? "resume" : mode;
+  await launch(resumePhase);
   const events =
     (await Deno.readTextFile(join(baseDir, "traffic-finding-events.log")))
       .trim().split("\n");
   assertEquals(
     events.filter((event) => event.endsWith(":traffic-result")),
-    traffic.map(() => "interrupt:traffic-result"),
+    traffic.map(() =>
+      `${crashAfterCommit ? "commit-crash" : "interrupt"}:traffic-result`
+    ),
   );
-  assert(
-    events.includes("interrupt:report-pre") &&
-      events.includes("interrupt:interrupted"),
-  );
-  assert(events.includes(`${mode}:traffic-pre`));
+  if (!crashAfterCommit) {
+    assert(
+      events.includes("interrupt:report-pre") &&
+        events.includes("interrupt:interrupted"),
+    );
+  }
+  assert(events.includes(`${resumePhase}:traffic-pre`));
   const restoreArchive = async () => {
     assert(stopSentinelAssessment(path));
     const archiveId = crypto.randomUUID();
@@ -12372,13 +12406,27 @@ async function verifyInitialTrafficPublication(
     assertEquals(listSentinelFindingTrafficLinks(path), []);
     return;
   }
-  assert(events.includes("reclaim-crash:traffic-pre"));
-  assert(!events.includes("reclaim-crash:report-pre"));
+  if (!crashAfterCommit) {
+    assert(events.includes("reclaim-crash:traffic-pre"));
+    assert(!events.includes("reclaim-crash:report-pre"));
+  }
   assert(events.includes("resume:report-pre"));
   assert(events.includes("resume:report-post"));
   const recovered = JSON.parse(
     await Deno.readTextFile(join(baseDir, "traffic-finding-result.json")),
   );
+  if (crashAfterCommit) {
+    assertEquals(
+      recovered,
+      JSON.parse(
+        await Deno.readTextFile(
+          join(baseDir, "traffic-finding-committed-before-checkpoint.json"),
+        ),
+      ),
+    );
+    assert(events.includes("commit-crash:report-post"));
+    assert(!events.includes("resume:report-result"));
+  }
   const attached: SentinelFindingTrafficLink[] = recovered.links ??
     [recovered.link];
   assertEquals(
@@ -12880,7 +12928,7 @@ async function verifyTidepoolTrafficDownload(
 async function testScopedReporterRestart(
   useBatch: boolean,
   denyMember = false,
-  initialPublication?: "resume" | "revoked" | "stale",
+  initialPublication?: "resume" | "revoked" | "stale" | "committed",
   hinted: boolean | "set" = false,
   verifyReporterTrace = false,
 ) {
@@ -13871,6 +13919,9 @@ Deno.test("Sentinel resumes a staged finding and traffic receipt through root di
 
 Deno.test("Sentinel publishes a finding with an exact retained traffic set after restart", () =>
   testScopedReporterRestart(true, false, "resume"));
+
+Deno.test("Sentinel restores a committed traffic finding after process death before checkpoint", () =>
+  testScopedReporterRestart(true, false, "committed"));
 
 Deno.test("Revoking one source prevents publication of a staged finding traffic set", () =>
   testScopedReporterRestart(true, false, "revoked"));

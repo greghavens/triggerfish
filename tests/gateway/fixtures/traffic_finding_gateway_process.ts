@@ -53,7 +53,7 @@ registry.register({
       );
       Deno.writeTextFileSync(resultPath, JSON.stringify(committed));
     } else {
-      assertEquals(phase, "interrupt");
+      assert(phase === "interrupt" || phase === "commit-crash");
     }
     const calls = results.length === 0
       ? [{ name: "sentinel_assigned_target", args: {} }]
@@ -155,6 +155,13 @@ const planner = createSentinelModelPlanner(path, (current, id, token) => {
           input.tool_response.startsWith("{")
         ) {
           record("report-post");
+          if (phase === "commit-crash") {
+            Deno.writeTextFileSync(
+              join(baseDir, "traffic-finding-committed-before-checkpoint.json"),
+              input.tool_response,
+            );
+            Deno.kill(Deno.pid, "SIGKILL");
+          }
         }
         return Promise.resolve({
           allowed: true,
@@ -183,6 +190,11 @@ const planner = createSentinelModelPlanner(path, (current, id, token) => {
         ) {
           record("traffic-result");
         }
+        if (
+          step.tool === "sentinel_report_finding" && step.outcome === "returned"
+        ) {
+          record("report-result");
+        }
         trace?.(step);
       },
       digests,
@@ -204,8 +216,8 @@ try {
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
   assert(
-    phase !== "interrupt",
-    "did not interrupt at the durable journal fault",
+    phase !== "interrupt" && phase !== "commit-crash",
+    "did not interrupt at the selected durable journal boundary",
   );
   const events = await Deno.readTextFile(
     join(baseDir, "traffic-finding-events.log"),
@@ -216,7 +228,15 @@ try {
         !events.includes("stale:report-pre"),
     );
   } else {
-    assert(events.includes(`${phase}:traffic-pre`));
+    assert(
+      events.includes(`${phase}:traffic-pre`),
+      JSON.stringify({
+        events,
+        review: readAdaptiveSentinel(path, state)?.modelReviewStates.find((
+          { taskId: id },
+        ) => id === taskId),
+      }),
+    );
   }
   if (phase === "resume") assert(events.includes("resume:report-pre"));
   if (phase === "revoked") {
