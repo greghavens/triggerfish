@@ -102,6 +102,7 @@ export function createMcpClient(
   transport: Transport,
   timeoutMs = 30000,
   signal?: AbortSignal,
+  protocolVersion = "2024-11-05",
 ): McpClient {
   const pendingRequests = new Map<
     number,
@@ -159,7 +160,7 @@ export function createMcpClient(
       await transport.connect(signal);
 
       const response = await sendRequest("initialize", {
-        protocolVersion: "2024-11-05",
+        protocolVersion,
         capabilities: {},
         clientInfo: { name: "triggerfish", version: "0.1.0" },
       });

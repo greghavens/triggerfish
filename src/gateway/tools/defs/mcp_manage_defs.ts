@@ -73,7 +73,9 @@ For a new connector, the operator prepares \`mcp-proposals/<server_id>.yaml\`
 beside the daemon configuration file using their normal configuration editor.
 The proposal is one connector entry with an explicit classification, one
 command or URL, and optional arguments or named credential references where
-supported. Use \`creation_status\` to get its opaque review revision, then
+supported. For the ScopeSentry retained inventory connector, use server_id
+scopesentry with its exact HTTPS MCP URL and api_key_ref pointing to an
+operator-managed keychain entry. Use \`creation_status\` to get its opaque review revision, then
 call \`add\` with that revision. The owner approval inbox authorizes the
 exact proposal. The saved connector starts disabled. A separate \`enable\`
 decision is required before it can connect after restart.

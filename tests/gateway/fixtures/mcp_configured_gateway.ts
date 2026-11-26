@@ -155,6 +155,10 @@ registry.register({
       });
     }
     const request = String(last?.content);
+    const retainedPrefix = "Review retained inventory ";
+    const retainedManagement = request.startsWith(retainedPrefix)
+      ? JSON.parse(request.slice(retainedPrefix.length))
+      : undefined;
 
     const toolsServer = request === "List inventory tools"
       ? "inventory"
@@ -169,7 +173,8 @@ registry.register({
     const forceUnavailable = request === "Call omitted tool" ||
       request === "Call unreviewed tool";
     const refresh = request === "Refresh inventory tools";
-    const manage = refresh || request === "Update inventory timeout" ||
+    const manage = retainedManagement || refresh ||
+      request === "Update inventory timeout" ||
       request === "Update retry limit" || toolsServer !== undefined ||
       request === "Review inventory lifecycle" ||
       request === "Review inventory creation" ||
@@ -198,6 +203,8 @@ registry.register({
     }
     const args = configKey
       ? { action: "set", key: configKey, value: "fixture" }
+      : retainedManagement
+      ? { ...retainedManagement, server_id: "scopesentry" }
       : refresh
       ? { action: "refresh_tools", server_id: "inventory" }
       : request === "Update inventory timeout"

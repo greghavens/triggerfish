@@ -21,6 +21,7 @@ export interface McpServerConfig {
   readonly args?: readonly string[];
   readonly env?: Readonly<Record<string, string>>;
   readonly url?: string;
+  readonly apiKeyRef?: string;
   readonly classification?: ClassificationLevel;
   readonly enabled?: boolean;
   /**

@@ -119,6 +119,7 @@ export function wireMcpServers(
       args: serverCfg.args,
       env: serverCfg.env,
       url: serverCfg.url,
+      apiKeyRef: serverCfg.api_key_ref,
       classification,
       enabled: serverCfg.enabled,
       toolCallTimeoutMs: validMcpSetting(

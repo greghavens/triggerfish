@@ -23,6 +23,10 @@ import {
   type McpConnectorProposal,
   readMcpConnectorProposal,
 } from "./mcp_connector_proposal.ts";
+import {
+  parseRetainedInventoryEndpoint,
+  retainedInventoryConnectorId,
+} from "../../../mcp/retained_inventory.ts";
 import type { SecretStore } from "../../../core/secrets/backends/secret_store.ts";
 
 const log = createLogger("mcp-manage");
@@ -81,7 +85,11 @@ function executeList(ctx: McpManageContext): string {
     return {
       id,
       classification: cfg.classification ?? "INTERNAL",
-      transport: cfg.command ? "stdio" : "sse",
+      transport: cfg.api_key_ref !== undefined
+        ? "streamable_http"
+        : cfg.command
+        ? "stdio"
+        : "sse",
       command: cfg.command,
       url: cfg.url,
       args: cfg.args,
@@ -98,13 +106,13 @@ function executeList(ctx: McpManageContext): string {
 
 async function credentialsExist(
   ctx: McpManageContext,
-  proposal: McpConnectorProposal,
+  credentialNames: McpConnectorProposal["credentialNames"],
 ): Promise<boolean> {
-  if (proposal.credentialNames.length === 0) return true;
+  if (credentialNames.length === 0) return true;
   const current = await ctx.listCredentialNames?.();
   if (!current?.ok) return false;
   const names = new Set(current.value);
-  return proposal.credentialNames.every((name) => names.has(name));
+  return credentialNames.every((name) => names.has(name));
 }
 
 function proposalDestination(
@@ -144,7 +152,7 @@ async function executeProposal(
   ) {
     return "Error: The MCP proposal or saved configuration changed before the approved action.";
   }
-  if (!await credentialsExist(ctx, proposal) || !owner()) {
+  if (!await credentialsExist(ctx, proposal.credentialNames) || !owner()) {
     return "Error: Required operator credential references are unavailable.";
   }
 
@@ -309,6 +317,20 @@ async function executeLifecycle(
   }
   const remove = intent.action === "remove";
   const enable = intent.action === "enable";
+  if (enable && cfg.api_key_ref !== undefined) {
+    const retained = parseRetainedInventoryEndpoint(
+      intent.connectorId,
+      cfg.url,
+      cfg.api_key_ref,
+      cfg.classification,
+    );
+    if (
+      !retained || !await credentialsExist(ctx, [retained.secretName]) ||
+      !owner()
+    ) {
+      return "Error: Required operator credential references are unavailable.";
+    }
+  }
   const changed = remove || (cfg.enabled !== false) !== enable;
   if (changed) {
     const updated = structuredClone(config.value);
@@ -349,16 +371,50 @@ function executeStatus(
   const config = readConfigYaml(ctx.configPath);
   const servers = config.ok ? configServers(config.value) : {};
   const cfg = Object.hasOwn(servers, serverId) ? servers[serverId] : undefined;
+  const retained = serverId === retainedInventoryConnectorId;
   if (!cfg) {
+    if (retained) {
+      return JSON.stringify({
+        id: serverId,
+        exists: false,
+        configured: false,
+        enabled: false,
+        reachable: false,
+        tools: [],
+        _classification: "INTERNAL",
+      });
+    }
     return JSON.stringify({
       error: `MCP server '${serverId}' not found in config.`,
       available: Object.keys(servers),
     });
   }
+  const live = retained ? ctx.getConnectorTools?.(serverId) : undefined;
   return JSON.stringify({
     id: serverId,
+    ...(retained && {
+      exists: true,
+      configured: cfg.api_key_ref === undefined
+        ? typeof cfg.command === "string" || typeof cfg.url === "string"
+        : !!parseRetainedInventoryEndpoint(
+          serverId,
+          cfg.url,
+          cfg.api_key_ref,
+          cfg.classification,
+        ),
+      reachable: cfg.enabled !== false && live !== undefined,
+      tools: cfg.enabled !== false ? live?.tools ?? [] : [],
+      _classification: maxClassification(
+        live?.classification ?? "INTERNAL",
+        "INTERNAL",
+      ),
+    }),
     classification: cfg.classification ?? "INTERNAL",
-    transport: cfg.command ? "stdio" : "sse",
+    transport: cfg.api_key_ref !== undefined
+      ? "streamable_http"
+      : cfg.command
+      ? "stdio"
+      : "sse",
     command: cfg.command,
     url: cfg.url,
     args: cfg.args,
@@ -393,7 +449,7 @@ async function executeCreationStatus(
     return "Error: Disable the configured connector before reviewing its replacement.";
   }
   if (
-    !await credentialsExist(ctx, proposal) ||
+    !await credentialsExist(ctx, proposal.credentialNames) ||
     !dispatch.isCurrentInteractiveOwner?.()
   ) {
     return "Error: Required operator credential references are unavailable.";

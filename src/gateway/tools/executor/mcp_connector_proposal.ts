@@ -8,6 +8,7 @@ import {
   parseClassification,
 } from "../../../core/types/classification.ts";
 import { isRealPathWithinJail } from "../../../core/security/path_jail.ts";
+import { parseRetainedInventoryEndpoint } from "../../../mcp/retained_inventory.ts";
 import { enforceCommandAllowlist } from "../../../mcp/manager_connection.ts";
 
 const maxProposalBytes = 32_768;
@@ -17,7 +18,7 @@ const secretReference =
 
 export interface McpConnectorProposal {
   readonly source: string;
-  readonly transport: "stdio" | "sse";
+  readonly transport: "stdio" | "sse" | "streamable_http";
   readonly classification: ClassificationLevel;
   readonly credentialNames: readonly string[];
   readonly entry: Record<string, unknown>;
@@ -60,7 +61,10 @@ function boundedInteger(value: unknown, min: number, max: number): boolean {
     value >= min && value <= max;
 }
 
-function parseProposal(source: string): McpConnectorProposal | undefined {
+function parseProposal(
+  source: string,
+  id: string,
+): McpConnectorProposal | undefined {
   const raw: unknown = parseYaml(source);
   if (
     !isRecord(raw) ||
@@ -69,6 +73,7 @@ function parseProposal(source: string): McpConnectorProposal | undefined {
         "command",
         "args",
         "url",
+        "api_key_ref",
         "classification",
         "env",
         "tool_call_timeout_ms",
@@ -79,6 +84,15 @@ function parseProposal(source: string): McpConnectorProposal | undefined {
   const classification = parseClassification(raw.classification);
   if (!classification.ok) return;
   const stdio = raw.command !== undefined;
+  const retained = raw.api_key_ref === undefined
+    ? undefined
+    : parseRetainedInventoryEndpoint(
+      id,
+      raw.url,
+      raw.api_key_ref,
+      classification.value,
+    );
+  if (raw.api_key_ref !== undefined && (!retained || stdio)) return;
   if (
     stdio
       ? typeof raw.command !== "string" || raw.command.length > 1_024 ||
@@ -95,9 +109,11 @@ function parseProposal(source: string): McpConnectorProposal | undefined {
   ) return;
   return {
     source,
-    transport: stdio ? "stdio" : "sse",
+    transport: retained ? "streamable_http" : stdio ? "stdio" : "sse",
     classification: classification.value,
-    credentialNames: isRecord(raw.env)
+    credentialNames: retained
+      ? [retained.secretName]
+      : isRecord(raw.env)
       ? Object.values(raw.env).map((ref) =>
         String(ref).split(":").slice(1).join(":")
       )
@@ -123,7 +139,7 @@ export function readMcpConnectorProposal(
     ) return;
     const source = Deno.readTextFileSync(path);
     if (new TextEncoder().encode(source).length > maxProposalBytes) return;
-    return parseProposal(source);
+    return parseProposal(source, serverId);
   } catch {
     // YAML and filesystem errors can contain proposal content or local paths.
     return undefined;

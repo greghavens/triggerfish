@@ -218,6 +218,8 @@ export interface ConfiguredMcpServer {
   readonly args?: readonly string[];
   readonly env?: Readonly<Record<string, string>>;
   readonly url?: string;
+  /** A keychain: reference used only by the reviewed ScopeSentry HTTPS endpoint. */
+  readonly api_key_ref?: string;
   readonly classification?: string;
   readonly enabled?: boolean;
   readonly tool_call_timeout_ms?: number;

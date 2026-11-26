@@ -903,3 +903,121 @@ mcp_servers:
     }
   },
 });
+
+Deno.test({
+  name:
+    "Owner gateway reviews the exact retained inventory HTTPS connector without exposing its key",
+  ignore: Deno.build.os === "windows",
+  async fn() {
+    const dir = await Deno.makeTempDir();
+    const configPath = join(dir, "triggerfish.yaml");
+    const proposalDir = join(dir, "mcp-proposals");
+    const proposalPath = join(proposalDir, "scopesentry.yaml");
+    const keyReference = "keychain:fixture-mcp-key";
+    const privateValue = "fixture-mcp-private-value";
+    const request = (action: string, revision?: string) =>
+      "Review retained inventory " + JSON.stringify({
+        action,
+        ...(revision && { lifecycle_revision: revision }),
+      });
+    // The exact endpoint is blocked by the production SSRF check. A native
+    // transport fixture checks successful exchanges independently.
+    const proposal = {
+      url: "https://127.0.0.1/inventory",
+      classification: "INTERNAL",
+      api_key_ref: keyReference,
+      max_retries: 1,
+    };
+    const writeProposal = (source: typeof proposal) =>
+      Deno.writeTextFile(proposalPath, JSON.stringify(source), { mode: 0o600 });
+    const keepPrivate = (value: unknown) => {
+      const text = JSON.stringify(value);
+      assert(!text.includes(keyReference));
+      assert(!text.includes(privateValue));
+    };
+    try {
+      await Deno.mkdir(proposalDir, { mode: 0o700 });
+      await Deno.writeTextFile(
+        configPath,
+        "models:\n  primary: fixture\nmcp_servers: {}\n",
+      );
+      await writeProposal({ ...proposal, api_key_ref: privateValue });
+      await withConfiguredGateway(dir, async (turn, inbox) => {
+        const unconfigured = JSON.parse(await turn(request("status")));
+        assertEquals(unconfigured.configured, false);
+        assertEquals(unconfigured.reachable, false);
+        assertStringIncludes(
+          await turn(request("creation_status")),
+          "unavailable",
+        );
+        await writeProposal({
+          ...proposal,
+          api_key_ref: "keychain:missing-key",
+        });
+        assertStringIncludes(
+          await turn(request("creation_status")),
+          "credential references are unavailable",
+        );
+        await writeProposal(proposal);
+        const review = JSON.parse(await turn(request("creation_status")));
+        assertEquals(review.transport, "streamable_http");
+        keepPrivate(review);
+
+        const adding = () => turn(request("add", review.lifecycle_revision));
+        const stale = adding();
+        const pending = await nextApproval(
+          inbox,
+          ({ status }) => status === "pending",
+        );
+        keepPrivate(pending);
+        await writeProposal({ ...proposal, url: "https://127.0.0.1/changed" });
+        assertEquals((await inbox.decide(pending.id, true)).ok, true);
+        assertStringIncludes(await stale, "configuration changed");
+        assert(
+          !String(await Deno.readTextFile(configPath)).includes("api_key_ref"),
+        );
+        await writeProposal(proposal);
+
+        const creating = adding();
+        const reviewed = await nextApproval(
+          inbox,
+          ({ status }) => status === "pending",
+        );
+        assertEquals(reviewed.mcpLifecycle, {
+          action: "add",
+          connectorId: "scopesentry",
+        });
+        assertEquals((await inbox.decide(reviewed.id, true)).ok, true);
+        assertEquals(JSON.parse(await creating).enabled, false);
+        const saved = await Deno.readTextFile(configPath);
+        assertStringIncludes(saved, keyReference);
+        assert(!saved.includes(privateValue));
+        const disabled = JSON.parse(await turn(request("status")));
+        assertEquals(disabled.configured, true);
+        assertEquals(disabled.enabled, false);
+        assertEquals(disabled.reachable, false);
+        assertEquals(disabled.tools, []);
+        keepPrivate(disabled);
+
+        const lifecycle = JSON.parse(await turn(request("lifecycle_status")));
+        const enabling = turn(request("enable", lifecycle.lifecycle_revision));
+        const enable = await nextApproval(
+          inbox,
+          ({ status }) => status === "pending",
+        );
+        assertEquals((await inbox.decide(enable.id, true)).ok, true);
+        assertEquals(JSON.parse(await enabling).enabled, true);
+      });
+      await withConfiguredGateway(dir, async (turn) => {
+        const ready = JSON.parse(await turn(request("status")));
+        assertEquals(ready.configured, true);
+        assertEquals(ready.enabled, true);
+        assertEquals(ready.reachable, false);
+        assertEquals(ready.tools, []);
+        keepPrivate(ready);
+      });
+    } finally {
+      await Deno.remove(dir, { recursive: true });
+    }
+  },
+});

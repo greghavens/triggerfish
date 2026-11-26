@@ -13,6 +13,14 @@ import { validateOutboundUrl } from "../core/security/mod.ts";
 import type { SecretStore } from "../core/secrets/keychain/keychain.ts";
 import type { Transport } from "./client/transport.ts";
 import { SSETransport, StdioTransport } from "./client/transport.ts";
+import {
+  RetainedInventoryHttpTransport,
+  retainedInventoryProtocolVersion,
+} from "./client/retained_inventory_http.ts";
+import {
+  isRetainedInventoryOperation,
+  parseRetainedInventoryEndpoint,
+} from "./retained_inventory.ts";
 import { createMcpClient } from "./client/protocol.ts";
 import type { McpClient } from "./client/protocol.ts";
 import { createMcpServerAdapter, resolveEnvVars } from "./manager_env.ts";
@@ -153,6 +161,22 @@ export async function connectOneMcpServer(
   signal?: AbortSignal,
 ): Promise<ConnectedMcpServer> {
   signal?.throwIfAborted();
+  const retained = cfg.apiKeyRef === undefined
+    ? undefined
+    : parseRetainedInventoryEndpoint(
+      cfg.id,
+      cfg.url,
+      cfg.apiKeyRef,
+      cfg.classification,
+    );
+  if (
+    cfg.apiKeyRef !== undefined &&
+    (!retained || cfg.command || cfg.env || cfg.args || !ctx.secretStore)
+  ) {
+    throw new Error(
+      "Retained inventory connector configuration is unavailable.",
+    );
+  }
   if (cfg.command) {
     const validation = enforceCommandAllowlist(
       cfg.command,
@@ -184,16 +208,29 @@ export async function connectOneMcpServer(
     : undefined;
 
   signal?.throwIfAborted();
-  const transport = createTransportForConfig(cfg, resolvedEnv);
+  const transport = retained
+    ? new RetainedInventoryHttpTransport(
+      retained.url,
+      async () => {
+        const key = await ctx.secretStore?.getSecret(retained.secretName);
+        return key?.ok ? key.value : undefined;
+      },
+      cfg.toolCallTimeoutMs ?? 60_000,
+    )
+    : createTransportForConfig(cfg, resolvedEnv);
   const client = createMcpClient(
     transport,
     cfg.toolCallTimeoutMs ?? 60_000,
     signal,
+    retained ? retainedInventoryProtocolVersion : undefined,
   );
   let tools;
   try {
     await client.initialize();
-    tools = await client.listTools();
+    const available = await client.listTools();
+    tools = retained
+      ? available.filter((tool) => isRetainedInventoryOperation(tool?.name))
+      : available;
     signal?.throwIfAborted();
   } catch (error) {
     await transport.disconnect().catch(() => {});
