@@ -7551,6 +7551,21 @@ export function createSentinelModelPlanner(
         string,
         { targetId: string; taskId: string }
       >();
+      const openedMixedSources = new Map<
+        string,
+        AdaptiveReviewedAssignmentSource
+      >();
+      const rememberMixedSource = (id: string, asset: string) => {
+        const [source] = readSentinelReviewedAssignmentSources(
+          snapshotPath,
+          state,
+          asset,
+          [id],
+        ) ?? [];
+        if (source && !source.executionEvidenceId) {
+          openedMixedSources.set(id, source);
+        }
+      };
       let presentedIncidents: typeof incidentContext = [];
       let presentedGraphFacts: typeof graphFacts = [];
       const presentedCancellations = new Map<string, string>();
@@ -7753,6 +7768,11 @@ export function createSentinelModelPlanner(
             : []),
           "For a prerequisite whose only requirement is a passing remediation recheck, use a depth-one trace with passingRecheckId from findingRechecks or an exact sentinel_worker_findings read on the same target. The scheduler revalidates the exact receipt before satisfying the task.",
           "Use graphFactId to cite an exact same-target receipt, or graphFactIds (2–4) to combine receipts in one depth-one trace. For fact-only settlement use a depth-one trace with graphFactOnly and graphFactId, or wait for a graphRelationship {from,to,relation}. A verifies edge with requireCurrentPass accepts the latest valid pass only. Omit from to allow a newer pass for the same control.",
+          ...(graphFacts.length && recheckFindings.length
+            ? [
+              "For one depth-one trace combining a same-asset verified graph fact and a local finding, first open each exact receipt with sentinel_graph_facts (id) or sentinel_worker_findings (receiptId), then propose sourceEvidenceIds (2–4 distinct IDs). Connector-backed findings are excluded.",
+            ]
+            : []),
           "To cite a carried record, copy its exact priorAssignedTargetCitation and use the current carrier task as sourceTaskId with sourceKind worker_result. Keep the cited targetId unchanged.",
           "To adjust the current queue, return an object with assignments (the same array) and prioritize (up to eight exact IDs from reprioritizable tasks in priority order). Include only tasks relevant to the latest goal and evidence. Return empty arrays when no changes are needed.",
           "Include an optional retire array of up to eight objects with id and reason for obsolete reprioritizable tasks that should be held for operator review. Never prioritize and retire the same task. Explain each reason in no more than 300 characters.",
@@ -8445,6 +8465,12 @@ export function createSentinelModelPlanner(
                       findingRecheckStillApplies(snapshot, receipt)
                     ) {
                       openedRecheckFindings.set(id, receipt.targetId);
+                      if (
+                        createHash("sha256").update(JSON.stringify({
+                          _classification: "INTERNAL",
+                          record: receipt,
+                        })).digest("hex") === goalReceiptRead.sha256
+                      ) rememberMixedSource(id, receipt.targetId);
                     } else if (
                       receipt.kind === "recheck" &&
                       receipt.outcome === "pass" &&
@@ -8561,6 +8587,7 @@ export function createSentinelModelPlanner(
                           goalReceiptRead.sha256
                       ) {
                         openedGraphFacts.set(fact.id, fact);
+                        rememberMixedSource(fact.id, fact.targetId);
                       }
                     }
                   }
@@ -8886,6 +8913,22 @@ export function createSentinelModelPlanner(
                   (reference) =>
                     checkedWorkerReviews.has(JSON.stringify(reference)) &&
                     currentLinkedWorkerReview(snapshotPath, current, reference),
+                  (asset, ids) => {
+                    const sources = readSentinelReviewedAssignmentSources(
+                      snapshotPath,
+                      current,
+                      asset,
+                      ids,
+                    );
+                    return sources?.every((source) =>
+                        isDeepStrictEqual(
+                          source,
+                          openedMixedSources.get(source.id),
+                        )
+                      )
+                      ? sources
+                      : undefined;
+                  },
                 );
               const existingById = new Map(
                 currentTasks.map((task) => [task.id, task]),

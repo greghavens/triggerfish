@@ -1198,7 +1198,11 @@ Deno.test("Reviewed analyst finding uses exact local failing evidence and surviv
   }
 });
 
-async function verifyReviewedMixedSourceAssignment(analyst: boolean) {
+async function verifyReviewedMixedSourceAssignment(
+  mode: "worker" | "analyst" | "planner",
+) {
+  const analyst = mode === "analyst";
+  const plannerOrigin = mode === "planner";
   const baseDir = await Deno.makeTempDir();
   const caseId = "mixed-source-review";
   const path = resolveSentinelCasePath(baseDir, caseId);
@@ -1352,82 +1356,215 @@ async function verifyReviewedMixedSourceAssignment(analyst: boolean) {
       if (revoke) allowed = false;
       return Promise.resolve(true);
     };
-    await withFindingAssignmentGateway(baseDir, confirm, async (turn) => {
-      assertEquals(
-        JSON.parse(await turn({ ...ref, action: "pause" })).run.status,
-        "paused",
+    if (plannerOrigin) {
+      const model = createProviderRegistry();
+      let blockFinding = true;
+      let proposals = 0;
+      let plannerReads: string[] = [];
+      const reviewSources = [parsedFact.id, finding.id];
+      const requested = [
+        tool("sentinel_graph_facts", { id: parsedFact.id }),
+        tool(findings, { receiptId: finding.id }),
+      ];
+      model.register({
+        name: "mixed-source-admission-planner",
+        supportsStreaming: false,
+        complete(messages) {
+          const reads = messages.filter(({ role }) => role === "tool");
+          const usage = { inputTokens: 1, outputTokens: 1 };
+          if (!reads.length) {
+            return Promise.resolve({
+              content: "",
+              usage,
+              toolCalls: requested.map(({ name, args }, index) => ({
+                type: "function",
+                id: `mixed-plan-source-${index}`,
+                function: { name, arguments: JSON.stringify(args) },
+              })),
+            });
+          }
+          plannerReads = reads.map(({ content }) => String(content));
+          proposals++;
+          return Promise.resolve({
+            content: JSON.stringify({
+              prioritize: [],
+              assignments: [{
+                kind: "trace",
+                depth: 1,
+                nodeId: "app",
+                sourceEvidenceIds: reviewSources,
+              }],
+            }),
+            usage,
+            toolCalls: [],
+          });
+        },
+      });
+      model.setDefault("mixed-source-admission-planner");
+      let clock = Date.now();
+      const planned = () =>
+        readAdaptiveSentinel(path, state, "revision")?.tasks
+          .find(({ plannerRound }) =>
+            plannerRound && "sourceEvidence" in plannerRound &&
+            plannerRound.sourceEvidence?.length === 2
+          );
+      const admission = createSentinelModelPlanner(
+        path,
+        (current, taskId) =>
+          taskId
+            ? { execute: () => Promise.resolve(), clear() {} }
+            : createSentinelSubagent({
+              snapshotPath: path,
+              assessmentRevision: current.revision,
+              plannerExecutionEvidenceRunId: current.plan.runId,
+              sharedInventoryBaseDir: baseDir,
+              providerRegistry: model,
+              allowModelAccess: true,
+              hookRunner: {
+                evaluateHook(hook, { input }) {
+                  const name = input.tool_name ??
+                    (input.tool_call as { name?: string } | undefined)?.name;
+                  const permitted =
+                    !(blockFinding && hook === "PRE_TOOL_CALL" &&
+                      name === findings);
+                  return Promise.resolve({
+                    allowed: permitted,
+                    action: permitted ? "ALLOW" : "BLOCK",
+                    duration: 0,
+                    ruleId: null,
+                  });
+                },
+              },
+            }),
+        () => planned() ? undefined : () => {},
+        () => clock,
       );
-      const beforeReview = reviews;
-      for (
-        const invalid of [
-          { ...batch, revision: state.revision + 1 },
-          {
-            ...batch,
-            assignments: [{ ...batch.assignments[0], node: "other" }],
-          },
-          {
+      try {
+        admission.advance(state);
+        await waitForCondition(
+          () => proposals === 1 && !admission.hasInFlightWork(),
+          () => {},
+        );
+        assertEquals(JSON.parse(plannerReads[0]).id, parsedFact.id);
+        assertStringIncludes(plannerReads[1], "policy");
+        assertEquals(planned(), undefined);
+        blockFinding = false;
+        clock += 65_000;
+        addSentinelCaseHint(
+          path,
+          "Review both exact retained sources together.",
+        );
+        await waitForCondition(
+          () => !!planned() && !admission.hasInFlightWork(),
+          () => admission.advance(state),
+        );
+        assertEquals(JSON.parse(plannerReads[1]).record, finding);
+        const accepted = planned()!;
+        assert(
+          accepted.plannerRound && "sourceEvidence" in accepted.plannerRound,
+        );
+        assert(accepted.plannerRound.sourceEvidence);
+        assertEquals(accepted.nodeId, "app");
+        reviewed = {
+          receipts: [{
+            taskId: accepted.id,
+            sourceEvidence: [...accepted.plannerRound.sourceEvidence],
+          }],
+        };
+      } finally {
+        admission.stop();
+      }
+    } else {await withFindingAssignmentGateway(
+        baseDir,
+        confirm,
+        async (turn) => {
+          assertEquals(
+            JSON.parse(await turn({ ...ref, action: "pause" })).run.status,
+            "paused",
+          );
+          const beforeReview = reviews;
+          for (
+            const invalid of [
+              { ...batch, revision: state.revision + 1 },
+              {
+                ...batch,
+                assignments: [{ ...batch.assignments[0], node: "other" }],
+              },
+              {
+                ...batch,
+                assignments: [{
+                  ...batch.assignments[0],
+                  sourceIds: [parsedFact.id, parsedFact.id],
+                }],
+              },
+            ]
+          ) {
+            assertStringIncludes(await turn(invalid), "unavailable");
+          }
+          assertEquals(reviews, beforeReview);
+          const before = readAdaptiveSentinel(path, state)?.tasks;
+          if (analyst) {
+            denyAnalystSource = true;
+            assertStringIncludes(await turn(batch), "unavailable");
+            denyAnalystSource = false;
+            assertEquals(reviews, beforeReview);
+            assertEquals(readAdaptiveSentinel(path, state)?.tasks, before);
+          }
+          revoke = true;
+          assertStringIncludes(await turn(batch), "unavailable");
+          assertEquals(reviews, beforeReview + 1);
+          assertEquals(readAdaptiveSentinel(path, state)?.tasks, before);
+          revoke = false;
+          allowed = true;
+          reviewed = JSON.parse(await turn(batch)).receipt;
+        },
+        (hook, input) => {
+          const action =
+            (input.tool_call as { args?: { action?: string } } | undefined)
+              ?.args?.action;
+          return hook !== "PRE_TOOL_CALL" ||
+            (allowed || action !== "assign_batch") &&
+              (!denyAnalystSource || action !== "finding_receipt");
+        },
+      );}
+    assert(reviewed!);
+    const sources = reviewed.receipts[0].sourceEvidence;
+    assertEquals(
+      sources.map(({ id }) => id),
+      plannerOrigin
+        ? [parsedFact.id, finding.id].sort()
+        : [parsedFact.id, finding.id],
+    );
+    const factSource = sources.find(({ id }) => id === parsedFact.id);
+    const findingSource = sources.find(({ id }) => id === finding.id);
+    assert(factSource && findingSource);
+    assertEquals(factSource.taskId, graphWorker.assignedTaskId);
+    assertEquals(findingSource.taskId, findingWorker?.assignedTaskId);
+    if (analyst) {
+      assertEquals(findingSource.analyst, { operatorScope: "owner" });
+    }
+    assertEquals(sources.map(({ evidenceRevision }) => evidenceRevision), [
+      state.revision,
+      state.revision,
+    ]);
+    assertEquals(factSource.digest, parsedFact.resultSha256);
+    assertEquals(factSource.sourceStepIndex, parsedFact.sourceStepIndex);
+    assert(/^[a-f0-9]{64}$/.test(findingSource.digest));
+    await withFindingAssignmentGateway(baseDir, confirm, async (turn) => {
+      const beforeReplay = reviews;
+      if (!plannerOrigin) {
+        assertEquals(JSON.parse(await turn(batch)).receipt, reviewed);
+        assertStringIncludes(
+          await turn({
             ...batch,
             assignments: [{
               ...batch.assignments[0],
-              sourceIds: [parsedFact.id, parsedFact.id],
+              sourceIds: [...batch.assignments[0].sourceIds].reverse(),
             }],
-          },
-        ]
-      ) {
-        assertStringIncludes(await turn(invalid), "unavailable");
+          }),
+          "unavailable",
+        );
       }
-      assertEquals(reviews, beforeReview);
-      const before = readAdaptiveSentinel(path, state)?.tasks;
-      if (analyst) {
-        denyAnalystSource = true;
-        assertStringIncludes(await turn(batch), "unavailable");
-        denyAnalystSource = false;
-        assertEquals(reviews, beforeReview);
-        assertEquals(readAdaptiveSentinel(path, state)?.tasks, before);
-      }
-      revoke = true;
-      assertStringIncludes(await turn(batch), "unavailable");
-      assertEquals(reviews, beforeReview + 1);
-      assertEquals(readAdaptiveSentinel(path, state)?.tasks, before);
-      revoke = false;
-      allowed = true;
-      reviewed = JSON.parse(await turn(batch)).receipt;
-      const sources = reviewed.receipts[0].sourceEvidence;
-      assertEquals(sources.map(({ id }) => id), [parsedFact.id, finding.id]);
-      assertEquals(sources.map(({ taskId }) => taskId), [
-        graphWorker.assignedTaskId,
-        findingWorker?.assignedTaskId,
-      ]);
-      if (analyst) assertEquals(sources[1].analyst, { operatorScope: "owner" });
-      assertEquals(sources.map(({ evidenceRevision }) => evidenceRevision), [
-        state.revision,
-        state.revision,
-      ]);
-      assertEquals(sources[0].digest, parsedFact.resultSha256);
-      assertEquals(sources[0].sourceStepIndex, parsedFact.sourceStepIndex);
-      assert(/^[a-f0-9]{64}$/.test(sources[1].digest));
-    }, (hook, input) => {
-      const action =
-        (input.tool_call as { args?: { action?: string } } | undefined)
-          ?.args?.action;
-      return hook !== "PRE_TOOL_CALL" ||
-        (allowed || action !== "assign_batch") &&
-          (!denyAnalystSource || action !== "finding_receipt");
-    });
-    assert(reviewed!);
-    await withFindingAssignmentGateway(baseDir, confirm, async (turn) => {
-      const beforeReplay = reviews;
-      assertEquals(JSON.parse(await turn(batch)).receipt, reviewed);
-      assertStringIncludes(
-        await turn({
-          ...batch,
-          assignments: [{
-            ...batch.assignments[0],
-            sourceIds: [...batch.assignments[0].sourceIds].reverse(),
-          }],
-        }),
-        "unavailable",
-      );
       assertEquals(reviews, beforeReplay);
       assertEquals(
         JSON.parse(await turn({ ...ref, runId, action: "cancel" })).run.status,
@@ -1461,7 +1598,16 @@ async function verifyReviewedMixedSourceAssignment(analyst: boolean) {
       );
       assert(readSentinelAssessment(path)?.paused);
       const beforeReplay = reviews;
-      assertEquals(JSON.parse(await turn(batch)).receipt, reviewed);
+      if (plannerOrigin) {
+        const restored = readSentinelAssessment(path);
+        assert(restored);
+        const task = readAdaptiveSentinel(path, restored, "revision")?.tasks
+          .find(({ id }) => id === reviewed.receipts[0].taskId);
+        assert(task?.plannerRound && "sourceEvidence" in task.plannerRound);
+        assertEquals<unknown>(task.plannerRound.sourceEvidence, sources);
+      } else {
+        assertEquals(JSON.parse(await turn(batch)).receipt, reviewed);
+      }
       assertEquals(reviews, beforeReplay);
       assertEquals(
         JSON.parse(await turn({ ...ref, action: "resume" })).run.status,
@@ -1593,10 +1739,13 @@ async function verifyReviewedMixedSourceAssignment(analyst: boolean) {
 }
 
 Deno.test("Reviewed mixed-source assignment retains exact graph and finding lineage across gateway restore", () =>
-  verifyReviewedMixedSourceAssignment(false));
+  verifyReviewedMixedSourceAssignment("worker"));
 
 Deno.test("Reviewed mixed-source assignment preserves analyst actor and scoped evidence through gateway restore", () =>
-  verifyReviewedMixedSourceAssignment(true));
+  verifyReviewedMixedSourceAssignment("analyst"));
+
+Deno.test("Planner mixed-source assignment requires both exact approved reads and resumes after gateway restore", () =>
+  verifyReviewedMixedSourceAssignment("planner"));
 
 Deno.test("Leased Sentinel workers report, recheck, and amend findings visible in authenticated Tidepool", async () => {
   const baseDir = await Deno.makeTempDir();

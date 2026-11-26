@@ -2523,7 +2523,7 @@ function normalizePlannerRound(round: AdaptivePlannerRound | undefined) {
         ) ||
         !/^worker-(?:graph-fact|finding):[a-f0-9]{64}$/.test(entry.id) ||
         (!identity.startsWith("operator:") &&
-          !entry.id.startsWith("worker-graph-fact:")) ||
+          entry.executionEvidenceId !== undefined) ||
         (entry.id.startsWith("worker-graph-fact:") !==
           (entry.sourceStepIndex !== undefined)) ||
         (entry.executionEvidenceId !== undefined &&

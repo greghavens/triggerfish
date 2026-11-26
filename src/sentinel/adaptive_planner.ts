@@ -841,6 +841,10 @@ export function validateSentinelPlanSuggestions(
   approvesPeerWorkerReview?: (
     reference: SentinelPeerWorkerReviewReference,
   ) => boolean,
+  resolveMixedSources?: (
+    asset: string,
+    ids: readonly string[],
+  ) => readonly AdaptiveReviewedAssignmentSource[] | undefined,
 ):
   | (AdaptiveTaskRequest & {
     analystObservationHintId?: number;
@@ -979,6 +983,26 @@ export function validateSentinelPlanSuggestions(
         )
       ) continue;
       sourceEvidence = resolveGraphSources?.(nodeId, [...ids].sort());
+      if (!sourceEvidence) continue;
+    }
+    if (item.sourceEvidenceIds !== undefined) {
+      const ids = item.sourceEvidenceIds;
+      if (
+        kind !== "trace" || item.depth !== 1 ||
+        !Array.isArray(ids) || ids.length < 2 || ids.length > 4 ||
+        new Set(ids).size !== ids.length ||
+        ids.some((id) =>
+          typeof id !== "string" ||
+          !/^worker-(?:graph-fact|finding):[a-f0-9]{64}$/.test(id)
+        ) ||
+        !ids.some((id) => id.startsWith("worker-graph-fact:")) ||
+        !ids.some((id) => id.startsWith("worker-finding:")) ||
+        Object.keys(item).some((key) =>
+          !["kind", "nodeId", "depth", "sourceEvidenceIds", "dependsOn"]
+            .includes(key)
+        )
+      ) continue;
+      sourceEvidence = resolveMixedSources?.(nodeId, [...ids].sort());
       if (!sourceEvidence) continue;
     }
     const graphFactId = item.graphFactId;
