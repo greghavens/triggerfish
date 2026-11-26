@@ -4526,24 +4526,53 @@ async function verifyConnectorFindingPublication(
     );
     assert(!future.results[0][0].includes(finding.id));
     await withTidepool(baseDir, async (_list, _provenance, request) => {
-      const retained = await request("shared_finding_source", {
+      const retainedSource = {
         caseId: consumerCase,
         sourceCase: "main",
         asset: "app",
         snapshotDigest: entry.snapshotDigest,
         finding: finding.id,
-      });
+      };
+      const retained = await request("shared_finding_source", retainedSource);
       assertEquals(retained.type, "sentinel_source_snapshot");
+      assertEquals(retained.scopeRestricted, true);
       assertEquals(retained.published, false);
       const graph = retained.graph as {
         nodes: readonly { id: string; workerFindingSource?: unknown }[];
+        edges: readonly unknown[];
       };
+      assertEquals(
+        graph.nodes.map(({ id }) => id).sort(),
+        ["app", finding.id].sort(),
+      );
+      assertEquals(graph.edges, [{
+        from: finding.id,
+        to: "app",
+        relation: "affects",
+      }]);
       const saved = graph.nodes.find(({ id }) => id === finding.id);
       assertEquals(
         saved?.workerFindingSource,
         publication.finding.workerFindingSource,
       );
       assert(!JSON.stringify(retained).includes(credential));
+      const blocked = await request("shared_finding_source", {
+        ...retainedSource,
+        asset: "outside",
+      });
+      assertEquals(blocked.type, "error");
+      assertEquals(blocked.graph, undefined);
+      assert(recordSentinelOperatingConstraints(consumerPath, {
+        runId: consumerState.plan.runId!,
+        evidenceRevision: consumerState.revision,
+        expectedVersion: policy.version,
+        requestId: crypto.randomUUID(),
+        operatorScope: "fixture-connector-owner",
+        constraints: { allowedAssetIds: [], deniedKinds: [] },
+      }));
+      const revoked = await request("shared_finding_source", retainedSource);
+      assertEquals(revoked.type, "error");
+      assertEquals(revoked.graph, undefined);
     });
   } finally {
     socket.close();

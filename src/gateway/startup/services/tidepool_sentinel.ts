@@ -1,4 +1,5 @@
 import { dirname, join } from "@std/path";
+import { isDeepStrictEqual } from "node:util";
 import { readSentinelWorkerEvidenceScope } from "../../sentinel_worker_evidence_scope.ts";
 import { scopedSentinelInventoryGraph } from "../../sentinel_agent.ts";
 import { sentinelOperatingConstraintsAllow } from "../../../sentinel/operating_constraints.ts";
@@ -63,6 +64,7 @@ import {
   readSentinelDecisionHistory,
   readSentinelFindingReviews,
   readSentinelIncidentReviews,
+  readSentinelLinkedSourcesForRevision,
   readSentinelNotificationReceipt,
   readSentinelNotificationState,
   readSentinelOperatingConstraints,
@@ -103,7 +105,11 @@ import {
   readSavedSentinelPlanningEvidence,
   renderSavedSentinelIncidentJson,
 } from "../../../sentinel/incident_archive.ts";
-import { loadSentinelGraph } from "../../../sentinel/graph.ts";
+import {
+  assetIdentityIndex,
+  loadSentinelGraph,
+  scopeSentinelInventoryReferences,
+} from "../../../sentinel/graph.ts";
 import { publishSentinelInput } from "../../../sentinel/published_input.ts";
 import {
   isSentinelCaseId,
@@ -115,12 +121,14 @@ import {
   digestSentinelSnapshot,
   readArchivedSentinelSnapshot,
   readCitedSentinelAliasSnapshot,
+  readPinnedSentinelSharedFindingSource,
   readSharedSentinelAssetCatalog,
   readSharedSentinelAssetLinks,
   readSharedSentinelAssets,
   readSharedSentinelFindingSource,
   type SharedSentinelAssetCatalogOptions,
 } from "../../../sentinel/shared_inventory.ts";
+import { readSentinelWorkerFindingPublications } from "../../../sentinel/worker_finding_publications.ts";
 import {
   auditSentinelSourceSnapshots,
   moveSentinelSourceSnapshot,
@@ -239,6 +247,92 @@ function projectTidepoolSourceSnapshot(
     );
   }
   return { graph: visible, scopeRestricted: true };
+}
+
+async function projectScopedTidepoolPeerFinding(
+  baseDir: string,
+  recipientPath: string,
+  recipientCase: string,
+  sourcePath: string,
+  reference: Parameters<typeof readSharedSentinelFindingSource>[1],
+) {
+  const { caseId, assetId, findingId } = reference;
+  const recipient = readSentinelAssessment(recipientPath);
+  const local = recipient?.result?.sharedGraph.snapshot;
+  if (!recipient || !local) return;
+  const selected = readSentinelLinkedSourcesForRevision(
+    recipientPath,
+    recipient.revision,
+  )?.find((source) => source.caseId === caseId);
+  if (
+    !selected || !retainedTelemetryScope(recipientPath, recipient.revision)
+      ?.allowFinding(assetId)
+  ) return;
+  const archived = await readPinnedSentinelSharedFindingSource(
+    baseDir,
+    local,
+    { ...reference, localAssetId: assetId },
+    recipientCase,
+    recipientPath,
+  );
+  if (!archived) return;
+  const ownsIdentity = (snapshot: typeof archived) =>
+    assetIdentityIndex(snapshot.nodes.filter(({ kind }) => kind === "asset"))
+      .get(assetId) === assetId;
+  const latest = readSentinelAssessment(recipientPath);
+  if (
+    latest?.revision !== recipient.revision ||
+    latest.plan.runId !== recipient.plan.runId ||
+    !retainedTelemetryScope(recipientPath, recipient.revision)
+      ?.allowFinding(assetId) ||
+    !ownsIdentity(local) || !ownsIdentity(archived) ||
+    archived.edges.some(({ from, to, relation }) =>
+      from === findingId && relation === "affects" && to !== assetId
+    ) ||
+    readSentinelRunIdForRevision(sourcePath, selected.revision) !==
+      selected.runId ||
+    retainedTelemetryScope(sourcePath, selected.revision)
+        ?.allowFinding(assetId) === false
+  ) return;
+  const published = readSentinelWorkerFindingPublications(sourcePath, caseId)
+    .find(({ finding, targetId }) =>
+      finding.id === findingId && targetId === assetId &&
+      finding.workerFindingSource?.revision === selected.revision &&
+      finding.workerFindingSource.runId === selected.runId
+    );
+  if (!published) return;
+  const { graph } = projectTidepoolSourceSnapshot(
+    sourcePath,
+    sourcePath,
+    assetId,
+    archived,
+    findingId,
+  );
+  const nodes = graph.nodes.filter(({ id }) =>
+    id === findingId || id === assetId
+  );
+  if (
+    nodes.length !== 2 ||
+    !nodes.some((node) => isDeepStrictEqual(node, published.finding))
+  ) return;
+  const edges = graph.edges.filter(({ from, to, relation }) =>
+    from === findingId && to === assetId && relation === "affects"
+  );
+  if (edges.length !== 1) return;
+  return {
+    graph: {
+      version: graph.version,
+      nodes: nodes.map((node) =>
+        scopeSentinelInventoryReferences(
+          node,
+          (id) => id === findingId || id === assetId,
+          caseId,
+        )
+      ),
+      edges,
+    },
+    scopeRestricted: true,
+  };
 }
 
 function tidepoolDecisionScope(path: string) {
@@ -2560,37 +2654,62 @@ export function createTidepoolSentinelHandler(
           ) {
             throw new SentinelAssignmentError("Choose a valid shared finding.");
           }
-          const source = await readSharedSentinelFindingSource(
+          const reference = {
+            caseId: sourceCase,
+            snapshotDigest,
+            assetId: asset,
+            findingId: finding,
+          };
+          const sourcePath = resolveSentinelCasePath(
             bootstrap.baseDir,
-            {
-              caseId: sourceCase,
-              snapshotDigest,
-              assetId: asset,
-              findingId: finding,
-            },
+            sourceCase,
           );
-          if (source.status === "source_unavailable") {
-            throw new SentinelAssignmentError(
-              "The source snapshot is unavailable.",
+          const recipient = sourcePath !== path && readSentinelAssessment(path);
+          let projection: ReturnType<typeof projectTidepoolSourceSnapshot>;
+          let published = false;
+          if (recipient && retainedTelemetryScope(path, recipient.revision)) {
+            const scoped = await projectScopedTidepoolPeerFinding(
+              bootstrap.baseDir,
+              path,
+              caseId,
+              sourcePath,
+              reference,
             );
-          }
-          if (source.status === "source_changed") {
-            throw new SentinelAssignmentError(
-              "The reporting inventory changed. Reload the shared relationships.",
+            if (!scoped) {
+              throw new SentinelAssignmentError(
+                "The requested evidence is unavailable in the source snapshot.",
+              );
+            }
+            projection = scoped;
+          } else {
+            const source = await readSharedSentinelFindingSource(
+              bootstrap.baseDir,
+              reference,
             );
-          }
-          if (source.status === "finding_unavailable") {
-            throw new SentinelAssignmentError(
-              "The finding is unavailable for this asset in the source snapshot.",
+            if (source.status === "source_unavailable") {
+              throw new SentinelAssignmentError(
+                "The source snapshot is unavailable.",
+              );
+            }
+            if (source.status === "source_changed") {
+              throw new SentinelAssignmentError(
+                "The reporting inventory changed. Reload the shared relationships.",
+              );
+            }
+            if (source.status === "finding_unavailable") {
+              throw new SentinelAssignmentError(
+                "The finding is unavailable for this asset in the source snapshot.",
+              );
+            }
+            projection = projectTidepoolSourceSnapshot(
+              path,
+              sourcePath,
+              asset,
+              source.graph,
+              finding,
             );
+            published = source.published;
           }
-          const projection = projectTidepoolSourceSnapshot(
-            path,
-            resolveSentinelCasePath(bootstrap.baseDir, sourceCase),
-            asset,
-            source.graph,
-            finding,
-          );
           send({
             topic: "sentinel",
             type: "sentinel_source_snapshot",
@@ -2600,7 +2719,7 @@ export function createTidepoolSentinelHandler(
             asset: finding,
             graph: projection.graph,
             ...(projection.scopeRestricted && { scopeRestricted: true }),
-            published: source.published,
+            published,
           });
           return;
         }
