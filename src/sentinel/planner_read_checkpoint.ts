@@ -6,6 +6,7 @@ import type { AgentTurnCheckpoint } from "../core/types/orchestrator.ts";
 import {
   SENTINEL_GOAL_GRAPH_FACT_READ,
   SENTINEL_GOAL_RECHECK_READ,
+  SENTINEL_INTERMEDIATE_WORKFLOW_READ,
   sentinelGoalReceiptReadArguments,
 } from "./worker_goal_recovery.ts";
 
@@ -19,6 +20,13 @@ export function plannerCheckpointReadSelector(name: string, input: unknown) {
     if (
       Object.keys(args).length !== 1 || typeof args.id !== "string" ||
       !/^worker-graph-fact:[a-f0-9]{64}$/.test(args.id)
+    ) return;
+    return { name, args: { id: args.id } } as const;
+  }
+  if (name === SENTINEL_INTERMEDIATE_WORKFLOW_READ) {
+    if (
+      Object.keys(args).length !== 1 || typeof args.id !== "string" ||
+      !/^workflow-observation:[a-f0-9]{64}$/.test(args.id)
     ) return;
     return { name, args: { id: args.id } } as const;
   }

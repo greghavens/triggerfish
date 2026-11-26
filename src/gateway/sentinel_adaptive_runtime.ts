@@ -84,6 +84,7 @@ import {
   SENTINEL_GOAL_PROVE,
   SENTINEL_GOAL_RECHECK_READ,
   SENTINEL_GOAL_STATE_READ,
+  SENTINEL_INTERMEDIATE_WORKFLOW_READ,
   SENTINEL_SHARED_WORKER_REVIEW,
   sentinelGoalProposalArguments,
   sentinelGoalReceiptReadArguments,
@@ -156,6 +157,7 @@ import {
   type AdaptiveTask,
   type AdaptiveTaskRequest,
   type AdaptiveVerificationReviewCandidate,
+  type AdaptiveWorkflowObservation,
   canReuseCommittedTrace,
   formatSentinelWorkerSteering,
   MAX_ADAPTIVE_TASK_ATTEMPTS,
@@ -1054,6 +1056,16 @@ export function readSentinelWorkflowPublicationStep(
   } finally {
     store.close();
   }
+}
+
+/** Canonical bounded response shared by the live exact read and its durable replay. */
+export function projectSentinelExactWorkflowObservation(
+  observation: AdaptiveWorkflowObservation,
+) {
+  const result = JSON.stringify(observation);
+  return result.length <= 7000 && redactCredentialText(result) === result
+    ? result
+    : undefined;
 }
 
 export function readSentinelIntermediateWorkflowObservations(
@@ -9448,6 +9460,25 @@ export function createSentinelModelPlanner(
                 ),
             );
           }
+          if (exchange.name === SENTINEL_INTERMEDIATE_WORKFLOW_READ) {
+            const retained = readSentinelIntermediateWorkflowObservations(
+              snapshotPath,
+              state.revision,
+              runId,
+              exchange.args,
+            );
+            const observation = retained && "observation" in retained
+              ? retained.observation
+              : undefined;
+            if (
+              !observation || !sentinelOperatingConstraintsAllow(
+                constraints?.constraints,
+                { kind: "review_evidence", nodeId: observation.targetId },
+                snapshot,
+              )
+            ) return;
+            return projectSentinelExactWorkflowObservation(observation);
+          }
           const { asset, taskId, recheckId } = exchange.args;
           if (
             !inputs.repositoryVisibilityRechecks?.some((source) =>
@@ -9902,11 +9933,24 @@ export function createSentinelModelPlanner(
                       "Sentinel planner checkpoint is incomplete",
                     );
                   }
-                  const target = exchange.name === "sentinel_graph_facts"
+                  const target = exchange.name === "sentinel_graph_facts" ||
+                      exchange.name === SENTINEL_INTERMEDIATE_WORKFLOW_READ
                     ? exchange.args.id
                     : exchange.name === SENTINEL_GOAL_RECHECK_READ
                     ? exchange.args.receiptId
                     : exchange.args.asset;
+                  const observation =
+                    exchange.name === SENTINEL_INTERMEDIATE_WORKFLOW_READ
+                      ? JSON.parse(projection) as AdaptiveWorkflowObservation
+                      : undefined;
+                  const workflow = observation && {
+                    observationId: observation.id,
+                    sourceTaskId: observation.taskId,
+                    sourceStepIndex: observation.stepIndex,
+                    targetId: observation.targetId,
+                    evidenceRevision: observation.evidenceRevision,
+                    resultSha256: observation.receipt.resultSha256,
+                  };
                   if (
                     !audit.recordModelPlanRead(roundIdentity, claim, {
                       tool: exchange.name,
@@ -9919,6 +9963,8 @@ export function createSentinelModelPlanner(
                           sha256: exchange.resultSha256,
                         },
                       }),
+                      ...(workflow &&
+                        { intermediateWorkflowObservation: workflow }),
                       resultSha256: exchange.resultSha256,
                     })
                   ) throw new Error("Sentinel planner checkpoint is stale");
@@ -9932,6 +9978,11 @@ export function createSentinelModelPlanner(
                       exchange.args.revision,
                       exchange.resultSha256,
                     );
+                  } else if (
+                    exchange.name === SENTINEL_INTERMEDIATE_WORKFLOW_READ &&
+                    workflow
+                  ) {
+                    openedCommitted.set(workflow.observationId, workflow);
                   } else {
                     rememberVisibility(projection);
                   }

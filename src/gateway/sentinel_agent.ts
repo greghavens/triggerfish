@@ -67,7 +67,10 @@ import { notifyCommittedEvidence } from "../core/evidence_task_progression.ts";
 import { guardAssignmentExecution } from "../core/durable_assignment.ts";
 import { readSentinelPlannerInventoryResult } from "../sentinel/inventory_queries.ts";
 import { readSentinelPlannerDigestResult } from "../sentinel/evidence_digests.ts";
-import { readSentinelIntermediateWorkflowObservations } from "./sentinel_adaptive_runtime.ts";
+import {
+  projectSentinelExactWorkflowObservation,
+  readSentinelIntermediateWorkflowObservations,
+} from "./sentinel_adaptive_runtime.ts";
 import { readScopedSentinelSharedAssetDiscoveries } from "./sentinel_asset_discoveries.ts";
 import {
   assetLinkProof,
@@ -2289,6 +2292,60 @@ async function authorizeRetainedWorkflowObservation(
     },
   });
   return isDeepStrictEqual(saved, retained) && current();
+}
+
+async function reopenPlannerWorkflowObservation(
+  options: SentinelAgentOptions,
+  turn: Pick<ActiveTurn, "signal">,
+  session: SessionState,
+  config: OrchestratorConfig,
+  runId: string,
+  revision: number,
+  id: string,
+  allow: (assetId: string) => boolean,
+) {
+  const lookup = () => {
+    const retained = readSentinelIntermediateWorkflowObservations(
+      options.snapshotPath,
+      revision,
+      runId,
+      { id },
+    );
+    return retained && "observation" in retained
+      ? retained.observation
+      : undefined;
+  };
+  const observation = lookup();
+  const current = () =>
+    observation !== undefined && !turn.signal.aborted &&
+    allow(observation.targetId) && isDeepStrictEqual(lookup(), observation);
+  if (
+    !observation || !await authorizeRetainedWorkflowObservation(
+      options,
+      turn,
+      session,
+      observation.targetId,
+      observation.taskId,
+      revision,
+      observation.receipt,
+      current,
+    )
+  ) return;
+  const decision = await enforcePostToolResponse(
+    liveWorkflowStatusTool.name,
+    config,
+    session,
+    {
+      resultText: JSON.stringify({
+        targetId: observation.targetId,
+        ...observation.receipt,
+      }),
+      blocked: false,
+    },
+  );
+  if (!decision.blocked && current()) {
+    return projectSentinelExactWorkflowObservation(observation);
+  }
 }
 
 async function readLiveWorkflowStatus(
@@ -7718,46 +7775,17 @@ function createAgent(
             }
             return "Error: The committed workflow observations are unavailable.";
           }
-          const retained = readSentinelIntermediateWorkflowObservations(
-            options.snapshotPath,
-            evidenceRevision,
+          const exact = await reopenPlannerWorkflowObservation(
+            options,
+            turn,
+            session,
+            config,
             runId,
-            { id },
+            evidenceRevision,
+            id,
+            (assetId) => currentPlannerReceiptScope(turn, assetId),
           );
-          const observation = retained && "observation" in retained
-            ? retained.observation
-            : undefined;
-          if (
-            observation && await authorizeRetainedWorkflowObservation(
-              options,
-              turn,
-              session,
-              observation.targetId,
-              observation.taskId,
-              evidenceRevision,
-              observation.receipt,
-              () => currentPlannerReceiptScope(turn, observation.targetId),
-            )
-          ) {
-            const decision = await enforcePostToolResponse(
-              liveWorkflowStatusTool.name,
-              config,
-              session,
-              {
-                resultText: JSON.stringify({
-                  targetId: observation.targetId,
-                  ...observation.receipt,
-                }),
-                blocked: false,
-              },
-            );
-            if (
-              !decision.blocked &&
-              currentPlannerReceiptScope(turn, observation.targetId)
-            ) {
-              return boundResult(observation);
-            }
-          }
+          if (exact) return exact;
         }
         return "Error: The committed workflow observation is unavailable.";
       }
@@ -10498,6 +10526,19 @@ function createAgent(
                         },
                         selector.args,
                         (id) => currentPlannerReceiptScope(turn, id),
+                      )
+                      : selector.name === SENTINEL_INTERMEDIATE_WORKFLOW_READ
+                      ? await reopenPlannerWorkflowObservation(
+                        options,
+                        turn,
+                        session,
+                        config,
+                        runId,
+                        revision,
+                        selector.args.id,
+                        (assetId) =>
+                          checkpointCurrent() &&
+                          currentPlannerReceiptScope(turn, assetId),
                       )
                       : await reopenRepositoryVisibilityVerdict(
                         runId,

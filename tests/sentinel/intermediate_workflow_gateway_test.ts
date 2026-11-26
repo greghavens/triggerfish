@@ -258,7 +258,7 @@ async function withOperator(
   }
 }
 
-Deno.test("Gateway workers cite an intermediate observation while its source review stays open", async () => {
+async function verifyIntermediateWorkflowGateway(checkpointOnly: boolean) {
   const baseDir = await Deno.makeTempDir();
   const caseId = "workflow-evidence";
   const path = resolveSentinelCasePath(baseDir, caseId);
@@ -923,6 +923,188 @@ Deno.test("Gateway workers cite an intermediate observation while its source rev
         plannerRound?.requiredWorkflowOutcome !== undefined
       ),
     );
+    if (checkpointOnly) {
+      planner.stop();
+      releaseSource.resolve();
+      await waitFor(() => !planner.hasInFlightWork());
+      let plannerRequestCount = 0;
+      let plannerDispatchCount = 0;
+      let checkpointPayload: string | undefined;
+      let pauseCheckpoint:
+        | ReturnType<typeof Promise.withResolvers<void>>
+        | undefined;
+      let replayClock = planningClock + 61_000;
+      const replayProviders = createProviderRegistry();
+      replayProviders.register({
+        name: "planner-workflow-observation-replay",
+        supportsStreaming: false,
+        async complete(messages) {
+          const result = messages.find(({ role }) => role === "tool");
+          if (!result) {
+            plannerRequestCount++;
+            return call("sentinel_intermediate_workflow_observation", {
+              id: observation.id,
+            });
+          }
+          checkpointPayload = String(result.content);
+          if (pauseCheckpoint) await pauseCheckpoint.promise;
+          return {
+            content: JSON.stringify({
+              assignments: [{
+                kind: "trace",
+                depth: 1,
+                nodeId: "delivery",
+                committedObservationId: observation.id,
+              }],
+              prioritize: [],
+            }),
+            usage,
+            toolCalls: [],
+          };
+        },
+      });
+      replayProviders.setDefault("planner-workflow-observation-replay");
+      const makeReplayPlanner = () =>
+        createSentinelModelPlanner(
+          path,
+          (current, taskId) => {
+            if (taskId) return { execute: () => Promise.resolve(), clear() {} };
+            const agent = createSentinelSubagent({
+              snapshotPath: path,
+              assessmentRevision: current.revision,
+              plannerExecutionEvidenceRunId: current.plan.runId,
+              providerRegistry: replayProviders,
+              readRetainedWorkflow: reader,
+              allowModelAccess: true,
+              hookRunner,
+            });
+            return {
+              ...agent,
+              execute(prompt, send, signal, trace, access, options) {
+                return agent.execute(
+                  prompt,
+                  send,
+                  signal,
+                  (step) => {
+                    if (
+                      step.tool === "sentinel_intermediate_workflow_observation"
+                    ) plannerDispatchCount++;
+                    trace?.(step);
+                  },
+                  access,
+                  options,
+                );
+              },
+            };
+          },
+          undefined,
+          () => replayClock,
+        );
+      const replayedAssignment = () =>
+        readAdaptiveSentinel(path, state)?.tasks.find(
+          ({ depth, plannerRound }) =>
+            depth === 1 &&
+            plannerRound?.committedObservation?.observationId ===
+              observation.id,
+        );
+      const interruptReplayPlanner = async (hint: string) => {
+        checkpointPayload = undefined;
+        pauseCheckpoint = Promise.withResolvers<void>();
+        addSentinelCaseHint(path, hint);
+        const first = makeReplayPlanner();
+        try {
+          first.advance(state);
+          await waitFor(() => checkpointPayload !== undefined);
+          assertEquals(JSON.parse(checkpointPayload!), observation);
+          assertEquals(replayedAssignment(), undefined);
+          return checkpointPayload!;
+        } finally {
+          first.stop();
+          pauseCheckpoint.resolve();
+          pauseCheckpoint = undefined;
+          await waitFor(() => !first.hasInFlightWork());
+          replayClock += 4 * 60_000;
+          checkpointPayload = undefined;
+        }
+      };
+      await interruptReplayPlanner(
+        "Check authorization of the exact committed workflow receipt.",
+      );
+      const revokedCounters = {
+        plannerRequestCount,
+        plannerDispatchCount,
+        blockedSettlement,
+      };
+      settlementPolicy = "pre";
+      let replayPlanner = makeReplayPlanner();
+      try {
+        replayPlanner.advance(state);
+        await waitFor(() =>
+          blockedSettlement > revokedCounters.blockedSettlement &&
+          !replayPlanner.hasInFlightWork()
+        );
+        assertEquals(checkpointPayload, undefined);
+        assertEquals(replayedAssignment(), undefined);
+        assertEquals(plannerRequestCount, revokedCounters.plannerRequestCount);
+        assertEquals(
+          plannerDispatchCount,
+          revokedCounters.plannerDispatchCount,
+        );
+      } finally {
+        replayPlanner.stop();
+        settlementPolicy = "allow";
+      }
+      replayClock += 61_000;
+      const originalPayload = await interruptReplayPlanner(
+        "Cite the currently authorized committed workflow receipt.",
+      );
+      const approvedCounters = {
+        plannerRequestCount,
+        plannerDispatchCount,
+        metadataChecks,
+      };
+      replayPlanner = makeReplayPlanner();
+      try {
+        replayPlanner.advance(state);
+        await waitFor(() => !replayPlanner.hasInFlightWork());
+        const replayHistory = readAdaptiveSentinel(path, state)
+          ?.modelPlannerHistory.at(-1);
+        assert(
+          replayedAssignment(),
+          JSON.stringify({
+            received: checkpointPayload !== undefined,
+            approvedCounters,
+            actual: {
+              plannerRequestCount,
+              plannerDispatchCount,
+              metadataChecks,
+            },
+            outcome: replayHistory?.outcome,
+            reads: replayHistory?.reads?.map(({ tool, outcome, target }) => ({
+              tool,
+              outcome,
+              target,
+            })),
+          }),
+        );
+        assertEquals(checkpointPayload, originalPayload);
+        assertEquals(plannerRequestCount, approvedCounters.plannerRequestCount);
+        assertEquals(
+          plannerDispatchCount,
+          approvedCounters.plannerDispatchCount,
+        );
+        assert(metadataChecks > approvedCounters.metadataChecks);
+        assertEquals(
+          replayedAssignment()?.plannerRound?.committedObservation
+            ?.sourceStepIndex,
+          observation.stepIndex,
+        );
+        assertEquals(transportCalls, 1);
+      } finally {
+        replayPlanner.stop();
+      }
+      return;
+    }
     expectedGateOutcome = "failure";
     addSentinelCaseHint(path, "Use the verified failed workflow outcome.");
     planningClock += 61_000;
@@ -2039,7 +2221,13 @@ Deno.test("Gateway workers cite an intermediate observation while its source rev
     await waitFor(() => !planner.hasInFlightWork());
     await Deno.remove(baseDir, { recursive: true });
   }
-});
+}
+
+Deno.test("Gateway workers cite an intermediate observation while its source review stays open", () =>
+  verifyIntermediateWorkflowGateway(false));
+
+Deno.test("Planner resumes an exact committed workflow observation only with current source authorization", () =>
+  verifyIntermediateWorkflowGateway(true));
 
 async function verifyScheduledObservationGoal(
   baseDir: string,
