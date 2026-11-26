@@ -354,6 +354,13 @@ settlement separately from the verdict. A failed or interrupted attempt
 does not establish a verdict. If the page becomes stale, start again
 without its cursor.
 
+The worker finding report shows a separate remediation status as of the selected
+evidence revision. A verified result identifies its exact recheck and evidence.
+Missing, expired, or inaccessible evidence yields `unknown`. The owner report
+reauthorizes retained connector sources before returning their status. Static
+exports use `unknown` for connector-backed status because they cannot repeat
+those checks. The analyst disposition stays independent of this status.
+
 In authenticated owner chat, use `operator_runs finding_groups` with
 `scopes` containing one to four exact case IDs and saved revisions. Each
 group reports its count of imported and worker findings and has an independent

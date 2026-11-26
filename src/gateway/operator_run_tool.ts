@@ -1,3 +1,4 @@
+import { createSentinelFindingRemediationReader } from "../sentinel/finding_remediation.ts";
 import { reopenSentinelPeerCoverage } from "./sentinel_peer_coverage.ts";
 import { discoverSentinelFindingNodeTraffic } from "./sentinel_finding_traffic_tool.ts";
 import { isSentinelHintTrafficReference } from "../sentinel/traffic_receipts.ts";
@@ -145,6 +146,7 @@ import type { SentinelLiveWorkflowDestination } from "./sentinel_agent.ts";
 import {
   exactExecutionRecheckCandidate,
   executionControlReceipt,
+  executionReceiptSupportsCheck,
   receiptRecheckCandidate,
 } from "./sentinel_execution_rechecks.ts";
 import { createHash } from "node:crypto";
@@ -9323,25 +9325,90 @@ ${
                 amendment.version === version && amendment.caseId === ref.id &&
                 amendment.runId === runId
               );
-            return selected
-              ? safeProjection({
-                run: ref,
-                report: {
-                  findingId: report.finding.id,
-                  version,
-                  latestVersion: report.version,
-                  sourceReceiptId: selected.id,
-                  evidenceRevision: selected.evidenceRevision,
-                  taskId: selected.taskId,
-                  ...("evidenceVersion" in selected && {
-                    evidenceVersion: selected.evidenceVersion,
-                  }),
-                  ...findingReportMetadata(report.amendments, version),
-                  title: selected.title,
-                  summary: selected.summary,
-                },
-              })
-              : unavailable;
+            if (!selected) return unavailable;
+            const checked = createSentinelFindingRemediationReader(
+              path,
+              ref.id,
+              ref.revision,
+              runId,
+            )(
+              report.finding,
+              journal.listFindingRechecks(report.finding.id, ref.revision),
+            );
+            let remediation = checked.value;
+            if (checked.sources?.length) {
+              const revalidateScope = () =>
+                readSentinelRunIdForRevision(path, ref.revision!) === runId &&
+                context?.authorizeSentinelCaseRead?.(ref.id, ref.revision!) !==
+                  false;
+              let approved = !!context;
+              if (context) {
+                for (const source of checked.sources) {
+                  const evidence = await readAuthorizedCaseEvidence(
+                    ref.id,
+                    path,
+                    source.revision,
+                    source.evidenceId,
+                    context,
+                    revalidateScope,
+                  );
+                  if (
+                    !evidence || !executionReceiptSupportsCheck(
+                      source.node,
+                      runId,
+                      report.finding.targetId,
+                      report.finding.controlId,
+                      source.outcome,
+                      executionControlReceipt(evidence.payload),
+                    )
+                  ) {
+                    approved = false;
+                    break;
+                  }
+                }
+              }
+              const latest = journal.readFindingReport(
+                report.finding.id,
+                ref.revision,
+              );
+              if (
+                !latest || !revalidateScope() ||
+                (reportVersion === undefined &&
+                  latest.version !== report.version)
+              ) return unavailable;
+              const rechecked = createSentinelFindingRemediationReader(
+                path,
+                ref.id,
+                ref.revision,
+                runId,
+              )(
+                latest.finding,
+                journal.listFindingRechecks(latest.finding.id, ref.revision),
+              );
+              if (
+                !approved || !isDeepStrictEqual(rechecked.value, remediation)
+              ) {
+                remediation = { status: "unknown", asOfRevision: ref.revision };
+              }
+            }
+            return safeProjection({
+              run: ref,
+              report: {
+                findingId: report.finding.id,
+                version,
+                latestVersion: report.version,
+                sourceReceiptId: selected.id,
+                evidenceRevision: selected.evidenceRevision,
+                taskId: selected.taskId,
+                ...("evidenceVersion" in selected && {
+                  evidenceVersion: selected.evidenceVersion,
+                }),
+                ...findingReportMetadata(report.amendments, version),
+                remediation,
+                title: selected.title,
+                summary: selected.summary,
+              },
+            });
           }
           if (listing) {
             const matching = journal.list(ref.revision).filter(

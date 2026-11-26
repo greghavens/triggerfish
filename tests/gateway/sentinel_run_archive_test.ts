@@ -2656,6 +2656,10 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
         restoredReport.sourceReceiptId,
         (ownerReport as { id: string }).id,
       );
+      assertEquals(restoredReport.remediation, {
+        status: "unknown",
+        asOfRevision: state.revision,
+      });
       const restoredReportHistory = {
         ...trafficScope,
         action: "finding_report_history",

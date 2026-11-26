@@ -1,3 +1,4 @@
+import { createSentinelFindingRemediationReader } from "./finding_remediation.ts";
 import { Buffer } from "node:buffer";
 /** Render a saved defensive assessment without writing files or fetching data. */
 import { createHash } from "node:crypto";
@@ -460,6 +461,12 @@ function renderFindingExport(
   );
   const runId = readSentinelRunIdForRevision(path, assessment.revision);
   const revisions = readSentinelFindingReviews(path, assessment.revision);
+  const remediationFor = createSentinelFindingRemediationReader(
+    path,
+    caseId,
+    assessment.revision,
+    runId,
+  );
   const dispositions = new Map(
     revisions.toReversed().map((
       review,
@@ -555,6 +562,10 @@ function renderFindingExport(
             item.targetId === report.finding.targetId
           )
         : [];
+      const verified = report && remediationFor(report.finding, linkedRechecks);
+      const remediation = verified?.sources?.length
+        ? { status: "unknown" as const, asOfRevision: assessment.revision }
+        : verified?.value;
       if (page && manifest) {
         manifest.update(JSON.stringify([
           id,
@@ -563,6 +574,7 @@ function renderFindingExport(
           report?.finding.id,
           report?.amendments.map(({ id }) => id),
           linkedRechecks.map(({ id }) => id),
+          remediation,
           exactAttachments.map((
             { id },
           ) => [id, annotationsByLink.get(id)?.map((item) => item.id)]),
@@ -643,6 +655,7 @@ function renderFindingExport(
           summary: redactCredentialText(summary),
         },
         reportVersion: report.version,
+        remediation: remediation!,
         amendments: report.amendments.map((
           { requestId: _requestId, title, summary, ...record },
         ) => ({
@@ -719,6 +732,14 @@ function renderFindingExport(
           ...(row.severity ? [`- ${t("Severity")} ${row.severity}`] : []),
           ...(row.disposition
             ? [`- ${t("Analyst disposition")} ${row.disposition}`]
+            : []),
+          ...(row.kind === "worker"
+            ? [
+              `- ${t("Remediation status")} ${row.remediation.status}`,
+              ...("recheckId" in row.remediation
+                ? [`  - ${markdownText(row.remediation.recheckId)}`]
+                : []),
+            ]
             : []),
           ...(row.kind === "worker" && row.findingCategory
             ? [

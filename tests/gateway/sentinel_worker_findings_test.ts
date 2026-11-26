@@ -149,10 +149,11 @@ function assignedLease(
 
 function nativeWorkflowReader(
   allowed: () => boolean = () => true,
+  caseId = "main",
 ) {
   return createSentinelLiveWorkflowReader({
     scopes: [{
-      case: "main",
+      case: caseId,
       asset: "app",
       owner: "owner",
       repo: "repo",
@@ -618,7 +619,7 @@ Deno.test("Leased Sentinel workers report, recheck, and amend findings visible i
     let waitingGateId: string | undefined;
     let amendment: SentinelWorkerFindingReportAmendment | undefined;
 
-    await withTidepool(baseDir, async (list, provenance) => {
+    await withTidepool(baseDir, async (list, provenance, request) => {
       const denied = await workerTurn(path, source, [[tool(assigned)], [
         tool(report, submission),
       ]], "report");
@@ -1274,6 +1275,50 @@ Deno.test("Leased Sentinel workers report, recheck, and amend findings visible i
       } finally {
         store.close();
       }
+      const remediation = {
+        status: "pass",
+        asOfRevision: second.revision,
+        recheckId: verified.id,
+        evidenceRevision: second.revision,
+        evidenceId: verified.evidenceId,
+        observedAt: verified.observedAt,
+        validUntil: verified.validUntil,
+      };
+      const exports = await request("export", {
+        caseId: "main",
+        revision: second.revision,
+        format: "findings-json",
+        findingIds: [original.id],
+      });
+      assertEquals(
+        JSON.parse(String(exports.content)).findings[0].remediation,
+        remediation,
+      );
+      await withFindingAssignmentGateway(
+        baseDir,
+        () => Promise.resolve(false),
+        async (turn) => {
+          const scope = {
+            action: "finding_report",
+            kind: "sentinel",
+            id: "main",
+            receiptId: original.id,
+          };
+          assertEquals(
+            JSON.parse(await turn({ ...scope, revision: first.revision }))
+              .report.remediation,
+            {
+              status: "unknown",
+              asOfRevision: first.revision,
+            },
+          );
+          const report =
+            JSON.parse(await turn({ ...scope, revision: second.revision }))
+              .report;
+          assertEquals(report.remediation, remediation);
+          assertEquals(report.disposition, undefined);
+        },
+      );
       assert(recordSentinelOperatingConstraints(path, {
         runId: second.plan.runId!,
         evidenceRevision: second.revision,
@@ -1937,16 +1982,19 @@ async function verifyHistoricalFindingChat(
 
 async function verifyOperatorNativeRecheck(options: {
   baseDir: string;
+  caseId?: string;
   state: State;
   findingId: string;
   evidenceId: string;
   digest: string;
   trace?: { taskId: string; result: unknown; index?: number };
 }) {
+  const caseId = options.caseId ?? "main";
   let blocked = false;
   let blockOutput = false;
   let revokeOnConfirm = false;
   let modelResult: string | undefined;
+  let showRemediation = false;
   const registry = createProviderRegistry();
   registry.register({
     name: "operator-evidence-fixture",
@@ -1966,9 +2014,11 @@ async function verifyOperatorNativeRecheck(options: {
             name: "operator_runs",
             arguments: JSON.stringify({
               kind: "sentinel",
-              id: "main",
+              id: caseId,
               revision: options.state.revision,
-              ...(options.trace
+              ...(showRemediation
+                ? { action: "finding_report", receiptId: options.findingId }
+                : options.trace
                 ? {
                   action: "worker_trace_result",
                   taskId: options.trace.taskId,
@@ -2010,7 +2060,7 @@ async function verifyOperatorNativeRecheck(options: {
     },
     operatorRunExecutor: createOperatorRunToolExecutor({
       baseDir: options.baseDir,
-      readLiveWorkflow: nativeWorkflowReader(),
+      readLiveWorkflow: nativeWorkflowReader(undefined, caseId),
       confirm(text) {
         confirmations.push(text);
         if (revokeOnConfirm) blocked = true;
@@ -2026,7 +2076,7 @@ async function verifyOperatorNativeRecheck(options: {
     return last.text;
   };
   const command =
-    `/sentinel-recheck main ${options.state.revision} ${options.findingId}`;
+    `/sentinel-recheck ${caseId} ${options.state.revision} ${options.findingId}`;
   await run("Review the exact saved workflow evidence.");
   if (options.trace) {
     assertEquals(JSON.parse(modelResult ?? "").result, options.trace.result);
@@ -2076,14 +2126,14 @@ async function verifyOperatorNativeRecheck(options: {
   const reader = nativeWorkflowReader(() => {
     metadataChecks++;
     return permitConnector;
-  });
+  }, caseId);
   const owner = createSession({
     userId: "owner" as UserId,
     channelId: "native-recheck" as ChannelId,
     bumpersEnabled: false,
   });
   const recover = buildWorkflowRecoveryExecutor(
-    { agent_recovery: { sentinel_assignment_cases: ["main"] } },
+    { agent_recovery: { sentinel_assignment_cases: [caseId] } },
     options.baseDir,
     createMemorySecretStore(),
     undefined,
@@ -2095,7 +2145,7 @@ async function verifyOperatorNativeRecheck(options: {
   const assignment = {
     action: "assign",
     kind: "sentinel",
-    id: "main",
+    id: caseId,
     revision: options.state.revision,
     runId: discovered.runId,
     adaptiveRevision: discovered.adaptiveRevision,
@@ -2201,7 +2251,7 @@ async function verifyOperatorNativeRecheck(options: {
   assertEquals(recoveredReceipt, originalReceipt);
   assertEquals(writes, 1);
 
-  const path = resolveSentinelCasePath(options.baseDir);
+  const path = resolveSentinelCasePath(options.baseDir, caseId);
   let verified: { id: string } | undefined;
   let workerRuns = 0;
   const planner = createSentinelModelPlanner(
@@ -2287,6 +2337,26 @@ async function verifyOperatorNativeRecheck(options: {
       ),
     );
     assertEquals(workerRuns, 1);
+    showRemediation = true;
+    await run("Review the saved remediation status.");
+    assertEquals(
+      JSON.parse(modelResult ?? "").report.remediation.status,
+      "pass",
+    );
+    assertEquals(
+      JSON.parse(modelResult ?? "").report.remediation.recheckId,
+      verified.id,
+    );
+    blocked = true;
+    await run(
+      "Review the saved remediation status after the source policy changed.",
+    );
+    assertEquals(JSON.parse(modelResult ?? "").report.remediation, {
+      status: "unknown",
+      asOfRevision: options.state.revision,
+    });
+    blocked = false;
+
     await withFindingAssignmentGateway(
       options.baseDir,
       () => Promise.resolve(false),
@@ -2295,7 +2365,7 @@ async function verifyOperatorNativeRecheck(options: {
           await turn({
             action: "finding_recheck_attempts",
             kind: "sentinel",
-            id: "main",
+            id: caseId,
             revision: options.state.revision,
             receiptId: options.findingId,
           }),
@@ -2311,6 +2381,51 @@ async function verifyOperatorNativeRecheck(options: {
   } finally {
     planner.stop();
   }
+
+  assert(stopSentinelAssessment(path));
+  const archiveId = crypto.randomUUID();
+  const reference = {
+    kind: "sentinel",
+    id: caseId,
+    revision: options.state.revision,
+    runId: options.state.plan.runId,
+  };
+  await withFindingAssignmentGateway(
+    options.baseDir,
+    () => Promise.resolve(true),
+    async (turn) => {
+      const receipt = JSON.parse(
+        await turn({ ...reference, action: "archive", requestId: archiveId }),
+      ).receipt;
+      assertEquals(receipt.status, "succeeded");
+    },
+  );
+  await Deno.rename(
+    dirname(path),
+    join(options.baseDir, "pre-remediation-restore"),
+  );
+  await withFindingAssignmentGateway(
+    options.baseDir,
+    () => Promise.resolve(true),
+    async (turn) => {
+      const receipt = JSON.parse(
+        await turn({
+          ...reference,
+          action: "restore",
+          archiveId,
+          requestId: crypto.randomUUID(),
+        }),
+      ).receipt;
+      assertEquals(receipt.status, "succeeded");
+    },
+  );
+  assertEquals(readSentinelAssessment(path)?.paused, true);
+  await run("Review the exact archived remediation status.");
+  assertEquals(
+    JSON.parse(modelResult ?? "").report.remediation.recheckId,
+    verified?.id,
+  );
+  assertEquals(JSON.parse(modelResult ?? "").report.remediation.status, "pass");
 }
 
 async function verifyImportedFindingGrant(
@@ -3214,7 +3329,8 @@ async function verifyReceiptFamily(
   manual = false,
 ) {
   const baseDir = await Deno.makeTempDir();
-  const path = resolveSentinelCasePath(baseDir);
+  const caseId = manual ? "native-remediation" : "main";
+  const path = resolveSentinelCasePath(baseDir, caseId);
   let receiptPlanner:
     | ReturnType<typeof createSentinelModelPlanner>
     | undefined;
@@ -3264,7 +3380,7 @@ async function verifyReceiptFamily(
   const native = family === "native workflow result";
   const workflow = native || family === "workflow result" || repeatedRun ||
     olderRun;
-  const reader = native ? nativeWorkflowReader() : undefined;
+  const reader = native ? nativeWorkflowReader(undefined, caseId) : undefined;
   const nativeRuns = [
     {
       id: 1,
@@ -3343,7 +3459,7 @@ async function verifyReceiptFamily(
         "app",
         "control",
         source,
-        "main",
+        caseId,
         validUntil,
       );
   const recordedAt = new Date(Date.now() - 30_000).toISOString();
@@ -3595,7 +3711,7 @@ async function verifyReceiptFamily(
     }
     if (attempt) return;
     await withTidepool(baseDir, async (list) => {
-      assertEquals(await list(state.revision), [finding]);
+      assertEquals(await list(state.revision, caseId), [finding]);
     });
     const peer = await workerTurn(path, assignedLease(path, state, "trace"), [
       [tool(findings, { receiptId: finding.id })],
@@ -3912,6 +4028,7 @@ async function verifyReceiptFamily(
     if (manual) {
       await verifyOperatorNativeRecheck({
         baseDir,
+        caseId,
         state: updated,
         findingId: finding.id,
         evidenceId: passingNode,
