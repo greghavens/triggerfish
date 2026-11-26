@@ -3,6 +3,11 @@ import {
   sentinelScopeRuleToolName,
 } from "../core/sentinel_scope_rule_intent.ts";
 import { resolveSentinelCaseMembership } from "../sentinel/case_membership.ts";
+import {
+  parseSentinelCompanyScopeUpdate,
+  readSentinelCompanyScopes,
+  recordSentinelCompanyScope,
+} from "../sentinel/company_scope.ts";
 import { recordSentinelOperatingConstraints } from "../sentinel/assessment_store.ts";
 import {
   MAX_PLANNER_CHECKPOINT_READS,
@@ -1137,7 +1142,7 @@ const workerIncidentRecommendationTool: ToolDefinition = {
 const plannerScopeRuleTool: ToolDefinition = {
   name: sentinelScopeRuleToolName,
   description:
-    "Request mandatory owner review to replace membership with bounded rules for this exact case. Rules apply to locally retained assets and only after operator approval. They grant no connector or network permission.",
+    "Request mandatory owner review of bounded case membership or shared company attribution rules. Shared company attribution grants no case admission, connector or network permission.",
   parameters: {
     caseId: {
       type: "string",
@@ -1158,6 +1163,17 @@ const plannerScopeRuleTool: ToolDefinition = {
       type: "string",
       description:
         "Optional declared company on this case. Company keywords are contextual only.",
+    },
+    scope: {
+      type: "string",
+      enum: ["company"],
+      description:
+        "Set company to propose shared attribution, or omit for case membership.",
+    },
+    organizationName: {
+      type: "string",
+      description:
+        "For shared attribution only. Use the exact declared company name.",
     },
     rules: {
       type: "array",
@@ -6186,6 +6202,38 @@ function createAgent(
           node.organization?.id === intent.organizationId
         ))
     ) return;
+    if (intent.scope === "company") {
+      if (
+        !snapshot.nodes.some((node) =>
+          node.kind === "asset" &&
+          node.organization?.id === intent.organizationId &&
+          node.organization?.label === intent.organizationName
+        )
+      ) return;
+      const before = readSentinelCompanyScopes(location.baseDir);
+      const company = parseSentinelCompanyScopeUpdate({
+        organizationId: intent.organizationId,
+        organizationName: intent.organizationName,
+        rules: intent.rules,
+        reason: intent.reason,
+        expectedVersion: before.version,
+        requestId: intent.requestId,
+      });
+      if (!company) return;
+      const binding = createHash("sha256").update(JSON.stringify([
+        company,
+        runId,
+        turn.plannerRound,
+        intent.evidenceRevision,
+        digestSentinelSnapshot(snapshot),
+      ])).digest("hex");
+      return {
+        kind: "company" as const,
+        binding,
+        baseDir: location.baseDir,
+        company,
+      };
+    }
     const prior = readSentinelOperatingConstraints(options.snapshotPath, runId);
     const membership = resolveSentinelCaseMembership(snapshot, {
       caseId: intent.caseId,
@@ -6206,7 +6254,15 @@ function createAgent(
       expectedVersion,
       membership,
     ])).digest("hex");
-    return { intent, runId, membership, expectedVersion, binding, prior };
+    return {
+      kind: "case" as const,
+      intent,
+      runId,
+      membership,
+      expectedVersion,
+      binding,
+      prior,
+    };
   }
 
   const plannerApprovalContext = canRequestWorkerControl
@@ -7024,6 +7080,19 @@ function createAgent(
           !await dispatch.reauthorizeOwnerApproval?.() ||
           plannerScopeRuleDraft(turn, args)?.binding !== draft.binding
         ) return unavailable;
+        if (draft.kind === "company") {
+          const company = recordSentinelCompanyScope(draft.baseDir, {
+            ...draft.company,
+            requestId: dispatch.toolApprovalRequestId,
+          });
+          return company
+            ? boundResult({
+              _classification: "INTERNAL",
+              organizationId: company.organizationId,
+              version: company.version,
+            })
+            : unavailable;
+        }
         const { intent, runId, membership, expectedVersion, prior } = draft;
         const committed = recordSentinelOperatingConstraints(
           options.snapshotPath,

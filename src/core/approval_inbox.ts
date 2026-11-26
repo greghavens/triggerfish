@@ -320,7 +320,11 @@ function project(row: Row | undefined): ApprovalInboxRecord | undefined {
       { assignmentId: row.assignmentId }),
     tool,
     description: scopeRule
-      ? `Approve Sentinel membership rule replacement for '${scopeRule.caseId}' revision ${scopeRule.evidenceRevision}: ${
+      ? `Approve Sentinel ${
+        scopeRule.scope === "company"
+          ? "shared company scope"
+          : "case membership"
+      } rule replacement for '${scopeRule.caseId}' revision ${scopeRule.evidenceRevision}: ${
         JSON.stringify(scopeRule)
       }`
       : incident

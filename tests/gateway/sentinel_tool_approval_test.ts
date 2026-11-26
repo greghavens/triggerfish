@@ -1,3 +1,8 @@
+import {
+  readSentinelCompanyScopes,
+  recordSentinelCompanyScope,
+} from "../../src/sentinel/company_scope.ts";
+import { readSharedSentinelAssetCatalog } from "../../src/sentinel/shared_inventory.ts";
 import { sentinelScopeRuleToolName } from "../../src/core/sentinel_scope_rule_intent.ts";
 import { assertRejects } from "@std/assert";
 import { DatabaseSync } from "node:sqlite";
@@ -1396,7 +1401,17 @@ for (
   });
 }
 
-for (const outcome of ["approved", "denied", "revoked", "stale"] as const) {
+for (
+  const outcome of [
+    "approved",
+    "denied",
+    "revoked",
+    "stale",
+    "approved-company",
+    "stale-company",
+    "other-company",
+  ] as const
+) {
   Deno.test(`Planner membership rules enforce ${outcome} through the approval gateway`, async () => {
     const baseDir = await Deno.makeTempDir();
     const path = resolveSentinelCasePath(baseDir);
@@ -1449,11 +1464,16 @@ for (const outcome of ["approved", "denied", "revoked", "stale"] as const) {
           edges: [],
         }),
       );
+    const companyScope = outcome.endsWith("company");
     const proposal = {
       caseId: "main",
       evidenceRevision: 1,
       requestId: crypto.randomUUID(),
-      organizationId: organization.id,
+      organizationId: outcome === "other-company"
+        ? "not-declared"
+        : organization.id,
+      ...(companyScope &&
+        { scope: "company", organizationName: organization.label }),
       rules: [
         { kind: "domain", value: "example.test" },
         { kind: "ip", value: "192.0.2.8" },
@@ -1556,12 +1576,30 @@ for (const outcome of ["approved", "denied", "revoked", "stale"] as const) {
       const { port } = await gateway.start();
       operator = await connect(port, token);
       planner.advance(state);
+      const waitForPlanner = async () => {
+        const deadline = Date.now() + 4000;
+        while (planner.hasInFlightWork() && Date.now() < deadline) {
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+        assert(!planner.hasInFlightWork());
+      };
+      if (outcome === "other-company") {
+        await waitForPlanner();
+        assert(called > 0);
+        assertEquals(inbox.list().records, []);
+        assertEquals(readSentinelCompanyScopes(baseDir).companies, []);
+        return;
+      }
       const pending = await pendingInbox(operator);
       assertEquals(pending.runId, state.plan.runId);
       assertEquals(pending.assignmentId, undefined);
       assertEquals(
         pending.sentinelScopeRuleReview?.organizationId,
         organization.id,
+      );
+      assertEquals(
+        pending.sentinelScopeRuleReview?.scope,
+        companyScope ? "company" : undefined,
       );
       assertEquals(pending.sentinelScopeRuleReview?.rules.length, 6);
       assertStringIncludes(pending.description, proposal.reason);
@@ -1574,18 +1612,65 @@ for (const outcome of ["approved", "denied", "revoked", "stale"] as const) {
         }]);
         assert(refreshSentinelAssessment(path)!.revision > state.revision);
       }
+      if (outcome === "stale-company") {
+        assert(recordSentinelCompanyScope(baseDir, {
+          organizationId: "fixture-other",
+          organizationName: "Unrelated approved company",
+          reason:
+            "Independent approval invalidates a pending registry version.",
+          rules: [],
+          expectedVersion: 0,
+          requestId: crypto.randomUUID(),
+        }));
+      }
       policyRevoked = outcome === "revoked";
       const decision = await operator.request({
         type: "approval_inbox_decide",
         approvalId: pending.id,
         approved: outcome !== "denied",
       });
-      assertEquals(decision.ok, outcome !== "stale");
-      const deadline = Date.now() + 4000;
-      while (planner.hasInFlightWork() && Date.now() < deadline) {
-        await new Promise((resolve) => setTimeout(resolve, 10));
+      assertEquals(
+        decision.ok,
+        outcome !== "stale" && outcome !== "stale-company",
+      );
+      await waitForPlanner();
+      if (outcome === "stale-company") {
+        assertEquals(
+          readSentinelCompanyScopes(baseDir).companies.map((
+            { organizationId },
+          ) => organizationId),
+          ["fixture-other"],
+        );
       }
-      assert(!planner.hasInFlightWork());
+      if (outcome === "approved-company") {
+        const [approved] = readSentinelCompanyScopes(baseDir).companies;
+        assert(approved);
+        assertEquals(approved.requestId, pending.id);
+        assertEquals(approved.organizationId, organization.id);
+        assertEquals(readSentinelOperatingConstraints(path), undefined);
+        const peer = resolveSentinelCasePath(baseDir, "other-case");
+        await Deno.mkdir(dirname(peer), { recursive: true });
+        await Deno.writeTextFile(
+          peer,
+          JSON.stringify({
+            version: 1,
+            nodes: [{
+              kind: "asset",
+              id: "peer",
+              label: "Newly retained network",
+              aliases: ["new.example.test"],
+            }],
+            edges: [],
+          }),
+        );
+        const catalog = await readSharedSentinelAssetCatalog(baseDir, {
+          caseId: "other-case",
+          organizationId: organization.id,
+        });
+        assertEquals(catalog.assets.map(({ id }) => id), ["peer"]);
+        assertEquals(readSentinelOperatingConstraints(peer), undefined);
+        return;
+      }
       if (outcome !== "approved") {
         assertEquals(readSentinelOperatingConstraints(path), undefined);
         return;

@@ -12,6 +12,8 @@ export interface SentinelScopeRuleIntent {
   readonly evidenceRevision: number;
   readonly requestId: string;
   readonly organizationId?: string;
+  readonly organizationName?: string;
+  readonly scope?: "company";
   readonly rules: readonly SentinelScopeRule[];
   readonly reason: string;
 }
@@ -21,7 +23,8 @@ export function parseSentinelScopeRuleIntent(
 ): SentinelScopeRuleIntent | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) return;
   const args = value as Record<string, unknown>;
-  const { caseId, evidenceRevision, organizationId, requestId } = args;
+  const { caseId, evidenceRevision, organizationId, requestId, scope } = args;
+  const organizationName = assetText(args.organizationName, 256);
   const rules = parseSentinelScopeRules(args.rules);
   const reason = assetText(args.reason, 512);
   if (
@@ -32,11 +35,16 @@ export function parseSentinelScopeRuleIntent(
     evidenceRevision < 1 || typeof requestId !== "string" ||
     !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(requestId) ||
     (organizationId !== undefined && !assetText(organizationId, 256)) ||
+    (scope === "company"
+      ? typeof organizationId !== "string" || !organizationName
+      : scope !== undefined || args.organizationName !== undefined) ||
     Object.keys(args).some((key) =>
       ![
         "caseId",
         "evidenceRevision",
         "organizationId",
+        "organizationName",
+        "scope",
         "requestId",
         "rules",
         "reason",
@@ -48,6 +56,7 @@ export function parseSentinelScopeRuleIntent(
     evidenceRevision,
     requestId,
     ...(typeof organizationId === "string" && { organizationId }),
+    ...(scope === "company" && { scope, organizationName }),
     rules,
     reason,
   };
