@@ -392,6 +392,20 @@ Deno.test("gateway imports exact retained connector inventory with live policy, 
       }
       assert(!saved.includes("unrelated.example"));
       assert(!saved.includes("synthetic-inventory-fixture"));
+      const assetMetadata = JSON.parse(saved).nodes.map(
+        ({ properties }: { properties?: Record<string, string[]> }) =>
+          properties,
+      );
+      assert(assetMetadata.some(
+        (properties: Record<string, string[]> | undefined) =>
+          properties?.recordType?.[0] === "A",
+      ));
+      assert(assetMetadata.some(
+        (properties: Record<string, string[]> | undefined) =>
+          properties?.appName?.[0] === "Fiber client" &&
+          properties.category?.[0] === "operator application" &&
+          properties.appRegistrationId?.[0] === "fixture-registration",
+      ));
       assertEquals((await calls()).length, 4);
       assertEquals(mcpInvocations, 4);
       assertEquals(classificationsSeen, 4);

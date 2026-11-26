@@ -67,12 +67,23 @@ function candidates(value: unknown, kind: Kind): Asset[] {
     case "subdomain":
       label = domain?.[0];
       assetType = "subdomain";
-      fields = { domain };
+      fields = {
+        domain,
+        recordType: optional(
+          row.type,
+          (value) => /^[a-z][a-z0-9_-]{0,31}$/i.test(value) ? value : undefined,
+        ),
+      };
       break;
     case "app":
       label = name;
       assetType = "application";
-      fields = { registrationId: optional(row.icp) };
+      fields = {
+        appName: optional(row.name),
+        category: optional(row.category),
+        registrationId: optional(row.icp),
+        appRegistrationId: optional(row.icp),
+      };
       break;
     case "asset":
       label = url?.[0] ??
@@ -84,6 +95,7 @@ function candidates(value: unknown, kind: Kind): Asset[] {
         domain,
         url,
         service,
+        serviceType: [url ? "http" : "other"],
         port: numberIn(port, 1, 65535),
         status: numberIn(row.status, 100, 599),
         title: optional(row.title),

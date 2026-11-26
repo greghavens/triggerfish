@@ -48,7 +48,9 @@ for await (const line of createInterface({ input: stdin })) {
     const list = !selected || !authorized || pageSize !== 100 || pageIndex !== 1
       ? []
       : asset_type === "subdomain"
-      ? [{ host: "public.safe.example" }, { host: "unrelated.example" }]
+      ? [{ host: "public.safe.example", type: "A" }, {
+        host: "unrelated.example",
+      }]
       : asset_type === "asset"
       ? [
         {
@@ -58,7 +60,11 @@ for await (const line of createInterface({ input: stdin })) {
         },
         { url: "https://unrelated.example/", domain: "safe.example" },
       ]
-      : [{ name: "Fiber client", icp: "fixture-registration" }];
+      : [{
+        name: "Fiber client",
+        icp: "fixture-registration",
+        category: "Operator application",
+      }];
     result = { content: [{ type: "text", text: JSON.stringify({ list }) }] };
   }
   console.log(JSON.stringify({ jsonrpc: "2.0", id, result }));
