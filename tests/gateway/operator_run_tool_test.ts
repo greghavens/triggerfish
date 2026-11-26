@@ -6144,6 +6144,13 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
         }]);
         assertEquals(exact.nextCursor, null);
         assertEquals(exact._classification, "INTERNAL");
+        assertEquals(
+          JSON.parse(
+            (await reconnected({ ...lookup, restoreStatus: "succeeded" }))
+              .result,
+          ).archives,
+          [],
+        );
         assertEquals(readSentinelAssessment(leafPath), undefined);
         const first = {
           action: "archive_catalog",
@@ -6248,6 +6255,57 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
           ),
         );
         assertEquals(confirmations.length, beforeRestoreBatch + 1);
+        const restoredCatalog = {
+          action: "archive_catalog",
+          archiveStatus: "succeeded",
+          restoreStatus: "succeeded",
+          limit: 1,
+        };
+        const first = JSON.parse((await reconnected(restoredCatalog)).result);
+        assert(first.nextCursor);
+        const second = JSON.parse(
+          (await reconnected({
+            ...restoredCatalog,
+            cursor: first.nextCursor,
+          })).result,
+        );
+        assertEquals(
+          [first.archives[0].archiveId, second.archives[0].archiveId],
+          [restoreParent.archiveId, restoreLeaf.archiveId],
+        );
+        const leafHistory = JSON.parse(
+          (await reconnected({
+            action: "archive_history",
+            ...archiveLeaf,
+          })).result,
+        );
+        const restore = leafHistory.records.find(
+          (record: { action: string }) => record.action === "restore",
+        );
+        assertEquals(second.archives[0].latestRestore, {
+          status: "succeeded",
+          createdAt: restore.createdAt,
+          updatedAt: restore.updatedAt,
+        });
+        assert(!JSON.stringify(second).includes(restore.requestId));
+        assertStringIncludes(
+          (await reconnected({
+            ...restoredCatalog,
+            cursor: first.nextCursor,
+            restoreStatus: "failed",
+          })).result,
+          "unavailable",
+        );
+        const exact = { ...restoredCatalog, archiveId: restoreLeaf.archiveId };
+        denyArchiveTarget = restoreLeaf.id;
+        try {
+          assertEquals(
+            JSON.parse((await reconnected(exact)).result).archives,
+            [],
+          );
+        } finally {
+          denyArchiveTarget = undefined;
+        }
       }, reopenedWorkflows);
 
       const deadlineCase = "deadline-child";

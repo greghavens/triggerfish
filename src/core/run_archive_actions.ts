@@ -394,6 +394,20 @@ export function openRunArchiveActions(path: string, now = Date.now) {
       return row && project(row);
     },
 
+    latestRestoreForArchive(archive: RunArchiveActionRecord) {
+      if (archive.action !== "archive" || archive.status !== "succeeded") {
+        return;
+      }
+      const { kind, id, runId, revision } = archive.identity;
+      const row = db.prepare(`
+        SELECT * FROM run_archive_actions
+        WHERE kind = ? AND identityId = ? AND runId = ? AND revision IS ?
+          AND archiveId = ? AND action = 'restore'
+        ORDER BY sequence DESC LIMIT 1
+      `).get(kind, id, runId, revision ?? null, archive.archiveId);
+      return row && project(row);
+    },
+
     listSentinelArchiveCatalog(
       query: string,
       status: RunArchiveActionRecord["status"] | undefined,

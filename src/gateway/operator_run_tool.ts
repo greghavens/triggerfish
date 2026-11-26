@@ -753,6 +753,12 @@ export const operatorRunTool: ToolDefinition = {
       enum: ["pending", "succeeded", "failed"],
       description: "Optional archive catalog status filter.",
     },
+    restoreStatus: {
+      type: "string",
+      enum: ["pending", "succeeded", "failed"],
+      description:
+        "Filter the archive catalog by its latest exact restore outcome.",
+    },
     before: {
       type: "integer",
       description: "Continuation for archive action history",
@@ -2567,6 +2573,9 @@ export function createOperatorRunToolExecutor(options: {
           canFlowTo(classification, context?.ceiling ?? "PUBLIC"));
     }
     const action = args.action;
+    if (args.restoreStatus !== undefined && action !== "archive_catalog") {
+      return unavailable;
+    }
     if (
       (args.assetText !== undefined || args.organizationText !== undefined ||
         args.includeMembers !== undefined ||

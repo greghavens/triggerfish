@@ -9,9 +9,25 @@ import {
 
 const uuid = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i;
 
-function metadata(record: RunArchiveActionRecord) {
+function metadata(
+  record: RunArchiveActionRecord,
+  restore?: RunArchiveActionRecord,
+) {
   const { archiveId, identity, status, createdAt, updatedAt } = record;
-  return { archiveId, identity, status, createdAt, updatedAt };
+  return {
+    archiveId,
+    identity,
+    status,
+    createdAt,
+    updatedAt,
+    ...(restore && {
+      latestRestore: {
+        status: restore.status,
+        createdAt: restore.createdAt,
+        updatedAt: restore.updatedAt,
+      },
+    }),
+  };
 }
 
 export async function executeOperatorArchiveCatalog(
@@ -19,12 +35,21 @@ export async function executeOperatorArchiveCatalog(
   args: Record<string, unknown>,
   authorize: (args: Record<string, unknown>) => Promise<boolean>,
 ) {
-  const { query = "", archiveStatus, archiveId, cursor, limit = 10 } = args;
+  const {
+    query = "",
+    archiveStatus,
+    restoreStatus,
+    archiveId,
+    cursor,
+    limit = 10,
+  } = args;
   if (
     typeof query !== "string" || query.length > 128 ||
     !/^[a-z\d_.:-]*$/i.test(query.trim()) ||
     (archiveStatus !== undefined && archiveStatus !== "pending" &&
       archiveStatus !== "succeeded" && archiveStatus !== "failed") ||
+    (restoreStatus !== undefined && restoreStatus !== "pending" &&
+      restoreStatus !== "succeeded" && restoreStatus !== "failed") ||
     (archiveId !== undefined &&
       (typeof archiveId !== "string" || !uuid.test(archiveId))) ||
     (cursor !== undefined &&
@@ -32,14 +57,27 @@ export async function executeOperatorArchiveCatalog(
     typeof limit !== "number" || !Number.isSafeInteger(limit) || limit < 1 ||
     limit > 20 ||
     Object.keys(args).some((key) =>
-      !["action", "query", "archiveStatus", "archiveId", "cursor", "limit"]
-        .includes(key)
+      ![
+        "action",
+        "query",
+        "archiveStatus",
+        "restoreStatus",
+        "archiveId",
+        "cursor",
+        "limit",
+      ].includes(key)
     )
   ) return;
   const literal = query.trim().toLowerCase();
   const id = archiveId?.toLowerCase();
   const scope = createHash("sha256").update(
-    JSON.stringify([literal, archiveStatus ?? null, id ?? null, limit]),
+    JSON.stringify([
+      literal,
+      archiveStatus ?? null,
+      id ?? null,
+      limit,
+      ...(restoreStatus === undefined ? [] : [restoreStatus]),
+    ]),
   ).digest("hex").slice(0, 32);
   const authorizeReceipt = (record: RunArchiveActionRecord) =>
     authorize({ action: "archive_history", ...record.identity });
@@ -75,10 +113,12 @@ export async function executeOperatorArchiveCatalog(
         anchor,
       )[0];
       if (
-        !item || (id && anchor !== id) || !await authorizeReceipt(item.record)
-      ) {
-        return;
-      }
+        !item || (id && anchor !== id) ||
+        !await authorizeReceipt(item.record) ||
+        (restoreStatus !== undefined &&
+          journal.latestRestoreForArchive(item.record)?.status !==
+            restoreStatus)
+      ) return;
       before = item.sequence;
     }
     const archives: ReturnType<typeof metadata>[] = [];
@@ -94,10 +134,14 @@ export async function executeOperatorArchiveCatalog(
       for (const { record, sequence } of page) {
         before = sequence;
         if (!await authorizeReceipt(record)) continue;
+        const restore = journal.latestRestoreForArchive(record);
+        if (restoreStatus !== undefined && restore?.status !== restoreStatus) {
+          continue;
+        }
         if (archives.length === limit) {
           return await finish(`${scope}:${archives.at(-1)!.archiveId}`);
         }
-        archives.push(metadata(record));
+        archives.push(metadata(record, restore));
       }
       if (page.length < 32) return await finish(null);
     }
