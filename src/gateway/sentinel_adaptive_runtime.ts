@@ -2345,8 +2345,30 @@ export function submitSentinelAssignmentIntent(
           },
         };
       }
-      const queued = store.list(revision).find(({ id, status }) =>
-        status === "queued" && id === sentinelAdaptiveTaskId(revision, task)
+      const tasks = store.list(revision);
+      const taskId = sentinelAdaptiveTaskId(revision, task);
+      if (input.recheckFindingId) {
+        const candidates = tasks.filter((existing) =>
+          existing.id !== taskId &&
+          existing.plannerRound?.recheckFindingId === input.recheckFindingId
+        );
+        if (candidates.length) {
+          const reviews = new Map(
+            store.modelReviewStates(revision).map(
+              ({ taskId, status }) => [taskId, status],
+            ),
+          );
+          if (
+            candidates.some(({ id, status }) =>
+              ["queued", "running", "retry_pending", "paused"].includes(
+                reviews.get(id) ?? (status === "completed" ? "queued" : status),
+              )
+            )
+          ) return undefined;
+        }
+      }
+      const queued = tasks.find(({ id, status }) =>
+        status === "queued" && id === taskId
       );
       const receipt = store.recordOperatorAssignmentIntent({
         requestId: input.requestId,

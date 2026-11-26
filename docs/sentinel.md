@@ -372,6 +372,10 @@ record is saved as a failed attempt with reason `missing_recheck_result`
 and follows the existing retry policy.
 An assignment can commit one conclusion for its finding. Repeating the
 same verified result returns the original receipt.
+A reviewed recheck for a different evidence receipt can queue once the
+finding's current assignment completes, exhausts retries, or is stopped.
+Existing request IDs
+still reopen their original admission receipt.
 
 The worker finding report shows a separate remediation status as of the selected
 evidence revision. A verified result identifies its exact recheck and evidence.

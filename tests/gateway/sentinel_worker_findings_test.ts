@@ -1987,6 +1987,7 @@ async function verifyOperatorNativeRecheck(options: {
   caseId?: string;
   inconclusive?: boolean;
   noResult?: boolean;
+  alternate?: { nodeId: string; resultSha256: string };
   state: State;
   findingId: string;
   evidenceId: string;
@@ -2104,10 +2105,14 @@ async function verifyOperatorNativeRecheck(options: {
   assertEquals(JSON.parse(await run(command)).candidates, []);
   blocked = false;
   const discovered = JSON.parse(await run(command));
-  assertEquals(discovered.candidates, [{
-    nodeId: options.evidenceId,
-    resultSha256: options.digest,
-  }]);
+  assertEquals(
+    [...discovered.candidates].sort((a, b) => a.nodeId.localeCompare(b.nodeId)),
+    [{
+      nodeId: options.evidenceId,
+      resultSha256: options.digest,
+    }, ...(options.alternate ? [options.alternate] : [])]
+      .sort((a, b) => a.nodeId.localeCompare(b.nodeId)),
+  );
   assertEquals(discovered.runId, options.state.plan.runId);
   const requestId = crypto.randomUUID();
   const recheckNote =
@@ -2136,6 +2141,13 @@ async function verifyOperatorNativeRecheck(options: {
     "unavailable",
   );
   assertEquals(confirmations.length, 2);
+
+  const alternateQueue = options.alternate &&
+    `${command} queue ${options.alternate.nodeId} ${discovered.runId} ${discovered.adaptiveRevision} ${crypto.randomUUID()}`;
+  if (alternateQueue) {
+    assertStringIncludes(await run(alternateQueue), "unavailable");
+    assertEquals(JSON.parse(await run(queue)).receipt, assigned);
+  }
 
   let permitConnector = true;
   let metadataChecks = 0;
@@ -2320,6 +2332,9 @@ async function verifyOperatorNativeRecheck(options: {
         }
         assert(taskId && leaseToken);
         workerRuns++;
+        if (alternateQueue) {
+          assertStringIncludes(await run(alternateQueue), "unavailable");
+        }
         const input = JSON.parse(String(message).split("\n").at(-1)!);
         assertEquals(input.assignment, assigned.taskId);
         assertEquals(input.recheckFindingId, options.findingId);
@@ -2516,6 +2531,13 @@ async function verifyOperatorNativeRecheck(options: {
     );
   } finally {
     planner.stop();
+  }
+
+  if (alternateQueue) {
+    const admitted = JSON.parse(await run(alternateQueue)).receipt;
+    assertEquals(admitted.nodeId, options.alternate?.nodeId);
+    assertEquals(admitted.recheckFindingId, options.findingId);
+    assert(admitted.taskId !== assigned.taskId);
   }
 
   assert(stopSentinelAssessment(path));
@@ -3606,6 +3628,15 @@ async function verifyReceiptFamily(
       createdAt: "2025-01-01T00:00:00.000Z",
     },
   ];
+  if (manual === true) {
+    nativeRuns.push({
+      id: 4,
+      status: "completed",
+      conclusion: "success",
+      repositoryId: 42,
+      createdAt: "2025-01-04T00:00:00.000Z",
+    });
+  }
   const nativeSources: {
     runId: string;
     revision: number;
@@ -3667,6 +3698,7 @@ async function verifyReceiptFamily(
   const recordedAt = new Date(Date.now() - 30_000).toISOString();
   const passedAt = new Date(Date.now() - 10_000).toISOString();
   const foreignAt = new Date(Date.now() - 5_000).toISOString();
+  const alternateAt = new Date(Date.now() - 1_000).toISOString();
   const source = {
     role: "delegated" as const,
     runId: "source-review",
@@ -3746,7 +3778,8 @@ async function verifyReceiptFamily(
             repository: repo,
             workflowId: 22,
             evidenceRevision: started.revision,
-            observedAt: [recordedAt, passedAt, foreignAt][stepIndex],
+            observedAt:
+              [recordedAt, passedAt, foreignAt, alternateAt][stepIndex],
             connectorId: "github-actions" as const,
             resultSha256,
             runs,
@@ -4188,6 +4221,9 @@ async function verifyReceiptFamily(
     const foreignNode = native
       ? "native-workflow-evidence:" + nativeSources[2].resultSha256
       : evidenceId(finding.runId, foreignSource, true);
+    const alternateSource = nativeSources[3];
+    const alternateNode = alternateSource &&
+      "native-workflow-evidence:" + alternateSource.resultSha256;
     const snapshot = state.result?.sharedGraph.snapshot;
     assert(snapshot);
     await Deno.writeTextFile(
@@ -4196,6 +4232,19 @@ async function verifyReceiptFamily(
         ...snapshot,
         nodes: [
           ...snapshot.nodes,
+          ...(alternateNode
+            ? [{
+              id: alternateNode,
+              kind: "evidence",
+              label: "Alternate verified workflow receipt",
+              nativeWorkflowSource: alternateSource,
+              controlVerification: {
+                outcome: "pass",
+                observedAt: alternateAt,
+                validUntil,
+              },
+            }]
+            : []),
           ...[
             { id: passingNode, source: passedSource, observedAt: passedAt },
             { id: foreignNode, source: foreignSource, observedAt: foreignAt },
@@ -4211,6 +4260,12 @@ async function verifyReceiptFamily(
         ],
         edges: [
           ...snapshot.edges,
+          ...(alternateNode
+            ? [
+              { from: alternateNode, to: "control", relation: "verifies" },
+              { from: alternateNode, to: "app", relation: "observed_on" },
+            ]
+            : []),
           {
             from: passingNode,
             to: "control",
@@ -4251,6 +4306,13 @@ async function verifyReceiptFamily(
         caseId,
         inconclusive: manual === "inconclusive",
         noResult: manual === "no-result",
+        ...(alternateNode &&
+          {
+            alternate: {
+              nodeId: alternateNode,
+              resultSha256: alternateSource.resultSha256,
+            },
+          }),
         state: updated,
         findingId: finding.id,
         evidenceId: passingNode,
