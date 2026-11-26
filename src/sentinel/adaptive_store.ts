@@ -7351,7 +7351,11 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
         time - 30_000,
       );
       if (typeof row?.projection === "string") {
-        return parsePlannerReadCheckpoint(JSON.parse(row.projection));
+        const parsed = parsePlannerReadCheckpoint(JSON.parse(row.projection));
+        if (!parsed) {
+          throw new Error("Invalid Sentinel planner read checkpoint");
+        }
+        return parsed;
       }
     },
 

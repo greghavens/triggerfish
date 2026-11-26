@@ -1748,17 +1748,31 @@ Deno.test("Only a post-authorized exact leased graph edge can be published and r
                   );
                   return {
                     content: "",
-                    toolCalls: [{
-                      id: `exact-read-${received.length}`,
+                    toolCalls: [0, 1].map((index) => ({
+                      id: `exact-read-${index}`,
                       type: "function",
                       function: {
                         name: read,
                         arguments: JSON.stringify({ id: fact.id }),
                       },
-                    }],
+                    })),
                     usage: { inputTokens: 1, outputTokens: 1 },
                   };
                 }
+                const history = messages as AgentTurnCheckpoint["history"];
+                const toolMessages = history.filter(({ role }) =>
+                  role === "tool"
+                );
+                const toolBatches = history.filter(({ role, tool_calls }) =>
+                  role === "assistant" && !!tool_calls?.length
+                );
+                assertEquals(toolBatches.length, 1);
+                assertEquals(
+                  toolBatches[0].tool_calls?.map((call) =>
+                    (call as { id: string }).id
+                  ),
+                  toolMessages.map(({ tool_call_id }) => tool_call_id),
+                );
                 if (interrupt) {
                   interruptedRead.resolve(received);
                   await released.promise;

@@ -8,7 +8,7 @@ import {
   sentinelGoalReceiptReadArguments,
 } from "./worker_goal_recovery.ts";
 
-const MAX_CHECKPOINT_READS = 4;
+export const MAX_PLANNER_CHECKPOINT_READS = 4;
 const SHA256 = /^[a-f0-9]{64}$/;
 
 export function plannerCheckpointReadSelector(name: string, input: unknown) {
@@ -48,6 +48,7 @@ export type PlannerCheckpointExchange = PlannerReadSelector & {
 
 export interface SentinelPlannerReadCheckpoint {
   readonly exchanges: readonly PlannerCheckpointExchange[];
+  readonly batchSizes: readonly number[];
   readonly inputTokens: number;
   readonly outputTokens: number;
   readonly modelRouteIdentity?: string;
@@ -59,6 +60,7 @@ export function parsePlannerReadCheckpoint(value: unknown) {
     factId,
     resultSha256,
     exchanges,
+    batchSizes,
     inputTokens,
     outputTokens,
     modelRouteIdentity,
@@ -73,6 +75,7 @@ export function parsePlannerReadCheckpoint(value: unknown) {
   const legacy = exchanges === undefined;
   if (
     Object.keys(value).length !== (legacy ? 4 : 3) +
+        Number(batchSizes !== undefined) +
         Number(modelRouteIdentity !== undefined)
   ) return;
   const entries = legacy
@@ -84,7 +87,16 @@ export function parsePlannerReadCheckpoint(value: unknown) {
     : exchanges;
   if (
     !Array.isArray(entries) || entries.length < 1 ||
-    entries.length > MAX_CHECKPOINT_READS
+    entries.length > MAX_PLANNER_CHECKPOINT_READS
+  ) return;
+  const sizes = batchSizes === undefined ? entries.map(() => 1) : batchSizes;
+  if (
+    !Array.isArray(sizes) || sizes.length < 1 ||
+    !sizes.every((size) =>
+      Number.isSafeInteger(size) && size > 0 &&
+      size <= MAX_PLANNER_CHECKPOINT_READS
+    ) ||
+    sizes.reduce((sum, size) => sum + size, 0) !== entries.length
   ) return;
   const projected: PlannerCheckpointExchange[] = [];
   for (const item of entries) {
@@ -100,6 +112,7 @@ export function parsePlannerReadCheckpoint(value: unknown) {
   }
   return {
     exchanges: projected,
+    batchSizes: sizes,
     inputTokens,
     outputTokens,
     ...(modelRouteIdentity && { modelRouteIdentity }),
@@ -113,50 +126,62 @@ export function projectPlannerReadCheckpoint(
   const [user, ...messages] = checkpoint.history;
   if (
     checkpoint.completedIterations < 1 ||
-    checkpoint.completedIterations > MAX_CHECKPOINT_READS ||
-    messages.length !== checkpoint.completedIterations * 2 ||
+    checkpoint.completedIterations > MAX_PLANNER_CHECKPOINT_READS ||
     checkpoint.nudgeCount !== 0 || checkpoint.eosRetries !== 0 ||
     user?.role !== "user" || user.content !== prompt
   ) return;
   const exchanges: PlannerCheckpointExchange[] = [];
-  for (let index = 0; index < messages.length; index += 2) {
-    const assistant = messages[index];
-    const result = messages[index + 1];
+  const batchSizes: number[] = [];
+  const usedCallIds = new Set<string>();
+  let index = 0;
+  while (index < messages.length) {
+    const assistant = messages[index++];
     if (
       assistant?.role !== "assistant" || assistant.content !== " " ||
       assistant.reasoning !== undefined ||
       assistant.reasoningBlocks !== undefined ||
-      assistant.tool_calls?.length !== 1 ||
-      result?.role !== "tool" || typeof result.content !== "string"
+      !assistant.tool_calls?.length ||
+      assistant.tool_calls.length + exchanges.length >
+        MAX_PLANNER_CHECKPOINT_READS
     ) return;
-    const call = assistant.tool_calls[0] as {
-      id?: unknown;
-      type?: unknown;
-      function?: { name?: unknown; arguments?: unknown };
-    } | undefined;
-    if (
-      !call || call.type !== "function" || typeof call.id !== "string" ||
-      call.id !== result.tool_call_id ||
-      typeof call.function?.name !== "string" ||
-      typeof call.function.arguments !== "string" ||
-      call.function.arguments.length > 512
-    ) return;
-    try {
-      const selector = plannerCheckpointReadSelector(
-        call.function.name,
-        JSON.parse(call.function.arguments),
-      );
-      if (!selector) return;
-      exchanges.push({
-        ...selector,
-        resultSha256: createHash("sha256").update(result.content).digest("hex"),
-      });
-    } catch {
-      return;
+    batchSizes.push(assistant.tool_calls.length);
+    for (const rawCall of assistant.tool_calls) {
+      const call = rawCall as {
+        id?: unknown;
+        type?: unknown;
+        function?: { name?: unknown; arguments?: unknown };
+      } | undefined;
+      const result = messages[index++];
+      if (
+        result?.role !== "tool" || typeof result.content !== "string" ||
+        !call || call.type !== "function" || typeof call.id !== "string" ||
+        call.id !== result.tool_call_id || usedCallIds.has(call.id) ||
+        typeof call.function?.name !== "string" ||
+        typeof call.function.arguments !== "string" ||
+        call.function.arguments.length > 512
+      ) return;
+      usedCallIds.add(call.id);
+      try {
+        const selector = plannerCheckpointReadSelector(
+          call.function.name,
+          JSON.parse(call.function.arguments),
+        );
+        if (!selector) return;
+        exchanges.push({
+          ...selector,
+          resultSha256: createHash("sha256").update(result.content).digest(
+            "hex",
+          ),
+        });
+      } catch {
+        return;
+      }
     }
   }
+  if (batchSizes.length !== checkpoint.completedIterations) return;
   return parsePlannerReadCheckpoint({
     exchanges,
+    batchSizes,
     ...checkpoint.tokenUsage,
     ...(checkpoint.modelRouteIdentity && {
       modelRouteIdentity: checkpoint.modelRouteIdentity,
@@ -173,33 +198,37 @@ export function reopenPlannerReadCheckpoint(
     { role: "user", content: prompt },
   ];
   const counts = new Map<string, number>();
-  for (const [index, exchange] of checkpoint.exchanges.entries()) {
-    const result = projections[index];
-    if (
-      result === undefined ||
-      exchange.resultSha256 !==
-        createHash("sha256").update(result).digest("hex")
-    ) return;
-    const id = `sentinel-resumed-read-${index}`;
-    const args = JSON.stringify(exchange.args);
-    const key = `${exchange.name}:${args}`;
-    counts.set(key, (counts.get(key) ?? 0) + 1);
+  let index = 0;
+  for (const size of checkpoint.batchSizes) {
+    const calls = [];
+    const results: typeof history = [];
+    for (let slot = 0; slot < size; slot++, index++) {
+      const exchange = checkpoint.exchanges[index];
+      const result = projections[index];
+      if (
+        result === undefined ||
+        exchange.resultSha256 !==
+          createHash("sha256").update(result).digest("hex")
+      ) return;
+      const id = `sentinel-resumed-read-${index}`;
+      const args = JSON.stringify(exchange.args);
+      const key = `${exchange.name}:${args}`;
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+      calls.push({
+        id,
+        type: "function",
+        function: { name: exchange.name, arguments: args },
+      });
+      results.push({ role: "tool", tool_call_id: id, content: result });
+    }
     history.push(
-      {
-        role: "assistant",
-        content: " ",
-        tool_calls: [{
-          id,
-          type: "function",
-          function: { name: exchange.name, arguments: args },
-        }],
-      },
-      { role: "tool", tool_call_id: id, content: result },
+      { role: "assistant", content: " ", tool_calls: calls },
+      ...results,
     );
   }
   return {
     history,
-    completedIterations: checkpoint.exchanges.length,
+    completedIterations: checkpoint.batchSizes.length,
     tokenUsage: {
       inputTokens: checkpoint.inputTokens,
       outputTokens: checkpoint.outputTokens,

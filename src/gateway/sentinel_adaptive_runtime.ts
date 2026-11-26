@@ -1,4 +1,5 @@
 import {
+  MAX_PLANNER_CHECKPOINT_READS,
   plannerCheckpointReadSelector,
   projectPlannerReadCheckpoint,
   reopenPlannerReadCheckpoint,
@@ -9453,6 +9454,7 @@ export function createSentinelModelPlanner(
         if (retainedRead && !resume) return;
         let checkpointSaved = resume !== undefined;
         let checkpointEligible = true;
+        let admittedCheckpointReads = retainedRead?.exchanges.length ?? 0;
         const rememberVisibility = (result: string) => {
           if (
             !result.startsWith("{") || !matchesRound(state)
@@ -9896,12 +9898,18 @@ export function createSentinelModelPlanner(
                 audit.close();
               }
             },
-            beforePlannerToolBatch(batch, calls) {
-              const call = calls[0];
+            beforePlannerToolBatch(_batch, calls) {
               if (
-                checkpointEligible && batch <= 4 && calls.length === 1 &&
-                plannerCheckpointReadSelector(call.name, call.args)
-              ) return;
+                checkpointEligible && calls.length > 0 &&
+                admittedCheckpointReads + calls.length <=
+                  MAX_PLANNER_CHECKPOINT_READS &&
+                calls.every(({ name, args }) =>
+                  plannerCheckpointReadSelector(name, args)
+                )
+              ) {
+                admittedCheckpointReads += calls.length;
+                return;
+              }
               checkpointEligible = false;
               if (!checkpointSaved) return;
               const audit = openSentinelAdaptiveStore(
