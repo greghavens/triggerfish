@@ -18,6 +18,7 @@ import { startSentinelAssessmentCoordinator } from "../../src/gateway/sentinel_a
 import type { BootstrapResult } from "../../src/gateway/startup/bootstrap.ts";
 import { createTidepoolSentinelHandler } from "../../src/gateway/startup/services/tidepool_sentinel.ts";
 import {
+  readSentinelFindingReviews,
   readSentinelIncidentReviews,
   readSentinelOperatingConstraints,
   recordSentinelOperatingConstraints,
@@ -37,9 +38,11 @@ async function waitFor(label: string, ready: () => boolean) {
   assert(ready(), label);
 }
 
-Deno.test("Selected Sentinel incident reviews recheck every member and wake planning exactly once", async () => {
+async function verifyReviewScope(kind: "incident" | "finding") {
+  const action = `review_${kind}`;
+  const selector = `${kind}Id`;
   const baseDir = await Deno.makeTempDir();
-  const caseId = "scoped-incident-reviews";
+  const caseId = `scoped-${kind}-reviews`;
   const path = resolveSentinelCasePath(baseDir, caseId);
   const graph = {
     version: 1,
@@ -50,6 +53,17 @@ Deno.test("Selected Sentinel incident reviews recheck every member and wake plan
     ],
     edges: [{ from: "proxy", to: "private", relation: "depends_on" }],
   };
+  if (kind === "finding") {
+    graph.nodes.push(
+      { id: "allowed-finding", kind: "finding", label: "Approved finding" },
+      { id: "mixed-finding", kind: "finding", label: "Mixed finding" },
+    );
+    graph.edges.push(
+      { from: "allowed-finding", to: "app", relation: "affects" },
+      { from: "mixed-finding", to: "proxy", relation: "affects" },
+      { from: "mixed-finding", to: "private", relation: "affects" },
+    );
+  }
   const alert = (
     type: string,
     asset: string,
@@ -77,23 +91,43 @@ Deno.test("Selected Sentinel incident reviews recheck every member and wake plan
   const confirmations: string[] = [];
   try {
     await Deno.mkdir(dirname(path), { recursive: true });
-    await Deno.writeTextFile(path, JSON.stringify(graph), { mode: 0o600 });
     await Deno.writeTextFile(
-      sentinelAlertsPath(path),
-      JSON.stringify([
-        alert("network_security_alert", "app", "00", "app-network"),
-        alert("authentication_failure_burst", "app", "00", "app-auth"),
-        alert("network_security_alert", "proxy", "01", "proxy-network"),
-        alert("authentication_failure_burst", "private", "01", "private-auth"),
-      ]),
+      path,
+      JSON.stringify({
+        ...graph,
+        nodes: graph.nodes.map((node) =>
+          node.kind === "finding" ? { ...node, severity: "high" } : node
+        ),
+      }),
       { mode: 0o600 },
     );
+    if (kind === "incident") {
+      await Deno.writeTextFile(
+        sentinelAlertsPath(path),
+        JSON.stringify([
+          alert("network_security_alert", "app", "00", "app-network"),
+          alert("authentication_failure_burst", "app", "00", "app-auth"),
+          alert("network_security_alert", "proxy", "01", "proxy-network"),
+          alert(
+            "authentication_failure_burst",
+            "private",
+            "01",
+            "private-auth",
+          ),
+        ]),
+        { mode: 0o600 },
+      );
+    }
     let state = startSentinelAssessment(path);
     const runId = state.plan.runId;
     assert(runId);
     const incidents = readSavedSentinelIncidentCandidates(path, state.revision);
-    const allowed = incidents.find(({ asset }) => asset === "app");
-    const mixed = incidents.find(({ id }) => id !== allowed?.id);
+    const allowed = kind === "finding"
+      ? { id: "allowed-finding" }
+      : incidents.find(({ asset }) => asset === "app");
+    const mixed = kind === "finding"
+      ? { id: "mixed-finding" }
+      : incidents.find(({ id }) => id !== allowed?.id);
     assert(typeof allowed?.id === "string" && typeof mixed?.id === "string");
     const setAssets = (allowedAssetIds: string[]) => {
       assert(recordSentinelOperatingConstraints(path, {
@@ -107,7 +141,11 @@ Deno.test("Selected Sentinel incident reviews recheck every member and wake plan
       }));
     };
     const reviews = () =>
-      readSentinelIncidentReviews(path, state.revision, { fullHistory: true });
+      (kind === "incident"
+        ? readSentinelIncidentReviews
+        : readSentinelFindingReviews)(path, state.revision, {
+          fullHistory: true,
+        });
     const registry = createProviderRegistry();
     registry.register({
       name: "scoped-incident-owner",
@@ -275,16 +313,16 @@ Deno.test("Selected Sentinel incident reviews recheck every member and wake plan
     const ref = { kind: "sentinel", id: caseId, revision: state.revision };
     const mixedReview = {
       ...ref,
-      runId,
-      action: "review_incident",
-      incidentId: mixed.id,
-      disposition: "investigating",
+      ...(kind === "incident" && { runId }),
+      action,
+      [selector]: mixed.id,
+      disposition: kind === "incident" ? "investigating" : "confirmed",
       note: "Review the exact mixed incident.",
       requestId: crypto.randomUUID(),
     };
     const allowedReview = {
       ...mixedReview,
-      incidentId: allowed.id,
+      [selector]: allowed.id,
       disposition: "resolved",
       note: "The exact approved cohort was reviewed.",
       requestId: crypto.randomUUID(),
@@ -300,8 +338,10 @@ Deno.test("Selected Sentinel incident reviews recheck every member and wake plan
       assertStringIncludes(await turn(mixedReview), "unavailable");
       assertEquals(approvalCount, 1);
 
-      await turn("/sentinel on");
-      await turn(`/sentinel case ${caseId}`);
+      if (kind === "incident") {
+        await turn("/sentinel on");
+        await turn(`/sentinel case ${caseId}`);
+      }
       assertStringIncludes(await turn(mixedReview), "unavailable");
       assertEquals(approvalCount, 1);
       const response = await turn(allowedReview);
@@ -309,7 +349,7 @@ Deno.test("Selected Sentinel incident reviews recheck every member and wake plan
       saved = JSON.parse(response).review;
       assertEquals(reviews(), [saved]);
       assertEquals(approvalCount, 2);
-      assert(scopedWriteCalls > 0);
+      if (kind === "incident") assert(scopedWriteCalls > 0);
       assert(confirmations.at(-1)?.includes('"assetIds":["app"]'));
       const replay = await turn(allowedReview);
       assert(replay.startsWith("{"), replay);
@@ -322,7 +362,9 @@ Deno.test("Selected Sentinel incident reviews recheck every member and wake plan
         const review = reviews()[0];
         return !!review &&
           runtime()?.modelPlannerHistory.some(({ inputManifest }) =>
-              inputManifest?.incidentReviewIds?.includes(review.id)
+              (kind === "incident"
+                ? inputManifest?.incidentReviewIds
+                : inputManifest?.findingReviewIds)?.includes(review.id)
             ) === true;
       },
     );
@@ -330,7 +372,9 @@ Deno.test("Selected Sentinel incident reviews recheck every member and wake plan
     const reviewId = reviews()[0].id;
     assertEquals(
       runtime()?.modelPlannerHistory.filter(({ inputManifest }) =>
-        inputManifest?.incidentReviewIds?.includes(reviewId)
+        (kind === "incident"
+          ? inputManifest?.incidentReviewIds
+          : inputManifest?.findingReviewIds)?.includes(reviewId)
       ).length,
       1,
     );
@@ -339,13 +383,25 @@ Deno.test("Selected Sentinel incident reviews recheck every member and wake plan
       assert(reopened.startsWith("{"), reopened);
       assertEquals(JSON.parse(reopened).review, saved);
       assertEquals(approvalCount, 2);
+      const trail = await turn({
+        ...ref,
+        action: "decision_history",
+        [selector]: allowed.id,
+      });
+      assert(trail.startsWith("{"), trail);
+      const { [selector]: subject, ...decision } = saved as Record<
+        string,
+        unknown
+      >;
+      assertEquals(subject, allowed.id);
+      assertEquals(JSON.parse(trail).page.decisions, [decision]);
       setAssets(["proxy"]);
       assertStringIncludes(await turn(allowedReview), "unavailable");
       assertStringIncludes(
         await turn({
           ...ref,
           action: "decision_history",
-          incidentId: allowed.id,
+          [selector]: allowed.id,
         }),
         "unavailable",
       );
@@ -385,11 +441,11 @@ Deno.test("Selected Sentinel incident reviews recheck every member and wake plan
       });
       socket.send(JSON.stringify({
         topic: "sentinel",
-        type: "review_incident",
+        type: action,
         requestId: 1,
         caseId,
         revision: state.revision,
-        incidentId: allowed.id,
+        [selector]: allowed.id,
         disposition: "dismissed",
         note: "A revoked incident cannot be reviewed.",
       }));
@@ -406,11 +462,16 @@ Deno.test("Selected Sentinel incident reviews recheck every member and wake plan
       path,
       JSON.stringify({
         ...graph,
-        nodes: [...graph.nodes, {
-          id: "rollover",
-          kind: "asset",
-          label: "Later",
-        }],
+        nodes: [
+          ...graph.nodes.map((node) =>
+            node.kind === "finding" ? { ...node, severity: "high" } : node
+          ),
+          {
+            id: "rollover",
+            kind: "asset",
+            label: "Later",
+          },
+        ],
       }),
     );
     const updated = refreshSentinelAssessment(path);
@@ -430,4 +491,9 @@ Deno.test("Selected Sentinel incident reviews recheck every member and wake plan
     await waitFor("planner shuts down", () => !planner?.hasInFlightWork());
     await Deno.remove(baseDir, { recursive: true });
   }
-});
+}
+
+Deno.test("Selected Sentinel incident reviews recheck every member and wake planning exactly once", () =>
+  verifyReviewScope("incident"));
+Deno.test("Owner and Tidepool finding reviews preserve lineage and deny mixed or withdrawn assets", () =>
+  verifyReviewScope("finding"));

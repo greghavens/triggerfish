@@ -1,5 +1,6 @@
 import { dirname, join } from "@std/path";
 import { isDeepStrictEqual } from "node:util";
+import { readSentinelGraphFindingReviewScope } from "../../sentinel_finding_review_scope.ts";
 import { notifyCommittedEvidence } from "../../../core/evidence_task_progression.ts";
 import { readSentinelWorkerEvidenceScope } from "../../sentinel_worker_evidence_scope.ts";
 import { scopedSentinelInventoryGraph } from "../../sentinel_agent.ts";
@@ -349,12 +350,14 @@ function tidepoolDecisionScope(path: string) {
     ReturnType<typeof readSavedSentinelIncidentAssetScopes>
   >();
   return (kind: "finding" | "incident", subject: string, revision: number) => {
+    if (kind === "finding") {
+      return !!readSentinelGraphFindingReviewScope(path, revision, subject);
+    }
     if (!scopes.has(revision)) {
       scopes.set(revision, readSentinelFindingReceiptScope(path, revision));
     }
     const scope = scopes.get(revision);
     if (!scope) return false;
-    if (kind === "finding") return scope.allows(subject, "review_finding");
     if (!incidentAssets.has(revision)) {
       incidentAssets.set(
         revision,
@@ -1108,15 +1111,23 @@ export function createTidepoolSentinelHandler(
           const decision = sentinelFindingDispositions.find((value) =>
             value === disposition
           );
+          const scope = () =>
+            typeof revision === "number" &&
+              typeof findingId === "string"
+              ? readSentinelGraphFindingReviewScope(path, revision, findingId)
+              : undefined;
+          const admitted = scope();
           if (
             typeof revision !== "number" || typeof findingId !== "string" ||
-            typeof note !== "string" || !decision ||
+            typeof note !== "string" || !decision || !admitted ||
             !recordSentinelFindingReview(
               path,
               revision,
               findingId,
               decision,
               note,
+              undefined,
+              () => isDeepStrictEqual(scope(), admitted),
             )
           ) {
             throw new SentinelAssignmentError(
@@ -1125,6 +1136,17 @@ export function createTidepoolSentinelHandler(
           }
           const state = readSentinelAssessment(path);
           if (state) advanceAdaptiveSentinel(path, state);
+          const review = readSentinelFindingReviews(path, revision).find(
+            (record) => record.findingId === findingId,
+          );
+          if (review && isDeepStrictEqual(scope(), admitted)) {
+            notifyCommittedEvidence({
+              case: caseId,
+              run_id: admitted.runId,
+              revision,
+              observation_id: `finding-review:${review.id}`,
+            });
+          }
           break;
         }
         case "review_incident": {

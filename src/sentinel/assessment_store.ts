@@ -4783,6 +4783,7 @@ export function recordSentinelFindingReview(
   disposition: SentinelFindingReview["disposition"],
   note: string,
   requestId?: string,
+  authorizeScope?: () => boolean,
 ): boolean {
   if (
     !Number.isSafeInteger(revision) || revision < 1 || !findingId ||
@@ -4795,6 +4796,7 @@ export function recordSentinelFindingReview(
   if (!db) return false;
   try {
     return transact(db, () => {
+      if (authorizeScope && !authorizeScope()) return false;
       const prior = requestId &&
         operatorReviewRequest(db, "finding", requestId);
       if (prior) {
