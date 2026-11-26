@@ -1,3 +1,5 @@
+import { sentinelAlertsPath } from "../../src/sentinel/paths.ts";
+import { sentinelAlertReference } from "../../src/sentinel/telemetry.ts";
 import { createHash } from "node:crypto";
 import { createSentinelLiveWorkflowReader } from "../../src/gateway/sentinel_live_workflow.ts";
 import { createOperatorRunToolExecutor } from "../../src/gateway/operator_run_tool.ts";
@@ -279,6 +281,29 @@ Deno.test("authenticated Sentinel /btw reads only the selected running worker's 
     ],
   };
   await Deno.writeTextFile(path, JSON.stringify(snapshot));
+  const alert = {
+    type: "network_security_alert",
+    severity: "high",
+    asset: "app",
+    subject: "sensor",
+    observedAt: "2026-01-01T00:00:01.000Z",
+    evidenceIds: ["alert-main-record"],
+  } as const;
+  const neighborAlert = {
+    ...alert,
+    asset: revokedAsset,
+    evidenceIds: ["alert-neighbor-record"],
+  };
+  const retainedAlertId = sentinelAlertReference(alert);
+  const revokedAlertId = sentinelAlertReference(neighborAlert);
+  const unretainedAlertId = sentinelAlertReference({
+    ...alert,
+    evidenceIds: ["no-such-record"],
+  });
+  await Deno.writeTextFile(
+    sentinelAlertsPath(path),
+    JSON.stringify([alert, neighborAlert]),
+  );
   const alternate = resolveSentinelCasePath(base, "different-case");
   await Deno.mkdir(dirname(alternate), { recursive: true, mode: 0o700 });
   await Deno.writeTextFile(alternate, JSON.stringify(snapshot));
@@ -414,7 +439,13 @@ Deno.test("authenticated Sentinel /btw reads only the selected running worker's 
       [{
         kind: "trace",
         nodeId: "app",
-        evidenceIds: ["evidence", revokedAsset],
+        evidenceIds: [
+          "evidence",
+          revokedAsset,
+          retainedAlertId,
+          revokedAlertId,
+          unretainedAlertId,
+        ],
         reason: MODEL_ASSIGNMENT_REASON,
       }],
       null,
@@ -458,6 +489,9 @@ Deno.test("authenticated Sentinel /btw reads only the selected running worker's 
       `"linkedNodeIds":["evidence","${revokedAsset}"]`,
     );
     assert(!prompt.includes("Private raw draft"));
+    assertStringIncludes(prompt, retainedAlertId);
+    assertStringIncludes(prompt, revokedAlertId);
+    assert(!prompt.includes(unretainedAlertId));
     assertEquals((await ws.send("/btw", "side_history")).entries, [
       answer.entry,
     ]);
@@ -531,6 +565,8 @@ Deno.test("authenticated Sentinel /btw reads only the selected running worker's 
     );
     assertStringIncludes(prompt, '"linkedNodeIds":["evidence"]');
     assert(!prompt.includes(revokedAsset));
+    assertStringIncludes(prompt, retainedAlertId);
+    assert(!prompt.includes(revokedAlertId));
     assertEquals((await ws.send(selection, "side_history")).entries, [
       current.entry,
     ]);

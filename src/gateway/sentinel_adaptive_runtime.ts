@@ -3425,12 +3425,29 @@ export function readSentinelWorkerSideContext(
     const snapshot = state.result?.sharedGraph.snapshot;
     if (policy?.constraints.allowedAssetIds !== undefined && !snapshot) return;
     const graphNodeIds = new Set(snapshot?.nodes.map(({ id }) => id));
-    const allowsEvidenceId = (id: string) =>
-      !graphNodeIds.has(id) || sentinelOperatingConstraintsAllow(
+    let allowedAlertIds: Set<string> | undefined;
+    const allowsEvidenceId = (id: string) => {
+      if (id.startsWith("case-alert:")) {
+        if (!snapshot) return false;
+        if (!allowedAlertIds) {
+          const resolveAlert = sentinelTelemetryAssetResolver(
+            snapshot,
+            policy?.constraints,
+          );
+          allowedAlertIds = new Set(
+            readSentinelAssessmentAlerts(snapshotPath, evidenceRevision)
+              ?.filter((alert) => resolveAlert(alert) !== undefined)
+              .map(sentinelAlertReference),
+          );
+        }
+        return allowedAlertIds.has(id);
+      }
+      return !graphNodeIds.has(id) || sentinelOperatingConstraintsAllow(
         policy?.constraints,
         { kind: "review_evidence", nodeId: id },
         snapshot,
       );
+    };
     const path = storePath(snapshotPath);
     try {
       Deno.lstatSync(path);
