@@ -317,6 +317,7 @@ import {
   previewSentinelQueueControl,
   readHistoricalAdaptiveSentinel,
   readProtectedSentinelAssignmentSources,
+  readProtectedSentinelReview,
   readRetainedSentinelAnalystObservation,
   readReviewedFindingExecutionProof,
   readSentinelAdaptiveEvidenceMapping,
@@ -10638,6 +10639,59 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
               { ...selected, result },
               evidence.classification,
             );
+          }
+          const reviewId = read.tool === "sentinel_provenance_node" &&
+            "node" in selector && typeof selector.node === "string" &&
+            /^observation:adaptive:review:(adaptive:[a-f0-9]{64})$/.exec(
+              selector.node,
+            )?.[1];
+          if (
+            includeResult && reviewId &&
+            readProtectedSentinelAssignmentSources(path, ref.revision, reviewId)
+              ?.sources.length
+          ) {
+            if (!context) return unavailable;
+            const proof = readProtectedSentinelReview(
+              path,
+              ref.revision,
+              reviewId,
+            );
+            if (!proof) return unavailable;
+            const current = () =>
+              isCurrent() && isDeepStrictEqual(
+                readProtectedSentinelReview(path, ref.revision!, reviewId),
+                proof,
+              );
+            const authorizeSources = async () => {
+              for (const source of proof.sources) {
+                if (
+                  !await authorizeReviewedFindingOperation(
+                    ref,
+                    path,
+                    proof.assetId,
+                    source,
+                    context,
+                    current,
+                  )
+                ) return false;
+              }
+              return current();
+            };
+            const text = await reopenSentinelSourceResult(
+              options.baseDir,
+              path,
+              ref.revision,
+              read,
+              selector,
+            );
+            if (
+              !text ||
+              JSON.parse(text).node?.modelReview?.summary !== proof.summary ||
+              !await authorizeSources() ||
+              !await authorize(scope, read.tool, selector, text) ||
+              !await authorizeSources()
+            ) return unavailable;
+            return safeProjection({ ...selected, result: JSON.parse(text) });
           }
           const sourceStillAuthorized = async () =>
             includeResult || !isSentinelPinnedSourceRead(read.tool) ||

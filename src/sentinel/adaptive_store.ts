@@ -7107,6 +7107,10 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
           : ""
       }
         WHERE t.revision = ? AND t.status = 'completed'
+          AND NOT EXISTS (
+            SELECT 1 FROM json_each(t.plannerRound, '$.sourceEvidence') source
+            WHERE json_type(source.value, '$.executionEvidenceId') = 'text'
+          )
           AND t.observation IS NOT NULL
           AND (? IS NULL OR t.id IN (SELECT value FROM json_each(?)))
       )

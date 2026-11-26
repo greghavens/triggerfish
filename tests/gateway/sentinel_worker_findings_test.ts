@@ -5414,6 +5414,8 @@ async function verifyConnectorMixedAssignment(
     },
   });
   providers.setDefault("connector-mixed-assignment");
+  let wokeOnProtectedReview = false;
+  let workerClock = Date.now();
   const planner = createSentinelModelPlanner(
     path,
     (_state, taskId, lease) =>
@@ -5438,7 +5440,25 @@ async function verifyConnectorMixedAssignment(
             },
           },
         })
-        : { execute: () => Promise.resolve(), clear() {} },
+        : {
+          execute(content, send) {
+            if (!taskId) {
+              const input = JSON.parse(String(content).split("\n").at(-1)!);
+              wokeOnProtectedReview ||= input.protectedWorkerReviews?.some(
+                ({ taskId }: { taskId: string }) => taskId === receipt.taskId,
+              ) === true;
+              send({
+                type: "response",
+                taint: "INTERNAL",
+                text: '{"prioritize":[],"assignments":[]}',
+              });
+            }
+            return Promise.resolve();
+          },
+          clear() {},
+        },
+    undefined,
+    () => workerClock,
   );
   try {
     assert((await credentials.deleteSecret("github-pat")).ok);
@@ -5450,6 +5470,7 @@ async function verifyConnectorMixedAssignment(
     );
     assertEquals(calls, 0);
     assert((await credentials.setSecret("github-pat", credential)).ok);
+    workerClock += 65_000;
     const review = () =>
       readAdaptiveSentinel(path, current)?.modelReviews
         .find(({ taskId }) => taskId === receipt.taskId);
@@ -5462,6 +5483,7 @@ async function verifyConnectorMixedAssignment(
     assertEquals(JSON.parse(responses[0]), fact);
     assertEquals(JSON.parse(responses[1]).record, finding);
     assertEquals(review()?.summary, "Reviewed retained connector evidence.");
+    await waitForCondition(() => wokeOnProtectedReview, () => {});
     const step = {
       ...ref,
       action: "worker_trace_result",
@@ -5489,6 +5511,191 @@ async function verifyConnectorMixedAssignment(
   } finally {
     planner.stop();
   }
+
+  const provenanceTool = "sentinel_provenance_node";
+  const selection = { node: `observation:adaptive:review:${receipt.taskId}` };
+  const plannerProviders = createProviderRegistry();
+  let proposalCount = 0;
+  let revokeDuringProposal = true;
+  let exactReview: unknown;
+  let initialPlannerContext: string | undefined;
+  plannerProviders.register({
+    name: "protected-review-planner",
+    supportsStreaming: false,
+    async complete(messages) {
+      const response = messages.findLast(({ role }) => role === "tool");
+      const usage = { inputTokens: 1, outputTokens: 1 };
+      if (!response) {
+        initialPlannerContext = String(
+          messages.findLast(({ role }) => role === "user")?.content,
+        );
+        return {
+          content: "",
+          usage,
+          toolCalls: [{
+            type: "function",
+            id: "protected-review",
+            function: {
+              name: provenanceTool,
+              arguments: JSON.stringify(selection),
+            },
+          }],
+        };
+      }
+      const review = JSON.parse(String(response.content));
+      if (revokeDuringProposal) {
+        assert((await credentials.deleteSecret("github-pat")).ok);
+      } else {
+        exactReview = review;
+      }
+      proposalCount++;
+      return {
+        usage,
+        toolCalls: [],
+        content: JSON.stringify({
+          prioritize: [],
+          assignments: [{
+            kind: "impact",
+            nodeId: "app",
+            depth: 2,
+            sourceTaskId: receipt.taskId,
+            sourceKind: "model_review",
+          }],
+        }),
+      };
+    },
+  });
+  plannerProviders.setDefault("protected-review-planner");
+  let plannerClock = workerClock + 65_000;
+  const followups = () =>
+    readAdaptiveSentinel(path, current, "revision")?.tasks.filter((task) =>
+      task.kind === "impact" && task.nodeId === "app" && task.depth === 2 &&
+      task.prerequisites.includes(receipt.taskId) &&
+      task.plannerRound?.sourceKind === "model_review"
+    ) ?? [];
+  const protectedPlanner = createSentinelModelPlanner(
+    path,
+    (latest, taskId) =>
+      taskId
+        ? { execute: () => Promise.resolve(), clear() {} }
+        : createSentinelSubagent({
+          snapshotPath: path,
+          assessmentRevision: latest.revision,
+          plannerExecutionEvidenceRunId: latest.plan.runId,
+          sharedInventoryBaseDir: baseDir,
+          readRetainedWorkflow: reader,
+          providerRegistry: plannerProviders,
+          allowModelAccess: true,
+          hookRunner: {
+            evaluateHook(hook, { input }) {
+              const allowed = policy(hook, input);
+              return Promise.resolve({
+                allowed,
+                action: allowed ? "ALLOW" : "BLOCK",
+                duration: 0,
+                ruleId: null,
+              });
+            },
+          },
+        }),
+    undefined,
+    () => plannerClock,
+  );
+  let recordedRead: Record<string, unknown>;
+  try {
+    assert((await credentials.setSecret("github-pat", credential)).ok);
+    addSentinelCaseHint(path, "Review the exact saved assignment observation.");
+    protectedPlanner.advance(current);
+    await waitForCondition(
+      () => proposalCount === 1 && !protectedPlanner.hasInFlightWork(),
+      () => {
+        if (!proposalCount) protectedPlanner.advance(current);
+      },
+    );
+    assertEquals(followups(), []);
+    assert((await credentials.setSecret("github-pat", credential)).ok);
+    revokeDuringProposal = false;
+    plannerClock += 65_000;
+    addSentinelCaseHint(
+      path,
+      "Reopen the approved review for its assigned asset.",
+    );
+    await waitForCondition(
+      () => followups().length === 1 && !protectedPlanner.hasInFlightWork(),
+      () => protectedPlanner.advance(current),
+    );
+    const planningInput = JSON.parse(
+      initialPlannerContext!.split("\n").at(-1)!,
+    );
+    assertEquals(planningInput.protectedWorkerReviews, [{
+      taskId: receipt.taskId,
+      nodeId: "app",
+    }]);
+    assert(!initialPlannerContext!.includes("Verified both retained sources."));
+    assertEquals(
+      (exactReview as { node: { modelReview: { summary: string } } })
+        .node.modelReview.summary,
+      "Verified both retained sources.",
+    );
+    const round = readAdaptiveSentinel(path, current, "revision")
+      ?.modelPlannerHistory.findLast(({ reads }) =>
+        reads?.some(({ tool }) => tool === provenanceTool)
+      );
+    assert(round);
+    recordedRead = {
+      ...ref,
+      action: "planner_reads",
+      plannerIdentity: round.identity,
+      attempt: round.attempt,
+      ordinal: round.reads!.findIndex(({ tool }) => tool === provenanceTool) +
+        1,
+      includeResult: true,
+    };
+  } finally {
+    protectedPlanner.stop();
+  }
+  const reviewArchiveId = crypto.randomUUID();
+  await gateway(async (turn) => {
+    assertEquals(JSON.parse(await turn(recordedRead)).result, exactReview);
+    assertEquals(
+      JSON.parse(await turn({ ...ref, runId, action: "cancel" })).run.status,
+      "stopped",
+    );
+    assertEquals(
+      JSON.parse(
+        await turn({
+          ...ref,
+          runId,
+          action: "archive",
+          requestId: reviewArchiveId,
+        }),
+      )
+        .receipt.status,
+      "succeeded",
+    );
+  });
+  await Deno.rename(
+    dirname(path),
+    join(baseDir, "before-protected-planner-restore"),
+  );
+  await gateway(async (turn) => {
+    assertEquals(
+      JSON.parse(
+        await turn({
+          ...ref,
+          runId,
+          action: "restore",
+          archiveId: reviewArchiveId,
+          requestId: crypto.randomUUID(),
+        }),
+      ).receipt.status,
+      "succeeded",
+    );
+    assertEquals(JSON.parse(await turn(recordedRead)).result, exactReview);
+    assert((await credentials.deleteSecret("github-pat")).ok);
+    assertStringIncludes(await turn(recordedRead), "unavailable");
+  });
+  assertEquals(resultFetches, 0);
 }
 
 async function verifyReceiptFamily(

@@ -247,6 +247,8 @@ import {
 import {
   readAssignedSentinelModelReview,
   readHistoricalAdaptiveSentinel,
+  readProtectedSentinelAssignmentSources,
+  readProtectedSentinelReview,
   readReviewedFindingExecutionProof,
   readSentinelAssetTrafficHints,
   readSentinelCaseHints,
@@ -5293,6 +5295,22 @@ function createAgent(
         }
         if (
           result.allowed && name === "POST_TOOL_RESPONSE" &&
+          canReadPlannerCase &&
+          toolName === SENTINEL_PROVENANCE_NODE_READ && turn &&
+          typeof context.input.tool_response === "string" &&
+          context.input.tool_response.startsWith("{")
+        ) {
+          const page = JSON.parse(context.input.tool_response);
+          const selected = await protectedPlannerReview(turn, page.node?.id);
+          if (
+            selected === false ||
+            (selected && page.node?.modelReview?.summary !== selected.summary)
+          ) {
+            return { ...result, allowed: false, action: "BLOCK" };
+          }
+        }
+        if (
+          result.allowed && name === "POST_TOOL_RESPONSE" &&
           toolName === SENTINEL_INTERMEDIATE_WORKFLOW_READ &&
           turn?.requiresLiveAssignment &&
           typeof context.input.tool_response === "string" &&
@@ -6783,7 +6801,16 @@ function createAgent(
         if (canReadPlannerCase && !currentPlannerReceiptScope(turn)) {
           return "Error: The requested Sentinel evidence scope is unavailable.";
         }
-        return inspectSentinelProvenance(options, args);
+        const text = inspectSentinelProvenance(options, args);
+        if (!canReadPlannerCase || !text.startsWith("{")) return text;
+        const page = JSON.parse(text);
+        const selected = await protectedPlannerReview(turn, page.node?.id);
+        if (selected === false) {
+          return "Error: The requested review evidence is unavailable.";
+        }
+        if (!selected || !page.node?.modelReview) return text;
+        page.node.modelReview.summary = selected.summary;
+        return boundResult(page);
       }
       if (name === SENTINEL_INCIDENT_ALERTS_READ) {
         const leased = options.assignedTaskId !== undefined ||
@@ -7705,6 +7732,44 @@ function createAgent(
     return true;
   }
 
+  async function protectedPlannerReview(turn: ActiveTurn, node: unknown) {
+    const taskId = typeof node === "string" &&
+      /^observation:adaptive:review:(adaptive:[a-f0-9]{64})$/.exec(node)?.[1];
+    const revision = options.assessmentRevision;
+    if (!taskId || revision === undefined) return;
+    if (
+      !readProtectedSentinelAssignmentSources(
+        options.snapshotPath,
+        revision,
+        taskId,
+      )?.sources.length
+    ) return;
+    const proof = readProtectedSentinelReview(
+      options.snapshotPath,
+      revision,
+      taskId,
+    );
+    if (!proof) return false;
+    const current = () =>
+      currentPlannerReceiptScope(turn, proof.assetId) &&
+      isDeepStrictEqual(
+        readProtectedSentinelReview(options.snapshotPath, revision, taskId),
+        proof,
+      );
+    for (const source of proof.sources) {
+      if (
+        !current() ||
+        !await authorizeReviewedFindingSource(
+          proof.assetId,
+          source,
+          turn.signal,
+          current,
+        )
+      ) return false;
+    }
+    return current() ? proof : false;
+  }
+
   async function authorizeReviewedFindingSource(
     assetId: string,
     source: ReviewedFindingSource,
@@ -7726,10 +7791,14 @@ function createAgent(
     if (!proof) return false;
     const isCurrent = () => {
       const task = readAssignedModelReview(options);
-      return !signal.aborted && current() && task?.nodeId === assetId &&
-        !!task.plannerRound?.sourceEvidence?.some((entry) =>
-          isDeepStrictEqual(entry, source)
-        ) &&
+      const validRole = canReadPlannerCase
+        ? options.plannerExecutionEvidenceRunId === proof.runId &&
+          options.assessmentRevision === source.evidenceRevision
+        : task?.nodeId === assetId &&
+          !!task.plannerRound?.sourceEvidence?.some((entry) =>
+            isDeepStrictEqual(entry, source)
+          );
+      return !signal.aborted && current() && validRole &&
         isDeepStrictEqual(
           readReviewedFindingExecutionProof(snapshotPath, assetId, source),
           proof,
@@ -7882,7 +7951,8 @@ function createAgent(
       : undefined;
   return {
     ...(canReadPlannerCase && { authorizeLinkedFinding }),
-    ...(options.assignedTaskId && { authorizeReviewedFindingSource }),
+    ...((options.assignedTaskId || canReadPlannerCase) &&
+      { authorizeReviewedFindingSource }),
     ...(canRequestWorkerControl && { canRequestWorkerControl }),
     ...(futureWorkflowTargets?.length && {
       futureWorkflowTargets,
