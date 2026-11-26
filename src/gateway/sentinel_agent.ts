@@ -4525,6 +4525,8 @@ export async function readSentinelGraphProjection(
 
 export const sentinelScopedGraphReadActions = [
   "linked_worker_review",
+  "linked_findings",
+  "linked_finding",
   "graph_overview",
   "graph",
   "findings",

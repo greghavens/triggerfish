@@ -43,7 +43,10 @@ import {
   SENTINEL_ASSESSMENT_READ,
   sentinelScopedGraphReadActions,
 } from "./sentinel_agent.ts";
-import { SENTINEL_SHARED_ASSET_LINKS_READ } from "../sentinel/worker_goal_recovery.ts";
+import {
+  parseSentinelPinnedFindingRead,
+  SENTINEL_SHARED_ASSET_LINKS_READ,
+} from "../sentinel/worker_goal_recovery.ts";
 import {
   readSentinelModelSettings,
   readSentinelWorkerSideContext,
@@ -924,6 +927,18 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
       ) {
         const { action, kind, id, revision, runId } = args;
         const linkedReview = action === "linked_worker_review";
+        const linkedFinding = action === "linked_finding" &&
+            args.linkedFinding && typeof args.linkedFinding === "object" &&
+            !Array.isArray(args.linkedFinding)
+          ? parseSentinelPinnedFindingRead(
+            args.linkedFinding as Record<string, unknown>,
+          )
+          : undefined;
+        const linkedCase = linkedReview || action === "linked_findings"
+          ? args.sourceCase
+          : linkedFinding?.sourceCase;
+        const linkedRead = linkedReview || action === "linked_findings" ||
+          action === "linked_finding";
         const selectedControl = sentinelOperatorCaseControlActions.some((
           allowed,
         ) => allowed === action);
@@ -960,7 +975,7 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
           ) return false;
           const casePath = resolveCase();
           if (!selectedControl) {
-            return directRead || linkedReview
+            return directRead || linkedRead
               ? casePath === selectedPath
               : !!casePath;
           }
@@ -1019,14 +1034,14 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
             authorizeSentinelCaseRead: (caseId, evidenceRevision) =>
               current() &&
               ((caseId === id && evidenceRevision === revision) ||
-                (linkedReview && caseId === args.sourceCase &&
+                (linkedRead && caseId === linkedCase &&
                   readSentinelLinkedSourcesForRevision(selectedPath, revision)
                       ?.some((source) =>
                         source.caseId === caseId &&
                         source.revision === evidenceRevision &&
-                        source.workerReviews?.some(({ taskId }) =>
-                          taskId === args.taskId
-                        )
+                        (!linkedReview || source.workerReviews?.some(
+                          ({ taskId }) => taskId === args.taskId,
+                        ))
                       ) === true)),
           });
         const result = nativeGraph && sourcePath
@@ -1091,7 +1106,7 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
                 { resultText: text, blocked: false },
               );
               if (approved.blocked || !sourceIsCurrent()) return false;
-              if (linkedReview) {
+              if (linkedRead) {
                 return await read() === text && sourceIsCurrent();
               }
               if (source.name !== SENTINEL_SHARED_ASSET_LINKS_READ) return true;

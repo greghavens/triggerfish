@@ -1497,6 +1497,8 @@ export const sentinelOperatorCaseReadActions = [
   "worker_trace_progress",
   "worker_trace_result",
   "linked_worker_review",
+  "linked_findings",
+  "linked_finding",
   "analyst_observation",
 ] as const;
 
@@ -1541,6 +1543,7 @@ export const sentinelOperatorCaseReadParameters = [
   "latestResult",
   "workflowRunNumber",
   "sourceCase",
+  "linkedFinding",
 ] as const;
 
 export const sentinelOperatorCaseControlActions = [

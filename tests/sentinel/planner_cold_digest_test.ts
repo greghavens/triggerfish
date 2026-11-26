@@ -102,7 +102,7 @@ async function withArchivedPlannerRead(
   approval?: (prompt: string) => Promise<boolean>,
   publicationPolicy?: (hook: string, input: Record<string, unknown>) => boolean,
   onFrame?: (frame: string) => void,
-  sentinelMode = false,
+  sentinelMode: boolean | string = false,
   beforeHook?: (hook: string, input: Record<string, unknown>) => Promise<void>,
 ) {
   let selection: Record<string, unknown> = {};
@@ -206,6 +206,9 @@ async function withArchivedPlannerRead(
       }
     };
     if (sentinelMode) await turn("/sentinel on");
+    if (typeof sentinelMode === "string") {
+      await turn(`/sentinel case ${sentinelMode}`);
+    }
     await check(async (args, denyResponse = false) => {
       selection = args;
       deny = denyResponse;
@@ -3000,6 +3003,63 @@ Deno.test("Sentinel plans from an exact published case finding and keeps its evi
         !(denySource && hook === "PRE_TOOL_CALL" &&
           JSON.stringify(input).includes('"finding_report"')),
     );
+    let rejectSelected:
+      | "PRE_TOOL_CALL"
+      | "POST_TOOL_RESPONSE"
+      | "PRE_OUTPUT"
+      | undefined;
+    const matchingSelectedHooks = new Set<string>();
+    const selectedFrames: string[] = [];
+    await withArchivedPlannerRead(
+      directory,
+      async (read) => {
+        assertEquals(JSON.parse(await read(ownerLinkedFinding)), ownerFinding);
+        assertEquals(JSON.parse(await read(catalog)), savedCatalog);
+        assertStringIncludes(
+          await read({ ...ownerLinkedFinding, id: source }),
+          "unavailable",
+        );
+        assertStringIncludes(
+          await read({
+            ...ownerLinkedFinding,
+            linkedFinding: { ...exactSelected, sourceCase: privateCase },
+          }),
+          "unavailable",
+        );
+        rejectSelected = "PRE_TOOL_CALL";
+        assertStringIncludes(await read(ownerLinkedFinding), "unavailable");
+        assertEquals(JSON.parse(await read(catalog)).entries, []);
+        rejectSelected = "POST_TOOL_RESPONSE";
+        assertStringIncludes(await read(ownerLinkedFinding), "unavailable");
+        rejectSelected = "PRE_OUTPUT";
+        selectedFrames.length = 0;
+        await read(ownerLinkedFinding);
+        assert(
+          !selectedFrames.join("\n").includes(String(exactSelected.finding)),
+        );
+        assertEquals([...matchingSelectedHooks].sort(), [
+          "POST_TOOL_RESPONSE",
+          "PRE_OUTPUT",
+          "PRE_TOOL_CALL",
+        ]);
+      },
+      undefined,
+      (hook, input) => {
+        const call = input.tool_call as
+          | { args?: { action?: string } }
+          | undefined;
+        const exact = hook === "PRE_TOOL_CALL"
+          ? call?.args?.action === "finding_report"
+          : hook === "POST_TOOL_RESPONSE"
+          ? String(input.tool_response).includes(String(exactSelected.finding))
+          : hook === "PRE_OUTPUT" &&
+            String(input.content).includes(String(exactSelected.finding));
+        if (exact) matchingSelectedHooks.add(hook);
+        return !(exact && hook === rejectSelected);
+      },
+      (frame) => selectedFrames.push(frame),
+      selectedRef.id,
+    );
     const firstReceipt = savedFinding;
     workerFindingTitle = "Second verified worker report";
     await reportFinding();
@@ -3167,6 +3227,21 @@ Deno.test("Sentinel plans from an exact published case finding and keeps its evi
       assertEquals(JSON.parse(await read(ownerLinkedFinding)), ownerFinding);
       assertEquals(JSON.parse(await read(catalog)), savedCatalog);
     });
+    await withArchivedPlannerRead(
+      directory,
+      async (read) => {
+        assertEquals(JSON.parse(await read(ownerLinkedFinding)), ownerFinding);
+        assertEquals(JSON.parse(await read(catalog)), savedCatalog);
+        assert(sourcePolicy(2, true));
+        assertStringIncludes(await read(ownerLinkedFinding), "unavailable");
+        assertEquals(JSON.parse(await read(catalog)).entries, []);
+        assert(sourcePolicy(3, false));
+      },
+      undefined,
+      undefined,
+      undefined,
+      selectedRef.id,
+    );
     const resumed = resumeSentinelAssessment(
       selectedPath,
       undefined,
