@@ -42,8 +42,9 @@ async function compactHistoryWithSummarization(
   provider: LlmProvider,
   messagesBefore: number,
   tokensBefore: number,
+  signal?: AbortSignal,
 ): Promise<CompactResult> {
-  const summarized = [...await compactor.summarize(history, provider)];
+  const summarized = [...await compactor.summarize(history, provider, signal)];
   history.length = 0;
   history.push(...summarized);
   return {
@@ -86,6 +87,7 @@ export async function compactSessionHistory(
   providerRegistry: LlmProviderRegistry,
   compactor: Compactor,
   taint: ClassificationLevel,
+  signal?: AbortSignal,
 ): Promise<CompactResult> {
   const history = histories.get(sessionId as string) ?? [];
   if (history.length === 0) return EMPTY_COMPACT_RESULT;
@@ -125,5 +127,6 @@ export async function compactSessionHistory(
     provider,
     messagesBefore,
     tokensBefore,
+    signal,
   );
 }

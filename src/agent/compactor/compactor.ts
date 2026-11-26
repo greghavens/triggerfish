@@ -63,6 +63,7 @@ export interface Compactor {
   summarize(
     history: readonly HistoryEntry[],
     provider: LlmProvider,
+    signal?: AbortSignal,
   ): Promise<readonly HistoryEntry[]>;
   /** Get token count for a history. */
   getTokenEstimate(history: readonly HistoryEntry[]): number;
@@ -231,13 +232,14 @@ export function createCompactor(
   async function summarize(
     history: readonly HistoryEntry[],
     provider: LlmProvider,
+    signal?: AbortSignal,
   ): Promise<readonly HistoryEntry[]> {
     if (history.length <= 2) return history;
     const digest = buildDigest(history, Math.floor(contextBudget * 0.25));
     const result = await provider.complete(
       buildSummarizerMessages(digest),
       [],
-      {},
+      signal ? { signal } : {},
     );
     return [{
       role: "user",

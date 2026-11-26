@@ -227,6 +227,7 @@ export const MAX_SENTINEL_ASSESSMENT_CONCURRENCY = 12;
 
 export interface TriggerFishConfig {
   readonly tool_approval?: readonly string[];
+  readonly owner_context_compaction?: boolean;
   readonly operator_workflows?: readonly {
     readonly id: string;
     readonly classification: "PUBLIC" | "INTERNAL";

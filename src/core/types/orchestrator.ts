@@ -137,6 +137,14 @@ export interface ProcessMessageOptions {
    * The per-tool boundary accepts stop decisions only.
    */
   readonly workerBoundary?: WorkerBoundary;
+  /** Replace only completed-turn context after an authorized tool batch. */
+  readonly refreshCommittedHistory?: (
+    results: readonly {
+      toolName: string;
+      content: string;
+      blocked?: boolean;
+    }[],
+  ) => Promise<readonly HistoryEntry[] | undefined>;
   /** Persist an entire tool batch before another provider call can begin. */
   readonly onToolBatchCheckpoint?: (
     checkpoint: AgentTurnCheckpoint,

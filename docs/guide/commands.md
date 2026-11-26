@@ -496,6 +496,12 @@ These commands are available during an interactive chat session (via
 | `/skill install <name>` | Install a skill from The Reef                                 |
 | `/cron list`            | List scheduled cron jobs                                      |
 
+Set `owner_context_compaction: true` in the gateway configuration to let the
+owner chat agent request compaction during a turn. The checkpoint summarizes
+prior conversation and keeps the active request and completed tool exchanges
+available to the current turn. Saved source messages are retained under the
+existing history policy.
+
 ## Keyboard Shortcuts
 
 These shortcuts work in the CLI chat interface:

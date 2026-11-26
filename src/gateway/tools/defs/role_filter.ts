@@ -80,6 +80,7 @@ export const OWNER_ONLY_TOOLS: ReadonlySet<string> = new Set([
   "operator_runs",
   "mcp_manage",
   "custom_tool_manage",
+  "compact_owner_context",
   // Tidepool canvas
   "tidepool_render_component",
   "tidepool_render_html",

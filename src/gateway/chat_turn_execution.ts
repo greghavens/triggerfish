@@ -1,3 +1,4 @@
+import type { ProcessMessageOptions } from "../core/types/orchestrator.ts";
 import { withExactToolApprovalRun } from "../core/tool_approval_service.ts";
 import { assignmentRecoveryKey } from "../core/durable_assignment.ts";
 import {
@@ -42,6 +43,7 @@ const log = createLogger("chat-turn-execution");
 /** Mutable state shared across chat session helpers via parameter passing. */
 export interface ChatSessionMutableState {
   activeSend: ChatEventSender | null;
+  ownerCompactionActive?: boolean;
   activeSessionId: string;
   activeNonOwnerCeiling: ClassificationLevel | null;
   mutex: Promise<void>;
@@ -190,8 +192,11 @@ export async function orchestrateOwnerAgentTurn(
     readonly tracePath?: string;
     readonly getTaint?: () => ClassificationLevel;
   },
+  refreshCommittedHistory?: ProcessMessageOptions["refreshCommittedHistory"],
 ): Promise<void> {
   const release = await acquireTurnMutex(state);
+  state.ownerCompactionActive = !recovery &&
+    refreshCommittedHistory !== undefined;
   let response: ChatEvent | undefined;
   state.activeSend = recovery
     ? (event) => {
@@ -229,6 +234,7 @@ export async function orchestrateOwnerAgentTurn(
       message: content,
       targetClassification,
       signal,
+      ...(!recovery && { refreshCommittedHistory }),
       ...(scope && trace && {
         onToolDispatchOutcome: (entry: ToolDispatchOutcome) =>
           trace?.appendNext(scope, entry, entry.approvedPayload),
@@ -261,6 +267,7 @@ export async function orchestrateOwnerAgentTurn(
     sendTurnErrorIfNotAborted(sendEvent, err, signal);
   } finally {
     trace?.close();
+    state.ownerCompactionActive = false;
     state.activeSend = null;
     state.activeSessionId = state.ownerSessionId;
     release();

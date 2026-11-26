@@ -199,6 +199,11 @@ export interface AgentLoopContext {
   readonly workerBoundary?: ProcessMessageOptions["workerBoundary"];
   readonly onToolDispatchOutcome?:
     ProcessMessageOptions["onToolDispatchOutcome"];
+  readonly refreshCommittedHistory?: (
+    results: Parameters<
+      NonNullable<ProcessMessageOptions["refreshCommittedHistory"]>
+    >[0],
+  ) => Promise<void>;
   readonly onToolBatchCheckpoint?:
     ProcessMessageOptions["onToolBatchCheckpoint"];
   readonly tokens: TokenAccumulator;

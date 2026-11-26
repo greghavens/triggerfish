@@ -106,6 +106,8 @@ export function buildMainChatSession(
   workflows.recoverWaiting();
   return assembleChatSession({
     customToolsBaseDir: bootstrap.baseDir,
+    enableOwnerContextCompaction:
+      bootstrap.config.owner_context_compaction === true,
     sideQuestionTracePath: join(bootstrap.baseDir, "execution-traces.db"),
     ownerRecoveryTracePath: join(bootstrap.baseDir, "execution-traces.db"),
     resolveSideQuestionSession: (id) =>

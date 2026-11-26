@@ -271,7 +271,9 @@ async function prepareAgentTurnContext(
   signal: AbortSignal | undefined,
   resume: AgentTurnCheckpoint | undefined,
   protectPrompt: boolean,
-): Promise<{ systemPrompt: string; history: HistoryEntry[] }> {
+): Promise<
+  { systemPrompt: string; history: HistoryEntry[]; activeUser?: HistoryEntry }
+> {
   if (resume) {
     const history = structuredClone([...resume.history]);
     if (!protectPrompt) state.histories.set(sessionKey, history);
@@ -296,7 +298,8 @@ async function prepareAgentTurnContext(
   // A new user message ends the previous turn, and reasoning is only
   // meaningful within the turn that produced it.
   expirePreviousTurnReasoning(history);
-  history.push({ role: "user", content: message });
+  const activeUser: HistoryEntry = { role: "user", content: message };
+  history.push(activeUser);
 
   if (!protectPrompt) {
     await persistUserMessage(state.config, sessionKey, message, sessionTaint);
@@ -313,7 +316,7 @@ async function prepareAgentTurnContext(
 
   alignCompactorBudgetToSession(state);
   autoCompactHistory(history, state.compactor, countTokens(systemPrompt));
-  return { systemPrompt, history };
+  return { systemPrompt, history, activeUser };
 }
 
 /** Validate pre-conditions for an agent turn: run pre-context hook and verify provider. */
@@ -364,6 +367,7 @@ export async function orchestrateAgentTurn(
     toolPersistence,
     workerBoundary,
     onToolDispatchOutcome,
+    refreshCommittedHistory,
     onToolBatchCheckpoint,
   } = options;
   const protectedResume = resumeClassification !== undefined ||
@@ -522,6 +526,7 @@ export async function orchestrateAgentTurn(
       error: "The protected agent context could not be prepared.",
     };
   }
+  const { activeUser } = ctx;
   return orchestrateAgentLoop({
     state: turnState,
     session: turnSession,
@@ -535,6 +540,17 @@ export async function orchestrateAgentTurn(
     toolPersistence,
     workerBoundary,
     onToolDispatchOutcome,
+    refreshCommittedHistory: !protectContext && activeUser &&
+        refreshCommittedHistory
+      ? async (results) => {
+        const activeIndex = ctx.history.indexOf(activeUser);
+        if (activeIndex < 1 || signal?.aborted) return;
+        const replacement = await refreshCommittedHistory(results);
+        if (replacement && !signal?.aborted) {
+          ctx.history.splice(0, activeIndex, ...replacement);
+        }
+      }
+      : undefined,
     onToolBatchCheckpoint,
   });
 }

@@ -451,6 +451,8 @@ async function handleToolCallsIteration(
     });
   }
 
+  await ctx.refreshCommittedHistory?.(batchResult.value.results);
+
   if (recordToolCallsAndDetectLoop(ctx.toolCallHistory, iter.parsedCalls)) {
     ctx.history.push({
       role: "user",

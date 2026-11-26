@@ -131,6 +131,7 @@ async function dispatchSingleToolCall(
 
 /** Result of formatting a single tool call execution. */
 interface FormattedToolCallResult {
+  readonly blocked?: boolean;
   readonly text: string;
   readonly toolCallId?: string;
   readonly toolName: string;
@@ -348,6 +349,7 @@ async function executeAndFormatToolCall(
 
   return {
     text: cappedText,
+    ...(blocked && { blocked }),
     toolName: call.name,
     ...(call.id ? { toolCallId: call.id } : {}),
     bumpersBlocked,
@@ -356,6 +358,7 @@ async function executeAndFormatToolCall(
 
 /** A single tool result, ready to be appended to history. */
 export interface ToolCallResult {
+  readonly blocked?: boolean;
   /** The tool name (used for human-readable framing when no ID exists). */
   readonly toolName: string;
   /** OpenAI tool_call_id. Undefined when the provider didn't emit IDs. */
@@ -411,6 +414,7 @@ export async function orchestrateToolCallBatch(
       toolName: formatted.toolName,
       ...(formatted.toolCallId ? { toolCallId: formatted.toolCallId } : {}),
       content: formatted.text,
+      ...(formatted.blocked && { blocked: true }),
     });
     if (formatted.bumpersBlocked) bumpersBlocked = true;
   }
