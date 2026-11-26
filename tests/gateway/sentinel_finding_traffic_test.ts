@@ -27,6 +27,7 @@ import {
 } from "../../src/sentinel/adaptive_planner.ts";
 import { openSentinelAdaptiveStore } from "../../src/sentinel/adaptive_store.ts";
 import {
+  recordSentinelOperatingConstraints,
   refreshSentinelAssessment,
   startSentinelAssessment,
 } from "../../src/sentinel/assessment_store.ts";
@@ -38,6 +39,7 @@ import {
 import { routeHostRequest } from "../../src/tools/tidepool/host/host_server.ts";
 import type { A2UIHostState } from "../../src/tools/tidepool/host/host_types.ts";
 
+const caseId = "reviewed-finding-traffic";
 const search = "sentinel_traffic_search";
 const get = "sentinel_traffic_get";
 const report = "sentinel_report_finding";
@@ -241,7 +243,7 @@ async function exportThroughTidepool(baseDir: string, revision: number) {
         topic: "sentinel",
         type: "export",
         format: "provenance",
-        caseId: "main",
+        caseId,
         revision,
         requestId: 1,
       }),
@@ -261,6 +263,8 @@ async function exportThroughTidepool(baseDir: string, revision: number) {
 async function readTrafficThroughGateway(
   baseDir: string,
   requests: readonly Record<string, unknown>[],
+  policy?: (hook: string) => boolean,
+  approve = false,
 ) {
   const registry = createProviderRegistry();
   let result = "";
@@ -298,16 +302,18 @@ async function readTrafficThroughGateway(
       providerRegistry: registry,
       operatorRunExecutor: createOperatorRunToolExecutor({
         baseDir,
-        confirm: () => Promise.resolve(false),
+        confirm: () => Promise.resolve(approve),
       }),
       hookRunner: {
-        evaluateHook: () =>
-          Promise.resolve({
-            allowed: true,
-            action: "ALLOW",
+        evaluateHook: (hook) => {
+          const allowed = policy?.(hook) ?? true;
+          return Promise.resolve({
+            allowed,
+            action: allowed ? "ALLOW" : "BLOCK",
             ruleId: null,
             duration: 0,
-          }),
+          });
+        },
       },
     }),
   });
@@ -355,7 +361,7 @@ async function readTrafficThroughGateway(
 
 Deno.test("Leased workers attach only exact saved traffic and authenticated Tidepool reopens historical links", async () => {
   const baseDir = await Deno.makeTempDir();
-  const path = resolveSentinelCasePath(baseDir);
+  const path = resolveSentinelCasePath(baseDir, caseId);
   try {
     const startedDateTime = new Date(Date.now() - 60_000).toISOString();
     const entries = ["service", "neighbor"].map((host) => ({
@@ -363,8 +369,19 @@ Deno.test("Leased workers attach only exact saved traffic and authenticated Tide
       request: {
         url: `https://${host}.example/private?token=${rawSecret}`,
         method: "GET",
+        headers: [
+          { name: "Accept", value: "application/fixture" },
+          { name: "X-Unreviewed", value: "unretained-header-marker" },
+        ],
       },
-      response: { status: 403, content: { text: reviewedBody } },
+      response: {
+        status: 403,
+        content: { text: reviewedBody },
+        headers: [{
+          name: "Content-Type",
+          value: `application/${host}-fixture`,
+        }],
+      },
     }));
     const { observations } = importSentinelHar({
       log: { version: "1.2", entries: entries },
@@ -375,6 +392,8 @@ Deno.test("Leased workers attach only exact saved traffic and authenticated Tide
       "fixture",
       path,
       "har",
+      true,
+      false,
       true,
     );
     const { assetId } = observations[0];
@@ -467,7 +486,7 @@ Deno.test("Leased workers attach only exact saved traffic and authenticated Tide
     const bodySearch = {
       action: "traffic_search",
       kind: "sentinel",
-      id: "main",
+      id: caseId,
       revision,
       bodyContains: "REVIEWED FIXTURE",
       limit: 1,
@@ -501,6 +520,58 @@ Deno.test("Leased workers attach only exact saved traffic and authenticated Tide
     );
     assertStringIncludes(changedFilter, "unavailable");
     assertEquals(JSON.parse(noMatch).receipts, []);
+    const { bodyContains: _body, ...headerSearch } = bodySearch;
+    const headerQuery = { ...headerSearch, headerContains: "CONTENT-TYPE" };
+    const [headerResult] = await readTrafficThroughGateway(baseDir, [
+      headerQuery,
+    ]);
+    const headerPage = JSON.parse(headerResult);
+    assertEquals(headerPage.receipts.length, 1);
+    assert(typeof headerPage.nextCursor === "string");
+    assert(!headerResult.includes("application/"));
+    const [headerContinued, wrongHeader, bodyCursor, unreviewed, bodyOnly] =
+      await readTrafficThroughGateway(baseDir, [
+        { ...headerQuery, cursor: headerPage.nextCursor },
+        {
+          ...headerQuery,
+          headerContains: "application/fixture",
+          cursor: headerPage.nextCursor,
+        },
+        { ...headerQuery, cursor: firstMatch.nextCursor },
+        { ...headerQuery, headerContains: "unretained-header-marker" },
+        { ...headerQuery, headerContains: "reviewed fixture" },
+      ]);
+    assertEquals(
+      [
+        headerPage.receipts[0].evidenceId,
+        JSON.parse(headerContinued).receipts[0].evidenceId,
+      ].sort(),
+      [exact.evidenceId, neighbor.evidenceId].sort(),
+    );
+    assertStringIncludes(wrongHeader, "unavailable");
+    assertStringIncludes(bodyCursor, "unavailable");
+    assertEquals(JSON.parse(unreviewed).receipts, []);
+    assertEquals(JSON.parse(bodyOnly).receipts, []);
+    const [deniedHeader] = await readTrafficThroughGateway(
+      baseDir,
+      [headerQuery],
+      (hook) => hook !== "PRE_TOOL_CALL",
+    );
+    assert(!deniedHeader.includes(exact.evidenceId));
+    const scopedHeader = await runWorker(path, lease, [[
+      call(search, { revision, headerContains: "application/service-fixture" }),
+      call(search, {
+        revision,
+        headerContains: "application/neighbor-fixture",
+      }),
+    ]]);
+    assertEquals(
+      JSON.parse(scopedHeader.responses[0][0]).receipts.map(
+        ({ evidenceId }: { evidenceId: string }) => evidenceId,
+      ),
+      [exact.evidenceId],
+    );
+    assertEquals(JSON.parse(scopedHeader.responses[0][1]).receipts, []);
     const submitted = await runWorker(path, lease, [
       [call(assigned)],
       [call(report, {
@@ -513,6 +584,26 @@ Deno.test("Leased workers attach only exact saved traffic and authenticated Tide
       })],
     ]);
     const findingId: string = JSON.parse(submitted.responses[1][0]).record.id;
+    const findingHeader = {
+      ...headerQuery,
+      action: "finding_traffic_candidates",
+      receiptId: findingId,
+    };
+    const [candidate, neighborCandidate] = await readTrafficThroughGateway(
+      baseDir,
+      [
+        { ...findingHeader, headerContains: "application/service-fixture" },
+        { ...findingHeader, headerContains: "application/neighbor-fixture" },
+      ],
+    );
+    assertEquals(
+      JSON.parse(candidate).page.receipts.map(
+        ({ evidenceId }: { evidenceId: string }) => evidenceId,
+      ),
+      [exact.evidenceId],
+    );
+    assert(!candidate.includes("application/service-fixture"));
+    assertEquals(JSON.parse(neighborCandidate).page.receipts, []);
     const mutation = {
       ...exact,
       findingId,
@@ -595,7 +686,7 @@ Deno.test("Leased workers attach only exact saved traffic and authenticated Tide
     const nodeRequest = {
       action: "node",
       kind: "sentinel",
-      id: "main",
+      id: caseId,
       revision,
       node: "finding:case-finding",
     };
@@ -888,7 +979,7 @@ Deno.test("Leased workers attach only exact saved traffic and authenticated Tide
     const operatorPayload = {
       action: "finding_traffic",
       kind: "sentinel",
-      id: "main",
+      id: caseId,
       receiptId: findingId,
       revision: newer.revision,
       recheckId: recheck.id,
@@ -931,6 +1022,63 @@ Deno.test("Leased workers attach only exact saved traffic and authenticated Tide
         .findingTrafficLinks,
       [boundLink],
     );
+    const runId = newer.plan.runId;
+    assert(runId);
+    const run = {
+      kind: "sentinel",
+      id: caseId,
+      revision: newer.revision,
+      runId,
+    };
+    const archiveId = crypto.randomUUID();
+    const [stopped, archived] = await readTrafficThroughGateway(
+      baseDir,
+      [
+        { ...run, action: "cancel" },
+        { ...run, action: "archive", requestId: archiveId },
+      ],
+      undefined,
+      true,
+    );
+    assertEquals(JSON.parse(stopped).run.status, "stopped");
+    assertEquals(JSON.parse(archived).receipt.status, "succeeded");
+    await Deno.rename(dirname(path), join(baseDir, "before-header-restore"));
+    const [restored, restoredPage] = await readTrafficThroughGateway(
+      baseDir,
+      [
+        {
+          ...run,
+          action: "restore",
+          archiveId,
+          requestId: crypto.randomUUID(),
+        },
+        { ...headerQuery, cursor: headerPage.nextCursor },
+      ],
+      undefined,
+      true,
+    );
+    assertEquals(JSON.parse(restored).receipt.status, "succeeded");
+    assertEquals(restoredPage, headerContinued);
+    assert(recordSentinelOperatingConstraints(path, {
+      runId,
+      evidenceRevision: newer.revision,
+      expectedVersion: 0,
+      operatorScope: "owner",
+      requestId: crypto.randomUUID(),
+      constraints: {
+        deniedKinds: [],
+        allowedAssetIds: [observations[1].assetId],
+      },
+    }));
+    const [revokedHeader, revokedCandidate, revokedCursor] =
+      await readTrafficThroughGateway(baseDir, [
+        { ...headerQuery, headerContains: "application/service-fixture" },
+        findingHeader,
+        { ...headerQuery, cursor: headerPage.nextCursor },
+      ]);
+    assertEquals(JSON.parse(revokedHeader).receipts, []);
+    assertStringIncludes(revokedCandidate, "unavailable");
+    assertStringIncludes(revokedCursor, "unavailable");
   } finally {
     await Deno.remove(baseDir, { recursive: true });
   }

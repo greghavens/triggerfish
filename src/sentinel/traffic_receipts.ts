@@ -53,6 +53,7 @@ export interface SentinelTrafficReceiptQuery {
   readonly from?: string;
   readonly until?: string;
   readonly bodyContains?: string;
+  readonly headerContains?: string;
   readonly limit?: number;
   readonly cursor?: string;
 }
@@ -496,6 +497,25 @@ export function readSentinelTrafficReceipt(
     );
 }
 
+function validReviewedSearchPhrase(phrase: unknown): boolean {
+  return phrase === undefined ||
+    (typeof phrase === "string" && phrase.trim() === phrase &&
+      phrase.length >= 3 && phrase.length <= 128 &&
+      /^[\p{L}\p{N}\p{P}\p{S} ]+$/u.test(phrase) &&
+      redactCredentialText(phrase) === phrase);
+}
+
+function matchesReviewedHeader(text: string | undefined, phrase: string) {
+  if (!text) return false;
+  const { request, response } = JSON.parse(text) as {
+    request: { name: string; value: string }[];
+    response: { name: string; value: string }[];
+  };
+  return [...request, ...response].some(({ name, value }) =>
+    name.toLowerCase().includes(phrase) || value.toLowerCase().includes(phrase)
+  );
+}
+
 export function validSentinelTrafficReceiptQuery(
   query: SentinelTrafficReceiptQuery,
 ): boolean {
@@ -510,6 +530,7 @@ export function validSentinelTrafficReceiptQuery(
     from,
     until,
     bodyContains,
+    headerContains,
     limit = 10,
     cursor,
   } = query;
@@ -527,12 +548,8 @@ export function validSentinelTrafficReceiptQuery(
     (from !== undefined && !timestamp(from)) ||
     (until !== undefined && !timestamp(until)) ||
     (from !== undefined && until !== undefined && from >= until) ||
-    (bodyContains !== undefined &&
-      (typeof bodyContains !== "string" ||
-        bodyContains.trim() !== bodyContains ||
-        bodyContains.length < 3 || bodyContains.length > 128 ||
-        !/^[\p{L}\p{N}\p{P}\p{S} ]+$/u.test(bodyContains) ||
-        redactCredentialText(bodyContains) !== bodyContains)) ||
+    !validReviewedSearchPhrase(bodyContains) ||
+    !validReviewedSearchPhrase(headerContains) ||
     !Number.isSafeInteger(limit) || limit < 1 || limit > MAX_PAGE ||
     (cursor !== undefined &&
       (typeof cursor !== "string" ||
@@ -558,6 +575,7 @@ export function readSentinelTrafficReceiptPage(
     from,
     until,
     bodyContains,
+    headerContains,
     limit = 10,
     cursor,
   } = query;
@@ -570,6 +588,7 @@ export function readSentinelTrafficReceiptPage(
   );
   if (!available) return undefined;
   const phrase = bodyContains?.toLowerCase();
+  const header = headerContains?.toLowerCase();
   const results = available.filter(
     (
       {
@@ -578,6 +597,7 @@ export function readSentinelTrafficReceiptPage(
         observation,
         reviewedRequestBody,
         reviewedResponseBody,
+        reviewedHeaders,
       },
     ) => {
       const http = "origin" in observation;
@@ -591,6 +611,8 @@ export function readSentinelTrafficReceiptPage(
         (status === undefined || (http && observation.status === status)) &&
         (from === undefined || (at !== undefined && at >= from)) &&
         (until === undefined || (at !== undefined && at < until)) &&
+        (header === undefined ||
+          matchesReviewedHeader(reviewedHeaders, header)) &&
         (phrase === undefined ||
           reviewedRequestBody?.toLowerCase().includes(phrase) === true ||
           reviewedResponseBody?.toLowerCase().includes(phrase) === true);
@@ -610,6 +632,7 @@ export function readSentinelTrafficReceiptPage(
     from,
     until,
     ...(phrase === undefined ? [] : ["reviewed-text", phrase]),
+    ...(header === undefined ? [] : ["reviewed-header", header]),
     results.map(({ digest }) => digest),
   ]);
   const offset = cursor === undefined

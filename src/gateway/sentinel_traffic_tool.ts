@@ -77,6 +77,11 @@ export const sentinelTrafficSearchTool: ToolDefinition = {
       description:
         "Literal case-insensitive phrase in reviewed retained request or response text. Returns receipt metadata only.",
     },
+    headerContains: {
+      type: "string",
+      description:
+        "Literal case-insensitive phrase in a reviewed retained request or response header name or value. Returns receipt metadata only.",
+    },
     limit: { type: "integer", description: "Page size from 1 to 10" },
     cursor: {
       type: "string",

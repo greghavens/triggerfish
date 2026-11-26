@@ -753,6 +753,7 @@ export const operatorRunTool: ToolDefinition = {
     method: sentinelTrafficSearchTool.parameters.method,
     status: sentinelTrafficSearchTool.parameters.status,
     bodyContains: sentinelTrafficSearchTool.parameters.bodyContains,
+    headerContains: sentinelTrafficSearchTool.parameters.headerContains,
     evidenceRole: sentinelFindingTrafficAttachTool.parameters.evidenceRole,
     evidenceNote: sentinelFindingTrafficAttachTool.parameters.evidenceNote,
     from: sentinelTrafficSearchTool.parameters.from,
