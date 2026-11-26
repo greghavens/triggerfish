@@ -7101,6 +7101,31 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
         currentGoalRef.revision,
       );
       denied = undefined;
+      const denyDuringGoalReview = async (
+        request: typeof appendGoals,
+      ) => {
+        const before = readSentinelAssessment(peerPath)?.plan.formalGoals;
+        const beforeReview = confirmations.length;
+        duringConfirmation = () => {
+          denied = "PRE_TOOL_CALL";
+        };
+        try {
+          assertStringIncludes((await turn(request)).result, "unavailable");
+        } finally {
+          duringConfirmation = undefined;
+          denied = undefined;
+        }
+        assertEquals(confirmations.length, beforeReview + 1);
+        assertEquals(
+          readSentinelAssessment(peerPath)?.revision,
+          request.revision,
+        );
+        assertEquals(
+          readSentinelAssessment(peerPath)?.plan.formalGoals,
+          before,
+        );
+      };
+      await denyDuringGoalReview(appendGoals);
       const appendReceipt =
         JSON.parse((await turn(appendGoals)).result).receipt;
       const appendedRef = {
@@ -7121,6 +7146,7 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
           }],
         }],
       };
+      await denyDuringGoalReview(reviseGoals);
       const revisedReceipt =
         JSON.parse((await turn(reviseGoals)).result).receipt;
       const revisedRef = {

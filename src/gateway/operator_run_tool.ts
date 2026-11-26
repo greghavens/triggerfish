@@ -11661,6 +11661,8 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
           )
         ) return unavailable;
         if (
+          (!read && (!context?.authenticatedOwnerSessionId ||
+            !context.authorizeOwnerRunCall)) ||
           (withdrawal && (!context?.authenticatedOwnerSessionId ||
             !canFlowTo("INTERNAL", context.ceiling ?? "PUBLIC"))) ||
           ref.kind !== "sentinel" || ref.revision === undefined ||
@@ -11878,9 +11880,8 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
           )
         ) return "Error: The operator declined the run action.";
         if (
-          (withdrawal || selectedCase || supersedes) &&
-          (!await context?.authorizeOwnerRunCall?.(args) ||
-            (selectedCase && !selectedCase()))
+          !await context?.authorizeOwnerRunCall?.(args) ||
+          (selectedCase && !selectedCase()) || !await controller.inspect(ref)
         ) {
           return unavailable;
         }
