@@ -1476,7 +1476,57 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
       },
     };
     let pinnedFilteredFacets: unknown;
+    const findingLineageRequest = {
+      kind: exact.kind,
+      id: exact.id,
+      revision: exact.revision,
+      action: "finding_lineage",
+      node: findingId,
+      limit: 1,
+    };
+    let originalLineagePages: unknown[];
     await withGateway(baseDir, async (turn, approvals, policy) => {
+      const first = JSON.parse(await turn(findingLineageRequest)).page;
+      assertEquals(first.findingId, findingId);
+      assertEquals(first.edges.length, 1);
+      assert(first.nextCursor);
+      const pages = [first];
+      while (pages.at(-1)?.nextCursor) {
+        assert(pages.length < 8);
+        pages.push(
+          JSON.parse(
+            await turn({
+              ...findingLineageRequest,
+              cursor: pages.at(-1).nextCursor,
+            }),
+          ).page,
+        );
+      }
+      assert(
+        pages.flatMap(({ edges }) => edges).some(({ relation, from }) =>
+          relation === "supports" && from === evidenceId
+        ),
+      );
+      assert(
+        pages.flatMap(({ edges }) => edges).some(({ relation, to }) =>
+          relation === "affects" && to === "app"
+        ),
+      );
+      assert(
+        !pages.flatMap(({ nodes }) => nodes).some(({ id }) => id === "db"),
+      );
+      assertStringIncludes(
+        await turn({ ...findingLineageRequest, node: "db" }),
+        "unavailable",
+      );
+      assertStringIncludes(
+        await turn({
+          ...findingLineageRequest,
+          cursor: first.nextCursor.replace(/[a-f0-9]{64}/, "0".repeat(64)),
+        }),
+        "unavailable",
+      );
+      originalLineagePages = pages;
       policy.denyTrafficBefore = true;
       assert(!(await turn(trafficBlob)).includes("🙂"));
       assert(!(await turn(trafficSearch)).includes(traffic.digest));
@@ -2719,6 +2769,17 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
         JSON.parse(await turn(filteredFacetsRequest)),
         pinnedFilteredFacets,
       );
+      let priorCursor: string | undefined;
+      for (const originalPage of originalLineagePages!) {
+        const restoredLineage = JSON.parse(
+          await turn({
+            ...findingLineageRequest,
+            ...(priorCursor && { cursor: priorCursor }),
+          }),
+        ).page;
+        assertEquals(restoredLineage, originalPage);
+        priorCursor = restoredLineage.nextCursor;
+      }
       const restoredReportHistory = {
         ...trafficScope,
         action: "finding_report_history",
@@ -3656,6 +3717,18 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
         original.sourceResultSha256,
         node.nativeWorkflowSource.resultSha256,
       );
+      const restoredRunId = restoredNative.plan.runId;
+      assert(restoredRunId);
+      const constraints = readSentinelOperatingConstraints(path, restoredRunId);
+      assert(recordSentinelOperatingConstraints(path, {
+        evidenceRevision: restoredNative.revision,
+        runId: restoredRunId,
+        requestId: crypto.randomUUID(),
+        expectedVersion: constraints?.version ?? 0,
+        operatorScope: "fixture-current-owner",
+        constraints: { deniedKinds: [], allowedAssetIds: ["db"] },
+      }));
+      assertStringIncludes(await turn(findingLineageRequest), "unavailable");
     });
   } finally {
     await Deno.remove(baseDir, { recursive: true });

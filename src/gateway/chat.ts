@@ -383,6 +383,7 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
                       "finding_receipts",
                       "finding_report",
                       "finding_report_history",
+                      "finding_lineage",
                       "finding_traffic",
                       "finding_traffic_set_receipt",
                       "finding_traffic_candidates",

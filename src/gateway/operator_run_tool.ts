@@ -132,6 +132,7 @@ import {
   readSentinelFindingGroup,
 } from "../sentinel/finding_groups.ts";
 import { parseFindingExportFilter } from "../sentinel/assessment_export.ts";
+import { readSentinelFindingLineage } from "../sentinel/finding_lineage.ts";
 import { loadSentinelGraph } from "../sentinel/graph.ts";
 import { isSentinelFindingMutation } from "../sentinel/worker_finding_recovery.ts";
 import { executionFindingAsset } from "../sentinel/worker_finding_evidence.ts";
@@ -462,6 +463,7 @@ export const operatorRunTool: ToolDefinition = {
         "publish_finding",
         "withdraw_published_finding",
         "finding_report_history",
+        "finding_lineage",
         "amend_finding_report",
         "traffic_search",
         "traffic_get",
@@ -9898,6 +9900,32 @@ ${JSON.stringify({ run: ref, runId: exactRunId, adaptiveRevision, ...scope })}`,
           )
         ) return unavailable;
         return safeProjection({ run: ref, taskId, stepIndex: index, source });
+      }
+      if (action === "finding_lineage") {
+        const { node, cursor, limit = 4 } = args;
+        if (
+          ref.kind !== "sentinel" || ref.revision === undefined ||
+          !context?.authenticatedOwnerSessionId ||
+          !canFlowTo("INTERNAL", context.ceiling ?? "PUBLIC") ||
+          typeof node !== "string" || !node || node.length > 4096 ||
+          (cursor !== undefined &&
+            (typeof cursor !== "string" || cursor.length > 100)) ||
+          typeof limit !== "number" || !Number.isSafeInteger(limit) ||
+          limit < 1 || limit > 8 ||
+          Object.keys(args).some((key) =>
+            !["action", "kind", "id", "revision", "node", "cursor", "limit"]
+              .includes(key)
+          ) || !await controller.inspect(ref) ||
+          context.authorizeSentinelCaseRead?.(ref.id, ref.revision) === false
+        ) return unavailable;
+        const page = readSentinelFindingLineage(
+          resolveSentinelCasePath(options.baseDir, ref.id),
+          ref.revision,
+          node,
+          limit,
+          cursor,
+        );
+        return page ? safeProjection({ run: ref, page }) : unavailable;
       }
       if (action === "graph_overview") {
         if (

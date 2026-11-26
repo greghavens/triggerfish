@@ -395,6 +395,10 @@ For up to sixteen selected `findingIds`, use `operator_runs finding_asset_tree`
 with `kind: sentinel`, the case `id`, and a saved `revision`. It shows the
 affected assets and their declared in-scope ancestors. Aggregate counts count
 each finding once per asset, even when it affects multiple descendants.
+Use `operator_runs finding_lineage` with an exact case ID, saved revision,
+and finding `node` to page its retained graph evidence. Each page links the
+finding to visible supporting evidence, controls, or affected assets through
+their exact node IDs. The cursor binds to the authorized lineage.
 
 An authenticated owner can use `operator_runs amend_finding_report` with
 `severity`, `findingCategory`, or `disposition`, the current
