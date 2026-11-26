@@ -277,6 +277,31 @@ export function sentinelGitHubBranchUrl(
   }`;
 }
 
+export function sentinelGitHubBranchRefUrl(
+  owner: string,
+  repo: string,
+  branch: string,
+) {
+  if (!isApprovedHistoryBranchName(branch)) {
+    throw new Error("Invalid configured GitHub branch.");
+  }
+  return `${sentinelGitHubRepositoryUrl(owner, repo)}/git/ref/heads/${
+    encodeURIComponent(branch)
+  }`;
+}
+
+/** Prove access to the exact ref without retaining its object or protection data. */
+export function verifySentinelGitHubBranchContents(
+  target: { owner: string; repo: string; branch: string },
+  options: SentinelGitHubWorkflowOptions,
+) {
+  return readSentinelGitHubJson(
+    sentinelGitHubBranchRefUrl(target.owner, target.repo, target.branch),
+    options,
+    (body) => record(body).ref === `refs/heads/${target.branch}`,
+  );
+}
+
 /** Read only the positive, exact branch protection signal. */
 export function readSentinelGitHubBranchProtection(
   target: { owner: string; repo: string; branch: string },

@@ -1,3 +1,8 @@
+import { SENTINEL_LIVE_BRANCH_PROTECTION } from "./github_repository_visibility.ts";
+import {
+  retainedBranchExecutionProjection,
+  sentinelExecutionEvidenceFile,
+} from "./case_execution_evidence.ts";
 import { matchesPortableSentinelProvenanceNode } from "./portable_provenance.ts";
 import { SENTINEL_LIVE_REPOSITORY_VISIBILITY } from "./github_repository_visibility.ts";
 import { readSentinelCaseFindingReceipts } from "./worker_finding_store.ts";
@@ -23,6 +28,7 @@ import {
   isSentinelInventoryFindingRead,
   isSentinelInventoryNeighborhoodRead,
   parseSentinelPinnedFindingRead,
+  SENTINEL_ASSIGNED_EXECUTION_EVIDENCE,
   SENTINEL_SAVED_WORKFLOW_READ,
   sentinelGoalReceiptReadArguments,
   sentinelSharedAssetLinksArgs,
@@ -765,7 +771,11 @@ function retainedTraceReceiptFields(
     const page = sentinelTrafficPageReference(step.trafficSearchPage);
     if (page) fields.trafficSearchPage = page;
   }
-  if (step.tool === SENTINEL_SAVED_WORKFLOW_READ) {
+  if (
+    step.tool === SENTINEL_SAVED_WORKFLOW_READ ||
+    step.tool === SENTINEL_ASSIGNED_EXECUTION_EVIDENCE ||
+    step.tool === SENTINEL_LIVE_BRANCH_PROTECTION
+  ) {
     const read = step.goalReceiptRead as
       | { args?: unknown; sha256?: unknown }
       | undefined;
@@ -865,6 +875,8 @@ function scrubAdaptive(
   runId: string,
   evidenceRevision: number,
   snapshotPath: string,
+  workspace: string,
+  livePath: string,
 ) {
   clearRows(db, [
     "adaptive_active",
@@ -903,6 +915,16 @@ function scrubAdaptive(
     evidenceRevision,
     false,
     {
+      branchExecution: (target, node, expected) =>
+        retainedBranchExecutionProjection(
+          snapshotPath,
+          join(dirname(livePath), sentinelExecutionEvidenceFile),
+          evidenceRevision,
+          target,
+          node,
+          expected,
+          workspace,
+        ),
       traffic: (args, targetId) =>
         readPortableSentinelTrafficMetadata(
           snapshotPath,
@@ -1124,6 +1146,8 @@ export function captureStoppedSentinelCaseArtifacts(
               scope.runId,
               scope.evidenceRevision,
               join(directory, "sentinel.json"),
+              baseDir,
+              source,
             ),
         );
         files.push(artifact(directory, "sentinel-adaptive.db"));

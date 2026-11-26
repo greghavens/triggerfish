@@ -13,8 +13,10 @@ import {
 import {
   readSentinelGitHubBranchProtection,
   readSentinelGitHubRepositoryVisibility,
+  sentinelGitHubBranchRefUrl,
   sentinelGitHubBranchUrl,
   sentinelGitHubRepositoryUrl,
+  verifySentinelGitHubBranchContents,
 } from "../sentinel/github_workflow_runs.ts";
 
 type Scopes = NonNullable<
@@ -87,6 +89,7 @@ export function createSentinelRepositoryVisibilityReader(options: {
       receipt: SentinelRepositoryVisibilityReceipt,
     ) => SentinelRepositoryVisibilityReceipt | undefined;
     readonly resumeOnly?: boolean;
+    readonly verifyCurrentContents?: boolean;
     readonly branch?: string;
   }) => {
     const scope = options.scopes?.find(({ case: caseId, asset }) =>
@@ -141,8 +144,6 @@ export function createSentinelRepositoryVisibilityReader(options: {
           }),
           "INTERNAL",
         );
-      if (saved) return mayRead(saved.visibility) ? saved : undefined;
-      const observedAt = (options.now?.() ?? new Date()).toISOString();
       const http = {
         token: credential.token,
         signal: request.signal,
@@ -152,6 +153,40 @@ export function createSentinelRepositoryVisibilityReader(options: {
       const target = { owner, repo, repositoryId };
       const readVisibility = options.readVisibility ??
         readSentinelGitHubRepositoryVisibility;
+      if (saved) {
+        if (!mayRead(saved.visibility)) return;
+        if (request.verifyCurrentContents) {
+          if (!branch || !branchDestination || saved.visibility === "public") {
+            return;
+          }
+          const refDestination = {
+            ...branchDestination,
+            url: sentinelGitHubBranchRefUrl(owner, repo, branch),
+          };
+          const identity = async () => {
+            if (
+              !current() || !await request.authorize(destination) || !current()
+            ) return false;
+            const visibility = await readVisibility(target, http);
+            return current() && visibility !== "public" && mayRead(visibility);
+          };
+          if (
+            !await identity() || !await request.authorize(refDestination) ||
+            !current() ||
+            !await verifySentinelGitHubBranchContents(
+              { ...target, branch },
+              http,
+            ) || !await identity() || !current()
+          ) return;
+          const rechecked = await options.resolveCredential(credential.ref);
+          if (
+            !current() || rechecked?.ref !== credential.ref ||
+            rechecked.token !== credential.token
+          ) return;
+        }
+        return saved;
+      }
+      const observedAt = (options.now?.() ?? new Date()).toISOString();
       if (
         branchDestination &&
         (!await request.authorize(destination) || !current() ||

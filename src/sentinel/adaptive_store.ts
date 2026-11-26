@@ -1,3 +1,4 @@
+import type { retainedBranchExecutionProjection } from "./case_execution_evidence.ts";
 import {
   parsePlannerReadCheckpoint,
   type SentinelPlannerReadCheckpoint,
@@ -32,6 +33,7 @@ import {
   repositoryVisibilityReceipt,
   repositoryVisibilityRecheckBinding,
   repositoryVisibilityReference,
+  SENTINEL_LIVE_BRANCH_PROTECTION,
   SENTINEL_SAVED_REPOSITORY_VISIBILITY,
   type SentinelRepositoryVisibilityReceipt,
   type SentinelRepositoryVisibilityRecheckBinding,
@@ -84,6 +86,7 @@ import {
   readSentinelProvenanceSearchReference,
   readSentinelTaskObservationPageReference,
   readSentinelWorkerTracePageReference,
+  SENTINEL_ASSIGNED_EXECUTION_EVIDENCE,
   SENTINEL_CASE_INVENTORY_READ,
   SENTINEL_GOAL_PROPOSE,
   SENTINEL_GOAL_PROVE,
@@ -708,10 +711,23 @@ function portablePausedWorkerRead(
     ) return { id: call.id, tool: ASSIGNED_TARGET_CHECKPOINT_TOOL } as const;
     if (
       (call.function.name === SENTINEL_SAVED_WORKFLOW_READ ||
-        call.function.name === WORKFLOW_CHECKPOINT_TOOL) &&
+        call.function.name === WORKFLOW_CHECKPOINT_TOOL ||
+        call.function.name === SENTINEL_LIVE_BRANCH_PROTECTION) &&
       args && typeof args === "object" && !Array.isArray(args) &&
       Object.keys(args).length === 0
     ) return { id: call.id, tool: call.function.name } as const;
+    if (call.function.name === SENTINEL_ASSIGNED_EXECUTION_EVIDENCE) {
+      const source = sentinelGoalReceiptReadArguments(
+        SENTINEL_ASSIGNED_EXECUTION_EVIDENCE,
+        args,
+      );
+      if (!source?.node) return;
+      return {
+        id: call.id,
+        tool: call.function.name,
+        source: { node: source.node },
+      } as const;
+    }
     if (call.function.name === SENTINEL_PROVENANCE_NODE_READ) {
       const provenance = sentinelGoalReceiptReadArguments(
         SENTINEL_PROVENANCE_NODE_READ,
@@ -734,6 +750,11 @@ function portablePausedWorkerRead(
 }
 
 type PortableWorkerSources = {
+  readonly branchExecution: (
+    targetId: string,
+    node: string,
+    expected: Parameters<typeof retainedBranchExecutionProjection>[5],
+  ) => string | undefined;
   readonly traffic: (
     args: NonNullable<ReturnType<typeof sentinelTrafficReadArgs>>,
     targetId: string,
@@ -862,6 +883,51 @@ function portableLiveWorkflowReceipt(
   return receipt;
 }
 
+function portableBranchCheckpoint(
+  db: DatabaseSync,
+  revision: string,
+  evidenceRevision: number,
+  taskId: string,
+  targetId: string,
+  control: string | null,
+) {
+  const task = db.prepare(
+    "SELECT * FROM adaptive_tasks WHERE id = ? AND revision = ? AND nodeId = ?",
+  ).get(taskId, revision, targetId);
+  if (!task) return;
+  const followup = decodeTask(task).plannerRound?.findingFollowup;
+  const scope = followup?.nativeRepositoryVisibility;
+  if (!scope?.branch || !followup || followup.completedAssessmentSha256) return;
+  const row = db.prepare(`
+    SELECT receipt, sourceStepIndex FROM adaptive_repository_visibility_results
+    WHERE revision = ? AND evidenceRevision = ? AND taskId = ? AND controlClaimSha256 IS ?
+  `).get(revision, evidenceRevision, taskId, control);
+  if (
+    typeof row?.receipt !== "string" || typeof row.sourceStepIndex !== "number"
+  ) return;
+  const receipt = repositoryVisibilityReceipt(JSON.parse(row.receipt));
+  if (
+    !receipt || receipt.visibility === "public" ||
+    receipt.evidenceRevision !== evidenceRevision ||
+    JSON.stringify(receipt) !== row.receipt ||
+    receipt.repository !== scope.repository ||
+    receipt.repositoryId !== scope.repositoryId ||
+    receipt.branch !== scope.branch
+  ) return;
+  return {
+    source: followup.evidenceId,
+    expected: {
+      repository: scope.repository,
+      repositoryId: scope.repositoryId,
+      branch: scope.branch,
+    },
+    result: JSON.stringify(
+      projectRepositoryVisibility(receipt, taskId, targetId),
+    ),
+    step: row.sourceStepIndex,
+  };
+}
+
 function portablePausedWorkerProgress(
   db: DatabaseSync,
   value: AgentTurnCheckpoint,
@@ -871,6 +937,7 @@ function portablePausedWorkerProgress(
   nodeId: string,
   sources?: PortableWorkerSources,
   workflow?: SentinelGitHubWorkflowReadReceipt,
+  branch?: ReturnType<typeof portableBranchCheckpoint>,
 ): SentinelReviewStep[] | undefined {
   const calls = value.history.flatMap(({ tool_calls = [] }) => tool_calls);
   const results = value.history.filter(({ role }) => role === "tool");
@@ -913,6 +980,41 @@ function portablePausedWorkerProgress(
         outcome: "returned",
         target: nodeId,
         githubWorkflowRead: workflow,
+      });
+      continue;
+    }
+    if (call.tool === SENTINEL_ASSIGNED_EXECUTION_EVIDENCE) {
+      const proof = { args: call.source, sha256: hash };
+      if (
+        !branch || branch.step <= index ||
+        branch.source !== call.source.node ||
+        !isDeepStrictEqual(step.goalReceiptRead, proof) ||
+        sources?.branchExecution(nodeId, call.source.node, branch.expected) !==
+          result.content
+      ) return;
+      safe.push({
+        tool: call.tool,
+        outcome: "returned",
+        goalReceiptRead: proof,
+      });
+      continue;
+    }
+    if (call.tool === SENTINEL_LIVE_BRANCH_PROTECTION) {
+      if (!branch) return;
+      const proof = {
+        args: {},
+        sha256: createHash("sha256").update(branch.result).digest("hex"),
+      };
+      if (
+        branch.step !== index ||
+        result.content !== `sentinel-repository-visibility:${proof.sha256}` ||
+        !isDeepStrictEqual(step.goalReceiptRead, proof) ||
+        !safe.some(({ tool }) => tool === SENTINEL_ASSIGNED_EXECUTION_EVIDENCE)
+      ) return;
+      safe.push({
+        tool: call.tool,
+        outcome: "returned",
+        goalReceiptRead: proof,
       });
       continue;
     }
@@ -1114,6 +1216,23 @@ export function retainPortablePausedGraphCheckpoints(
             control,
           )
           : undefined;
+        const branch = value.history.some((
+            { tool_calls }: AgentTurnCheckpoint["history"][number],
+          ) =>
+            tool_calls?.some((call) =>
+              portablePausedWorkerRead(call, evidenceRevision)?.tool ===
+                SENTINEL_LIVE_BRANCH_PROTECTION
+            )
+          )
+          ? portableBranchCheckpoint(
+            db,
+            revision,
+            evidenceRevision,
+            taskId,
+            nodeId,
+            control,
+          )
+          : undefined;
         const safeSteps = portablePausedWorkerProgress(
           db,
           value,
@@ -1123,6 +1242,7 @@ export function retainPortablePausedGraphCheckpoints(
           nodeId,
           sources,
           workflow,
+          branch,
         );
         if (!safeSteps) continue;
         const normalized = normalizeWorkerCheckpoint(
@@ -1133,6 +1253,14 @@ export function retainPortablePausedGraphCheckpoints(
           safeSteps,
           undefined,
           [],
+          branch
+            ? (tool) =>
+              tool === SENTINEL_LIVE_BRANCH_PROTECTION
+                ? { id: taskId, args: {}, result: branch.result }
+                : undefined
+            : undefined,
+          undefined,
+          true,
         );
         if (
           !normalized ||
@@ -8433,6 +8561,11 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
       return hold?.event === "model_review_resumed"
         ? JSON.parse(String(hold.note)).policyDigest
         : undefined;
+    },
+
+    hasReviewedWorkerResume(revision: string, id: string) {
+      return lastWorkerHold.get(revisionKey(revision), taskId(id))?.event ===
+        "model_review_resumed";
     },
 
     reviewModelHold(

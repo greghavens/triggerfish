@@ -63,6 +63,7 @@ import {
 import { retainArchivedWorkerTraceMetadata } from "./case_archive_capture.ts";
 import {
   branchExecutionEvidenceId,
+  retainedBranchExecutionProjection,
   sentinelExecutionEvidenceFile,
   validateCaseExecutionEvidence,
 } from "./case_execution_evidence.ts";
@@ -1032,6 +1033,7 @@ function restoreAdaptive(
   revision: number,
   runId: string,
   retained: readonly number[],
+  executionEvidence: string | undefined,
 ) {
   checkedDatabase(path, "adaptive", (db, tables) => {
     requireColumns(db, "adaptive_active", ["singleton", "revision"]);
@@ -1146,6 +1148,15 @@ function restoreAdaptive(
         revision,
         true,
         {
+          branchExecution: (target, node, expected) =>
+            retainedBranchExecutionProjection(
+              assessment,
+              executionEvidence,
+              revision,
+              target,
+              node,
+              expected,
+            ),
           traffic: (args, targetId) =>
             readPortableSentinelTrafficMetadata(
               join(dirname(assessment), "sentinel.json"),
@@ -2235,8 +2246,18 @@ export async function restoreVerifiedSentinelCaseArchive(
   );
   validateArchivedIncidentRecommendations(assessment, snapshot);
   const revisions = sentinelArchiveLinkRevisions(assessment, runId, revision);
+  const execution = stagedPath(archive, sentinelExecutionEvidenceFile);
+  await validateCaseExecutionEvidence(execution, assessment, revisions, graph);
   if (adaptive) {
-    restoreAdaptive(adaptive, assessment, caseId, revision, runId, revisions);
+    restoreAdaptive(
+      adaptive,
+      assessment,
+      caseId,
+      revision,
+      runId,
+      revisions,
+      execution,
+    );
   }
   validateNativeWorkflowCitations(
     adaptive,
@@ -2353,8 +2374,6 @@ export async function restoreVerifiedSentinelCaseArchive(
       source: discoveries,
     });
   }
-  const execution = stagedPath(archive, sentinelExecutionEvidenceFile);
-  await validateCaseExecutionEvidence(execution, assessment, revisions, graph);
   if (execution) {
     sourceBundles.push({
       name: sentinelExecutionEvidenceFile,

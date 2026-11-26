@@ -2748,6 +2748,10 @@ async function readLiveRepositoryVisibility(
     signal: turn.signal,
     isCurrent: current,
     resumeOnly: replay,
+    verifyCurrentContents: replay && branchProtection &&
+      withStore((store) =>
+        store.hasReviewedWorkerResume(task.revision, task.id)
+      ),
     branch: reviewed?.branch,
     loadSaved: () =>
       withStore((store) =>
@@ -6204,11 +6208,26 @@ function createAgent(
       : undefined;
     const liveDestination = liveTask?.nodeId &&
       assignedWorkflowDestination(options, location.caseId, liveTask.nodeId);
+    const branchTask = worker && tool === SENTINEL_LIVE_BRANCH_PROTECTION &&
+        !Object.keys(args).length && options.readRepositoryVisibility
+      ? readAssignedModelReview(options)
+      : undefined;
+    const branchFollowup = branchTask?.plannerRound?.findingFollowup;
+    const branch = branchFollowup?.nativeRepositoryVisibility;
     const selector = worker
       ? workerArgs && approvalIsCurrent(turn) &&
           (workerArgs.revision === undefined ||
             workerArgs.revision === current.revision)
         ? { name: tool, args: workerArgs }
+        : branchTask?.nodeId && branch?.branch &&
+            !branchFollowup?.completedAssessmentSha256 &&
+            approvalIsCurrent(turn)
+        ? {
+          name: tool,
+          args: {},
+          asset: branchTask.nodeId,
+          followup: branchFollowup,
+        }
         : liveDestination && approvalIsCurrent(turn)
         ? { name: tool, args: {}, destination: liveDestination }
         : workflowSource && approvalIsCurrent(turn)

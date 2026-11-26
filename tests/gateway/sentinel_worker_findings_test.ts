@@ -1,3 +1,8 @@
+import type { ApprovalInboxRecord } from "../../src/core/approval_inbox.ts";
+import {
+  createToolApprovalService,
+  type ToolApprovalService,
+} from "../../src/core/tool_approval_service.ts";
 import { createWorkflowRunRegistry } from "../../src/workflow/registry.ts";
 import {
   withVerifiedRunArchive,
@@ -509,6 +514,7 @@ async function withFindingAssignmentGateway(
   confirm: () => Promise<boolean>,
   test: (
     turn: (args: Record<string, unknown> | string) => Promise<string>,
+    inbox: (args: Record<string, unknown>) => Promise<Record<string, unknown>>,
   ) => Promise<void>,
   outputPolicy?: (hook: string, input: Record<string, unknown>) => boolean,
   onFrame?: (frame: string) => void,
@@ -522,6 +528,7 @@ async function withFindingAssignmentGateway(
   readRepositoryVisibility?: ReturnType<
     typeof createSentinelRepositoryVisibilityReader
   >,
+  toolApprovalInbox?: ToolApprovalService,
 ) {
   const registry = createProviderRegistry();
   let input: Record<string, unknown> = {};
@@ -583,6 +590,7 @@ async function withFindingAssignmentGateway(
       sentinelModelAccess: true,
     }),
     hookRunner: {
+      toolApprovalInbox,
       evaluateHook(hook, { input }) {
         const allowed = outputPolicy?.(hook, input) ?? true;
         return Promise.resolve({
@@ -636,6 +644,26 @@ async function withFindingAssignmentGateway(
         clearTimeout(timer);
         socket.removeEventListener("message", receive);
       }
+    }, (args) => {
+      const requestId = crypto.randomUUID();
+      const done = Promise.withResolvers<Record<string, unknown>>();
+      const timer = setTimeout(
+        () => done.reject(new Error("No approval response")),
+        3000,
+      );
+      const receive = ({ data }: MessageEvent) => {
+        const frame = JSON.parse(data);
+        if (
+          frame.type === "approval_inbox_result" &&
+          frame.requestId === requestId
+        ) done.resolve(frame);
+      };
+      socket.addEventListener("message", receive);
+      socket.send(JSON.stringify({ ...args, requestId }));
+      return done.promise.finally(() => {
+        clearTimeout(timer);
+        socket.removeEventListener("message", receive);
+      });
     });
   } finally {
     socket.close();
@@ -8454,12 +8482,36 @@ for (
       outcome,
       denied: branchMode,
     })),
+    {
+      branchMode: "portable branch",
+      visibility: "private",
+      repositoryId: 42,
+      outcome: "pass",
+      denied: "portable branch",
+    },
+    {
+      branchMode: "portable revoked branch",
+      visibility: "private",
+      repositoryId: 42,
+      outcome: "pass",
+      denied: "portable revoked branch",
+    },
+    {
+      branchMode: "portable public branch",
+      visibility: "private",
+      repositoryId: 42,
+      outcome: "pass",
+      denied: "portable public branch",
+    },
   ] as const
 ) {
   const branchMode = "branchMode" in scenario ? scenario.branchMode : undefined;
+  const portableBranch = branchMode === "portable branch" ||
+    branchMode === "portable revoked branch" ||
+    branchMode === "portable public branch";
   const family = branchMode ? "branch protection" : "repository visibility";
   const goalPolicy = "goalPolicy" in scenario ? scenario.goalPolicy : undefined;
-  Deno.test(`Native ${family} remediation checks ${goalPolicy ? `${goalPolicy} goal` : scenario.outcome ?? scenario.denied}`, async () => {
+  Deno.test(`Native ${family} remediation checks ${portableBranch ? branchMode : goalPolicy ? `${goalPolicy} goal` : scenario.outcome ?? scenario.denied}`, async () => {
     const baseDir = await Deno.makeTempDir();
     const caseId = "native-repository-remediation";
     const path = resolveSentinelCasePath(baseDir, caseId);
@@ -8474,6 +8526,10 @@ for (
       : SENTINEL_LIVE_REPOSITORY_VISIBILITY;
     const metadataPath = "/repos/owner/repo";
     const branchPath = `${metadataPath}/branches/release%2F2026`;
+    const refPath = metadataPath + "/git/ref/heads/release%2F2026";
+    const approvalInbox = portableBranch
+      ? createToolApprovalService(join(baseDir, "tool-approvals.db"))
+      : undefined;
     const original = branchMode
       ? {
         kind: "github_branch_protection" as const,
@@ -8546,7 +8602,40 @@ for (
         }]),
         { mode: 0o600 },
       );
-      const started = startSentinelAssessment(path);
+      const goals: SentinelFormalGoal[] = [{
+        id: "review-branch",
+        title: "Review branch control",
+        policy: "operator",
+        criteria: [{
+          id: "recorded-review",
+          description: "Record the reviewed branch protection.",
+          source: "graph_evidence",
+          reference: "future-branch-review",
+        }],
+      }];
+      const started = portableBranch
+        ? applySentinelFormalGoals(path, {
+          mode: "start",
+          requestId: "branch-checkpoint-fixture",
+          proposalDigest: digestSentinelGoalProposal(goals),
+          goals,
+          plan: {
+            goal: "Review branch protection.",
+            childDescription: "Review the exact branch.",
+            assessmentTemplate: {
+              id: crypto.randomUUID(),
+              version: 1,
+              digest: "a".repeat(64),
+              interceptRules: [{
+                tool: branchTool,
+                effect: "ask",
+                enabled: true,
+                assetId: "app",
+              }],
+            },
+          },
+        }).state
+        : startSentinelAssessment(path);
       const runId = started.plan.runId;
       assert(runId);
       const originalId = branchMode
@@ -8766,6 +8855,8 @@ for (
       let branchResponses = 0;
       let liveDispatches = 0;
       let interrupted = false;
+      let archived = false;
+      let modelReused = false;
       const reader = createSentinelRepositoryVisibilityReader({
         scopes: [{
           case: caseId,
@@ -8825,8 +8916,22 @@ for (
                       ? 43
                       : 42,
                     full_name: repo,
-                    visibility: "public",
+                    visibility: portableBranch &&
+                        !(archived && branchMode === "portable public branch")
+                      ? "private"
+                      : "public",
                   }),
+                });
+              }
+              if (portableBranch && destination === refPath) {
+                return Promise.resolve({
+                  ok: true as const,
+                  value: branchMode === "portable revoked branch"
+                    ? new Response(null, { status: 404 })
+                    : Response.json({
+                      ref: "refs/heads/" + branch,
+                      object: { sha: "discard-ref-object" },
+                    }),
                 });
               }
               assertEquals(destination, branchPath);
@@ -8900,9 +9005,12 @@ for (
               } else {
                 assert(!live.startsWith("{"));
               }
-              if (branchMode === "protected" && !interrupted) {
+              if (
+                (branchMode === "protected" || portableBranch) && !interrupted
+              ) {
                 await resume.promise;
               }
+              if (archived) modelReused = true;
             } else if (scenario.repositoryId === original.repositoryId) {
               assertEquals(
                 JSON.parse(live).repositoryId,
@@ -8953,6 +9061,7 @@ for (
                 Promise.resolve(receipt.repositoryId === original.repositoryId),
               allowModelAccess: true,
               hookRunner: {
+                toolApprovalInbox: approvalInbox,
                 evaluateHook(hook, { input }) {
                   const call = input.tool_call as { name?: string } | undefined;
                   const name = input.tool_name ?? call?.name;
@@ -8999,6 +9108,174 @@ for (
           () => () => {},
         );
       coordinator = startReview();
+      if (portableBranch) {
+        const selected = () =>
+          readAdaptiveSentinel(path, state)?.modelReviewStates.find(
+            ({ taskId }) => taskId === selectedTask,
+          );
+        const allowOriginal: NonNullable<
+          Parameters<
+            typeof createOperatorRunToolExecutor
+          >[0]["authorizeExecutionTracePayload"]
+        > = (payload) =>
+          Promise.resolve(
+            payload.kind === original.kind && payload.repo === original.repo &&
+              payload.repositoryId === original.repositoryId,
+          );
+        const run = { ...ref, runId, revision: state.revision };
+        const hold = {
+          ...run,
+          adaptiveRevision: adaptiveRevision(state),
+          taskId: selectedTask,
+          attempt: 1,
+        };
+        const withBranchGateway = (
+          fn: Parameters<typeof withFindingAssignmentGateway>[2],
+        ) =>
+          withFindingAssignmentGateway(
+            baseDir,
+            () => Promise.resolve(true),
+            fn,
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            false,
+            undefined,
+            allowOriginal,
+            reader,
+            approvalInbox,
+          );
+        const archiveId = crypto.randomUUID();
+        await withBranchGateway(async (turn, inbox) => {
+          let pending: ApprovalInboxRecord | undefined;
+          for (let attempts = 0; attempts < 100 && !pending; attempts++) {
+            coordinator?.advance(state);
+            const page = await inbox({ type: "approval_inbox_list" });
+            assertEquals(page.ok, true);
+            pending = (page.result as { records: ApprovalInboxRecord[] })
+              .records.find(
+                ({ status }) => status === "pending",
+              );
+            if (!pending) {
+              await new Promise((resolve) => setTimeout(resolve, 10));
+            }
+          }
+          assert(pending);
+          assertEquals(pending.assignmentId, selectedTask);
+          assertEquals(pending.tool, branchTool);
+          assertEquals(
+            (await inbox({
+              type: "approval_inbox_decide",
+              approvalId: pending.id,
+              approved: true,
+            })).ok,
+            true,
+          );
+          await waitForCondition(() => live !== undefined, () => {});
+          assertEquals(
+            JSON.parse(
+              await turn({
+                ...hold,
+                action: "pause_assignment",
+                requestId: crypto.randomUUID(),
+              }),
+            ).receipt.action,
+            "pause_assignment",
+          );
+          assertEquals(selected()?.status, "paused");
+          coordinator?.stop();
+          interrupted = true;
+          resume.resolve();
+          await waitForCondition(
+            () => !coordinator?.hasInFlightWork(),
+            () => {},
+          );
+          assertEquals(
+            JSON.parse(await turn({ ...run, action: "cancel" })).run.status,
+            "stopped",
+          );
+          assertEquals(
+            JSON.parse(
+              await turn({
+                ...run,
+                action: "archive",
+                requestId: archiveId,
+              }),
+            ).receipt.status,
+            "succeeded",
+          );
+        });
+        await Deno.rename(
+          dirname(path),
+          join(baseDir, "before-branch-restore"),
+        );
+        await withBranchGateway(async (turn) => {
+          assertEquals(
+            JSON.parse(
+              await turn({
+                ...run,
+                action: "restore",
+                archiveId,
+                requestId: crypto.randomUUID(),
+              }),
+            ).receipt.status,
+            "succeeded",
+          );
+          assertEquals(
+            JSON.parse(await turn({ ...run, action: "resume" })).run.status,
+            "running",
+          );
+          assertEquals(
+            JSON.parse(
+              await turn({
+                ...hold,
+                action: "resume_assignment",
+                requestId: crypto.randomUUID(),
+              }),
+            ).receipt.action,
+            "resume_assignment",
+          );
+        });
+        archived = true;
+        coordinator = startReview();
+        await waitForCondition(
+          () =>
+            branchMode === "portable public branch"
+              ? branchRequests.length > 3
+              : branchRequests.includes(refPath),
+          () => coordinator?.advance(state),
+        );
+        if (branchMode !== "portable branch") {
+          await waitForCondition(
+            () => !coordinator?.hasInFlightWork(),
+            () => {},
+          );
+          assertEquals(modelReused, false);
+          assertEquals(result, undefined);
+          assertEquals(fetches, 1);
+          if (branchMode === "portable public branch") {
+            assert(!branchRequests.includes(refPath));
+          }
+          return;
+        }
+        await waitForCondition(
+          () => !!result,
+          () => coordinator?.advance(state),
+        );
+        assert(modelReused);
+        assertEquals(fetches, 1);
+        assertEquals(liveDispatches, 1);
+        const report = readSentinelWorkerFindingReport(path, state.revision);
+        assertEquals(report?.rechecks[0]?.outcome, "pass");
+        const saved = await Deno.readFile(
+          join(dirname(path), "sentinel-adaptive.db"),
+        );
+        const persisted = new TextDecoder().decode(saved);
+        assert(!persisted.includes("discard-ref-object"));
+        assert(!persisted.includes("synthetic-local-metadata-token"));
+        return;
+      }
       if (branchMode === "protected") {
         await waitForCondition(
           () => live !== undefined,

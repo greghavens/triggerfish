@@ -204,6 +204,61 @@ async function readBundle(path: string) {
   return parseBundle(await readSentinelChatSnapshot(path));
 }
 
+function readBundleSync(path: string) {
+  let info: Deno.FileInfo;
+  try {
+    info = Deno.lstatSync(path);
+  } catch (error) {
+    if (error instanceof Deno.errors.NotFound) {
+      return new Map<string, SavedExecutionEvidence>();
+    }
+    throw error;
+  }
+  assertOperatorSourceSnapshotInfo(info);
+  if ((info.mode ?? 0) & 0o077 || info.size > MAX_SNAPSHOT_BYTES) {
+    throw new Error("Invalid private Sentinel execution evidence");
+  }
+  return parseBundle(JSON.parse(Deno.readTextFileSync(path)));
+}
+
+/** Independently project only the exact reviewed branch's sealed source. */
+export function retainedBranchExecutionProjection(
+  assessment: string,
+  bundle: string | undefined,
+  revision: number,
+  assignedAsset: string,
+  nodeId: string,
+  expected: { repository: string; repositoryId: number; branch: string },
+  workspace?: string,
+) {
+  const snapshot = readSentinelAssessmentRevision(assessment, revision)
+    ?.result.sharedGraph.snapshot;
+  if (
+    !snapshot?.edges.some(({ from, to, relation }) =>
+      from === nodeId && to === assignedAsset && relation === "observed_on"
+    )
+  ) return;
+  const ref = sourceReference(snapshot.nodes.find(({ id }) => id === nodeId));
+  if (!ref) return;
+  const saved = (bundle && readBundleSync(bundle).get(ref.source.receiptId)) ||
+    (workspace && findWorkspaceSource(workspace, ref));
+  if (!saved || !matchesSource(saved, ref)) return;
+  const payload = saved.payload;
+  if (
+    payload.kind !== "github_branch_protection" ||
+    payload.repo.toLowerCase() !== expected.repository ||
+    payload.repositoryId !== expected.repositoryId ||
+    !payload.approvedBranches?.some(({ name, protected: enabled }) =>
+      name === expected.branch && !enabled
+    )
+  ) return;
+  return JSON.stringify({
+    evidenceId: nodeId,
+    evidenceRevision: revision,
+    evidence: saved,
+  });
+}
+
 function parseBundle(data: unknown) {
   const records = new Map<string, SavedExecutionEvidence>();
   if (!Array.isArray(data)) {
