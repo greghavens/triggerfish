@@ -1,4 +1,6 @@
 /** Project a retained control-check verdict independently of analyst disposition. */
+import { dirname, join } from "@std/path";
+import { readSentinelDedicatedRecheckSettlements } from "./adaptive_store.ts";
 import {
   readSentinelAssessmentRevision,
   readSentinelOperatingConstraintsForRevision,
@@ -32,6 +34,27 @@ export function createSentinelFindingRemediationReader(
     }
     return cache.get(number);
   }
+  const settlements = new Map<
+    number,
+    ReturnType<typeof readSentinelDedicatedRecheckSettlements>
+  >();
+  const settled = (receipt: SentinelWorkerFindingRecheckRecord) => {
+    const number = receipt.evidenceRevision;
+    if (!settlements.has(number)) {
+      settlements.set(
+        number,
+        readSentinelDedicatedRecheckSettlements(
+          join(dirname(path), "sentinel-adaptive.db"),
+          receipt.runId,
+          number,
+        ),
+      );
+    }
+    const assignment = settlements.get(number)?.get(receipt.taskId);
+    return !assignment || (assignment.completed &&
+      assignment.findingId === receipt.findingId &&
+      assignment.evidenceId === receipt.evidenceId);
+  };
   const scoped = runId && locateSentinelCase(path)?.caseId === caseId;
   const constraints = scoped
     ? readSentinelOperatingConstraintsForRevision(path, revision)?.constraints
@@ -52,7 +75,7 @@ export function createSentinelFindingRemediationReader(
         receipt.graphFindingId === original.graphFindingId &&
         receipt.controlId === original.controlId &&
         receipt.evidenceRevision >= original.evidenceRevision &&
-        receipt.evidenceRevision <= revision
+        receipt.evidenceRevision <= revision && settled(receipt)
       ).toSorted((a, b) =>
         b.observedAt.localeCompare(a.observedAt) ||
         b.evidenceRevision - a.evidenceRevision ||

@@ -1987,6 +1987,7 @@ async function verifyOperatorNativeRecheck(options: {
   caseId?: string;
   inconclusive?: boolean;
   noResult?: boolean;
+  stopAfterResult?: boolean;
   alternate?: { nodeId: string; resultSha256: string };
   state: State;
   findingId: string;
@@ -2355,6 +2356,7 @@ async function verifyOperatorNativeRecheck(options: {
     "The retained control evidence did not resolve the operator’s requested comparison.";
   const rationaleRequest = crypto.randomUUID();
   let workerRuns = 0;
+  const workerStopped = Promise.withResolvers<void>();
   const planner = createSentinelModelPlanner(
     path,
     (state, taskId, leaseToken) => ({
@@ -2489,6 +2491,40 @@ async function verifyOperatorNativeRecheck(options: {
           assertStringIncludes(repeated.results[1][2], "Error:");
         }
         verified = record;
+        if (options.stopAfterResult) {
+          try {
+            showRemediation = true;
+            await run(
+              "Review remediation while the verified result is staged.",
+            );
+            assertEquals(JSON.parse(modelResult ?? "").report.remediation, {
+              status: "unknown",
+              asOfRevision: options.state.revision,
+            });
+            await withFindingAssignmentGateway(
+              options.baseDir,
+              () => Promise.resolve(true),
+              async (turn) => {
+                const stopped = JSON.parse(
+                  await turn({
+                    action: "stop",
+                    kind: "sentinel",
+                    id: caseId,
+                    revision: options.state.revision,
+                    runId: options.state.plan.runId,
+                    adaptiveRevision: discovered.adaptiveRevision,
+                    taskId,
+                    requestId: crypto.randomUUID(),
+                  }),
+                ).receipt;
+                assert(stopped);
+              },
+            );
+            workerStopped.resolve();
+          } catch (error) {
+            workerStopped.reject(error);
+          }
+        }
         for (const event of reviewed.events) send(event);
       },
       clear() {},
@@ -2502,10 +2538,15 @@ async function verifyOperatorNativeRecheck(options: {
         .find(({ taskId }) => taskId === assigned.taskId);
       if (
         completion?.status ===
-          (options.noResult ? "retry_pending" : "completed")
+          (options.noResult
+            ? "retry_pending"
+            : options.stopAfterResult
+            ? "stopped"
+            : "completed")
       ) break;
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
+    if (options.stopAfterResult) await workerStopped.promise;
     assert(
       options.noResult || verified,
       JSON.stringify(
@@ -2517,11 +2558,15 @@ async function verifyOperatorNativeRecheck(options: {
     await run("Review the saved remediation status.");
     assertEquals(
       JSON.parse(modelResult ?? "").report.remediation.status,
-      options.inconclusive || options.noResult ? "unknown" : "pass",
+      options.inconclusive || options.noResult || options.stopAfterResult
+        ? "unknown"
+        : "pass",
     );
     assertEquals(
       JSON.parse(modelResult ?? "").report.remediation.recheckId,
-      options.inconclusive ? undefined : verified?.id,
+      options.inconclusive || options.stopAfterResult
+        ? undefined
+        : verified?.id,
     );
     blocked = true;
     await run(
@@ -2568,11 +2613,16 @@ async function verifyOperatorNativeRecheck(options: {
           assertEquals(settled?.lastAttempt?.reason, "missing_recheck_result");
           assertEquals(settled?.status, "retry_pending");
         } else {
-          assertEquals(settled?.status, "completed");
+          assertEquals(
+            settled?.status,
+            options.stopAfterResult ? "stopped" : "completed",
+          );
         }
         assertEquals(
           settled?.outcome,
-          options.inconclusive || options.noResult ? undefined : "pass",
+          options.inconclusive || options.noResult || options.stopAfterResult
+            ? undefined
+            : "pass",
         );
       },
     );
@@ -2639,12 +2689,37 @@ async function verifyOperatorNativeRecheck(options: {
   await run("Review the exact archived remediation status.");
   assertEquals(
     JSON.parse(modelResult ?? "").report.remediation.recheckId,
-    options.inconclusive ? undefined : verified?.id,
+    options.inconclusive || options.stopAfterResult ? undefined : verified?.id,
   );
   assertEquals(
     JSON.parse(modelResult ?? "").report.remediation.status,
-    options.inconclusive || options.noResult ? "unknown" : "pass",
+    options.inconclusive || options.noResult || options.stopAfterResult
+      ? "unknown"
+      : "pass",
   );
+  if (options.stopAfterResult) {
+    await withFindingAssignmentGateway(
+      options.baseDir,
+      () => Promise.resolve(false),
+      async (turn) => {
+        const page = JSON.parse(
+          await turn({
+            action: "finding_recheck_attempts",
+            kind: "sentinel",
+            id: caseId,
+            revision: options.state.revision,
+            receiptId: options.findingId,
+          }),
+        ).page;
+        const stopped = page.entries.find(({ taskId }: { taskId: string }) =>
+          taskId === assigned.taskId
+        );
+        assertEquals(stopped?.status, "stopped");
+        assertEquals(stopped?.resultReceiptId, verified?.id);
+        assertEquals(stopped?.outcome, undefined);
+      },
+    );
+  }
   if (options.noResult) {
     await withFindingAssignmentGateway(
       options.baseDir,
@@ -3608,7 +3683,7 @@ async function verifyReceiptFamily(
     | "workflow result with repeated run"
     | "workflow result with older run"
     | "native workflow result",
-  manual: boolean | "inconclusive" | "no-result" = false,
+  manual: boolean | "inconclusive" | "no-result" | "stop-after-result" = false,
 ) {
   const baseDir = await Deno.makeTempDir();
   const caseId = manual ? "native-remediation" : "main";
@@ -4364,6 +4439,7 @@ async function verifyReceiptFamily(
         caseId,
         inconclusive: manual === "inconclusive",
         noResult: manual === "no-result",
+        stopAfterResult: manual === "stop-after-result",
         ...(alternateNode &&
           {
             alternate: {
@@ -5229,6 +5305,9 @@ Deno.test("Gateway operator discovers and queues one exact native remediation re
 
 Deno.test("A clean Sentinel recheck turn without an exact result records a failed attempt", () =>
   verifyReceiptFamily("native workflow result", "no-result"));
+
+Deno.test("Stopping an exact recheck preserves its staged evidence without publishing remediation", () =>
+  verifyReceiptFamily("native workflow result", "stop-after-result"));
 
 async function testScopedReporterRestart(
   useBatch: boolean,

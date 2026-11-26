@@ -2767,6 +2767,61 @@ function openPrivateDatabase(path: string, readOnly = false): DatabaseSync {
   return new DatabaseSync(resolved, { readOnly });
 }
 
+/** Read settlement separately from a result committed during a recheck worker turn. */
+export function readSentinelDedicatedRecheckSettlements(
+  path: string,
+  runId: string,
+  evidenceRevision: number,
+): ReadonlyMap<
+  string,
+  { findingId: string; evidenceId: string; completed: boolean }
+> {
+  let db: DatabaseSync;
+  try {
+    db = openPrivateDatabase(path, true);
+  } catch (error) {
+    if (error instanceof Deno.errors.NotFound) return new Map();
+    throw error;
+  }
+  try {
+    if (
+      !db.prepare(
+        "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'adaptive_evidence_revisions'",
+      ).get()
+    ) return new Map();
+    return new Map(
+      db.prepare(`
+      SELECT task.id, task.nodeId,
+        json_extract(task.plannerRound, '$.recheckFindingId') AS findingId,
+        (
+          SELECT event FROM adaptive_events AS settlement
+          WHERE settlement.revision = task.revision AND settlement.taskId = task.id
+            AND settlement.event IN ('model_review_completed', 'model_review_failed',
+              'model_review_interrupted', 'model_review_lease_expired', 'model_review_stopped',
+              'model_review_paused')
+          ORDER BY settlement.rowid DESC LIMIT 1
+        ) AS settlement
+      FROM adaptive_tasks AS task
+      JOIN adaptive_evidence_revisions AS evidence ON evidence.revision = task.revision
+      WHERE evidence.goalId = ? AND evidence.evidenceNumber = ?
+        AND task.kind = 'review_evidence'
+        AND json_extract(task.plannerRound, '$.recheckFindingId') IS NOT NULL
+    `).all(runId, evidenceRevision).map((row) =>
+        [
+          String(row.id),
+          {
+            findingId: String(row.findingId),
+            evidenceId: String(row.nodeId),
+            completed: row.settlement === "model_review_completed",
+          },
+        ] as const
+      ),
+    );
+  } finally {
+    db.close();
+  }
+}
+
 /** Read through a separate read-only connection during checkpoint reconciliation. */
 export function readAdaptiveOperatorTrafficHint(
   path: string,

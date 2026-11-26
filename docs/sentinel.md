@@ -382,7 +382,11 @@ still reopen their original admission receipt.
 
 The worker finding report shows a separate remediation status as of the selected
 evidence revision. A verified result identifies its exact recheck and evidence.
-Missing, expired, or inaccessible evidence yields `unknown`. The owner report
+A dedicated recheck's committed receipt counts toward that status after
+the worker assignment completes successfully. A stopped or running
+assignment can retain evidence while the report uses the latest settled
+result, if one exists. Missing, expired, or inaccessible evidence yields
+`unknown`. The owner report
 reauthorizes retained connector sources before returning their status. Static
 exports use `unknown` for connector-backed status because they cannot repeat
 those checks. The analyst disposition stays independent of this status.
