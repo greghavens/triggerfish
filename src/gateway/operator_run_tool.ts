@@ -8215,6 +8215,13 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
                 createHash("sha256").update(text).digest("hex") !==
                   citation.sha256 ||
                 !await authorize(scope, step.tool, args, text) ||
+                (step.tool === "sentinel_prior_assigned_evidence" &&
+                  (!carriedSnapshot || readSentinelCarriedEvidence(
+                        path,
+                        ref.revision,
+                        task,
+                        carriedSnapshot,
+                      ) !== text)) ||
                 (step.tool === "sentinel_incident_alerts" &&
                   queryIncidentAlerts(
                       readOptions,

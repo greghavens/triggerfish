@@ -1,3 +1,4 @@
+import { createGatewayServer } from "../../src/gateway/server/server.ts";
 import { createChatSession } from "../../src/gateway/chat.ts";
 import { createOperatorRunToolExecutor } from "../../src/gateway/operator_run_tool.ts";
 import { createProviderRegistry } from "../../src/agent/llm.ts";
@@ -68,6 +69,7 @@ import {
   readSentinelWorkerGoalProposalReceipt,
   readSentinelWorkerGoalProposals,
   recordSentinelFindingReview,
+  recordSentinelOperatingConstraints,
   refreshSentinelAssessment,
   startSentinelAssessment,
 } from "../../src/sentinel/assessment_store.ts";
@@ -88,6 +90,7 @@ async function verifyHistoricalWorkerReads(
   assessment: ReturnType<typeof startSentinelAssessment>,
   summary: string,
   indices: readonly number[],
+  revokeScopeAtPost = false,
 ) {
   const review = readAdaptiveSentinel(path, assessment)?.modelReviews
     .find(
@@ -96,6 +99,8 @@ async function verifyHistoricalWorkerReads(
   assert(review);
   let selected = 0;
   let denied = false;
+  let revoke = false;
+  let revoked = false;
   let response = "";
   const registry = createProviderRegistry();
   registry.register({
@@ -140,6 +145,25 @@ async function verifyHistoricalWorkerReads(
     }),
     hookRunner: {
       evaluateHook(hook, { input }) {
+        if (
+          revoke && hook === "POST_TOOL_RESPONSE" &&
+          input.tool_name === "sentinel_prior_assigned_evidence"
+        ) {
+          revoke = false;
+          assert(assessment.plan.runId);
+          assert(recordSentinelOperatingConstraints(path, {
+            runId: assessment.plan.runId,
+            evidenceRevision: assessment.revision,
+            expectedVersion: 0,
+            requestId: crypto.randomUUID(),
+            operatorScope: "prior-assignment-policy-test",
+            constraints: {
+              deniedKinds: [],
+              allowedAssetIds: ["additional-asset"],
+            },
+          }));
+          revoked = true;
+        }
         const allowed = !(denied && hook === "POST_TOOL_RESPONSE" &&
           input.tool_name === review.steps[selected].tool);
         return Promise.resolve({
@@ -170,6 +194,46 @@ async function verifyHistoricalWorkerReads(
     () => {},
   );
   assert(response.includes("unavailable"));
+  if (!revokeScopeAtPost) return;
+  denied = false;
+  const token = crypto.randomUUID();
+  const gateway = createGatewayServer({ port: 0, token, chatSession: chat });
+  const { port } = await gateway.start();
+  const socket = new WebSocket(`ws://127.0.0.1:${port}/chat?token=${token}`);
+  try {
+    await new Promise<void>((resolve, reject) => {
+      socket.addEventListener("open", () => resolve(), { once: true });
+      socket.addEventListener("error", reject, { once: true });
+    });
+    async function send(content: string) {
+      const receive = AbortSignal.timeout(3000);
+      const done = new Promise<void>((resolve, reject) => {
+        receive.addEventListener("abort", () => reject(receive.reason), {
+          once: true,
+        });
+        const listener = ({ data }: MessageEvent) => {
+          if (JSON.parse(data).type === "turn_end") {
+            socket.removeEventListener("message", listener);
+            resolve();
+          }
+        };
+        socket.addEventListener("message", listener, { signal: receive });
+      });
+      socket.send(JSON.stringify({ type: "message", content }));
+      await done;
+    }
+    await send("Reopen the authorized historical step.");
+    assert(JSON.parse(response).result.citations.length > 0);
+    revoke = true;
+    await send("Reopen the historical step during scope withdrawal.");
+    assert(revoked);
+    assert(response.startsWith("Error:") && response.includes("unavailable"));
+    await send("Reopen after the scope withdrawal.");
+    assert(response.startsWith("Error:") && response.includes("unavailable"));
+  } finally {
+    socket.close();
+    await gateway.stop();
+  }
 }
 
 for (
@@ -2875,6 +2939,7 @@ for (
             assessment,
             "Recovered the exact historical evidence.",
             [0],
+            true,
           );
           return;
         }

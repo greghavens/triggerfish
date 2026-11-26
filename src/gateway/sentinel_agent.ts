@@ -1758,13 +1758,37 @@ export function readSentinelCarriedEvidence(
   if (!authorized?.length) {
     return "Error: The assignment has no available prior evidence citation.";
   }
+  const runId = readSentinelRunIdForRevision(path, revision);
+  const unavailable =
+    "Error: The prior assigned Sentinel evidence is unavailable.";
+  if (!runId) return unavailable;
+  const policy = readSentinelOperatingConstraints(path, runId)?.constraints;
+  const recipientPolicy = readSentinelOperatingConstraints(
+    path,
+    runId,
+    revision,
+  )?.constraints;
+  const canReview = (
+    constraints: typeof policy,
+    nodeId: string | undefined,
+    snapshot: ReturnType<Graph["snapshot"]>,
+  ) =>
+    sentinelOperatingConstraintsAllow(
+      constraints,
+      { kind: "review_evidence", nodeId },
+      snapshot,
+    );
+  if (
+    !canReview(policy, task.nodeId, current) ||
+    !canReview(recipientPolicy, task.nodeId, current)
+  ) return unavailable;
   const store = openSentinelAdaptiveStore(
     join(dirname(path), "sentinel-adaptive.db"),
   );
   let retainedCitations;
   try {
     const goal = store.forEvidence(revision)?.goal;
-    retainedCitations = goal
+    retainedCitations = goal?.id === runId
       ? authorized.flatMap((citation) => {
         if (citation.targetId !== task.nodeId) return [];
         const retained = store.readPriorAssignedTargetCitation(
@@ -1780,12 +1804,28 @@ export function readSentinelCarriedEvidence(
   } finally {
     store.close();
   }
+  let scopeDenied = false;
   const citations = retainedCitations.flatMap(
     ({ citation, sourceTargetId }) => {
       const previous = readSentinelAssessmentRevision(
         path,
         citation.evidenceRevision,
-      )?.result?.sharedGraph.snapshot ?? undefined;
+      )?.result?.sharedGraph.snapshot;
+      const sourcePolicy = readSentinelOperatingConstraints(
+        path,
+        runId,
+        citation.evidenceRevision,
+      )?.constraints;
+      if (
+        !previous ||
+        !canReview(policy, sourceTargetId, current) ||
+        !canReview(recipientPolicy, sourceTargetId, current) ||
+        !canReview(sourcePolicy, sourceTargetId, previous) ||
+        !canReview(sourcePolicy, citation.targetId, previous)
+      ) {
+        scopeDenied = true;
+        return [];
+      }
       const evidence = current.nodes.find(({ id }) => id === citation.targetId);
       if (
         evidence?.kind !== "evidence" ||
@@ -1808,6 +1848,7 @@ export function readSentinelCarriedEvidence(
       }];
     },
   );
+  if (scopeDenied) return unavailable;
   const response = {
     revision,
     taskId: task.id,
@@ -5118,6 +5159,29 @@ function createAgent(
               ) || !currentPlannerReceiptScope(turn, receipt.selector.asset)
             ) return { ...result, allowed: false, action: "BLOCK" };
           }
+        }
+        if (
+          result.allowed && name === "POST_TOOL_RESPONSE" &&
+          toolName === SENTINEL_PRIOR_ASSIGNED_EVIDENCE_READ &&
+          typeof context.input.tool_response === "string" &&
+          context.input.tool_response.startsWith("{")
+        ) {
+          const revision = options.assessmentRevision;
+          const task = readAssignedModelReview(options);
+          const snapshot = revision === undefined
+            ? undefined
+            : readSentinelAssessmentRevision(options.snapshotPath, revision)
+              ?.result.sharedGraph.snapshot;
+          if (
+            revision === undefined || !task || !snapshot ||
+            readSentinelCarriedEvidence(
+                options.snapshotPath,
+                revision,
+                task,
+                snapshot,
+              ) !==
+              context.input.tool_response
+          ) return { ...result, allowed: false, action: "BLOCK" };
         }
         if (
           result.allowed && name === "POST_TOOL_RESPONSE" &&
