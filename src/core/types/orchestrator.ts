@@ -115,6 +115,9 @@ export interface ProcessMessageOptions {
       readonly sha256: string;
     };
   })[];
+  /** Additional durable read receipt authorization for the saved exchange only. */
+  readonly acceptsSavedReadApproval?:
+    RecoveryToolPersistence["acceptsSavedApproval"];
   /** Recheck saved source access after the root hooks authorize the checkpoint. */
   readonly authorizeResumeSources?: (
     signal?: AbortSignal,

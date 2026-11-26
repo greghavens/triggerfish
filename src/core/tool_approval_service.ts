@@ -42,6 +42,12 @@ export interface ToolApprovalContext {
     | { readonly assignmentId?: string; readonly binding?: string }
     | undefined;
   readonly isCurrent?: (sessionId: string) => boolean | Promise<boolean>;
+  /** Scope for a retained read with an independently validated checkpoint. */
+  readonly retainedReadBinding?: (
+    tool: string,
+    args: Record<string, unknown>,
+    ruleId: string,
+  ) => string | undefined;
 }
 
 const currentApprovalRun = new AsyncLocalStorage<{
@@ -116,6 +122,11 @@ function buildToolApprovalService(path: string) {
       const page = use((db) => db.list(toolApprovalOwnerScope, limit, before));
       return { ...page, records: page.records.map(project) };
     },
+    hasCompletedRead(binding: string, resultSha256: string) {
+      return use((db) =>
+        db.hasCompletedRead(toolApprovalOwnerScope, binding, resultSha256)
+      );
+    },
     decide(id: string, decision: "approved" | "denied") {
       return use((db) => {
         const existing = db.read(toolApprovalOwnerScope, id);
@@ -142,6 +153,7 @@ function buildToolApprovalService(path: string) {
       readonly runId?: string;
       readonly assignmentId?: string;
       readonly scopeBinding?: string;
+      readonly retainedReadBinding?: string;
       readonly canProject?: () => boolean;
       readonly tool: string;
       readonly args: Record<string, unknown>;
@@ -155,6 +167,7 @@ function buildToolApprovalService(path: string) {
         runId,
         assignmentId,
         scopeBinding,
+        retainedReadBinding,
         tool,
         args,
         ruleId,
@@ -173,6 +186,7 @@ function buildToolApprovalService(path: string) {
             args,
             ruleId,
             ...(scopeBinding ? [scopeBinding] : []),
+            ...(retainedReadBinding ? [retainedReadBinding] : []),
           ]),
         ).digest("hex");
       const binding = bind(args);
@@ -320,9 +334,20 @@ function buildToolApprovalService(path: string) {
                     claim.token,
                   )
                 ),
-              finish: (outcome: "returned" | "blocked" | "failed") =>
+              finish: (
+                outcome: "returned" | "blocked" | "failed",
+                resultSha256?: string,
+              ) =>
                 use((db) =>
-                  db.complete(toolApprovalOwnerScope, id, claim.token, outcome)
+                  db.complete(
+                    toolApprovalOwnerScope,
+                    id,
+                    claim.token,
+                    outcome,
+                    retainedReadBinding && resultSha256
+                      ? { binding: retainedReadBinding, resultSha256 }
+                      : undefined,
+                  )
                 ),
             };
           },

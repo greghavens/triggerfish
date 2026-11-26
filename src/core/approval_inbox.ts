@@ -787,6 +787,7 @@ export function openApprovalInbox(path: string, now = Date.now) {
       rawId: string,
       token: string,
       outcome: ApprovalInboxDispatchOutcome = "returned",
+      retainedRead?: { binding: string; resultSha256: string },
     ) {
       const id = requestId(rawId);
       if (
@@ -794,12 +795,55 @@ export function openApprovalInbox(path: string, now = Date.now) {
         (outcome !== "returned" && outcome !== "blocked" &&
           outcome !== "failed")
       ) return undefined;
-      return project(
+      const finish = () =>
         db.prepare(`
         UPDATE approval_requests SET status = 'completed', updatedAt = ?, claimToken = NULL, dispatchOutcome = ?
         WHERE scope = ? AND id = ? AND status = 'claimed' AND claimToken = ? RETURNING *
-      `).get(now(), outcome, scope, id, token),
-      );
+      `).get(now(), outcome, scope, id, token);
+      if (
+        outcome !== "returned" || !retainedRead ||
+        !tokenPattern.test(retainedRead.binding) ||
+        !tokenPattern.test(retainedRead.resultSha256)
+      ) return project(finish());
+      return transaction(db, () => {
+        const row = finish();
+        if (
+          row?.decision === "approved" &&
+          typeof row.handlerReturnedAt === "number"
+        ) {
+          db.exec(`
+            CREATE TABLE IF NOT EXISTS approval_completed_reads (
+              requestId TEXT PRIMARY KEY REFERENCES approval_requests(id) ON DELETE CASCADE,
+              binding TEXT NOT NULL,
+              resultSha256 TEXT NOT NULL
+            ) STRICT;
+            CREATE INDEX IF NOT EXISTS approval_completed_read_scope
+              ON approval_completed_reads(binding, resultSha256);
+          `);
+          db.prepare("INSERT INTO approval_completed_reads VALUES (?, ?, ?)")
+            .run(id, retainedRead.binding, retainedRead.resultSha256);
+        }
+        return project(row);
+      });
+    },
+
+    /** Check an approved completed read without reusing its claim or dispatching. */
+    hasCompletedRead(scope: string, binding: string, resultSha256: string) {
+      if (
+        !exactReference(scope) || !tokenPattern.test(binding) ||
+        !tokenPattern.test(resultSha256) || !db.prepare(
+          "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'approval_completed_reads'",
+        ).get()
+      ) return false;
+      return !!db.prepare(`
+        SELECT 1 FROM approval_completed_reads AS receipt
+        JOIN approval_requests AS request ON request.id = receipt.requestId
+        WHERE receipt.binding = ? AND receipt.resultSha256 = ?
+          AND request.scope = ? AND request.status = 'completed'
+          AND request.decision = 'approved' AND request.dispatchOutcome = 'returned'
+          AND request.handlerReturnedAt IS NOT NULL
+        LIMIT 1
+      `).get(binding, resultSha256, scope);
     },
 
     stale(scope: string, rawId: string, binding: string) {

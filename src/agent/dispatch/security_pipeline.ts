@@ -496,8 +496,13 @@ export async function dispatchSecurityEnforcedToolCall(
   let approval: {
     requestId: string;
     recordHandlerReturn(): unknown;
-    finish(outcome: "returned" | "blocked" | "failed"): unknown;
+    finish(
+      outcome: "returned" | "blocked" | "failed",
+      resultSha256?: string,
+    ): unknown;
   } | undefined;
+  let retainedReadBinding: string | undefined;
+  let retainedResultSha256: string | undefined;
   if (preToolResult.action === "REQUIRE_APPROVAL" && inbox) {
     const blocked = {
       resultText: "Tool approval was denied, expired, or no longer applies.",
@@ -515,7 +520,11 @@ export async function dispatchSecurityEnforcedToolCall(
     ) {
       return blocked;
     }
+    retainedReadBinding = preToolResult.ruleId
+      ? owner?.retainedReadBinding?.(call.name, call.args, preToolResult.ruleId)
+      : undefined;
     const release = await inbox.wait({
+      ...(retainedReadBinding && { retainedReadBinding }),
       sessionId: session.id,
       runId: owner?.runId ?? exactToolApprovalRun(session.id) ?? session.id,
       assignmentId,
@@ -727,9 +736,12 @@ export async function dispatchSecurityEnforcedToolCall(
       : permitted.resultText.startsWith("Error:")
       ? "failed"
       : "returned";
+    if (outcome === "returned" && approval && retainedReadBinding) {
+      retainedResultSha256 = await computeContentHash(permitted.resultText);
+    }
     return permitted;
   } finally {
-    approval?.finish(outcome);
+    approval?.finish(outcome, retainedResultSha256);
   }
 }
 
@@ -857,9 +869,11 @@ export async function authorizeSavedToolCalls(
   calls: readonly RecoveryToolCall[],
   config: OrchestratorConfig,
   session: SessionState,
-  persistence?: Pick<
-    RecoveryToolPersistence,
-    "projectCall" | "acceptsSavedApproval"
+  persistence?: Partial<
+    Pick<
+      RecoveryToolPersistence,
+      "projectCall" | "acceptsSavedApproval"
+    >
   >,
   signal?: AbortSignal,
 ) {
@@ -883,11 +897,11 @@ export async function authorizeSavedToolCalls(
           !isDeepStrictEqual(configured.args, call.args))
       ) return false;
       if (configured) stillConfigured.push(configured.isCurrent);
-      const projected = persistence?.projectCall({
+      const projected = persistence?.projectCall?.({
         ...call,
         args: structuredClone(call.args),
       });
-      if (persistence && !projected) return false;
+      if (persistence?.projectCall && !projected) return false;
       if (config.planManager?.isToolBlocked(session.id, call.name, call.args)) {
         return false;
       }

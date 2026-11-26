@@ -500,7 +500,10 @@ export async function orchestrateAgentTurn(
         turnState.config,
         turnSession,
         acceptsSavedReadApproval
-          ? { ...toolPersistence, acceptsSavedApproval: acceptsSavedReadApproval }
+          ? {
+            ...toolPersistence,
+            acceptsSavedApproval: acceptsSavedReadApproval,
+          }
           : toolPersistence,
         signal,
       )

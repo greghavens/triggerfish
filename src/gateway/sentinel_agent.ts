@@ -1731,6 +1731,7 @@ function rememberIncidentRecommendationPage(
 
 interface ActiveTurn {
   modelFailure?: { readonly transient: boolean };
+  readonly checkpointPromptSha256?: string;
   readonly leasedTraceCalls: Map<string, SentinelWorkerTraceSearchArgs>;
   readonly approvedLeasedTraces: Map<string, SentinelWorkerTraceSearchArgs>;
   readonly incidentRecommendationPages: Map<number, IncidentRecommendationPage>;
@@ -6078,11 +6079,65 @@ function createAgent(
       constraints?.digest === turn.approvalConstraints?.digest;
   }
 
+  function retainedReadBinding(
+    tool: string,
+    args: Record<string, unknown>,
+    ruleId: string,
+  ): string | undefined {
+    const turn = active;
+    const current = turn?.checkpointPromptSha256 && !turn.signal.aborted
+      ? readSentinelAssessment(options.snapshotPath)
+      : undefined;
+    const runId = current?.plan.runId;
+    const template = current?.plan.assessmentTemplate;
+    const location = locateSentinelCase(options.snapshotPath);
+    if (
+      !turn || !runId || !template?.interceptRules || !location ||
+      current.revision !== options.assessmentRevision
+    ) return;
+    const worker = options.assignedTaskId !== undefined;
+    const selector = worker
+      ? tool === assignedTargetTool.name && !Object.keys(args).length &&
+          approvalIsCurrent(turn)
+        ? { name: tool, args: {} }
+        : undefined
+      : currentPlannerReceiptScope(turn) && turn.plannerRound &&
+          turn.plannerRoundIsCurrent?.()
+      ? plannerCheckpointReadSelector(tool, args)
+      : undefined;
+    const prefix = `reviewed-tool-rule:pinned:${runId}:`;
+    const index = ruleId.startsWith(prefix) &&
+      /^(\d+):1$/.exec(ruleId.slice(prefix.length))?.[1];
+    if (!selector || !index) return;
+    const rule = template.interceptRules[Number(index)];
+    const asset = worker ? readAssignedModelReview(options)?.nodeId : undefined;
+    if (
+      !rule || rule.effect !== "ask" || !rule.enabled ||
+      (rule.tool !== undefined && rule.tool !== tool) ||
+      (rule.assetId !== undefined && rule.assetId !== asset)
+    ) return;
+    return createHash("sha256").update(JSON.stringify([
+      location.caseId,
+      runId,
+      current.revision,
+      options.assignedTaskId ?? turn.plannerRound?.identity,
+      turn.checkpointPromptSha256,
+      turn.operatingConstraints,
+      template.id,
+      template.version,
+      template.digest,
+      rule,
+      ruleId,
+      selector,
+    ])).digest("hex");
+  }
+
   const workerApprovalContext =
     approvalRunId && caseId && options.assignedTaskId
       ? {
         runId: approvalRunId,
         assignmentId: options.assignedTaskId,
+        retainedReadBinding,
         scopeForCall(name: string, args: Record<string, unknown>) {
           if (name !== sentinelIncidentRecommendationToolName) return {};
           const draft = active && incidentRecommendationDraft(active, args);
@@ -6350,6 +6405,7 @@ function createAgent(
   const plannerApprovalContext = canRequestWorkerControl
     ? {
       runId: options.plannerExecutionEvidenceRunId,
+      retainedReadBinding,
       scopeForCall(name: string, args: Record<string, unknown>) {
         if (!active) return;
         if (name === plannerScopeRuleTool.name) {
@@ -10893,6 +10949,11 @@ function createAgent(
         active = {
           controller,
           signal,
+          ...(checkpointed && {
+            checkpointPromptSha256: createHash("sha256").update(message).digest(
+              "hex",
+            ),
+          }),
           outputLanguage: options.readOutputLanguage?.() ??
             options.outputLanguage ?? "en",
           readGraph: sharedGraph ??
@@ -10975,6 +11036,19 @@ function createAgent(
           ...(resume && {
             resumeClassification: "INTERNAL",
             resumeToolCalls: savedCalls,
+            acceptsSavedReadApproval(call, ruleId) {
+              if (signal.aborted || !checkpointCurrent()) return false;
+              const binding = retainedReadBinding(call.name, call.args, ruleId);
+              const result = call.id &&
+                resume.history.find((entry) =>
+                  entry.role === "tool" && entry.tool_call_id === call.id
+                )?.content;
+              return !!binding && typeof result === "string" &&
+                (toolApprovalInbox?.hasCompletedRead(
+                  binding,
+                  createHash("sha256").update(result).digest("hex"),
+                ) ?? false);
+            },
             async authorizeResumeSources() {
               if (signal.aborted || !checkpointCurrent()) return false;
               if (plannerCheckpointed) {

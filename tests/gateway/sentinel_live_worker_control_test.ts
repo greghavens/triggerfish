@@ -1,4 +1,10 @@
 import { ModelFailoverExhausted } from "../../src/agent/providers/retry.ts";
+import { DatabaseSync } from "node:sqlite";
+import type { ApprovalInboxRecord } from "../../src/core/approval_inbox.ts";
+import {
+  createToolApprovalService,
+  type ToolApprovalService,
+} from "../../src/core/tool_approval_service.ts";
 import { assert, assertEquals, assertFalse } from "@std/assert";
 import { dirname, join } from "@std/path";
 import { createProviderRegistry } from "../../src/agent/llm.ts";
@@ -148,6 +154,7 @@ async function withOwnerControl(
   run: (
     request: (args: Record<string, unknown>) => Promise<string>,
     approvals: string[],
+    inbox: (args: Record<string, unknown>) => Promise<Record<string, unknown>>,
   ) => Promise<void>,
   sentinelProfiles?: Parameters<
     typeof createOperatorRunToolExecutor
@@ -158,6 +165,7 @@ async function withOwnerControl(
     onConfirm?: () => void | Promise<void>;
     graphRetries?: boolean;
     deniesSavedTarget?: (hook: string) => boolean;
+    toolApprovalInbox?: ToolApprovalService;
   } = {},
 ) {
   const approvals: string[] = [];
@@ -220,6 +228,7 @@ async function withOwnerControl(
       allowSentinelModelAccess: true,
     }),
     hookRunner: {
+      toolApprovalInbox: options.toolApprovalInbox,
       evaluateHook(hook, { session, input, auditInput }) {
         const allowed =
           (hook !== "PRE_TOOL_CALL" || !input.tool_call || allowCall()) &&
@@ -293,10 +302,34 @@ async function withOwnerControl(
       });
     };
     if (options.sentinelMode) await turn("/sentinel on");
-    await run((args) => {
-      next = args;
-      return turn("Use the exact requested Sentinel worker control.");
-    }, approvals);
+    await run(
+      (args) => {
+        next = args;
+        return turn("Use the exact requested Sentinel worker control.");
+      },
+      approvals,
+      (args) => {
+        const requestId = crypto.randomUUID();
+        const done = Promise.withResolvers<Record<string, unknown>>();
+        const timer = setTimeout(
+          () => done.reject(new Error("Missing approval inbox response")),
+          3000,
+        );
+        const receive = ({ data }: MessageEvent) => {
+          const event = JSON.parse(data);
+          if (
+            event.type === "approval_inbox_result" &&
+            event.requestId === requestId
+          ) done.resolve(event);
+        };
+        socket.addEventListener("message", receive);
+        socket.send(JSON.stringify({ ...args, requestId }));
+        return done.promise.finally(() => {
+          clearTimeout(timer);
+          socket.removeEventListener("message", receive);
+        });
+      },
+    );
   } finally {
     socket.close();
     await closed.promise;
@@ -871,10 +904,15 @@ async function verifyPausedGraphWorker(
   denySavedRead = false,
   stopAt?: "running" | "paused",
   pinnedTemplate = false,
+  askCheckpoint?: "approved" | "missing",
 ) {
   const baseDir = await Deno.makeTempDir();
   const caseId = cold ? "portable-worker" : "main";
   const path = resolveSentinelCasePath(baseDir, caseId);
+  const approvalPath = join(baseDir, "worker-approvals.db");
+  const toolApprovalInbox = askCheckpoint
+    ? createToolApprovalService(approvalPath)
+    : undefined;
   let blockedSavedRead = 0;
   let enforceReadRevocation = false;
   const release = Promise.withResolvers<void>();
@@ -959,6 +997,7 @@ async function verifyPausedGraphWorker(
   const peerProvider = provider("peer-graph");
   const workerPool = createSentinelWorkerPool(2);
   const hookRunner: HookRunner = {
+    toolApprovalInbox,
     evaluateHook(hook, { input }) {
       if (
         hook === "POST_TOOL_RESPONSE" && input.tool_name === "sentinel_trace"
@@ -1061,12 +1100,22 @@ async function verifyPausedGraphWorker(
             id: crypto.randomUUID(),
             version: 1,
             digest: "a".repeat(64),
-            interceptRules: [{
-              tool: "sentinel_trace",
-              effect: "block",
-              enabled: true,
-              assetId: "held-graph",
-            }],
+            interceptRules: [
+              {
+                tool: "sentinel_trace",
+                effect: "block",
+                enabled: true,
+                assetId: "held-graph",
+              },
+              ...(askCheckpoint
+                ? [{
+                  tool: "sentinel_assigned_target",
+                  effect: "ask" as const,
+                  enabled: true,
+                  assetId: "held-graph",
+                }]
+                : []),
+            ],
           },
         },
       }).state
@@ -1080,6 +1129,41 @@ async function verifyPausedGraphWorker(
       )
     );
     first.advance(initial);
+    if (askCheckpoint) {
+      await withOwnerControl(
+        baseDir,
+        async (_request, _approvals, inbox) => {
+          let pending: ApprovalInboxRecord | undefined;
+          for (let attempt = 0; attempt < 100 && !pending; attempt++) {
+            const page = await inbox({ type: "approval_inbox_list" });
+            assert(page.ok);
+            pending = (page.result as { records: ApprovalInboxRecord[] })
+              .records.find((record) => record.status === "pending");
+            if (!pending) {
+              await new Promise((resolve) => setTimeout(resolve, 10));
+            }
+          }
+          assert(pending);
+          assertEquals(pending.tool, "sentinel_assigned_target");
+          assertEquals(pending.runId, initial.plan.runId);
+          assertEquals(
+            pending.assignmentId,
+            adaptive()?.tasks.find(({ nodeId }) => nodeId === "held-graph")?.id,
+          );
+          assertEquals(
+            (await inbox({
+              type: "approval_inbox_decide",
+              approvalId: pending.id,
+              approved: true,
+            })).ok,
+            true,
+          );
+        },
+        undefined,
+        undefined,
+        { toolApprovalInbox },
+      );
+    }
     await until(() => heldStep);
     const status = adaptive()!;
     const held = status.tasks.find(({ nodeId }) => nodeId === "held-graph")!;
@@ -1289,6 +1373,17 @@ async function verifyPausedGraphWorker(
         assertEquals(readSentinelAssessment(path)?.revision, initial.revision);
       });
     }
+    if (askCheckpoint === "missing") {
+      const db = new DatabaseSync(approvalPath);
+      try {
+        assertEquals(
+          db.prepare("DELETE FROM approval_completed_reads").run().changes,
+          1,
+        );
+      } finally {
+        db.close();
+      }
+    }
     const resumed = startPlanner();
     const resume = {
       ...pause,
@@ -1325,6 +1420,18 @@ async function verifyPausedGraphWorker(
     });
     enforceReadRevocation = denySavedRead;
     resumed.advance(readSentinelAssessment(path)!);
+    if (askCheckpoint === "missing") {
+      await until(() => !resumed.hasInFlightWork());
+      assertEquals(reused, false);
+      assertEquals(sourceCalls.get("held-graph"), 1);
+      assertEquals(
+        toolApprovalInbox?.list().records.filter(({ status }) =>
+          status === "completed"
+        ).length,
+        1,
+      );
+      return;
+    }
     if (denySavedRead) {
       await until(() => blockedSavedRead > 0 && !resumed.hasInFlightWork());
       assertEquals(reused, false);
@@ -1365,6 +1472,12 @@ Deno.test("Portable resumed Sentinel worker reauthorizes its checkpoint under th
 
 Deno.test("Portable resumed Sentinel worker protects a pinned template checkpoint after read revocation", () =>
   verifyPausedGraphWorker(true, true, undefined, true));
+
+Deno.test("Portable resumed Sentinel worker reuses only an exactly approved pinned read", async () => {
+  await verifyPausedGraphWorker(true, false, undefined, true, "approved");
+  await verifyPausedGraphWorker(true, false, undefined, true, "missing");
+  await verifyPausedGraphWorker(true, true, undefined, true, "approved");
+});
 
 Deno.test("Owner gateway restores a portable paused graph worker before reusing its checkpoint", () =>
   verifyPausedGraphWorker(true));

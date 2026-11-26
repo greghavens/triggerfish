@@ -2,6 +2,8 @@ import { assert, assertEquals, assertRejects } from "@std/assert";
 import { dirname, fromFileUrl, join } from "@std/path";
 import { DatabaseSync } from "node:sqlite";
 import { createProviderRegistry } from "../../src/agent/llm.ts";
+import type { ApprovalInboxRecord } from "../../src/core/approval_inbox.ts";
+import { createToolApprovalService } from "../../src/core/tool_approval_service.ts";
 import type { HookRunner } from "../../src/core/policy/hooks/hooks.ts";
 import type { AgentTurnCheckpoint } from "../../src/core/types/orchestrator.ts";
 import {
@@ -27,10 +29,15 @@ import {
 } from "../../src/sentinel/adaptive_planner.ts";
 import { openSentinelAdaptiveStore } from "../../src/sentinel/adaptive_store.ts";
 import {
+  applySentinelFormalGoals,
   readSentinelAssessment,
   refreshSentinelAssessment,
   startSentinelAssessment,
 } from "../../src/sentinel/assessment_store.ts";
+import {
+  digestSentinelGoalProposal,
+  type SentinelFormalGoal,
+} from "../../src/sentinel/formal_goals.ts";
 import { resolveSentinelCasePath } from "../../src/sentinel/cases.ts";
 import { listSentinelPlannerGraphFacts } from "../../src/sentinel/worker_graph_facts.ts";
 
@@ -204,6 +211,9 @@ async function runGateway(
   const path = resolveSentinelCasePath(base);
   const state = readSentinelAssessment(path);
   assert(state?.active);
+  const approvalInbox = state.plan.assessmentTemplate
+    ? createToolApprovalService(join(base, "planner-approvals.db"))
+    : undefined;
   const marker = (name: string) => join(base, name);
   const append = (name: string, text: string) =>
     Deno.writeTextFileSync(marker(name), text + "\n", {
@@ -264,16 +274,17 @@ async function runGateway(
       toolCalls: [],
     };
   });
+  const token = crypto.randomUUID();
   const app = createGatewayServer({
     port: 0,
-    token: crypto.randomUUID(),
+    token,
     chatSession: createChatSession({
       session: createSession({
         userId: "owner" as UserId,
         channelId: "planner-process-fixture" as ChannelId,
       }),
       providerRegistry: registry,
-      hookRunner: allow,
+      hookRunner: { ...allow, toolApprovalInbox: approvalInbox },
     }),
   });
   const planner = createSentinelModelPlanner(
@@ -287,6 +298,7 @@ async function runGateway(
         providerRegistry: registry,
         allowModelAccess: true,
         hookRunner: {
+          toolApprovalInbox: approvalInbox,
           evaluateHook(hook, context) {
             const { input } = context;
             const name = input.tool_name ??
@@ -327,7 +339,14 @@ async function runGateway(
     undefined,
     () => clock,
   );
-  await app.start();
+  const { port } = await app.start();
+  if (approvalInbox) {
+    await Deno.writeTextFile(
+      marker("approval-gateway.json"),
+      JSON.stringify({ port, token }),
+      { mode: 0o600 },
+    );
+  }
   const coordinator = startSentinelAssessmentCoordinator({
     snapshotPath: path,
     advanceAdaptive(current) {
@@ -370,6 +389,69 @@ async function copyDirectory(source: string, target: string) {
   }
 }
 
+async function approvePlannerReadBatch(base: string, runId: string) {
+  const address = join(base, "approval-gateway.json");
+  await waitFor("The approval gateway did not start.", () => exists(address));
+  const { port, token } = JSON.parse(await Deno.readTextFile(address));
+  const socket = new WebSocket(`ws://127.0.0.1:${port}/chat?token=${token}`);
+  const closed = Promise.withResolvers<void>();
+  socket.addEventListener("close", () => closed.resolve(), { once: true });
+  try {
+    await new Promise<void>((resolve, reject) => {
+      socket.addEventListener("open", () => resolve(), { once: true });
+      socket.addEventListener("error", reject, { once: true });
+    });
+    const request = (args: Record<string, unknown>) => {
+      const requestId = crypto.randomUUID();
+      const done = Promise.withResolvers<{ ok: boolean; result?: unknown }>();
+      const timer = setTimeout(
+        () => done.reject(new Error("No planner approval reply")),
+        3000,
+      );
+      const receive = ({ data }: MessageEvent) => {
+        const message = JSON.parse(data);
+        if (
+          message.type === "approval_inbox_result" &&
+          message.requestId === requestId
+        ) done.resolve(message);
+      };
+      socket.addEventListener("message", receive);
+      socket.send(JSON.stringify({ ...args, requestId }));
+      return done.promise.finally(() => {
+        clearTimeout(timer);
+        socket.removeEventListener("message", receive);
+      });
+    };
+    const approved = new Set<string>();
+    await waitFor(
+      "The planner did not request both read approvals.",
+      async () => {
+        const reply = await request({ type: "approval_inbox_list" });
+        assert(reply.ok);
+        const { records } = reply.result as { records: ApprovalInboxRecord[] };
+        for (const record of records) {
+          if (record.status !== "pending" || approved.has(record.id)) continue;
+          assertEquals(record.runId, runId);
+          assertEquals(record.assignmentId, undefined);
+          assertEquals(record.tool, readFact);
+          assert(
+            (await request({
+              type: "approval_inbox_decide",
+              approvalId: record.id,
+              approved: true,
+            })).ok,
+          );
+          approved.add(record.id);
+        }
+        return approved.size === 2;
+      },
+    );
+  } finally {
+    socket.close();
+    await closed.promise;
+  }
+}
+
 if (import.meta.main) {
   await runGateway(
     Deno.args[0],
@@ -378,6 +460,107 @@ if (import.meta.main) {
     Deno.args[3],
   );
 } else {
+  Deno.test({
+    name:
+      "A restarted planner reauthorizes an exact approval without redispatching the saved read",
+    ignore: Deno.build.os === "windows",
+    async fn() {
+      const base = await Deno.makeTempDir();
+      const path = resolveSentinelCasePath(base);
+      const time = Date.now();
+      let child: Deno.ChildProcess | undefined;
+      const launch = (mode: string, clock: number, factId: string) =>
+        new Deno.Command(Deno.execPath(), {
+          args: [
+            "run",
+            "-A",
+            fromFileUrl(import.meta.url),
+            base,
+            mode,
+            String(clock),
+            factId,
+          ],
+          stdout: "null",
+          stderr: "piped",
+          signal: AbortSignal.timeout(20_000),
+        }).spawn();
+      try {
+        await writeGraph(path, "Reviewed checkpoint evidence");
+        const goals: SentinelFormalGoal[] = [{
+          id: "retained-evidence",
+          title: "Check retained evidence",
+          policy: "operator",
+          criteria: [{
+            id: "known-record",
+            description: "Verify the retained service record.",
+            source: "graph_evidence",
+            reference: "unresolved-proof",
+          }],
+        }];
+        const state = applySentinelFormalGoals(path, {
+          mode: "start",
+          requestId: "planner-approved-checkpoint",
+          proposalDigest: digestSentinelGoalProposal(goals),
+          goals,
+          plan: {
+            childDescription: "Review the retained service case.",
+            assessmentTemplate: {
+              id: crypto.randomUUID(),
+              version: 1,
+              digest: "b".repeat(64),
+              interceptRules: [{
+                tool: readFact,
+                effect: "ask",
+                enabled: true,
+              }],
+            },
+          },
+        }).state;
+        const fact = await publishFact(base, state);
+        child = launch("interrupt", time, fact.id);
+        await approvePlannerReadBatch(base, state.plan.runId!);
+        await waitFor(
+          "Planner did not save the approved reads.",
+          () => exists(join(base, "interrupt-results")),
+        );
+        child.kill("SIGKILL");
+        assert(!(await child.status).success);
+        await child.stderr.cancel();
+        child = undefined;
+        const result = await launch("resume", time + 240_000, fact.id).output();
+        assert(result.success, new TextDecoder().decode(result.stderr));
+        assertEquals(
+          await Deno.readTextFile(join(base, "resume-results")),
+          await Deno.readTextFile(join(base, "interrupt-results")),
+        );
+        assertEquals(
+          await Deno.readTextFile(join(base, "dispatches")),
+          "interrupt\ninterrupt\n",
+        );
+        assertEquals(
+          createToolApprovalService(join(base, "planner-approvals.db")).list()
+            .records.map((
+              { status, decision, dispatchOutcome },
+            ) => [status, decision, dispatchOutcome]),
+          [["completed", "approved", "returned"], [
+            "completed",
+            "approved",
+            "returned",
+          ]],
+        );
+      } finally {
+        if (child) {
+          try {
+            child.kill("SIGKILL");
+          } finally {
+            await child.status;
+            await child.stderr.cancel();
+          }
+        }
+        await Deno.remove(base, { recursive: true });
+      }
+    },
+  });
   Deno.test({
     name:
       "A killed gateway restores a native planner batch, checks source policy, and fences a newer revision",
