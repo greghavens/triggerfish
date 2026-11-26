@@ -641,6 +641,7 @@ export const operatorRunTool: ToolDefinition = {
         "agent_profile",
         "agent_profile_history",
         "preview_agent_prompt",
+        "agent_prompt_variables",
         "set_agent_profile",
         "delete_agent_profile",
         "sentinel_tool_configuration",

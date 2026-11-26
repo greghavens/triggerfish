@@ -11,6 +11,8 @@ import {
 
 const profileId = /^[a-z][a-z0-9_-]{0,63}$/;
 const requestId = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/;
+const promptVariableName = /^[A-Za-z][A-Za-z0-9_-]{0,63}$/;
+const promptPlaceholder = /\{\{\s*\.?([A-Za-z][A-Za-z0-9_-]{0,63})\s*\}\}/g;
 const toolId = /^[a-zA-Z][a-zA-Z0-9_.:-]{0,127}$/;
 
 export interface AgentAutomaticAdmission {
@@ -23,6 +25,7 @@ export interface AgentProfileDefinition {
   readonly description: string;
   readonly role: string;
   readonly prompt: string;
+  readonly promptVariables?: Readonly<Record<string, string>>;
   readonly wrapupPrompt?: string;
   readonly timeoutWrapupPrompt?: string;
   readonly maxTurns?: number;
@@ -78,6 +81,24 @@ function automaticAdmission(
   return { enabled, maxConcurrent };
 }
 
+function promptValues(
+  value: unknown,
+  limit = 32,
+): Record<string, string> | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return;
+  const entries = Object.entries(value).sort(([a], [b]) =>
+    a < b ? -1 : a > b ? 1 : 0
+  );
+  if (entries.length > limit) return;
+  const values: [string, string][] = [];
+  for (const [name, input] of entries) {
+    const parsed = safeText(input, 1000, true);
+    if (!promptVariableName.test(name) || parsed === undefined) return;
+    values.push([name, parsed]);
+  }
+  return Object.fromEntries(values);
+}
+
 export function parseAgentProfileDefinition(
   value: unknown,
 ): AgentProfileDefinition | undefined {
@@ -88,6 +109,7 @@ export function parseAgentProfileDefinition(
     description,
     role,
     prompt,
+    promptVariables,
     wrapupPrompt,
     timeoutWrapupPrompt,
     maxTurns,
@@ -105,6 +127,7 @@ export function parseAgentProfileDefinition(
         "description",
         "role",
         "prompt",
+        "promptVariables",
         "wrapupPrompt",
         "timeoutWrapupPrompt",
         "maxTurns",
@@ -120,6 +143,7 @@ export function parseAgentProfileDefinition(
   const parsedName = safeText(name, 128);
   const parsedDescription = safeText(description, 1000, true);
   const parsedPrompt = safeText(prompt, 12000);
+  const variables = promptValues(promptVariables);
   const wrapup = safeText(wrapupPrompt, 4000, true);
   const timeout = safeText(timeoutWrapupPrompt, 4000, true);
   const visibleTools = settingList(tools);
@@ -132,6 +156,12 @@ export function parseAgentProfileDefinition(
   if (
     !parsedName || parsedDescription === undefined || !parsedPrompt ||
     !isAgentProfileId(role) ||
+    (promptVariables !== undefined &&
+      (!variables || Object.hasOwn(variables, "Now") ||
+        previewAgentProfilePrompt(parsedPrompt, {
+            ...variables,
+            Now: "2000-01-01T00:00:00.000Z",
+          }) === undefined)) ||
     (wrapupPrompt !== undefined && wrapup === undefined) ||
     (timeoutWrapupPrompt !== undefined && timeout === undefined) ||
     (tools !== undefined && !visibleTools) ||
@@ -155,6 +185,7 @@ export function parseAgentProfileDefinition(
     description: parsedDescription,
     role,
     prompt: parsedPrompt,
+    ...(variables !== undefined && { promptVariables: variables }),
     ...(wrapup !== undefined && { wrapupPrompt: wrapup }),
     ...(timeout !== undefined && { timeoutWrapupPrompt: timeout }),
     ...(typeof maxTurns === "number" && { maxTurns }),
@@ -193,27 +224,55 @@ export function parseAgentProfileMutation(
   return { id, expectedVersion, requestId: request, definition: parsed };
 }
 
+/** Preview plain named placeholders without evaluating expressions. */
 export function previewAgentProfilePrompt(
   template: string,
   values: unknown,
 ): string | undefined {
-  if (
-    !safeText(template, 12000) || !values || typeof values !== "object" ||
-    Array.isArray(values)
-  ) return;
-  const variables = new Map<string, string>();
-  const entries = Object.entries(values);
-  if (entries.length > 32) return;
-  for (const [key, value] of entries) {
-    const parsed = safeText(value, 1000, true);
-    if (!profileId.test(key) || parsed === undefined) return;
-    variables.set(key, parsed);
-  }
+  if (!safeText(template, 12000)) return;
+  const variables = promptValues(values, 65);
+  if (!variables) return;
   const rendered = template.replace(
-    /\{\{\s*([a-z][a-z0-9_-]{0,63})\s*\}\}/g,
-    (original, key: string) => variables.get(key) ?? original,
+    promptPlaceholder,
+    (original, name: string) =>
+      Object.hasOwn(variables, name) ? variables[name] : original,
   );
   return safeText(rendered, 16000);
+}
+
+export function agentProfilePromptVariables(profile: AgentProfileDefinition) {
+  const names = new Set([
+    ...[...profile.prompt.matchAll(promptPlaceholder)].map((match) => match[1]),
+    "Now",
+  ]);
+  return [...names].sort().map((name) => {
+    if (name === "Now") {
+      return {
+        name,
+        source: "runtime",
+        description: "Current UTC time when the agent turn is prepared.",
+        example: "2000-01-01T00:00:00.000Z",
+      };
+    }
+    const values = profile.promptVariables;
+    return values && Object.hasOwn(values, name)
+      ? { name, source: "profile", example: values[name] }
+      : { name, source: "sample" };
+  });
+}
+
+export function renderAgentProfilePrompt(
+  profile: AgentProfileDefinition,
+  samples?: unknown,
+): string | undefined {
+  const reviewed = profile.promptVariables ?? {};
+  const overrides = samples === undefined ? {} : promptValues(samples);
+  if (!overrides) return;
+  return previewAgentProfilePrompt(profile.prompt, {
+    ...reviewed,
+    Now: new Date().toISOString(),
+    ...overrides,
+  });
 }
 
 export function openAgentProfiles(baseDir: string) {

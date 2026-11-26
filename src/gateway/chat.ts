@@ -387,6 +387,7 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
                       "agent_profile",
                       "agent_profile_history",
                       "preview_agent_prompt",
+                      "agent_prompt_variables",
                       "agent_event_subscriptions",
                       "sentinel_tool_configuration",
                       "inspect",

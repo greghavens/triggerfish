@@ -1,5 +1,8 @@
 /** Execute durable event deliveries through the isolated scheduler factory. */
-import { readAgentProfile } from "../core/agent_profiles.ts";
+import {
+  readAgentProfile,
+  renderAgentProfilePrompt,
+} from "../core/agent_profiles.ts";
 import { createLogger } from "../core/logger/mod.ts";
 import { join } from "@std/path";
 import {
@@ -92,7 +95,11 @@ export function createAgentEventScheduler(config: SchedulerServiceConfig) {
             isCurrent: current,
           },
           maxIterations: profile.definition.maxTurns ?? 4,
-          systemPromptSections: [profile.definition.prompt, ...instructions],
+          systemPromptSections: [
+            renderAgentProfilePrompt(profile.definition) ??
+              profile.definition.prompt,
+            ...instructions,
+          ],
         }, execution),
         execution,
       );

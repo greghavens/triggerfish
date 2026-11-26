@@ -1,5 +1,8 @@
 /** Apply reviewed agent settings by intersecting the existing runtime policy. */
-import type { AgentProfileRevision } from "../../core/agent_profiles.ts";
+import {
+  type AgentProfileRevision,
+  renderAgentProfilePrompt,
+} from "../../core/agent_profiles.ts";
 import {
   MAX_TOOL_ITERATIONS,
   type OrchestratorConfig,
@@ -39,7 +42,7 @@ export function withAgentProfileRuntime(
         ...prior,
         ...(profile
           ? [`Reviewed agent role: ${profile.role}
-${profile.prompt}`]
+${renderAgentProfilePrompt(profile) ?? profile.prompt}`]
           : []),
       ];
     },

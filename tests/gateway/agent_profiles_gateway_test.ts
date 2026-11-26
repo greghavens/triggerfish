@@ -145,6 +145,7 @@ Deno.test("Reviewed agent profiles persist history and restrict a selected gatew
       description: "Read-only role.",
       role: "assistant",
       prompt: "Use careful wording for {{topic}}.",
+      promptVariables: { topic: "operations" },
       tools: [],
       skills: [],
       wrapupPrompt: "Summarize only evidence.",
@@ -178,6 +179,35 @@ Deno.test("Reviewed agent profiles persist history and restrict a selected gatew
       1,
     );
     await turn("/agent-profile sentinel-reporter");
+    const catalog = JSON.parse(
+      await manage({ action: "agent_prompt_variables", id, version: 1 }),
+    ).variables;
+    assertEquals(
+      catalog.map((
+        { name, source }: { name: string; source: string },
+      ) => [name, source]),
+      [
+        ["Now", "runtime"],
+        ["topic", "profile"],
+      ],
+    );
+    assertEquals(catalog[1].example, "operations");
+    assertEquals(
+      JSON.parse(await manage({ action: "preview_agent_prompt", id })).prompt,
+      "Use careful wording for operations.",
+    );
+    assertStringIncludes(
+      await manage({
+        ...creation,
+        expectedVersion: 1,
+        requestId: crypto.randomUUID(),
+        profileSettings: {
+          ...profileSettings,
+          promptVariables: { Now: "bogus clock" },
+        },
+      }),
+      "unavailable",
+    );
     const preview = await manage({
       action: "preview_agent_prompt",
       id,
@@ -191,7 +221,7 @@ Deno.test("Reviewed agent profiles persist history and restrict a selected gatew
       expectedVersion: 1,
       profileSettings: {
         ...profileSettings,
-        prompt: "Verified test instructions.",
+        prompt: "Verified test instructions for {{topic}} at {{.Now}}.",
       },
     });
     assertEquals(JSON.parse(changed).profile.version, 2);
@@ -210,7 +240,12 @@ Deno.test("Reviewed agent profiles persist history and restrict a selected gatew
     await turn("/agent-profile test-agent");
     requested = { name: "fixture_read", args: {} };
     await turn("Can this agent invoke the fixture tool?");
-    assert(modelPrompt.includes("Verified test instructions."));
+    assertStringIncludes(
+      modelPrompt,
+      "Verified test instructions for operations at ",
+    );
+    assert(!modelPrompt.includes("{{.Now}}"));
+    assert(/operations at \d{4}-\d{2}-\d{2}T/.test(modelPrompt));
     assert(!advertised.includes("fixture_read"));
     assertEquals(invoked, 0);
     await turn("/agent-profile off");

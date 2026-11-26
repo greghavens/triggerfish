@@ -1,11 +1,12 @@
 import type { SelectedModelProfile } from "../core/model_profile_selection.ts";
 /** Owner gateway operations for the durable agent registry. */
 import {
+  agentProfilePromptVariables,
   isAgentProfileId,
   openAgentProfiles,
   parseAgentProfileDefinition,
   parseAgentProfileMutation,
-  previewAgentProfilePrompt,
+  renderAgentProfilePrompt,
 } from "../core/agent_profiles.ts";
 import { canFlowTo } from "../core/types/classification.ts";
 import type { OperatorRunToolContext } from "./operator_run_tool.ts";
@@ -15,6 +16,7 @@ const reads = new Set([
   "agent_profile",
   "agent_profile_history",
   "preview_agent_prompt",
+  "agent_prompt_variables",
 ]);
 
 export function isAgentProfileRead(action: unknown): boolean {
@@ -102,16 +104,26 @@ export async function executeAgentProfileAction(
       });
     }
     if (
+      action === "agent_prompt_variables" &&
+      only(["action", "id", "version"]) &&
+      (args.version === undefined || positiveVersion(args.version))
+    ) {
+      const profile = args.version === undefined
+        ? registry.read(id)
+        : registry.version(id, args.version);
+      return profile?.definition
+        ? output({ variables: agentProfilePromptVariables(profile.definition) })
+        : unavailable;
+    }
+    if (
       action === "preview_agent_prompt" &&
       only(["action", "id", "promptVariables", "profileSettings"])
     ) {
       const profile = registry.read(id);
       const draft = profileSettings ?? profile?.definition;
       const parsed = parseAgentProfileDefinition(draft);
-      const prompt = parsed && previewAgentProfilePrompt(
-        parsed.prompt,
-        promptVariables ?? {},
-      );
+      const prompt = parsed &&
+        renderAgentProfilePrompt(parsed, promptVariables);
       return prompt ? output({ prompt }) : unavailable;
     }
     const deletion = action === "delete_agent_profile";
