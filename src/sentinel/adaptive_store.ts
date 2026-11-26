@@ -6439,6 +6439,19 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
         : undefined;
     },
 
+    runningModelReviewControlIdentity(revision: string, id: string) {
+      const row = db.prepare(`
+        SELECT review.attempts, review.token FROM adaptive_model_reviews AS review
+        JOIN adaptive_tasks AS task ON task.id = review.taskId
+        WHERE task.revision = ? AND task.id = ? AND task.status = 'completed'
+          AND review.token IS NOT NULL AND review.availableAt > ? AND review.noteId IS NULL
+          AND NOT EXISTS (SELECT 1 FROM adaptive_worker_controls AS control
+            WHERE control.revision = ? AND control.taskId = ? AND control.action = 'stop')
+      `).get(revisionKey(revision), taskId(id), now(), revision, id);
+      if (!row || typeof row.token !== "string") return;
+      return { attempt: Number(row.attempts), leaseToken: row.token };
+    },
+
     requestModelReviewControl(
       revision: string,
       id: string,
@@ -6446,6 +6459,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
       action: "steer" | "stop",
       note?: string,
       allowNew = true,
+      expected?: { attempt: number; leaseToken: string },
     ): SentinelWorkerControlReceipt | undefined {
       revision = revisionKey(revision);
       id = taskId(id);
@@ -6466,12 +6480,17 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
           () => {
             if (!allowNew || activeRevision() !== revision) return;
             const current = db.prepare(`
-              SELECT review.attempts FROM adaptive_model_reviews AS review
+              SELECT review.attempts, review.token FROM adaptive_model_reviews AS review
               JOIN adaptive_tasks AS task ON task.id = review.taskId
               WHERE task.revision = ? AND task.id = ? AND task.status = 'completed'
                 AND review.token IS NOT NULL AND review.availableAt > ? AND review.noteId IS NULL
             `).get(revision, id, time);
-            return current ? Number(current.attempts) : undefined;
+            const attempt = current ? Number(current.attempts) : undefined;
+            return !expected ||
+                (expected.attempt === attempt &&
+                  expected.leaseToken === current?.token)
+              ? attempt
+              : undefined;
           },
         );
         if (result?.created) {

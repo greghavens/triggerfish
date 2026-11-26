@@ -465,9 +465,11 @@ export async function dispatchSecurityEnforcedToolCall(
       blocked: true,
     };
     const owner = config.toolApprovalContext;
+    const assignmentId = owner?.assignmentForCall?.(call.name, call.args) ??
+      owner?.assignmentId;
     const activity = signal ?? new AbortController().signal;
     if (
-      activity.aborted ||
+      activity.aborted || (owner?.assignmentForCall && !assignmentId) ||
       (owner?.isCurrent && !await owner.isCurrent(session.id))
     ) {
       return blocked;
@@ -475,7 +477,7 @@ export async function dispatchSecurityEnforcedToolCall(
     const release = await inbox.wait({
       sessionId: session.id,
       runId: owner?.runId ?? exactToolApprovalRun(session.id) ?? session.id,
-      assignmentId: owner?.assignmentId,
+      assignmentId,
       tool: call.name,
       args: call.args,
       ruleId: preToolResult.ruleId,

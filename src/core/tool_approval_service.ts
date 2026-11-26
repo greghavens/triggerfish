@@ -13,6 +13,10 @@ import { openApprovalInbox } from "./approval_inbox.ts";
 export interface ToolApprovalContext {
   readonly runId?: string;
   readonly assignmentId?: string;
+  readonly assignmentForCall?: (
+    name: string,
+    args: Record<string, unknown>,
+  ) => string | undefined;
   readonly isCurrent?: (sessionId: string) => boolean | Promise<boolean>;
 }
 

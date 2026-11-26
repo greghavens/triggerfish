@@ -247,7 +247,10 @@ function project(row: Row | undefined): ApprovalInboxRecord | undefined {
     ...(typeof row.assignmentId === "string" &&
       { assignmentId: row.assignmentId }),
     tool,
-    description: customTool
+    description: tool === "sentinel_request_worker_stop" &&
+        typeof row.assignmentId === "string"
+      ? `Approve stopping Sentinel assignment '${row.assignmentId}'.`
+      : customTool
       ? "Approve " + customTool.action + " for custom tool '" +
         customTool.name + "'."
       : chatGoal?.action === "confirm"

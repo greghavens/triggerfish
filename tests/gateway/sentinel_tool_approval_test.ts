@@ -10,7 +10,10 @@ import {
   type UserId,
 } from "../../src/core/types/session.ts";
 import { createChatSession } from "../../src/gateway/chat.ts";
-import { advanceAdaptiveSentinel } from "../../src/gateway/sentinel_adaptive_runtime.ts";
+import {
+  advanceAdaptiveSentinel,
+  createSentinelModelPlanner,
+} from "../../src/gateway/sentinel_adaptive_runtime.ts";
 import { createSentinelSubagent } from "../../src/gateway/sentinel_agent.ts";
 import { createGatewayServer } from "../../src/gateway/server/server.ts";
 import {
@@ -89,7 +92,7 @@ async function pendingInbox(socket: Awaited<ReturnType<typeof connect>>) {
     if (found) return found;
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
-  throw new Error("The leased worker did not reach approval");
+  throw new Error("The agent did not reach approval");
 }
 
 for (
@@ -310,6 +313,259 @@ for (
       await job;
       await reopened?.close();
       await original?.close();
+      await gateway.stop();
+      await Deno.remove(baseDir, { recursive: true });
+    }
+  });
+}
+
+for (
+  const outcome of [
+    "approved",
+    "denied",
+    "replaced-lease",
+    "revoked-policy",
+  ] as const
+) {
+  Deno.test(`Planner stop request honors ${outcome} through the reconnected owner approval inbox`, async () => {
+    const baseDir = await Deno.makeTempDir();
+    const path = resolveSentinelCasePath(baseDir);
+    const file = join(dirname(path), "sentinel-adaptive.db");
+    const toolApprovalInbox = createToolApprovalService(
+      join(baseDir, "approvals.db"),
+    );
+    const token = crypto.randomUUID();
+    const requestId = crypto.randomUUID();
+    const name = "sentinel_request_worker_stop";
+    const hooksSeen: string[] = [];
+    let policyRevoked = false;
+    let withheldReceipt = false;
+    const hookRunner: HookRunner = {
+      toolApprovalInbox,
+      evaluateHook(hook, { input }) {
+        if (input.tool_name === name) {
+          hooksSeen.push(hook);
+          assertEquals(input.case_id, "main");
+          assertEquals(input.resource_classification, "INTERNAL");
+        }
+        if (
+          hook === "PRE_OUTPUT" && typeof input.content === "string" &&
+          input.content.includes(requestId) &&
+          input.content.includes('"receipt"')
+        ) {
+          assertEquals(input.target_classification, "INTERNAL");
+          withheldReceipt = true;
+          return Promise.resolve({
+            allowed: false,
+            action: "BLOCK",
+            ruleId: "withhold-receipt",
+            duration: 0,
+          });
+        }
+        const allowed = !(policyRevoked && hook === "PRE_TOOL_CALL" &&
+          input.tool_name === name);
+        return Promise.resolve({
+          allowed,
+          action: allowed ? "ALLOW" : "BLOCK",
+          ruleId: null,
+          duration: 0,
+        });
+      },
+    };
+    const completed = Promise.withResolvers<string>();
+    const providerRegistry = createProviderRegistry();
+    let plannerOffers = 0;
+    let selectedTask = "";
+    providerRegistry.register({
+      name: "planner-stop-fixture",
+      supportsStreaming: false,
+      complete(messages) {
+        const result = messages.findLast(({ role }) => role === "tool");
+        if (result) {
+          completed.resolve(String(result.content));
+          return Promise.resolve({
+            content: "[]",
+            usage: { inputTokens: 1, outputTokens: 1 },
+            toolCalls: [],
+          });
+        }
+        const input = messages.findLast(({ role }) => role === "user");
+        const candidates =
+          JSON.parse(String(input?.content).split("\n").at(-1)!)
+            .runningWorkerAttempts;
+        assertEquals(candidates, [{ taskId: selectedTask, attempt: 1 }]);
+        plannerOffers++;
+        return Promise.resolve({
+          usage: { inputTokens: 1, outputTokens: 1 },
+          content: "",
+          toolCalls: [{
+            id: "stop-reviewed-worker",
+            type: "function",
+            function: {
+              name,
+              arguments: JSON.stringify({ ...candidates[0], requestId }),
+            },
+          }],
+        });
+      },
+    });
+    providerRegistry.setDefault("planner-stop-fixture");
+    const chatSession = createChatSession({
+      session: createSession({
+        userId: "owner" as UserId,
+        channelId: "test" as ChannelId,
+      }),
+      providerRegistry,
+      hookRunner,
+      enableStreaming: false,
+    });
+    const gateway = createGatewayServer({ port: 0, token, chatSession });
+    const planner = createSentinelModelPlanner(
+      path,
+      (state, taskId, leaseToken, role) => {
+        assertEquals(role, "planner");
+        assertEquals(taskId, undefined);
+        assertEquals(leaseToken, undefined);
+        return createSentinelSubagent({
+          snapshotPath: path,
+          assessmentRevision: state.revision,
+          plannerExecutionEvidenceRunId: state.plan.runId,
+          providerRegistry,
+          hookRunner,
+          allowModelAccess: true,
+        });
+      },
+    );
+    let initialSocket: Awaited<ReturnType<typeof connect>> | undefined;
+    let reconnected: Awaited<ReturnType<typeof connect>> | undefined;
+    try {
+      await Deno.mkdir(dirname(path), { recursive: true });
+      await Deno.writeTextFile(
+        path,
+        JSON.stringify({
+          version: 1,
+          nodes: [{ id: "service", kind: "asset", label: "Service" }],
+          edges: [],
+        }),
+      );
+      const state = startSentinelAssessment(path);
+      const runId = state.plan.runId;
+      assert(runId);
+      advanceAdaptiveSentinel(path, state);
+      const revision = adaptiveRevision(state);
+      const store = openSentinelAdaptiveStore(file);
+      try {
+        store.sync(revision, [{
+          kind: "impact",
+          nodeId: "service",
+          reason: MODEL_ASSIGNMENT_REASON,
+        }], revision);
+        advanceAdaptiveSentinel(path, state);
+        const lease = store.claimModelReview(
+          revision,
+          MODEL_ASSIGNMENT_REASON,
+          ({ nodeId }) => nodeId === "service",
+        );
+        assert(lease);
+        selectedTask = lease.task.id;
+        const { port } = await gateway.start();
+        initialSocket = await connect(port, token);
+        planner.advance(state);
+        const entry = await pendingInbox(initialSocket);
+        assertEquals(entry.assignmentId, selectedTask);
+        assertEquals(entry.runId, runId);
+        assertEquals(entry.tool, name);
+        assertStringIncludes(entry.description, selectedTask);
+        assert(!JSON.stringify(entry).includes(lease.token));
+        assertEquals(
+          store.modelReviewControls(revision, selectedTask).stopped,
+          false,
+        );
+        await initialSocket.close();
+        reconnected = await connect(port, token);
+        assertEquals((await pendingInbox(reconnected)).id, entry.id);
+        if (outcome === "replaced-lease") {
+          assert(
+            store.finishModelReview(
+              revision,
+              selectedTask,
+              lease.token,
+              "interrupted",
+            ),
+          );
+          const replacement = store.claimModelReview(
+            revision,
+            MODEL_ASSIGNMENT_REASON,
+            ({ id }) => id === selectedTask,
+          );
+          assert(replacement && replacement.token !== lease.token);
+          assertEquals(
+            store.modelReviewStates(revision).find(({ taskId }) =>
+              taskId === selectedTask
+            )?.attempts,
+            1,
+          );
+        }
+        policyRevoked = outcome === "revoked-policy";
+        const decide = {
+          type: "approval_inbox_decide",
+          approvalId: entry.id,
+          approved: outcome !== "denied",
+        };
+        assertEquals((await reconnected.request(decide)).ok, true);
+        const timeout = AbortSignal.timeout(2500);
+        const result = await Promise.race([
+          completed.promise,
+          new Promise<never>((_, reject) =>
+            timeout.addEventListener("abort", () => reject(timeout.reason), {
+              once: true,
+            })
+          ),
+        ]);
+        assertEquals(plannerOffers, 1);
+        const controls = store.modelReviewControls(revision, selectedTask);
+        const terminal = toolApprovalInbox.list().records.find(({ id }) =>
+          id === entry.id
+        );
+        if (outcome === "approved") {
+          assertEquals(controls.stopped, true);
+          assertEquals(JSON.parse(result).receipt.taskId, selectedTask);
+          assertEquals(JSON.parse(result).receipt.requestId, requestId);
+          assert(hooksSeen.includes("POST_TOOL_RESPONSE"));
+          assert(withheldReceipt);
+          assertEquals(terminal?.status, "completed");
+          assertEquals((await reconnected.request(decide)).ok, true);
+          assert(
+            store.finishModelReview(
+              revision,
+              selectedTask,
+              lease.token,
+              "interrupted",
+            ),
+          );
+          assertEquals(
+            store.claimModelReview(
+              revision,
+              MODEL_ASSIGNMENT_REASON,
+              ({ id }) => id === selectedTask,
+            ),
+            null,
+          );
+        } else {
+          assertEquals(controls.stopped, false);
+          assertStringIncludes(result.toLowerCase(), "approval");
+          assertEquals(
+            terminal?.status,
+            outcome === "denied" ? "denied" : "stale",
+          );
+        }
+      } finally {
+        store.close();
+      }
+    } finally {
+      planner.stop();
+      await reconnected?.close();
+      await initialSocket?.close();
       await gateway.stop();
       await Deno.remove(baseDir, { recursive: true });
     }

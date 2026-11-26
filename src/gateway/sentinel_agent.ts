@@ -219,6 +219,7 @@ import {
   readSentinelCaseHints,
   readSentinelProvenance,
   readSentinelWorkerObservation,
+  reviewSentinelPlannerWorkerStop,
   SENTINEL_MAX_INPUT_CHARS,
   sentinelHintAssetsInScope,
 } from "./sentinel_adaptive_runtime.ts";
@@ -376,6 +377,7 @@ export interface SentinelTurnCheckpointOptions {
   readonly retainedProgress?: readonly SentinelReviewStep[];
   readonly onResumeAccepted?: () => void;
   readonly workerBoundary?: WorkerBoundary;
+  readonly plannerRoundIsCurrent?: () => boolean;
   readonly operatingConstraints?: {
     readonly version: number;
     readonly digest: string;
@@ -400,6 +402,7 @@ type SelectedFinding = Parameters<typeof readLinkedFindingProof>[4];
 type LinkedFindingSources = Parameters<typeof readLinkedFindingProof>[1];
 
 export interface SentinelAgent {
+  readonly canRequestWorkerStop?: boolean;
   readonly authorizeLinkedFinding?: (
     caseId: string,
     assetId: string,
@@ -882,6 +885,29 @@ const assignedExecutionEvidenceTool: ToolDefinition = {
   },
 };
 
+const plannerStopTool: ToolDefinition = {
+  name: "sentinel_request_worker_stop",
+  description:
+    "Request operator approval to stop one running investigation assignment. Specify its current attempt.",
+  parameters: {
+    taskId: {
+      type: "string",
+      required: true,
+      description: "Exact assignment ID",
+    },
+    attempt: {
+      type: "integer",
+      required: true,
+      description: "Current running attempt number",
+    },
+    requestId: {
+      type: "string",
+      required: true,
+      description: "Unique request UUID",
+    },
+  },
+};
+
 const caseExecutionEvidenceTool: ToolDefinition = {
   name: "sentinel_case_execution_evidence",
   description:
@@ -1146,6 +1172,8 @@ interface ActiveTurn {
   readonly traceResultDigests?: boolean;
   readonly requiresLiveAssignment?: boolean;
   readonly workerBoundary?: WorkerBoundary;
+  readonly plannerRoundIsCurrent?: () => boolean;
+  readonly plannerWorkerStopLeases: Map<string, string>;
   readonly operatingConstraints?: {
     readonly version: number;
     readonly digest: string;
@@ -3578,6 +3606,8 @@ function createAgent(
     options.assignedTaskLeaseToken === undefined &&
     options.assessmentRevision !== undefined &&
     options.plannerExecutionEvidenceRunId !== undefined;
+  const canRequestWorkerStop = canReadPlannerCase &&
+    options.hookRunner.toolApprovalInbox !== undefined;
   const canReadCaseExecutionEvidence = canReadPlannerCase &&
     !!options.authorizeExecutionTracePayload &&
     !!options.sharedInventoryBaseDir;
@@ -3630,6 +3660,7 @@ function createAgent(
     ? [
       ...tools,
       ...plannerTodoTools,
+      ...(canRequestWorkerStop ? [plannerStopTool] : []),
       ...(options.readRetainedWorkflow
         ? [{
           ...intermediateWorkflowObservationTool,
@@ -3792,18 +3823,19 @@ function createAgent(
       constraints?.digest === turn.approvalConstraints?.digest;
   }
 
-  const toolApprovalContext = approvalRunId && caseId && options.assignedTaskId
-    ? {
-      runId: approvalRunId,
-      assignmentId: options.assignedTaskId,
-      async isCurrent() {
-        const turn = active;
-        if (!turn || !approvalIsCurrent(turn)) return false;
-        if ((await turn.workerBoundary?.("before_tool"))?.stop) return false;
-        return approvalIsCurrent(turn);
-      },
-    }
-    : undefined;
+  const workerApprovalContext =
+    approvalRunId && caseId && options.assignedTaskId
+      ? {
+        runId: approvalRunId,
+        assignmentId: options.assignedTaskId,
+        async isCurrent() {
+          const turn = active;
+          if (!turn || !approvalIsCurrent(turn)) return false;
+          if ((await turn.workerBoundary?.("before_tool"))?.stop) return false;
+          return approvalIsCurrent(turn);
+        },
+      }
+      : undefined;
 
   function currentPlannerReceiptScope(
     turn: ActiveTurn,
@@ -3828,6 +3860,66 @@ function createAgent(
         current.result?.sharedGraph.snapshot,
       ));
   }
+
+  function plannerWorkerStopScope(
+    turn: ActiveTurn,
+    args: Record<string, unknown>,
+  ) {
+    const { taskId, attempt, requestId } = args;
+    const runId = options.plannerExecutionEvidenceRunId;
+    const evidenceRevision = options.assessmentRevision;
+    if (
+      !canRequestWorkerStop || !runId || evidenceRevision === undefined ||
+      !currentPlannerReceiptScope(turn) || !turn.plannerRoundIsCurrent?.() ||
+      Object.keys(args).length !== 3 ||
+      typeof taskId !== "string" || !/^adaptive:[a-f0-9]{64}$/.test(taskId) ||
+      typeof attempt !== "number" || !Number.isSafeInteger(attempt) ||
+      attempt < 1 ||
+      typeof requestId !== "string" ||
+      !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(requestId)
+    ) return;
+    return {
+      runId,
+      evidenceRevision,
+      taskId,
+      attempt,
+      requestId,
+      constraintsVersion: turn.operatingConstraints?.version,
+      constraintsDigest: turn.operatingConstraints?.digest,
+    };
+  }
+
+  function validatePlannerWorkerStop(
+    turn: ActiveTurn,
+    args: Record<string, unknown>,
+  ) {
+    const scope = plannerWorkerStopScope(turn, args);
+    if (!scope) return;
+    const binding = reviewSentinelPlannerWorkerStop(
+      options.snapshotPath,
+      scope,
+    );
+    if (!binding) return;
+    const previous = turn.plannerWorkerStopLeases.get(scope.requestId);
+    if (previous && previous !== binding.leaseToken) return;
+    turn.plannerWorkerStopLeases.set(scope.requestId, binding.leaseToken);
+    return scope;
+  }
+
+  const plannerApprovalContext = canRequestWorkerStop
+    ? {
+      runId: options.plannerExecutionEvidenceRunId,
+      assignmentForCall(name: string, args: Record<string, unknown>) {
+        if (!active || name !== plannerStopTool.name) return;
+        return validatePlannerWorkerStop(active, args)?.taskId;
+      },
+      isCurrent() {
+        return !!active && currentPlannerReceiptScope(active) &&
+          active.plannerRoundIsCurrent?.() === true;
+      },
+    }
+    : undefined;
+  const toolApprovalContext = workerApprovalContext ?? plannerApprovalContext;
 
   const config: OrchestratorConfig = {
     ...(toolApprovalContext && { toolApprovalContext }),
@@ -3854,6 +3946,7 @@ function createAgent(
             toolName === sentinelFindingTrafficListTool.name);
         const digestRead = typeof toolName === "string" &&
           isSentinelEvidenceDigestTool(toolName);
+        const plannerStop = toolName === plannerStopTool.name;
         const plannerTodo = plannerTodoTools.some(({ name }) =>
           name === toolName
         );
@@ -3882,7 +3975,7 @@ function createAgent(
             toolName === SENTINEL_GOAL_STATE_READ ||
             toolName === SENTINEL_INCIDENT_ALERTS_READ ||
             toolName === SENTINEL_DEFENSE_READ || traffic || plannerTodo ||
-            digestRead);
+            digestRead || plannerStop);
         let evidenceRevision = options.assessmentRevision ??
           (traffic || digestRead || selectedCaseCall
             ? sentinelTrafficPolicyRevision(call?.args?.revision)
@@ -3902,9 +3995,13 @@ function createAgent(
             tool_name: toolName,
             case_id: locateSentinelCase(options.snapshotPath)?.caseId ?? null,
             evidence_revision: evidenceRevision ?? null,
-            assignment_id: options.assignedTaskId ?? null,
+            assignment_id: options.assignedTaskId ??
+              (plannerStop && typeof call?.args?.taskId === "string" &&
+                  /^adaptive:[a-f0-9]{64}$/.test(call.args.taskId)
+                ? call.args.taskId
+                : null),
             resource_classification: "INTERNAL",
-            operation_type: selectedCaseWrite ||
+            operation_type: selectedCaseWrite || plannerStop ||
                 toolName === "todo_write" ||
                 toolName === proposeWorkerGoalTool.name ||
                 toolName === proveWorkerGoalTool.name ||
@@ -3936,6 +4033,15 @@ function createAgent(
             }
             : context,
         );
+        if (name === "PRE_TOOL_CALL" && plannerStop) {
+          const permits = result.action === "REQUIRE_APPROVAL" ||
+            (result.action === "ALLOW" && result.allowed);
+          if (
+            !permits || !turn || !call?.args ||
+            !validatePlannerWorkerStop(turn, call.args)
+          ) return { ...result, allowed: false, action: "BLOCK" };
+          return { ...result, allowed: false, action: "REQUIRE_APPROVAL" };
+        }
         if (
           name === "PRE_TOOL_CALL" && reporter &&
           toolName === sentinelFindingTrafficAttachTool.name &&
@@ -3946,13 +4052,14 @@ function createAgent(
         ) return { ...result, allowed: false, action: "BLOCK" };
         if (
           result.allowed && name === "POST_TOOL_RESPONSE" &&
-          (toolName === caseExecutionEvidenceTool.name || plannerTodo) &&
+          (toolName === caseExecutionEvidenceTool.name || plannerTodo ||
+            plannerStop) &&
           (!turn || !currentPlannerReceiptScope(turn))
         ) return { ...result, allowed: false, action: "BLOCK" };
         if (
           result.allowed &&
           (name === "POST_TOOL_RESPONSE" || name === "PRE_OUTPUT") &&
-          ((toolApprovalContext && (!turn || !approvalIsCurrent(turn))) ||
+          ((workerApprovalContext && (!turn || !approvalIsCurrent(turn))) ||
             (await turn?.workerBoundary?.("before_tool"))?.stop)
         ) return { ...result, allowed: false, action: "BLOCK" };
         if (
@@ -4002,9 +4109,22 @@ function createAgent(
       if (
         !turn || turn.signal.aborted || !toolNames.has(name) ||
         (turn.requiresLiveAssignment && !readAssignedModelReview(options)) ||
-        (toolApprovalContext && !approvalIsCurrent(turn))
+        (workerApprovalContext && !approvalIsCurrent(turn))
       ) {
         return "Error: This tool is unavailable in Sentinel.";
+      }
+      if (name === plannerStopTool.name) {
+        const scope = plannerWorkerStopScope(turn, args);
+        const expected = scope &&
+          turn.plannerWorkerStopLeases.get(scope.requestId);
+        const receipt = scope && expected && reviewSentinelPlannerWorkerStop(
+          options.snapshotPath,
+          scope,
+          expected,
+        )?.receipt;
+        return receipt
+          ? boundResult({ _classification: "INTERNAL", receipt })
+          : "Error: The reviewed Sentinel assignment attempt is unavailable.";
       }
       if (name === workerTool.name) return delegate(turn, args);
       if (++turn.reads > MAX_READS_PER_TURN) {
@@ -5977,6 +6097,7 @@ function createAgent(
       : undefined;
   return {
     ...(canReadPlannerCase && { authorizeLinkedFinding }),
+    ...(canRequestWorkerStop && { canRequestWorkerStop }),
     ...(futureWorkflowTargets?.length && {
       futureWorkflowTargets,
       permitsFutureWorkflow(asset, selector) {
@@ -6068,6 +6189,7 @@ function createAgent(
           onMutationBoundary,
           onBatchReadReceipt,
           workerBoundary,
+          plannerRoundIsCurrent,
           operatingConstraints,
         } = checkpointOptions ?? {};
         const checkpointed = resume !== undefined ||
@@ -6082,7 +6204,7 @@ function createAgent(
           });
           return;
         }
-        const approvalConstraints = toolApprovalContext &&
+        const approvalConstraints = workerApprovalContext &&
           readSentinelOperatingConstraints(options.snapshotPath, approvalRunId);
         active = {
           controller,
@@ -6114,8 +6236,10 @@ function createAgent(
           onBatchReadReceipt,
           traceResultDigests,
           requiresLiveAssignment: workerBoundary !== undefined ||
-            toolApprovalContext !== undefined,
+            workerApprovalContext !== undefined,
           workerBoundary,
+          plannerRoundIsCurrent,
+          plannerWorkerStopLeases: new Map(),
           operatingConstraints,
           reads: 0,
           workers: 0,
