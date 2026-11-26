@@ -5209,7 +5209,11 @@ ${
         action === "preview_inventory_withdrawal" ||
         action === "withdraw_inventory_host"
       ) {
-        if (ref.kind !== "sentinel" || !await controller.inspect(ref)) {
+        const authorize = context?.authorizeOwnerRunCall;
+        if (
+          !authorize || !context?.authenticatedOwnerSessionId ||
+          ref.kind !== "sentinel" || !await controller.inspect(ref)
+        ) {
           return unavailable;
         }
         const result = await executeOperatorInventoryWithdrawal(
@@ -5217,6 +5221,7 @@ ${
           ref,
           args,
           options.confirm,
+          () => authorize(args),
           options.webContainmentConfigured,
         );
         return typeof result === "string" ? result : safeProjection(result);

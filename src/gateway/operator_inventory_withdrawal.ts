@@ -23,6 +23,7 @@ export async function executeOperatorInventoryWithdrawal(
   ref: OperatorRunRef,
   args: Record<string, unknown>,
   confirm: (message: string) => Promise<boolean>,
+  authorize: () => Promise<boolean>,
   webContainmentConfigured?: boolean,
 ): Promise<Record<string, unknown> | string> {
   const applying = args.action === "withdraw_inventory_host";
@@ -98,7 +99,8 @@ export async function executeOperatorInventoryWithdrawal(
       const current = await proposal();
       if (
         !current || current.change.previousDigest !== previewDigest ||
-        current.change.nextDigest !== planned.change.nextDigest
+        current.change.nextDigest !== planned.change.nextDigest ||
+        !await authorize()
       ) return unavailable;
       const { change, original } = current;
       const input = {

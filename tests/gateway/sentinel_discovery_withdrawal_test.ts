@@ -27,6 +27,7 @@ import {
   sentinelSourceSnapshotPath,
 } from "../../src/sentinel/shared_inventory.ts";
 import { loadSentinelGraph } from "../../src/sentinel/graph.ts";
+import { openSentinelInventoryWithdrawalReceipts } from "../../src/sentinel/inventory_withdrawal_receipts.ts";
 
 const tool = "operator_runs";
 const host = "safe.example";
@@ -354,12 +355,13 @@ Deno.test("authenticated root inventory withdrawal retains the exact prior snaps
   const path = resolveSentinelCasePath(baseDir, sourceId);
   const peerPath = resolveSentinelCasePath(baseDir, peerId);
   let confirmations = 0;
+  let denyPreTool = false;
   let duringApproval: () => Promise<void> = () => Promise.resolve();
   const gateway = operatorGateway(baseDir, async () => {
     ++confirmations;
     await duringApproval();
     return true;
-  });
+  }, () => denyPreTool);
   const sourceRef = { kind: "sentinel", id: sourceId, host };
   const preview = { action: "preview_inventory_withdrawal", ...sourceRef };
   const change = { action: "withdraw_inventory_host", ...sourceRef };
@@ -411,10 +413,26 @@ Deno.test("authenticated root inventory withdrawal retains the exact prior snaps
       const latest = latestPayload.preview ?? latestPayload;
       chosenDigest = latest.previewDigest ?? latest.previousDigest;
       assertEquals(chosenDigest, digest(updated));
+      duringApproval = () => {
+        denyPreTool = true;
+        return Promise.resolve();
+      };
+      assert((await turn({ ...change, requestId, previewDigest: chosenDigest }))
+        .startsWith("Error:"));
+      denyPreTool = false;
+      duringApproval = () => Promise.resolve();
+      assertEquals(confirmations, 2);
+      assertEquals(digest(source()), digest(updated));
+      const receipts = openSentinelInventoryWithdrawalReceipts(baseDir);
+      try {
+        assertEquals(receipts.read(requestId), undefined);
+      } finally {
+        receipts.close();
+      }
       durableResponse = JSON.parse(
         await turn({ ...change, requestId, previewDigest: chosenDigest }),
       );
-      assertEquals(confirmations, 2);
+      assertEquals(confirmations, 3);
       const live = source();
       assertEquals(live.nodes.map(({ id }) => id), [
         "safe.example.evil",
@@ -447,7 +465,7 @@ Deno.test("authenticated root inventory withdrawal retains the exact prior snaps
         ),
         durableResponse,
       );
-      assertEquals(confirmations, 2);
+      assertEquals(confirmations, 3);
       const after = source();
       assert(!after.nodes.some(({ id }) => id === host));
       const ambiguous = {
@@ -466,7 +484,7 @@ Deno.test("authenticated root inventory withdrawal retains the exact prior snaps
       };
       await Deno.writeTextFile(path, JSON.stringify(ambiguous));
       assert((await turn(preview)).startsWith("Error:"));
-      assertEquals(confirmations, 2);
+      assertEquals(confirmations, 3);
       assertEquals(source(), loadSentinelGraph(ambiguous).snapshot());
     });
   } finally {
