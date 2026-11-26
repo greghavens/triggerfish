@@ -1,3 +1,4 @@
+import { isModelRouteIdentity } from "./model_route_identity.ts";
 /** Durable, fail-closed state for trusted agent continuation adapters. */
 /// <reference path="./sqlite_types.d.ts" />
 
@@ -147,6 +148,8 @@ function normalizedCheckpoint(
     typeof count === "number" && Number.isSafeInteger(count) && count >= 0;
   if (
     !checkpoint || checkpoint.completedIterations !== batch ||
+    (checkpoint.modelRouteIdentity !== undefined &&
+      !isModelRouteIdentity(checkpoint.modelRouteIdentity)) ||
     !Array.isArray(checkpoint.history) || checkpoint.history.length < 2 ||
     checkpoint.history.length > 256 ||
     checkpoint.history[0]?.role !== "user" ||
@@ -198,6 +201,8 @@ function normalizedCheckpoint(
     },
   );
   const encoded = JSON.stringify(normalizedJson({
+    ...(checkpoint.modelRouteIdentity !== undefined &&
+      { modelRouteIdentity: checkpoint.modelRouteIdentity }),
     history,
     completedIterations: batch,
     tokenUsage: {

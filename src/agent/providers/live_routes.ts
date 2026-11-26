@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+import { isModelRouteIdentity } from "../../core/model_route_identity.ts";
 /** Operator-owned provider selection from the already configured provider registry. */
 import { dirname, join } from "@std/path";
 import {
@@ -64,6 +66,19 @@ function readOperatorRoutes(path: string): unknown {
   ));
 }
 
+function providerRouteIdentity(
+  level: ClassificationLevel,
+  managed: boolean,
+  provider?: LlmProvider,
+) {
+  return createHash("sha256").update(JSON.stringify([
+    level,
+    managed,
+    provider?.name ?? null,
+    provider?.model ?? null,
+  ])).digest("hex");
+}
+
 /** Pin all classification routes together before the first request in a turn. */
 export function enableLiveProviderRoutes(
   registry: LlmProviderRegistry,
@@ -74,7 +89,13 @@ export function enableLiveProviderRoutes(
   const routeFile = join(baseDir, "data", "model-routes.json");
   return {
     ...registry,
-    snapshotForTurn() {
+    snapshotForTurn(priorRouteIdentity) {
+      if (
+        priorRouteIdentity !== undefined &&
+        !isModelRouteIdentity(priorRouteIdentity)
+      ) {
+        throw new Error("Invalid approved model route identity");
+      }
       const allowed = asMap(allowlists);
       const selected = asMap(readOperatorRoutes(routeFile));
       const edits = readLiveRouteEdits(baseDir);
@@ -104,8 +125,32 @@ export function enableLiveProviderRoutes(
         if (!provider) throw new Error("Approved model route is unavailable");
         routes.set(level, provider);
       }
+      const identities = levels.map((level, index) => {
+        const managed = classes.includes(level);
+        const expected = priorRouteIdentity?.slice(
+          index * 64,
+          (index + 1) * 64,
+        );
+        const provider = routes.get(level);
+        const current = providerRouteIdentity(level, managed, provider);
+        if (expected === undefined || expected === current) return current;
+        if (managed) {
+          const eligible = allowlists[level]?.flatMap((name) => {
+            const candidate = registry.get(name);
+            return candidate?.name === name ? [candidate] : [];
+          }).find((candidate) =>
+            providerRouteIdentity(level, true, candidate) === expected
+          );
+          if (eligible) {
+            routes.set(level, eligible);
+            return expected;
+          }
+        }
+        throw new Error("The original approved model route is unavailable");
+      });
       return {
         ...registry,
+        modelRouteIdentity: identities.join(""),
         getDefault: () => defaultProvider,
         getForClassification: (level) => routes.get(level),
       };

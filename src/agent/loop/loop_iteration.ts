@@ -468,7 +468,9 @@ async function handleToolCallsIteration(
       return { ok: false, error: "Operation cancelled by user" };
     }
     try {
+      const { modelRouteIdentity } = ctx.state.config.providerRegistry;
       await ctx.onToolBatchCheckpoint({
+        ...(modelRouteIdentity !== undefined && { modelRouteIdentity }),
         history: structuredClone(ctx.history),
         completedIterations: iter.iteration,
         tokenUsage: { ...ctx.tokens },

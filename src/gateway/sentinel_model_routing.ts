@@ -170,8 +170,8 @@ export function sentinelAssessmentModelRouting(
       providerRegistry: snapshot
         ? {
           ...scoped,
-          snapshotForTurn() {
-            const base = snapshot();
+          snapshotForTurn(priorRouteIdentity?: string) {
+            const base = snapshot(priorRouteIdentity);
             const provider = select(base);
             if (!provider) throw new Error("Sentinel model route unavailable.");
             return override(base, provider);

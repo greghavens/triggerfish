@@ -203,6 +203,7 @@ export interface HistoryEntry {
 
 /** Trusted continuation state after a complete assistant/tool exchange. */
 export interface AgentTurnCheckpoint {
+  readonly modelRouteIdentity?: string;
   readonly history: readonly HistoryEntry[];
   readonly completedIterations: number;
   readonly tokenUsage: ProcessMessageResult["tokenUsage"];

@@ -43,9 +43,12 @@ classification. This example selects OpenAI for INTERNAL turns.
 Use a private file and replace it atomically to select a different approved
 route. The provider and model must already exist in the configured provider
 registry. Each new turn reads the same selection across gateway and
-background agents. Uninterrupted turns keep their existing routes. A turn recovered from a
-checkpoint resolves the current route on restart. Missing,
-invalid, or revoked selections stop new turns while reload is enabled.
+background agents. Active turns keep their existing routes. A checkpoint
+created with live reload keeps its original route across restart while that
+route remains approved. A removed or revoked route requires operator review.
+Older checkpoints without a route identity keep their existing recovery
+behavior. Missing, invalid, or revoked selections stop new turns while reload
+is enabled.
 Unlisted classifications retain their startup routes. Omit the allowlist to
 leave live reload disabled.
 

@@ -370,17 +370,30 @@ export async function orchestrateAgentTurn(
     refreshCommittedHistory,
     onToolBatchCheckpoint,
   } = options;
-  if (state.config.providerRegistry.snapshotForTurn) {
+  const snapshot = state.config.providerRegistry.snapshotForTurn;
+  if (resume?.modelRouteIdentity !== undefined && !snapshot) {
+    return {
+      ok: false,
+      error:
+        "The original approved model route is unavailable. Operator review is required.",
+    };
+  }
+  if (snapshot) {
     try {
       state = {
         ...state,
         config: {
           ...state.config,
-          providerRegistry: state.config.providerRegistry.snapshotForTurn(),
+          providerRegistry: snapshot(resume?.modelRouteIdentity),
         },
       };
     } catch {
-      return { ok: false, error: "The approved model route is unavailable." };
+      return {
+        ok: false,
+        error: resume?.modelRouteIdentity
+          ? "The original approved model route is unavailable. Operator review is required."
+          : "The approved model route is unavailable.",
+      };
     }
   }
   const protectedResume = resumeClassification !== undefined ||

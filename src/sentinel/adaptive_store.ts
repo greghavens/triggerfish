@@ -1,3 +1,4 @@
+import { isModelRouteIdentity } from "../core/model_route_identity.ts";
 import { readVerifiedPassingFindingRecheck } from "./worker_finding_evidence.ts";
 import { sentinelOperatingConstraintsAllow } from "./operating_constraints.ts";
 import type { SentinelWorkerFindingRecheckRecord } from "./worker_finding_store.ts";
@@ -227,6 +228,8 @@ function normalizeWorkerCheckpoint(
 ): AgentTurnCheckpoint | undefined {
   if (
     !value || !Array.isArray(value.history) || value.history.length < 3 ||
+    (value.modelRouteIdentity !== undefined &&
+      !isModelRouteIdentity(value.modelRouteIdentity)) ||
     value.history.length > 16 ||
     !Number.isSafeInteger(value.completedIterations) ||
     value.completedIterations < 1 || value.completedIterations > 4 ||
@@ -574,6 +577,8 @@ function normalizeWorkerCheckpoint(
     !isDeepStrictEqual(value.toolCallCounts, counts)
   ) return;
   return {
+    ...(value.modelRouteIdentity !== undefined &&
+      { modelRouteIdentity: value.modelRouteIdentity }),
     history,
     completedIterations: value.completedIterations,
     tokenUsage: { inputTokens, outputTokens },

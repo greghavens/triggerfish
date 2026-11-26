@@ -138,8 +138,11 @@ function safeCheckpoint(
       ).join("\n\n"),
     });
   }
+  const modelRouteIdentity = batch.modelRouteIdentity ??
+    prior?.modelRouteIdentity;
   return {
     ...batch,
+    ...(modelRouteIdentity !== undefined && { modelRouteIdentity }),
     history,
     // The raw loop keys contain serialized tool arguments.
     toolCallCounts: [],

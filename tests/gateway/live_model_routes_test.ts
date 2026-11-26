@@ -1,3 +1,6 @@
+import { runRecoverableAgentTurn } from "../../src/core/agent_recovery.ts";
+import { AgentRecoveryStore } from "../../src/core/agent_recovery_store.ts";
+import { assignmentRecoveryKey } from "../../src/core/durable_assignment.ts";
 import { createOperatorRunToolExecutor } from "../../src/gateway/operator_run_tool.ts";
 import { buildSubagentFactory } from "../../src/gateway/startup/factory/subagent.ts";
 import { createSchedulerService } from "../../src/scheduler/service.ts";
@@ -75,6 +78,16 @@ Deno.test("gateway pins approved classification routes for the entire model turn
     },
   };
   const requests: string[] = [];
+  const recoveryPath = join(baseDir, "agent-recovery.db");
+  const recoverPrompt = "Use the exact committed local fixture receipt.";
+  const approvedResult = "Exact approved local fixture receipt.";
+  let readCount = 0;
+  let routeEnabled = true;
+  let interruption: {
+    entered: PromiseWithResolvers<void>;
+    release: PromiseWithResolvers<void>;
+    finished: PromiseWithResolvers<void>;
+  } | undefined;
 
   async function select(provider: string, model = provider) {
     const replacement = join(data, "replacement.json");
@@ -94,6 +107,32 @@ Deno.test("gateway pins approved classification routes for the entire model turn
       const input = messages.at(-1)?.content;
       requests.push(name);
       const last = messages.at(-1);
+      if (last?.role === "user" && input === recoverPrompt) {
+        return {
+          content: "",
+          toolCalls: [{
+            type: "function",
+            id: "exact-local-read",
+            function: { name: "fixture_check", arguments: "{}" },
+          }],
+          usage: { inputTokens: 1, outputTokens: 1 },
+        };
+      }
+      if (
+        input === approvedResult &&
+        messages.some(({ content }) => content === recoverPrompt)
+      ) {
+        if (interruption) {
+          interruption.entered.resolve();
+          await interruption.release.promise;
+          throw new Error("Synthetic gateway interruption");
+        }
+        return {
+          content: `Resumed on ${name} with the exact committed receipt.`,
+          toolCalls: [],
+          usage: { inputTokens: 1, outputTokens: 1 },
+        };
+      }
       if (
         last?.role === "user" && typeof input === "string" &&
         input.startsWith("{")
@@ -149,7 +188,6 @@ Deno.test("gateway pins approved classification routes for the entire model turn
     userId: "owner" as UserId,
     channelId: "fixture" as ChannelId,
   });
-  const ownerRoutes = enableLiveProviderRoutes(registry(), baseDir, approvals);
   const backgroundRoutes = enableLiveProviderRoutes(
     registry(),
     baseDir,
@@ -157,6 +195,11 @@ Deno.test("gateway pins approved classification routes for the entire model turn
   );
   const token = crypto.randomUUID();
   function makeGateway() {
+    const ownerRoutes = enableLiveProviderRoutes(
+      registry(),
+      baseDir,
+      routeEnabled ? approvals : undefined,
+    );
     return createGatewayServer({
       port: 0,
       token,
@@ -184,7 +227,35 @@ Deno.test("gateway pins approved classification routes for the entire model turn
           description: "Check",
           parameters: {},
         }],
-        toolExecutor: () => Promise.resolve("A completed call."),
+        toolExecutor: () => {
+          readCount++;
+          return Promise.resolve(approvedResult);
+        },
+        recoverAgentTurn: (id, orchestrator, options, control) =>
+          runRecoverableAgentTurn(
+            recoveryPath,
+            id,
+            {
+              version: "exact-local-test-v1",
+              projectCall: (call) =>
+                call.name === "fixture_check" && !Object.keys(call.args).length
+                  ? {}
+                  : undefined,
+              projectResult: (call, text) =>
+                call.name === "fixture_check" && text === approvedResult
+                  ? text
+                  : undefined,
+              authorize: (receipt) =>
+                Promise.resolve(
+                  receipt.name === "fixture_check" &&
+                    !Object.keys(receipt.args).length,
+                ),
+              classification: () => "INTERNAL",
+            },
+            orchestrator,
+            options,
+            control,
+          ).finally(() => interruption?.finished.resolve()),
       }),
     });
   }
@@ -401,6 +472,87 @@ Deno.test("gateway pins approved classification routes for the entire model turn
     assertEquals(
       independent.snapshotForTurn?.().getForClassification("INTERNAL")?.name,
       "first",
+    );
+
+    const resumeCommand = (id: string) => `/recover ${id} ${recoverPrompt}`;
+    async function interrupt(id: string) {
+      const control = interruption = {
+        entered: Promise.withResolvers<void>(),
+        release: Promise.withResolvers<void>(),
+        finished: Promise.withResolvers<void>(),
+      };
+      socket.send(
+        JSON.stringify({ type: "message", content: resumeCommand(id) }),
+      );
+      const timeout = setTimeout(
+        () => control.entered.reject(new Error("No committed tool batch")),
+        3000,
+      );
+      try {
+        await control.entered.promise;
+        const journal = new AgentRecoveryStore(recoveryPath);
+        try {
+          const exact = journal.read(assignmentRecoveryKey(session.id, id));
+          assert(
+            exact && "checkpoint" in exact &&
+              exact.checkpoint?.modelRouteIdentity,
+          );
+          assert(/^[a-f0-9]{256}$/.test(exact.checkpoint.modelRouteIdentity));
+          assert(!exact.checkpoint.modelRouteIdentity.includes("first"));
+        } finally {
+          journal.close();
+        }
+      } finally {
+        clearTimeout(timeout);
+        socket.close();
+        control.release.resolve();
+        await control.finished.promise;
+        interruption = undefined;
+        await gateway.stop();
+      }
+    }
+
+    const resumedId = crypto.randomUUID();
+    await interrupt(resumedId);
+    const afterFirstInterrupt = readCount;
+    await select("second");
+    gateway = makeGateway();
+    socket = await connect();
+    assertEquals(
+      await turn("A new turn uses the updated route."),
+      "Answered by second.",
+    );
+    assertEquals(
+      await turn(resumeCommand(resumedId)),
+      "Resumed on first with the exact committed receipt.",
+    );
+    assertEquals(readCount, afterFirstInterrupt);
+
+    const revokedId = crypto.randomUUID();
+    await select("first");
+    await interrupt(revokedId);
+    const afterSecondInterrupt = readCount;
+    await select("second");
+    approvals.INTERNAL = ["second"];
+    gateway = makeGateway();
+    socket = await connect();
+    requests.length = 0;
+    const denied =
+      "The original approved model route is unavailable. Operator review is required.";
+    assertEquals(await turn(resumeCommand(revokedId)), denied);
+    assertEquals(requests, []);
+    assertEquals(readCount, afterSecondInterrupt);
+
+    socket.close();
+    await gateway.stop();
+    routeEnabled = false;
+    gateway = makeGateway();
+    socket = await connect();
+    assertEquals(await turn(resumeCommand(revokedId)), denied);
+    assertEquals(requests, []);
+    assertEquals(
+      await turn("A fresh turn without live routes."),
+      "Answered by default.",
     );
   } finally {
     socket.close();
