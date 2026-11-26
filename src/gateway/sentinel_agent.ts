@@ -109,6 +109,7 @@ import {
   SENTINEL_SAVED_WORKFLOW_READ,
   SENTINEL_SHARED_ASSET_LINKS_READ,
   SENTINEL_SHARED_DISCOVERY_READ,
+  SENTINEL_SHARED_WORKER_REVIEW,
   SENTINEL_TRACE_READ,
   SENTINEL_WORKER_TRACE_SEARCH,
   sentinelCaseHintsReadArgs,
@@ -1038,7 +1039,7 @@ const plannerFindingReviewTool: ToolDefinition = {
 };
 
 const sharedWorkerReviewTool: ToolDefinition = {
-  name: "sentinel_shared_worker_review",
+  name: SENTINEL_SHARED_WORKER_REVIEW,
   description:
     "Read an exact reviewed linked worker summary for an authorized matching local asset.",
   parameters: {
@@ -7530,6 +7531,12 @@ function createAgent(
             ? redactCredentialText(result) === result &&
               JSON.parse(result).evidenceId === goalArgs.node &&
               JSON.parse(result).evidenceRevision === options.assessmentRevision
+            : name === SENTINEL_SHARED_WORKER_REVIEW
+            ? !!assignedReview?.plannerRound?.peerWorkerReview &&
+              isDeepStrictEqual(
+                assignedReview.plannerRound.peerWorkerReview,
+                parseSentinelPeerWorkerReview(JSON.parse(result).reference),
+              )
             : name === SENTINEL_SHARED_ASSET_LINKS_READ
             ? assetLinksPage !== undefined &&
               redactCredentialText(result) === result
@@ -8621,6 +8628,41 @@ function createAgent(
                     state.revision !== revision ||
                     !readAssignedModelReview(options)
                   ) return false;
+                  if (call.name === SENTINEL_SHARED_WORKER_REVIEW) {
+                    const args = sentinelGoalReceiptReadArguments(
+                      call.name,
+                      call.args,
+                    );
+                    const reference = task.plannerRound?.peerWorkerReview;
+                    const current = () =>
+                      isDeepStrictEqual(
+                        reference,
+                        readAssignedModelReview(options)?.plannerRound
+                          ?.peerWorkerReview,
+                      );
+                    if (
+                      !args || !reference ||
+                      args.sourceCase !== reference.sourceCase ||
+                      args.taskId !== reference.sourceTaskId ||
+                      args.asset !== reference.asset ||
+                      !await authorizeLinkedWorkerReview(
+                        reference,
+                        signal,
+                        current,
+                      )
+                    ) return false;
+                    const opened = linkedWorkerReview({
+                      sourceCase: reference.sourceCase,
+                      taskId: reference.sourceTaskId,
+                      asset: reference.asset,
+                    });
+                    if (
+                      !opened || !current() ||
+                      saved !==
+                        boundResult({ _classification: "INTERNAL", ...opened })
+                    ) return false;
+                    continue;
+                  }
                   if (call.name === SENTINEL_SHARED_ASSET_LINKS_READ) {
                     const args = sentinelSharedAssetLinksArgs(call.args);
                     if (
@@ -9117,7 +9159,7 @@ function createAgent(
                   (isSentinelRetainedReadReceipt(name, read)
                     ? read.id ?? read.receiptId ?? "search"
                     : read.id ?? read.receiptId ?? read.task ?? read.view ??
-                      read.evidenceId);
+                      read.evidenceId ?? read.taskId);
                 return id
                   ? {
                     requestId: id,

@@ -6688,11 +6688,11 @@ Deno.test("Reviewed cross-case worker review reaches a scoped planner and reopen
       assertEquals(JSON.parse(mismatched).run.ref.id, wrongIdentityCase);
     });
 
-    async function plan(
+    const plan = async (
       id: string,
       authorized: boolean,
       revokeOnProposal = false,
-    ) {
+    ) => {
       const targetPath = path(id);
       const current = readSentinelAssessment(targetPath);
       assert(current?.active && current.plan.runId);
@@ -6844,7 +6844,7 @@ Deno.test("Reviewed cross-case worker review reaches a scoped planner and reopen
       } finally {
         planner.stop();
       }
-    }
+    };
     await plan(linkOnlyCase, false);
     await plan(wrongIdentityCase, false);
     await plan(approvedCase, true, true);
@@ -6920,49 +6920,140 @@ Deno.test("Reviewed cross-case worker review reaches a scoped planner and reopen
       const restoredPath = path(approvedCase);
       const restored = readSentinelAssessment(restoredPath);
       assert(restored);
-      const journal = openSentinelAdaptiveStore(
-        join(dirname(restoredPath), "sentinel-adaptive.db"),
-      );
-      const lease = (() => {
-        try {
-          const claimed = journal.claimModelReview(
-            adaptiveRevision(restored),
-            MODEL_ASSIGNMENT_REASON,
-            ({ id }) => id === admitted.assignment,
-          );
-          assert(claimed);
-          return {
-            assessmentRevision: restored.revision,
-            assignedTaskId: claimed.task.id,
-            assignedTaskLeaseToken: claimed.token,
-          };
-        } finally {
-          journal.close();
-        }
-      })();
       const readCall = tool(reviewedTool, {
         sourceCase,
         taskId: sourceTask.id,
         asset: "app",
       });
-      const reused = await workerTurn(
-        restoredPath,
-        lease,
-        [[readCall]],
-        undefined,
-        baseDir,
-      );
-      assertEquals(JSON.parse(reused.results[0][0]), admitted.read);
+      const workerRegistry = createProviderRegistry();
+      let worker: ReturnType<typeof createSentinelModelPlanner>;
+      let savedResult: string | undefined;
+      let resumedResult: string | undefined;
+      let requests = 0;
+      let deniedSource = 0;
+      let phase: "save" | "deny" | "resume" = "save";
+      workerRegistry.register({
+        name: "cross-case-review-worker",
+        supportsStreaming: false,
+        complete(messages) {
+          const usage = { inputTokens: 1, outputTokens: 1 };
+          const response = messages.findLast(({ role }) => role === "tool");
+          if (response) {
+            if (phase === "save") {
+              savedResult = String(response.content);
+              worker.stop();
+            } else {
+              assertEquals(phase, "resume");
+              resumedResult = String(response.content);
+            }
+            return Promise.resolve({
+              content:
+                '{"summary":"Reviewed the exact retained evidence.","followUps":[]}',
+              usage,
+              toolCalls: [],
+            });
+          }
+          requests++;
+          assertEquals(phase, "save");
+          return Promise.resolve({
+            content: "",
+            usage,
+            toolCalls: [{
+              id: "cross-case-worker-review",
+              type: "function",
+              function: {
+                name: readCall.name,
+                arguments: JSON.stringify(readCall.args),
+              },
+            }],
+          });
+        },
+      });
+      workerRegistry.setDefault("cross-case-review-worker");
+      const start = () =>
+        createSentinelModelPlanner(
+          restoredPath,
+          (latest, taskId, lease) =>
+            taskId === admitted.assignment
+              ? createSentinelSubagent({
+                snapshotPath: restoredPath,
+                assessmentRevision: latest.revision,
+                assignedTaskId: taskId,
+                assignedTaskLeaseToken: lease,
+                sharedInventoryBaseDir: baseDir,
+                providerRegistry: workerRegistry,
+                allowModelAccess: true,
+                hookRunner: {
+                  evaluateHook(hook, { input }) {
+                    const allowed = !(phase === "deny" &&
+                      hook === "PRE_TOOL_CALL" && input.case_id === sourceCase);
+                    if (!allowed) deniedSource++;
+                    return Promise.resolve({
+                      allowed,
+                      action: allowed ? "ALLOW" : "BLOCK",
+                      duration: 0,
+                      ruleId: null,
+                    });
+                  },
+                },
+              })
+              : { execute: () => Promise.resolve(), clear() {} },
+        );
+      worker = start();
+      try {
+        const advance = () => worker.advance(restored);
+        await waitForCondition(
+          () => savedResult !== undefined && !worker.hasInFlightWork(),
+          advance,
+        );
+        assertEquals(JSON.parse(savedResult!), admitted.read);
+        const sqlite = new DatabaseSync(
+          join(dirname(restoredPath), "sentinel-adaptive.db"),
+          { readOnly: true },
+        );
+        try {
+          const checkpoint = String(
+            sqlite.prepare("SELECT checkpoint FROM adaptive_worker_checkpoints")
+              .get()?.checkpoint,
+          );
+          assertStringIncludes(checkpoint, "sentinel-shared-worker-review:");
+          assert(!checkpoint.includes(exactSummary));
+        } finally {
+          sqlite.close();
+        }
+        phase = "deny";
+        worker = start();
+        await waitForCondition(
+          () => deniedSource > 0 && !worker.hasInFlightWork(),
+          advance,
+          20_000,
+        );
+        assertEquals(requests, 1);
+        assertEquals(resumedResult, undefined);
+        worker.stop();
+        phase = "resume";
+        worker = start();
+        await waitForCondition(
+          () => resumedResult !== undefined && !worker.hasInFlightWork(),
+          advance,
+          20_000,
+        );
+        assertEquals(resumedResult, savedResult);
+        assertEquals(requests, 1);
+        const review = readAdaptiveSentinel(restoredPath, restored, "revision")
+          ?.modelReviews.find(({ taskId }) => taskId === admitted.assignment);
+        assertEquals(review?.steps.map(({ tool }) => tool), [
+          reviewedTool,
+        ]);
+        assertEquals(
+          review?.steps[0].goalReceiptRead?.sha256,
+          createHash("sha256").update(savedResult!).digest("hex"),
+        );
+      } finally {
+        worker.stop();
+      }
       assert(recordScope(3, []));
       assertStringIncludes(await turn(admitted.trace), "unavailable");
-      const blocked = await workerTurn(
-        restoredPath,
-        lease,
-        [[readCall]],
-        undefined,
-        baseDir,
-      );
-      assert(!blocked.results[0][0].includes(exactSummary));
     });
   } finally {
     await Deno.remove(baseDir, { recursive: true });

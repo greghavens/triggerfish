@@ -556,6 +556,7 @@ export function sentinelProvenanceNodeArgs(args: Record<string, unknown>) {
 
 export const SENTINEL_ASSIGNED_EXECUTION_EVIDENCE =
   "sentinel_assigned_execution_evidence";
+export const SENTINEL_SHARED_WORKER_REVIEW = "sentinel_shared_worker_review";
 export const SENTINEL_GOAL_TASK_READ = "sentinel_worker_observation";
 export function isSentinelGoalReceiptRead(tool: unknown) {
   return tool === SENTINEL_GOAL_GRAPH_FACT_READ ||
@@ -565,7 +566,8 @@ export function isSentinelGoalReceiptRead(tool: unknown) {
 }
 
 export function isRepeatableSentinelReceiptRead(tool: unknown) {
-  return tool === SENTINEL_TRAFFIC_BLOB ||
+  return tool === SENTINEL_SHARED_WORKER_REVIEW ||
+    tool === SENTINEL_TRAFFIC_BLOB ||
     tool === SENTINEL_CASE_INVENTORY_READ ||
     tool === SENTINEL_ASSIGNED_EXECUTION_EVIDENCE ||
     tool === SENTINEL_SHARED_ASSET_LINKS_READ ||
@@ -703,6 +705,7 @@ type GoalReceiptReadArguments =
     payloadPart?: string;
     byteLength?: number;
     sourceCase?: string;
+    taskId?: string;
     asset?: string;
     includeFindings?: boolean;
     sourceAsset?: string;
@@ -843,6 +846,18 @@ export function sentinelGoalReceiptReadArguments(
 ): GoalReceiptReadArguments | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) return;
   const args = value as Record<string, unknown>;
+  if (tool === SENTINEL_SHARED_WORKER_REVIEW) {
+    const { sourceCase, taskId, asset } = args;
+    if (
+      Object.keys(args).length !== 3 ||
+      !isSentinelCaseId(sourceCase) ||
+      typeof taskId !== "string" || !/^adaptive:[a-f0-9]{64}$/.test(taskId) ||
+      typeof asset !== "string" || !asset ||
+      asset.length > 256 ||
+      redactCredentialText(asset) !== asset
+    ) return;
+    return { sourceCase, taskId, asset };
+  }
   if (tool === SENTINEL_TRAFFIC_BLOB) return sentinelTrafficBlobArgs(args);
   if (tool === SENTINEL_CASE_INVENTORY_READ) {
     return sentinelCheckpointInventoryArgs(args);

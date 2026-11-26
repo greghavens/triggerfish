@@ -58,6 +58,7 @@ import {
   SENTINEL_GOAL_PROPOSE,
   SENTINEL_GOAL_PROVE,
   SENTINEL_GOAL_RECHECK_READ,
+  SENTINEL_SHARED_WORKER_REVIEW,
   sentinelGoalProofArguments,
   sentinelGoalProposalArguments,
   sentinelGoalReceiptReadArguments,
@@ -410,6 +411,8 @@ function normalizeWorkerCheckpoint(
           ? "sentinel-traffic-blob"
           : name === SENTINEL_CASE_INVENTORY_READ && input.view !== "coverage"
           ? "sentinel-case-inventory"
+          : name === SENTINEL_SHARED_WORKER_REVIEW
+          ? "sentinel-shared-worker-review"
           : undefined;
         const sha256 = createHash("sha256").update(tool.content).digest("hex");
         const receipt = progress.find((step) =>
@@ -3123,6 +3126,30 @@ export function readAdaptiveOperatorTrafficHint(
     ) return;
     return sentinelHintTrafficReferences(ref).find(({ evidenceId, digest }) =>
       evidenceId === selected.evidenceId && digest === selected.digest
+    );
+  } finally {
+    db.close();
+  }
+}
+
+export function readAdaptivePeerWorkerReview(
+  path: string,
+  id: string,
+  target: string,
+  revisions: readonly string[],
+) {
+  const db = openPrivateDatabase(path, true);
+  try {
+    const task = db.prepare(
+      "SELECT revision, plannerRound FROM adaptive_tasks WHERE id = ? AND nodeId = ? AND status = 'completed'",
+    ).get(taskId(id), target);
+    if (
+      typeof task?.revision !== "string" ||
+      !revisions.includes(task.revision) ||
+      typeof task.plannerRound !== "string"
+    ) return;
+    return parseSentinelPeerWorkerReview(
+      JSON.parse(task.plannerRound).peerWorkerReview,
     );
   } finally {
     db.close();
@@ -10351,7 +10378,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
                 step?.tool !== tool || step.outcome !== "returned" || !args ||
                 admitted?.requestId !==
                   (args.id ?? args.receiptId ?? args.task ?? args.view ??
-                    args.evidenceId) ||
+                    args.evidenceId ?? args.taskId) ||
                 admitted.argsDigest !==
                   createHash("sha256").update(JSON.stringify(args)).digest(
                     "hex",
@@ -10697,6 +10724,8 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
               : tool === SENTINEL_CASE_INVENTORY_READ &&
                   args.view !== "coverage"
               ? "sentinel-case-inventory"
+              : tool === SENTINEL_SHARED_WORKER_REVIEW
+              ? "sentinel-shared-worker-review"
               : tool === SENTINEL_TRAFFIC_LINKS &&
                   sentinelLinkedTrafficPayloadArgs(args)
               ? "sentinel-linked-payload"

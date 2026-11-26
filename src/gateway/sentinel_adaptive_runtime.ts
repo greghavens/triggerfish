@@ -47,7 +47,9 @@ import {
   SENTINEL_GOAL_PROVE,
   SENTINEL_GOAL_RECHECK_READ,
   SENTINEL_GOAL_STATE_READ,
+  SENTINEL_SHARED_WORKER_REVIEW,
   sentinelGoalProposalArguments,
+  sentinelGoalReceiptReadArguments,
 } from "../sentinel/worker_goal_recovery.ts";
 import {
   SENTINEL_ASSET_DISCOVERY_SUBMIT,
@@ -126,6 +128,7 @@ import {
   querySentinelWorkerObservations,
   readAdaptiveAssetSnapshotCitations,
   readAdaptiveOperatorTrafficHint,
+  readAdaptivePeerWorkerReview,
   readSentinelDedicatedRecheckSettlements,
   readSentinelQueuedCancellations,
   roundWithUpstreamCitations,
@@ -5861,6 +5864,54 @@ export function createSentinelModelPlanner(
           ? { id: args.evidenceId, args, result }
           : undefined;
       }
+      if (tool === SENTINEL_SHARED_WORKER_REVIEW) {
+        const args = sentinelGoalReceiptReadArguments(
+          tool,
+          JSON.parse(requestId),
+        );
+        const state = readSentinelAssessment(snapshotPath);
+        if (
+          !args?.sourceCase || !args.taskId || args.asset !== targetId ||
+          !location || !state?.active || state.paused ||
+          state.revision !== current.revision || state.plan.runId !== runId
+        ) return;
+        const source = state.plan.linkedCaseSources;
+        const local = state.result?.sharedGraph.snapshot;
+        if (!source || !local) return;
+        const reference = readAdaptivePeerWorkerReview(
+          storePath(snapshotPath),
+          taskId,
+          targetId,
+          [identity, adaptiveRevision(state, true)],
+        );
+        if (
+          !reference || reference.sourceCase !== args.sourceCase ||
+          reference.sourceTaskId !== args.taskId ||
+          reference.asset !== args.asset ||
+          !caseOperatingScope(snapshotPath, state.revision)({
+            kind: "review_evidence",
+            nodeId: targetId,
+          })
+        ) return;
+        const reopened = readLinkedSentinelWorkerReview(
+          location.baseDir,
+          source,
+          local,
+          {
+            sourceCase: args.sourceCase,
+            taskId: args.taskId,
+            asset: args.asset,
+          },
+        );
+        if (!reopened || !isDeepStrictEqual(reopened.reference, reference)) {
+          return;
+        }
+        return {
+          id: args.taskId,
+          args,
+          result: JSON.stringify({ _classification: "INTERNAL", ...reopened }),
+        };
+      }
       if (
         isSentinelGoalReceiptRead(tool)
       ) {
@@ -6699,6 +6750,23 @@ export function createSentinelModelPlanner(
                   }
                   const call = entry.tool_call_id &&
                     resumedCalls.get(entry.tool_call_id);
+                  if (call && call.name === SENTINEL_SHARED_WORKER_REVIEW) {
+                    const args = sentinelGoalReceiptReadArguments(
+                      call.name,
+                      call.args,
+                    );
+                    const saved = previousProgress.find((step) =>
+                      !resumedProgress.has(step) && step.tool === call.name &&
+                      step.outcome === "returned" &&
+                      step.goalReceiptRead?.sha256 === digest &&
+                      isDeepStrictEqual(step.goalReceiptRead.args, args)
+                    );
+                    if (saved) {
+                      resumedProgress.add(saved);
+                      steps.push(saved);
+                    }
+                    continue;
+                  }
                   if (
                     call && (call.name === SENTINEL_ASSET_DISCOVERY_SUBMIT ||
                       call.name === SENTINEL_GOAL_PROVE) &&
