@@ -1,3 +1,7 @@
+import {
+  sentinelGitHubWorkflowMetadataUrl,
+  sentinelGitHubWorkflowRunsUrl,
+} from "../sentinel/github_workflow_runs.ts";
 import { withPinnedReviewedToolRules } from "../core/policy/reviewed_tool_rules.ts";
 import { withAgentProfileRuntime } from "../agent/orchestrator/agent_profile_runtime.ts";
 import { readAgentProfile } from "../core/agent_profiles.ts";
@@ -2461,6 +2465,29 @@ async function reopenPlannerWorkflowObservation(
   }
 }
 
+function assignedWorkflowDestination(
+  options: SentinelAgentOptions,
+  caseId: string,
+  asset: string,
+) {
+  const scope = options.futureWorkflowScopes?.find((entry) =>
+    entry.case === caseId && entry.asset === asset
+  );
+  if (!scope) return;
+  const target = {
+    owner: scope.owner,
+    repo: scope.repo,
+    workflowId: scope.workflow_id,
+  };
+  return {
+    asset,
+    repository: `${target.owner}/${target.repo}`,
+    workflowId: target.workflowId,
+    metadataUrl: sentinelGitHubWorkflowMetadataUrl(target),
+    resultUrl: sentinelGitHubWorkflowRunsUrl(target),
+  };
+}
+
 async function readLiveWorkflowStatus(
   options: SentinelAgentOptions,
   turn: ActiveTurn,
@@ -2497,6 +2524,11 @@ async function readLiveWorkflowStatus(
       }
       turn.liveStatusRead = true;
     }
+    const scope = assignedWorkflowDestination(
+      options,
+      location.caseId,
+      task.nodeId,
+    );
     let attempted = false;
     let authorized: SentinelLiveWorkflowDestination | undefined;
     const raw = await callback({
@@ -2509,6 +2541,10 @@ async function readLiveWorkflowStatus(
         if (
           attempted || turn.signal.aborted ||
           destination.caseId !== location.caseId ||
+          (scope && (destination.repository !== scope.repository ||
+            destination.workflowId !== scope.workflowId ||
+            (destination.url !== scope.metadataUrl &&
+              (resumeOnly || destination.url !== scope.resultUrl)))) ||
           !url || url.protocol !== "https:" || url.username || url.password ||
           url.hash || !readAssignedModelReview(options)
         ) return false;
@@ -6115,11 +6151,19 @@ function createAgent(
         current.revision,
         workflowTask,
       );
+    const liveTask = worker && tool === liveWorkflowStatusTool.name &&
+        options.readLiveWorkflowStatus && !Object.keys(args).length
+      ? readAssignedModelReview(options)
+      : undefined;
+    const liveDestination = liveTask?.nodeId &&
+      assignedWorkflowDestination(options, location.caseId, liveTask.nodeId);
     const selector = worker
       ? workerArgs && approvalIsCurrent(turn) &&
           (workerArgs.revision === undefined ||
             workerArgs.revision === current.revision)
         ? { name: tool, args: workerArgs }
+        : liveDestination && approvalIsCurrent(turn)
+        ? { name: tool, args: {}, destination: liveDestination }
         : workflowSource && approvalIsCurrent(turn)
         ? {
           name: tool,

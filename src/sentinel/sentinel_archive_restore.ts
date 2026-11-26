@@ -1179,7 +1179,6 @@ function restoreAdaptive(
           "adaptive_recheck_context_batch_receipts",
           "adaptive_traffic_links_batch_receipts",
           "adaptive_observation_search_batch_receipts",
-          "adaptive_live_workflow_results",
           "adaptive_peer_verifications",
         ]
       ) {

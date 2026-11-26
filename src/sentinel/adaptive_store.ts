@@ -707,10 +707,11 @@ function portablePausedWorkerRead(
       Object.keys(args).length === 0
     ) return { id: call.id, tool: ASSIGNED_TARGET_CHECKPOINT_TOOL } as const;
     if (
-      call.function.name === SENTINEL_SAVED_WORKFLOW_READ &&
+      (call.function.name === SENTINEL_SAVED_WORKFLOW_READ ||
+        call.function.name === WORKFLOW_CHECKPOINT_TOOL) &&
       args && typeof args === "object" && !Array.isArray(args) &&
       Object.keys(args).length === 0
-    ) return { id: call.id, tool: SENTINEL_SAVED_WORKFLOW_READ } as const;
+    ) return { id: call.id, tool: call.function.name } as const;
     if (call.function.name === SENTINEL_PROVENANCE_NODE_READ) {
       const provenance = sentinelGoalReceiptReadArguments(
         SENTINEL_PROVENANCE_NODE_READ,
@@ -831,6 +832,36 @@ function matchesPortableSavedWorkflow(
     text === JSON.stringify({ targetId, ...proof });
 }
 
+function portableLiveWorkflowReceipt(
+  db: DatabaseSync,
+  revision: string,
+  taskId: string,
+  evidenceRevision: number,
+  control: string | null,
+) {
+  if (
+    !db.prepare(
+      "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'adaptive_live_workflow_results'",
+    ).get()
+  ) return;
+  const row = db.prepare(`
+    SELECT receipt FROM adaptive_live_workflow_results
+    WHERE revision = ? AND taskId = ? AND evidenceRevision = ? AND controlClaimSha256 IS ?
+  `).get(revision, taskId, evidenceRevision, control);
+  if (typeof row?.receipt !== "string" || row.receipt.length > 7000) return;
+  const receipt = readSentinelGitHubWorkflowReadReceipt(
+    JSON.parse(row.receipt),
+    evidenceRevision,
+  );
+  if (
+    receipt?.connectorId !== "github-actions" ||
+    JSON.stringify(receipt) !== row.receipt ||
+    createHash("sha256").update(JSON.stringify(receipt.runs)).digest("hex") !==
+      receipt.resultSha256
+  ) return;
+  return receipt;
+}
+
 function portablePausedWorkerProgress(
   db: DatabaseSync,
   value: AgentTurnCheckpoint,
@@ -839,6 +870,7 @@ function portablePausedWorkerProgress(
   taskId: string,
   nodeId: string,
   sources?: PortableWorkerSources,
+  workflow?: SentinelGitHubWorkflowReadReceipt,
 ): SentinelReviewStep[] | undefined {
   const calls = value.history.flatMap(({ tool_calls = [] }) => tool_calls);
   const results = value.history.filter(({ role }) => role === "tool");
@@ -867,6 +899,20 @@ function portablePausedWorkerProgress(
         tool: SENTINEL_TRAFFIC_READ,
         outcome: "returned",
         trafficRead: proof,
+      });
+      continue;
+    }
+    if (call.tool === WORKFLOW_CHECKPOINT_TOOL) {
+      if (
+        !workflow || step.target !== nodeId ||
+        !isDeepStrictEqual(step.githubWorkflowRead, workflow) ||
+        result.content !== JSON.stringify({ targetId: nodeId, ...workflow })
+      ) return;
+      safe.push({
+        tool: call.tool,
+        outcome: "returned",
+        target: nodeId,
+        githubWorkflowRead: workflow,
       });
       continue;
     }
@@ -956,10 +1002,15 @@ export function retainPortablePausedGraphCheckpoints(
     !!db.prepare(
       "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = ?",
     ).get(name);
+  const hasWorkflow = hasTable("adaptive_live_workflow_results");
+  const clearWorkflow = () => {
+    if (hasWorkflow) db.exec("DELETE FROM adaptive_live_workflow_results");
+  };
   if (!hasTable("adaptive_worker_progress")) {
     if (hasTable("adaptive_worker_checkpoints")) {
       db.exec("DELETE FROM adaptive_worker_checkpoints");
     }
+    clearWorkflow();
     return;
   }
   if (hasTable("adaptive_worker_checkpoints")) {
@@ -981,6 +1032,7 @@ export function retainPortablePausedGraphCheckpoints(
       db.exec(
         "DELETE FROM adaptive_worker_checkpoints; DELETE FROM adaptive_worker_progress",
       );
+      clearWorkflow();
       return;
     }
   }
@@ -989,6 +1041,7 @@ export function retainPortablePausedGraphCheckpoints(
     taskId: string;
     progress: SentinelReviewStep[];
     control: string | null;
+    workflow?: SentinelGitHubWorkflowReadReceipt;
   }>();
   if (hasTable("adaptive_worker_checkpoints")) {
     const checkpoints = db.prepare(`
@@ -1044,6 +1097,23 @@ export function retainPortablePausedGraphCheckpoints(
           hold.checkpointSha256 !==
             createHash("sha256").update(checkpoint).digest("hex")
         ) continue;
+        const needsWorkflow = value.history.some((
+          { tool_calls }: AgentTurnCheckpoint["history"][number],
+        ) =>
+          tool_calls?.some((call) =>
+            portablePausedWorkerRead(call, evidenceRevision)?.tool ===
+              WORKFLOW_CHECKPOINT_TOOL
+          )
+        );
+        const workflow = needsWorkflow
+          ? portableLiveWorkflowReceipt(
+            db,
+            revision,
+            taskId,
+            evidenceRevision,
+            control,
+          )
+          : undefined;
         const safeSteps = portablePausedWorkerProgress(
           db,
           value,
@@ -1052,13 +1122,14 @@ export function retainPortablePausedGraphCheckpoints(
           taskId,
           nodeId,
           sources,
+          workflow,
         );
         if (!safeSteps) continue;
         const normalized = normalizeWorkerCheckpoint(
           value,
           promptSha256,
           nodeId,
-          undefined,
+          workflow,
           safeSteps,
           undefined,
           [],
@@ -1076,6 +1147,7 @@ export function retainPortablePausedGraphCheckpoints(
           taskId,
           progress: safeSteps,
           control,
+          workflow,
         });
       } catch {
         // Unrecognized or incomplete checkpoints carry no archive authority.
@@ -1097,6 +1169,25 @@ export function retainPortablePausedGraphCheckpoints(
         !valid.has(JSON.stringify([row.revision, row.taskId]))
       ) {
         drop.run(row.revision, row.taskId, row.evidenceRevision);
+      }
+    }
+  }
+  clearWorkflow();
+  if (hasWorkflow && [...valid.values()].some(({ workflow }) => workflow)) {
+    const insert = db.prepare(`
+      INSERT INTO adaptive_live_workflow_results
+        (revision, taskId, evidenceRevision, receipt, controlClaimSha256)
+      VALUES (?, ?, ?, ?, ?)
+    `);
+    for (const { revision, taskId, workflow, control } of valid.values()) {
+      if (workflow) {
+        insert.run(
+          revision,
+          taskId,
+          evidenceRevision,
+          JSON.stringify(workflow),
+          control,
+        );
       }
     }
   }
