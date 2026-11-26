@@ -8117,7 +8117,11 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
       limit = 6,
       offset = 0,
     ) {
-      if (!validWorkflowObservationPage(offset, limit)) return [];
+      if (
+        !Number.isSafeInteger(limit) || limit < 1 ||
+        limit > MAX_ADAPTIVE_TASKS ||
+        !validWorkflowObservationPage(offset, 1)
+      ) return [];
       return narrativeJournal.list(revision, 0, MAX_ADAPTIVE_TASKS, {
         ...options,
         latestFirst: true,

@@ -208,6 +208,7 @@ async function workerTurn(
       name: string;
       hook: "PRE_TOOL_CALL" | "POST_TOOL_RESPONSE";
     };
+    beforeHook?: (hook: string, name: string) => void;
   },
 ) {
   const receiptHooks: string[] = [];
@@ -220,6 +221,7 @@ async function workerTurn(
         input.tool_name ??
           (input.tool_call as { name?: string } | undefined)?.name,
       );
+      execution?.beforeHook?.(hook, name);
       const writing = [report, recheck, amend, INCONCLUSIVE_RECHECK_TOOL]
         .includes(name);
       if (name === findings) receiptHooks.push(hook);
@@ -6684,21 +6686,89 @@ Deno.test("Committed worker narrative reaches peers and planning while its sourc
       );
     });
 
+    const query = "  STALE LOCAL  ";
     const retrieved = await workerTurn(path, peer, [
       [tool(reopen)],
+      [tool(reopen, { query })],
       [tool(reopen, selector)],
     ]);
-    assertEquals(
-      JSON.parse(retrieved.results[0][0]).observations.map(
-        ({ id }: { id: string }) => id,
-      ),
-      [committed.id],
+    const list = JSON.parse(retrieved.results[0][0]);
+    assertEquals(list.observations.map(({ id }: { id: string }) => id), [
+      committed.id,
+    ]);
+    assertEquals(JSON.parse(retrieved.results[1][0]), list);
+    assert(!retrieved.results[1][0].includes(committed.receipt.summary));
+    assertEquals(JSON.parse(retrieved.results[2][0]), committed);
+    const empty = await workerTurn(path, peer, [
+      [tool(reopen, { query, offset: 1 })],
+      [tool(reopen, { query: "unrelated search term" })],
+      [tool(reopen, { ...selector, query })],
+    ]);
+    for (const [page] of empty.results.slice(0, 2)) {
+      assertEquals(JSON.parse(page), {
+        _classification: "INTERNAL",
+        revision: state.revision,
+        observations: [],
+        nextOffset: null,
+      });
+    }
+    assertStringIncludes(empty.results[2][0], "unavailable");
+    const blocked = await workerTurn(path, unrelated, [
+      [tool(reopen, { query })],
+      [tool(reopen, selector)],
+    ]);
+    assertEquals(JSON.parse(blocked.results[0][0]).observations, []);
+    assertStringIncludes(blocked.results[1][0], "unavailable");
+    for (const hook of ["PRE_TOOL_CALL", "POST_TOOL_RESPONSE"] as const) {
+      const denied = await workerTurn(
+        path,
+        peer,
+        [[tool(reopen, { query })]],
+        undefined,
+        undefined,
+        undefined,
+        {
+          prompt: "Find exact authorized source evidence.",
+          options: [],
+          blockedSource: { name: "sentinel_provenance_node", hook },
+        },
+      );
+      const page = JSON.parse(denied.results[0][0]);
+      assertEquals(page.observations, []);
+      assertEquals(page.nextOffset, null);
+    }
+
+    let changedPolicy = false;
+    const stale = await workerTurn(
+      path,
+      peer,
+      [[tool(reopen, { query })]],
+      undefined,
+      undefined,
+      undefined,
+      {
+        prompt: "Find exact authorized source evidence.",
+        options: [],
+        beforeHook(hook, name) {
+          if (
+            hook !== "POST_TOOL_RESPONSE" || name !== reopen || changedPolicy
+          ) return;
+          const runId = state.plan.runId;
+          assert(runId);
+          changedPolicy = !!recordSentinelOperatingConstraints(path, {
+            runId,
+            evidenceRevision: state.revision,
+            expectedVersion: 0,
+            requestId: crypto.randomUUID(),
+            operatorScope: "owner",
+            constraints: { deniedKinds: [], note: "Review policy updated." },
+          });
+        },
+      },
     );
-    assertEquals(JSON.parse(retrieved.results[1][0]), committed);
-    const blocked = await workerTurn(path, unrelated, [[
-      tool(reopen, selector),
-    ]]);
-    assertStringIncludes(blocked.results[0][0], "unavailable");
+    assert(changedPolicy);
+    assertStringIncludes(stale.results[0][0], "policy");
+    assert(!stale.results[0][0].includes(committed.id));
 
     const planningRegistry = createProviderRegistry();
     let plannerResult: unknown;
