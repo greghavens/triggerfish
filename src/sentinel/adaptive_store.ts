@@ -3191,7 +3191,6 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
         at: new Date(Number(existing.at)).toISOString(),
         text: hint,
         ...(anchors && { assetIds: anchors }),
-        ...hintTraffic(existing),
       };
     }
   }
@@ -8124,7 +8123,6 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
         at: new Date(Number(row.at)).toISOString(),
         text: String(row.text),
         ...hintAssets(row),
-        ...hintTraffic(row),
       }));
     },
 
@@ -8160,7 +8158,6 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
           at: new Date(Number(row.at)).toISOString(),
           text: String(row.text),
           ...hintAssets(row),
-        ...hintTraffic(row),
         }));
     },
 
