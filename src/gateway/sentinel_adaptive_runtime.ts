@@ -1003,6 +1003,56 @@ export function readSentinelTaskQueue(
   }
 }
 
+/** Settlement requires the durable result from this exact assignment. */
+function hasCommittedRecheckResult(
+  path: string,
+  state: State,
+  task: AdaptiveTask,
+): boolean {
+  const findingId = task.plannerRound?.recheckFindingId;
+  if (!findingId) return true;
+  const caseId = locateSentinelCase(path)?.caseId;
+  const runId = state.plan.runId;
+  const snapshot = state.result?.sharedGraph.snapshot;
+  if (
+    !caseId || !runId || !snapshot || !task.nodeId ||
+    !hasSentinelWorkerFindingJournal(path)
+  ) return false;
+  const journal = openSentinelWorkerFindingStore(path);
+  try {
+    const original = journal.readFinding(findingId);
+    if (
+      !original || original.caseId !== caseId || original.runId !== runId ||
+      original.evidenceRevision > state.revision
+    ) return false;
+    const snapshotDigest = digestSentinelSnapshot(snapshot);
+    const matches = (receipt: {
+      caseId: string;
+      runId: string;
+      taskId: string;
+      evidenceRevision: number;
+      evidenceId: string;
+      snapshotDigest: string;
+      targetId: string;
+    }) =>
+      receipt.caseId === caseId && receipt.runId === runId &&
+      receipt.taskId === task.id &&
+      receipt.evidenceRevision === state.revision &&
+      receipt.evidenceId === task.nodeId &&
+      receipt.snapshotDigest === snapshotDigest &&
+      receipt.targetId === original.targetId;
+    return journal.listFindingRechecks(findingId, state.revision).some((
+      receipt,
+    ) =>
+      receipt.controlId === original.controlId &&
+      receipt.graphFindingId === original.graphFindingId && matches(receipt)
+    ) ||
+      journal.listInconclusiveRechecks(findingId, state.revision).some(matches);
+  } finally {
+    journal.close();
+  }
+}
+
 /** Read attempt state separately from verdicts committed by finding recheck workers. */
 export function readSentinelFindingRecheckAttempts(
   path: string,
@@ -5702,11 +5752,15 @@ export function createSentinelModelPlanner(
               task.id,
               token,
             );
-            const shouldPlan =
+            const acceptedReview =
               review && assignmentCurrent && !stopped && !interrupted &&
-                !signal.aborted
-                ? automaticReviewScope(snapshotPath, state.revision)
+                !signal.aborted &&
+                hasCommittedRecheckResult(snapshotPath, state, task)
+                ? review
                 : undefined;
+            const shouldPlan = acceptedReview
+              ? automaticReviewScope(snapshotPath, state.revision)
+              : undefined;
             const followUps = shouldPlan?.(task)
               ? review?.followUps.filter(shouldPlan)
               : [];
@@ -5716,9 +5770,9 @@ export function createSentinelModelPlanner(
               token,
               interrupted || stopped || !assignmentCurrent
                 ? "interrupted"
-                : !signal.aborted && review
+                : acceptedReview
                 ? {
-                  ...review,
+                  ...acceptedReview,
                   followUps: followUps ?? [],
                   operatingConstraints: constraints && {
                     version: constraints.version,

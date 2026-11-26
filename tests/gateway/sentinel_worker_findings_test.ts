@@ -1986,6 +1986,7 @@ async function verifyOperatorNativeRecheck(options: {
   baseDir: string;
   caseId?: string;
   inconclusive?: boolean;
+  noResult?: boolean;
   state: State;
   findingId: string;
   evidenceId: string;
@@ -2336,19 +2337,21 @@ async function verifyOperatorNativeRecheck(options: {
               node: options.evidenceId,
             })],
             [tool(context, { findingId: options.findingId })],
-            options.inconclusive
-              ? [tool(INCONCLUSIVE_RECHECK_TOOL, {
-                findingId: options.findingId,
-                evidenceId: options.evidenceId,
-                requestId: rationaleRequest,
-                rationale,
-              })]
-              : [tool(recheck, {
-                findingId: options.findingId,
-                evidenceId: options.evidenceId,
-                requestId: crypto.randomUUID(),
-                summary: "Confirmed the approved retained workflow recheck.",
-              })],
+            ...(options.noResult ? [] : [
+              options.inconclusive
+                ? [tool(INCONCLUSIVE_RECHECK_TOOL, {
+                  findingId: options.findingId,
+                  evidenceId: options.evidenceId,
+                  requestId: rationaleRequest,
+                  rationale,
+                })]
+                : [tool(recheck, {
+                  findingId: options.findingId,
+                  evidenceId: options.evidenceId,
+                  requestId: crypto.randomUUID(),
+                  summary: "Confirmed the approved retained workflow recheck.",
+                })],
+            ]),
           ],
           undefined,
           options.baseDir,
@@ -2370,6 +2373,13 @@ async function verifyOperatorNativeRecheck(options: {
           JSON.parse(reviewed.results[1][0]).recheckNote,
           recheckNote,
         );
+        if (options.noResult) {
+          assert(reviewed.events.some(({ type }) => type === "response"));
+          assertEquals(reviewed.reportPre, 0);
+          assertEquals(reviewed.reportPost, 0);
+          for (const event of reviewed.events) send(event);
+          return;
+        }
         assertEquals(reviewed.reportPre, 1);
         assertEquals(reviewed.reportPost, 1);
         const record = JSON.parse(reviewed.results[2][0]).record;
@@ -2395,11 +2405,14 @@ async function verifyOperatorNativeRecheck(options: {
       const completion = readAdaptiveSentinel(path, options.state)
         ?.modelReviewStates
         .find(({ taskId }) => taskId === assigned.taskId);
-      if (completion?.status === "completed") break;
+      if (
+        completion?.status ===
+          (options.noResult ? "retry_pending" : "completed")
+      ) break;
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
     assert(
-      verified,
+      options.noResult || verified,
       JSON.stringify(
         readAdaptiveSentinel(path, options.state)?.modelReviewStates,
       ),
@@ -2409,11 +2422,11 @@ async function verifyOperatorNativeRecheck(options: {
     await run("Review the saved remediation status.");
     assertEquals(
       JSON.parse(modelResult ?? "").report.remediation.status,
-      options.inconclusive ? "unknown" : "pass",
+      options.inconclusive || options.noResult ? "unknown" : "pass",
     );
     assertEquals(
       JSON.parse(modelResult ?? "").report.remediation.recheckId,
-      options.inconclusive ? undefined : verified.id,
+      options.inconclusive ? undefined : verified?.id,
     );
     blocked = true;
     await run(
@@ -2449,10 +2462,15 @@ async function verifyOperatorNativeRecheck(options: {
           settled?.inconclusiveReceiptId,
           options.inconclusive ? verified?.id : undefined,
         );
-        assertEquals(settled?.status, "completed");
+        if (options.noResult) {
+          assertEquals(settled?.lastAttempt?.outcome, "failed");
+          assertEquals(settled?.status, "retry_pending");
+        } else {
+          assertEquals(settled?.status, "completed");
+        }
         assertEquals(
           settled?.outcome,
-          options.inconclusive ? undefined : "pass",
+          options.inconclusive || options.noResult ? undefined : "pass",
         );
       },
     );
@@ -2505,8 +2523,31 @@ async function verifyOperatorNativeRecheck(options: {
   );
   assertEquals(
     JSON.parse(modelResult ?? "").report.remediation.status,
-    options.inconclusive ? "unknown" : "pass",
+    options.inconclusive || options.noResult ? "unknown" : "pass",
   );
+  if (options.noResult) {
+    await withFindingAssignmentGateway(
+      options.baseDir,
+      () => Promise.resolve(false),
+      async (turn) => {
+        const attempts = JSON.parse(
+          await turn({
+            action: "finding_recheck_attempts",
+            kind: "sentinel",
+            id: caseId,
+            revision: options.state.revision,
+            receiptId: options.findingId,
+          }),
+        ).page;
+        const attempt = attempts.entries.find((entry: { taskId: string }) =>
+          entry.taskId === assigned.taskId
+        );
+        assertEquals(attempt.lastAttempt.outcome, "failed");
+        assertEquals(attempt.outcome, undefined);
+        assertEquals(attempt.resultReceiptId, undefined);
+      },
+    );
+  }
   if (options.inconclusive) {
     await withFindingAssignmentGateway(
       options.baseDir,
@@ -3446,7 +3487,7 @@ async function verifyReceiptFamily(
     | "workflow result with repeated run"
     | "workflow result with older run"
     | "native workflow result",
-  manual: boolean | "inconclusive" = false,
+  manual: boolean | "inconclusive" | "no-result" = false,
 ) {
   const baseDir = await Deno.makeTempDir();
   const caseId = manual ? "native-remediation" : "main";
@@ -4168,6 +4209,7 @@ async function verifyReceiptFamily(
         baseDir,
         caseId,
         inconclusive: manual === "inconclusive",
+        noResult: manual === "no-result",
         state: updated,
         findingId: finding.id,
         evidenceId: passingNode,
@@ -4389,10 +4431,10 @@ async function verifyReceiptFamily(
           assertStringIncludes(denied, "unavailable");
           const next = JSON.parse(await turn({ ...attempts, cursor })).page;
           const [{ lastAttempt, ...entry }] = next.entries;
-          assertEquals(lastAttempt.outcome, "completed");
+          assertEquals(lastAttempt.outcome, "failed");
           assertEquals([entry], [{
             taskId: handoff?.[0].id,
-            status: "completed",
+            status: "retry_pending",
             attempts: 1,
             evidenceId: passingNode,
           }]);
@@ -5023,6 +5065,9 @@ Deno.test("A leased inconclusive Sentinel recheck remains citable after gateway 
 
 Deno.test("Gateway operator discovers and queues one exact native remediation recheck", () =>
   verifyReceiptFamily("native workflow result", true));
+
+Deno.test("A clean Sentinel recheck turn without an exact result records a failed attempt", () =>
+  verifyReceiptFamily("native workflow result", "no-result"));
 
 async function testScopedReporterRestart(
   useBatch: boolean,
