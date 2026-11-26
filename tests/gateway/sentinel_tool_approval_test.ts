@@ -1,4 +1,8 @@
 import {
+  approvalAdviceStore,
+  createApprovalAdvisor,
+} from "../../src/core/policy/approval_advice.ts";
+import {
   readSentinelCompanyScopes,
   recordSentinelCompanyScope,
 } from "../../src/sentinel/company_scope.ts";
@@ -132,10 +136,16 @@ for (
     "deny",
     "stale-constraints",
     "stale-lease",
+    "advisor-error-approve",
+    "advisor-error-deny",
+    "advisor-consider-policy-denial",
   ] as const
 ) {
   Deno.test(`Leased Sentinel approval inbox applies exact ${outcome} on a reconnected operator socket`, async () => {
-    const baseDir = await Deno.makeTempDir();
+    const baseDir = await Deno.makeTempDir({
+      dir: Deno.cwd(),
+      prefix: ".sentinel-approval-",
+    });
     const path = resolveSentinelCasePath(baseDir);
     const toolApprovalInbox = createToolApprovalService(
       join(baseDir, "approvals.db"),
@@ -145,9 +155,67 @@ for (
     const rechecking = Promise.withResolvers<void>();
     const releaseRecheck = Promise.withResolvers<void>();
     let policyChecks = 0;
+    let policyRevoked = false;
+    const advisorFailed = outcome === "advisor-error-approve" ||
+      outcome === "advisor-error-deny";
+    const advisory = advisorFailed ||
+      outcome === "advisor-consider-policy-denial";
+    const denied = outcome === "deny" || outcome === "advisor-error-deny";
+    const approved = outcome === "approve" ||
+      outcome === "advisor-error-approve";
+    const adviceFinished = Promise.withResolvers<void>();
+    let adviceCalls = 0;
+    let adviceOutputChecks = 0;
+    const providerRegistry = createProviderRegistry();
+    const adviceStore = approvalAdviceStore(baseDir);
+    if (advisory) {
+      assert(
+        adviceStore.set(crypto.randomUUID(), 0, {
+          provider: "lease-advisor-fixture",
+        }),
+      );
+      providerRegistry.register({
+        name: "lease-advisor-fixture",
+        supportsStreaming: false,
+        complete(history, tools) {
+          adviceCalls++;
+          assertEquals(tools, []);
+          assertEquals(JSON.parse(String(history.at(-1)?.content)), {
+            tool: publish,
+            assignmentScoped: true,
+          });
+          if (advisorFailed) {
+            return Promise.reject(new Error("synthetic-provider-failure"));
+          }
+          return Promise.resolve({
+            content: "consider",
+            usage: { inputTokens: 3, outputTokens: 1 },
+            toolCalls: [],
+          });
+        },
+      });
+    }
+    const advise = createApprovalAdvisor(baseDir, providerRegistry, {
+      INTERNAL: ["lease-advisor-fixture"],
+    });
     const hooks: HookRunner = {
       toolApprovalInbox,
+      ...(advisory && {
+        async reviewApprovalAdvice(input) {
+          try {
+            await advise(input);
+          } finally {
+            adviceFinished.resolve();
+          }
+        },
+      }),
       async evaluateHook(hook, { input }) {
+        if (
+          hook === "PRE_OUTPUT" && input.operation === "tool_approval_advice"
+        ) {
+          adviceOutputChecks++;
+          assertEquals(input.destination, "lease-advisor-fixture");
+        }
         const call = input.tool_call as { name?: string } | undefined;
         const requires = hook === "PRE_TOOL_CALL" && call?.name === publish;
         if (requires && ++policyChecks === 2) {
@@ -156,13 +224,14 @@ for (
         }
         return {
           allowed: !requires,
-          action: requires ? "REQUIRE_APPROVAL" : "ALLOW",
+          action: requires
+            ? policyRevoked ? "BLOCK" : "REQUIRE_APPROVAL"
+            : "ALLOW",
           ruleId: requires ? "fixture-graph-approval" : null,
           duration: 0,
         };
       },
     };
-    const providerRegistry = createProviderRegistry();
     let iterations = 0;
     let result = "";
     providerRegistry.register({
@@ -272,6 +341,28 @@ for (
         assertEquals(entry.tool, publish);
         assert(!JSON.stringify(entry).includes("fixture-evidence"));
         assert(!JSON.stringify(entry).includes(requestId));
+        if (advisory) {
+          const deadline = setTimeout(
+            () =>
+              adviceFinished.reject(
+                new Error("No leased-worker advice result"),
+              ),
+            2_000,
+          );
+          try {
+            await adviceFinished.promise;
+          } finally {
+            clearTimeout(deadline);
+          }
+          assertEquals(adviceCalls, 1);
+          assertEquals(adviceOutputChecks, 1);
+          const saved = adviceStore.read(entry.id);
+          assertEquals(
+            saved?.verdict,
+            advisorFailed ? "unavailable" : "consider",
+          );
+          assert(!JSON.stringify(saved).includes("synthetic-provider-failure"));
+        }
         assertEquals(listSentinelPlannerGraphFacts(path, scope), []);
         await original.close();
         reopened = await connect(port, token);
@@ -289,10 +380,10 @@ for (
         const decision = await reopened.request({
           type: "approval_inbox_decide",
           approvalId: entry.id,
-          approved: outcome !== "deny",
+          approved: !denied,
         });
         assertEquals(decision.ok, true);
-        if (outcome !== "deny") {
+        if (!denied) {
           await rechecking.promise;
           assertEquals(
             (await reopened.request({
@@ -310,17 +401,18 @@ for (
               "stop",
             ));
           }
+          policyRevoked = outcome === "advisor-consider-policy-denial";
           releaseRecheck.resolve();
         }
         await job;
         const facts = listSentinelPlannerGraphFacts(path, scope);
-        if (outcome === "approve") {
+        if (approved) {
           assertEquals(facts.length, 1);
           assertEquals(facts[0].relationship, relationship);
           assertEquals(JSON.parse(result).id, facts[0].id);
         } else {
           assertEquals(facts, []);
-          if (outcome === "deny") {
+          if (denied) {
             assertStringIncludes(result.toLowerCase(), "approval");
           }
         }
@@ -329,11 +421,7 @@ for (
         );
         assertEquals(
           terminal?.status,
-          outcome === "approve"
-            ? "completed"
-            : outcome === "deny"
-            ? "denied"
-            : "stale",
+          approved ? "completed" : denied ? "denied" : "stale",
         );
       } finally {
         store.close();
