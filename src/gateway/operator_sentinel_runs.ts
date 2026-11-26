@@ -23,6 +23,7 @@ import {
 } from "../sentinel/cases.ts";
 import {
   matchesSentinelLinkedStartGoal,
+  matchesSentinelLinkedStartTemplate,
   pauseSentinelAssessment,
   previewSentinelLinkedOrganization,
   publishedSentinelGraphDigest,
@@ -96,6 +97,7 @@ export function createOperatorSentinelRuns(
     approval?: SentinelFormalGoalApproval,
   ): boolean;
   childDescription(ref: OperatorRunRef): string | undefined;
+  matchesStartTemplate(ref: OperatorRunRef, templateKey?: string): boolean;
   startSeed(ref: OperatorRunRef): SentinelLinkedSeedTask | undefined;
   matchesStartGoal(ref: OperatorRunRef, goal?: string): boolean;
   matchesStartTimeout(ref: OperatorRunRef, timeoutSeconds?: number): boolean;
@@ -110,6 +112,7 @@ export function createOperatorSentinelRuns(
       goalApproval?: SentinelFormalGoalApproval;
       membership?: SentinelCaseMembershipProof;
       childDescription?: string;
+      templateKey?: string;
       seedTask?: SentinelLinkedSeedTask;
       timeoutSeconds?: number;
       modelProfile?: SelectedModelProfile;
@@ -438,6 +441,11 @@ export function createOperatorSentinelRuns(
       return path && ref.revision !== undefined
         ? readSentinelChildDescription(path, ref.revision)
         : undefined;
+    },
+    matchesStartTemplate(ref, templateKey) {
+      const path = pathFor(ref);
+      return !!path && ref.revision !== undefined &&
+        matchesSentinelLinkedStartTemplate(path, ref.revision, templateKey);
     },
     startSeed(ref) {
       const path = pathFor(ref);

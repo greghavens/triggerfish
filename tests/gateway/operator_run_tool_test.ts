@@ -4183,6 +4183,129 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
         assertEquals(child.links, [linked.link]);
       }, reopenedWorkflows);
 
+      const templateId = crypto.randomUUID();
+      const saveTemplate = {
+        action: "set_assessment_template",
+        templateId,
+        templateVersion: 0,
+        requestId: crypto.randomUUID(),
+        title: "Review configuration",
+        childDescription: "Configuration baseline review",
+        childGoal: "Compare approved configuration to the baseline.",
+      };
+      const beforeTemplateApproval = confirmations.length;
+      denied = "PRE_TOOL_CALL";
+      await turn(saveTemplate);
+      denied = undefined;
+      assertEquals(confirmations.length, beforeTemplateApproval);
+      approved = false;
+      try {
+        assertStringIncludes(
+          (await turn(saveTemplate)).result,
+          "operator declined",
+        );
+      } finally {
+        approved = true;
+      }
+      assertEquals(
+        JSON.parse((await turn({ action: "assessment_templates" })).result)
+          .templates,
+        [],
+      );
+      const firstTemplate =
+        JSON.parse((await turn(saveTemplate)).result).template;
+      assertEquals(firstTemplate.version, 1);
+      assertEquals(
+        JSON.parse((await turn(saveTemplate)).result).template,
+        firstTemplate,
+      );
+      const templateSelection = {
+        action: "spawn",
+        ...exact,
+        targetKind: "sentinel",
+        initialGraph: "empty",
+        templateId,
+        templateVersion: 1,
+      };
+      const firstTemplateStart = {
+        ...templateSelection,
+        targetId: "template-run-one",
+        requestId: crypto.randomUUID(),
+      };
+      const templatedRun = JSON.parse((await turn(firstTemplateStart)).result);
+      assertEquals(templatedRun.run.label, firstTemplate.description);
+      assertEquals(templatedRun.template, { id: templateId, version: 1 });
+      assertEquals(
+        readSentinelAssessment(
+          resolveSentinelCasePath(baseDir, firstTemplateStart.targetId),
+        )?.plan.goal,
+        firstTemplate.objective,
+      );
+      assertEquals(
+        JSON.parse(confirmations.at(-1)!.split("\n").at(-1)!).template,
+        firstTemplate,
+      );
+      const changeTemplate = {
+        ...saveTemplate,
+        templateVersion: 1,
+        requestId: crypto.randomUUID(),
+        childGoal: "Review configuration drift against the baseline.",
+      };
+      const secondTemplate =
+        JSON.parse((await turn(changeTemplate)).result).template;
+      assertEquals(secondTemplate.version, 2);
+      assertStringIncludes(
+        (await turn({ ...saveTemplate, requestId: crypto.randomUUID() }))
+          .result,
+        "unavailable",
+      );
+      assertStringIncludes(
+        (await turn({
+          ...templateSelection,
+          targetId: "template-stale-run",
+          requestId: crypto.randomUUID(),
+        })).result,
+        "unavailable",
+      );
+      assertStringIncludes(
+        (await turn({
+          ...firstTemplateStart,
+          templateVersion: 2,
+        })).result,
+        "unavailable",
+      );
+      await withGateway(async (afterTemplateRestart) => {
+        const beforeReplay = confirmations.length;
+        assertEquals(
+          JSON.parse((await afterTemplateRestart(firstTemplateStart)).result),
+          templatedRun,
+        );
+        assertEquals(confirmations.length, beforeReplay);
+        assertEquals(
+          JSON.parse(
+            (await afterTemplateRestart({ action: "assessment_templates" }))
+              .result,
+          ).templates,
+          [secondTemplate],
+        );
+        const second = {
+          ...templateSelection,
+          templateVersion: 2,
+          requestId: crypto.randomUUID(),
+          targetId: "template-run-two",
+        };
+        assertEquals(
+          JSON.parse((await afterTemplateRestart(second)).result).run.label,
+          secondTemplate.description,
+        );
+        assertEquals(
+          readSentinelAssessment(
+            resolveSentinelCasePath(baseDir, second.targetId),
+          )?.plan.goal,
+          secondTemplate.objective,
+        );
+      }, reopenedWorkflows);
+
       const childCase = "linked-sentinel";
       const childPath = resolveSentinelCasePath(baseDir, childCase);
       await Deno.mkdir(dirname(childPath), { recursive: true });

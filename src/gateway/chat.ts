@@ -365,6 +365,7 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
                       "preview_inventory_affiliation",
                       "archive_history",
                       "archive_catalog",
+                      "assessment_templates",
                       "approval_history",
                       "profiles",
                       "execution_traces",

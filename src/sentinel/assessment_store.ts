@@ -1453,6 +1453,7 @@ export function startSentinelAssessment(
     goalApproval?: SentinelFormalGoalApproval;
     membership?: SentinelCaseMembershipProof;
     childDescription?: string;
+    templateKey?: string;
     timeoutSeconds?: number;
     modelProfile?: SelectedModelProfile;
     modelFallbackProfiles?: readonly SelectedModelProfile[];
@@ -1671,6 +1672,22 @@ export function startSentinelAssessment(
             saveFormalGoalRequest(db, approval, formal.binding, started);
           }
           if (linkedStart) {
+            if (linkedStart.templateKey !== undefined) {
+              if (!/^[a-f0-9]{64}$/.test(linkedStart.templateKey)) {
+                throw new Error("Invalid linked Sentinel template version");
+              }
+              if (
+                !db.prepare("PRAGMA table_info(assessment_run_revisions)").all()
+                  .some(({ name }) => name === "linkedStartTemplateKey")
+              ) {
+                db.exec(
+                  "ALTER TABLE assessment_run_revisions ADD COLUMN linkedStartTemplateKey TEXT",
+                );
+              }
+              db.prepare(
+                "UPDATE assessment_run_revisions SET linkedStartTemplateKey = ? WHERE revision = ?",
+              ).run(linkedStart.templateKey, started.revision);
+            }
             if (linkedStart.emptyCreationDigest !== undefined) {
               if (!/^[a-f0-9]{64}$/.test(linkedStart.emptyCreationDigest)) {
                 throw new Error("Invalid linked Sentinel creation approval");
@@ -2723,6 +2740,25 @@ export function readSentinelChildDescription(
       throw new Error("Invalid saved linked Sentinel description");
     }
     return description;
+  } finally {
+    db.close();
+  }
+}
+
+/** Compare the exact template-version binding saved at linked admission. */
+export function matchesSentinelLinkedStartTemplate(
+  path: string,
+  revision: number,
+  templateKey: string | undefined,
+): boolean {
+  const db = openStore(path, false);
+  if (!db) return false;
+  try {
+    const row = hasTable(db, "assessment_run_revisions")
+      ? db.prepare("SELECT * FROM assessment_run_revisions WHERE revision = ?")
+        .get(revision)
+      : undefined;
+    return (row?.linkedStartTemplateKey ?? undefined) === templateKey;
   } finally {
     db.close();
   }

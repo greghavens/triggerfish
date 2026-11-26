@@ -315,6 +315,12 @@ import { executeOperatorAssetWithdrawal } from "./operator_asset_withdrawal.ts";
 import { executeOperatorRunArchive } from "./operator_run_archive.ts";
 import { executeOperatorRunArchiveBatch } from "./operator_run_archive_batch.ts";
 import { executeOperatorArchiveCatalog } from "./operator_run_archive_catalog.ts";
+import {
+  executeAssessmentTemplates,
+  parseAssessmentTemplateSelector,
+  readAssessmentTemplate,
+  withCurrentAssessmentTemplate,
+} from "./sentinel_assessment_templates.ts";
 import { readOperatorSentinelInventory } from "./operator_sentinel_inventory.ts";
 import { createOperatorSentinelRuns } from "./operator_sentinel_runs.ts";
 import {
@@ -411,6 +417,8 @@ export const operatorRunTool: ToolDefinition = {
         "restore",
         "archive_history",
         "archive_catalog",
+        "assessment_templates",
+        "set_assessment_template",
         "archive_runs",
         "restore_runs",
         "approval_history",
@@ -829,6 +837,15 @@ export const operatorRunTool: ToolDefinition = {
       enum: ["sentinel", "workflow", "delegated", "scheduled"],
     },
     targetId: { type: "string", description: "Exact linked run ID" },
+    templateId: {
+      type: "string",
+      description: "Exact UUID of a workspace Sentinel assessment template.",
+    },
+    templateVersion: {
+      type: "integer",
+      description:
+        "Exact template version to start, or expected version to edit (0 creates).",
+    },
     childDescription: {
       type: "string",
       description: "Optional display title for a linked Sentinel assessment.",
@@ -3613,6 +3630,27 @@ ${
             display: committed.display,
           })
           : unavailable;
+      }
+      if (
+        action === "assessment_templates" ||
+        action === "set_assessment_template"
+      ) {
+        if (
+          !context?.authenticatedOwnerSessionId ||
+          !context.authorizeOwnerRunCall ||
+          !canFlowTo("INTERNAL", context.ceiling ?? "PUBLIC")
+        ) return unavailable;
+        const result = await executeAssessmentTemplates(
+          options.baseDir,
+          args,
+          context.authorizeOwnerRunCall,
+          options.confirm,
+        );
+        if (!result) return unavailable;
+        if ("declined" in result) {
+          return "Error: The operator declined the run action.";
+        }
+        return safeProjection(result);
       }
       if (action === "archive_catalog") {
         if (
@@ -10372,8 +10410,10 @@ ${
           targetKind,
           targetId,
           requestId,
-          childGoal,
-          childDescription,
+          childGoal: rawChildGoal,
+          childDescription: rawChildDescription,
+          templateId,
+          templateVersion,
           goalProposal,
           initialGraph,
           organizationId,
@@ -10385,6 +10425,35 @@ ${
           inventoryCoverageEnabled,
           sourceCases,
         } = args;
+        const templated = templateId !== undefined ||
+          templateVersion !== undefined;
+        const selection = templated
+          ? parseAssessmentTemplateSelector({
+            id: templateId,
+            version: templateVersion,
+          })
+          : undefined;
+        if (
+          templated && (
+            !selection || targetKind !== "sentinel" ||
+            rawChildGoal !== undefined ||
+            rawChildDescription !== undefined ||
+            !context?.authenticatedOwnerSessionId ||
+            !canFlowTo("INTERNAL", context.ceiling ?? "PUBLIC") ||
+            !await context.authorizeOwnerRunCall?.(args) ||
+            !await context?.authorizeOwnerRunCall?.({
+              action: "assessment_templates",
+            })
+          )
+        ) return unavailable;
+        const template = selection &&
+          readAssessmentTemplate(options.baseDir, selection);
+        if (selection && !template) return unavailable;
+        const childGoal = template?.objective ?? rawChildGoal;
+        const childDescription = template?.description ?? rawChildDescription;
+        const templateKey = template
+          ? createHash("sha256").update(JSON.stringify(template)).digest("hex")
+          : undefined;
         const seedTask = parseSentinelLinkedSeedTask(rawSeedTask);
         const workflows = options.workflows;
         const ceiling = context?.ceiling ?? "INTERNAL";
@@ -10404,6 +10473,8 @@ ${
               "requestId",
               "childGoal",
               "childDescription",
+              "templateId",
+              "templateVersion",
               "goalProposal",
               "initialGraph",
               "organizationId",
@@ -10575,6 +10646,7 @@ ${
             target,
             childGoal,
             childDescription,
+            ...(templateKey === undefined ? [] : [templateKey]),
             goalApproval,
             timeoutSeconds,
             modelProfile,
@@ -10620,6 +10692,7 @@ ${
                 other,
                 emptyCreationDigest,
               ) ||
+              !providers.sentinel.matchesStartTemplate(other, templateKey) ||
               !providers.sentinel.matchesStartGoal(other, childGoal) ||
               !providers.sentinel.matchesStartGoalApproval(
                 other,
@@ -10650,7 +10723,13 @@ ${
               )
             ) return unavailable;
             const child = await controller.inspect(other);
-            return child ? safeProjection({ run: child, link }) : unavailable;
+            return child
+              ? safeProjection({
+                run: child,
+                link,
+                ...(selection && { template: selection }),
+              })
+              : unavailable;
           }
           const child = workflows?.inspectRequest(childRequest, ceiling);
           if (child?.planId !== targetId || other.id !== child?.runId) {
@@ -10660,6 +10739,10 @@ ${
         };
         const prior = await readLinkedChild();
         if (prior !== undefined) return prior;
+        if (
+          selection &&
+          !withCurrentAssessmentTemplate(options.baseDir, selection, () => true)
+        ) return unavailable;
         const graphDigest = emptyCreationDigest
           ? providers.sentinel.canStartEmpty(target)
             ? emptyLinkedSentinelGraphDigest
@@ -10688,6 +10771,7 @@ ${
                 ...(emptyCreationDigest && { initialGraph }),
                 ...(childGoal !== undefined && { childGoal }),
                 ...(childDescription !== undefined && { childDescription }),
+                ...(template && { template }),
                 ...(goalApproval && { goalApproval }),
                 ...(membership && { membership }),
                 ...(seedTask && { seedTask }),
@@ -10725,13 +10809,14 @@ ${
         };
         try {
           if (target.kind === "sentinel" && graphDigest) {
-            const start = () =>
+            const admit = () =>
               providers.sentinel.startLinked(target, {
                 ...link,
                 graphDigest,
                 emptyCreationDigest,
                 childGoal,
                 childDescription,
+                templateKey,
                 goalApproval,
                 membership,
                 seedTask,
@@ -10742,13 +10827,27 @@ ${
                 inventoryCoverageEnabled,
                 linkedCaseSources,
               });
+            const start = async () => {
+              if (!selection) return admit();
+              if (
+                !await context?.authorizeOwnerRunCall?.(args) ||
+                !await context?.authorizeOwnerRunCall?.({
+                  action: "assessment_templates",
+                })
+              ) return;
+              return withCurrentAssessmentTemplate(
+                options.baseDir,
+                selection,
+                admit,
+              );
+            };
             if (emptyCreationDigest) {
               await withSentinelSourceSnapshotLock(
                 options.baseDir,
                 true,
                 start,
               );
-            } else start();
+            } else await start();
           } else {
             workflows?.start(target.id, ceiling, childRequest, link);
           }
