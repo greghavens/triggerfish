@@ -82,6 +82,7 @@ import {
   readSentinelEmptyCreationDigest,
   readSentinelOperatingConstraints,
   refreshSentinelAssessment,
+  resumeSentinelAssessment,
   SENTINEL_ASSESSMENT_TIMED_OUT,
   startSentinelAssessment,
   stopSentinelAssessment,
@@ -3464,6 +3465,171 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
       }
       assertEquals(Deno.readTextFileSync(collisionPath), collisionGraph);
       assertEquals(readSentinelAssessment(collisionPath), undefined);
+
+      const retryCase = "graph-retry-batch";
+      const retryPath = resolveSentinelCasePath(baseDir, retryCase);
+      await Deno.mkdir(dirname(retryPath), { recursive: true });
+      await Deno.writeTextFile(retryPath, JSON.stringify(childGraph));
+      const retryState = startSentinelAssessment(retryPath, {
+        goal: "Review local graph.",
+      });
+      const retryRevision = adaptiveRevision(retryState);
+      const retryRunId = retryState.plan.runId!;
+      const retryRunRef = {
+        kind: "sentinel",
+        id: retryCase,
+        revision: retryState.revision,
+      };
+      const firstRetry = {
+        kind: "trace" as const,
+        nodeId: "child-asset",
+        depth: 1,
+      };
+      const secondRetry = {
+        kind: "impact" as const,
+        nodeId: "other-child-asset",
+        depth: 1,
+      };
+      const firstRetryId = sentinelAdaptiveTaskId(retryRevision, firstRetry);
+      const secondRetryId = sentinelAdaptiveTaskId(retryRevision, secondRetry);
+      const dependent = {
+        kind: "impact" as const,
+        nodeId: "child-asset",
+        depth: 1,
+        prerequisites: [firstRetryId, secondRetryId],
+      };
+      const dependentId = sentinelAdaptiveTaskId(retryRevision, dependent);
+      const storePath = join(dirname(retryPath), "sentinel-adaptive.db");
+      const retryStore = openSentinelAdaptiveStore(storePath);
+      try {
+        retryStore.sync(
+          retryRevision,
+          [firstRetry, secondRetry, dependent],
+          undefined,
+          {
+            number: retryState.revision,
+            goal: { id: retryRunId, label: retryState.plan.goal! },
+          },
+        );
+        for (const ignored of [secondRetryId, firstRetryId]) {
+          const leased = retryStore.claim(
+            retryRevision,
+            60,
+            new Set([ignored]),
+          );
+          assert(leased);
+          retryStore.fail({
+            taskId: leased.task.id,
+            leaseToken: leased.leaseToken,
+            note: "Transient graph read failure fixture.",
+          });
+        }
+      } finally {
+        retryStore.close();
+      }
+      const currentRetryStates = () => {
+        const store = openSentinelAdaptiveStore(storePath);
+        try {
+          return Object.fromEntries(
+            store.list(retryRevision).map(({ id, status }) => [id, status]),
+          );
+        } finally {
+          store.close();
+        }
+      };
+      const initiallyFailed = {
+        [firstRetryId]: "failed",
+        [secondRetryId]: "failed",
+        [dependentId]: "queued",
+      };
+      assertEquals(currentRetryStates(), initiallyFailed);
+      assertEquals(
+        JSON.parse((await turn({ action: "pause", ...retryRunRef })).result).run
+          .status,
+        "paused",
+      );
+      const retryRequest = {
+        action: "retry_graph_tasks",
+        ...retryRunRef,
+        runId: retryRunId,
+        adaptiveRevision: retryRevision,
+        requestId: crypto.randomUUID(),
+        taskIds: [firstRetryId, secondRetryId],
+      };
+      const beforeRetryReview = confirmations.length;
+      denied = "PRE_TOOL_CALL";
+      await turn(retryRequest);
+      denied = undefined;
+      assertStringIncludes(
+        (await turn({ ...retryRequest, taskIds: [firstRetryId, dependentId] }))
+          .result,
+        "unavailable",
+      );
+      assertEquals(confirmations.length, beforeRetryReview);
+      assertEquals(currentRetryStates(), initiallyFailed);
+      approved = false;
+      assertStringIncludes(
+        (await turn(retryRequest)).result,
+        "operator declined",
+      );
+      approved = true;
+      assertEquals(currentRetryStates(), initiallyFailed);
+      duringConfirmation = () => {
+        assert(
+          resumeSentinelAssessment(retryPath, undefined, retryState.revision),
+        );
+      };
+      try {
+        assertStringIncludes((await turn(retryRequest)).result, "unavailable");
+      } finally {
+        duringConfirmation = undefined;
+      }
+      assertEquals(currentRetryStates(), initiallyFailed);
+      assertEquals(
+        JSON.parse((await turn({ action: "pause", ...retryRunRef })).result).run
+          .status,
+        "paused",
+      );
+      const retryReceipt =
+        JSON.parse((await turn(retryRequest)).result).receipt;
+      assertEquals(retryReceipt.paused, true);
+      assertEquals(retryReceipt.constraintsVersion, 0);
+      assertEquals(retryReceipt.taskIds, [...retryRequest.taskIds].sort());
+      assertEquals(
+        retryReceipt.tasks.map(({ attempts }: { attempts: number }) =>
+          attempts
+        ),
+        [1, 1],
+      );
+      assertEquals(currentRetryStates(), {
+        [firstRetryId]: "queued",
+        [secondRetryId]: "queued",
+        [dependentId]: "queued",
+      });
+      await withGateway(async (restartTurn) => {
+        const beforeRetryReplay = confirmations.length;
+        assertEquals(
+          JSON.parse((await restartTurn(retryRequest)).result).receipt,
+          retryReceipt,
+        );
+        assertStringIncludes(
+          (await restartTurn({ ...retryRequest, taskIds: [firstRetryId] }))
+            .result,
+          "unavailable",
+        );
+        assertEquals(confirmations.length, beforeRetryReplay);
+        assertEquals(
+          JSON.parse(
+            (await restartTurn({ action: "resume", ...retryRunRef })).result,
+          ).run.status,
+          "running",
+        );
+        assertEquals(currentRetryStates(), {
+          [firstRetryId]: "completed",
+          [secondRetryId]: "completed",
+          [dependentId]: "completed",
+        });
+      }, reopenedWorkflows);
 
       const cancelSentinel = {
         action: "cancel",

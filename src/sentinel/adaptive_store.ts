@@ -860,6 +860,59 @@ export interface AdaptiveTask extends AdaptiveTaskRequest {
   readonly leaseExpiresAt?: string;
 }
 
+export interface AdaptiveGraphRetryScope {
+  readonly requestId: string;
+  readonly runId: string;
+  readonly evidenceRevision: number;
+  readonly adaptiveRevision: string;
+  readonly taskIds: readonly string[];
+}
+
+export interface AdaptiveGraphRetryReceipt extends AdaptiveGraphRetryScope {
+  readonly recordedAt: string;
+  readonly tasks: readonly AdaptiveGraphRetryTask[];
+  readonly constraintsVersion: number;
+  readonly paused: boolean;
+}
+
+export interface AdaptiveGraphRetryTask {
+  readonly id: string;
+  readonly kind: "trace" | "impact";
+  readonly nodeId: string;
+  readonly attempts: number;
+  readonly prerequisites: readonly string[];
+}
+
+export function selectAdaptiveGraphRetries(
+  tasks: readonly AdaptiveTask[],
+  ids: readonly string[],
+): AdaptiveGraphRetryTask[] | undefined {
+  if (!ids.length || ids.length > 8 || new Set(ids).size !== ids.length) return;
+  const byId = new Map(tasks.map((task) => [task.id, task]));
+  const selected: AdaptiveGraphRetryTask[] = [];
+  for (const id of ids) {
+    const task = byId.get(id);
+    if (
+      !task || task.status !== "failed" || !task.nodeId ||
+      (task.kind !== "trace" && task.kind !== "impact") ||
+      task.attempts >= MAX_ADAPTIVE_TASK_ATTEMPTS ||
+      task.plannerRound || task.carriedFrom || task.reviewedFrom ||
+      task.evidenceIds.length ||
+      task.prerequisites.some((parent) =>
+        byId.get(parent)?.status !== "completed"
+      )
+    ) return;
+    selected.push({
+      id,
+      kind: task.kind,
+      nodeId: task.nodeId,
+      attempts: task.attempts,
+      prerequisites: task.prerequisites,
+    });
+  }
+  return selected;
+}
+
 export interface AdaptiveFactSatisfaction {
   readonly sourceTaskId: string;
   readonly sourceObservationSha256: string;
@@ -7784,6 +7837,75 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
             : "Operator withdrew the priority request.",
         );
         return true;
+      });
+    },
+
+    readGraphRetryReceipt(
+      scope: AdaptiveGraphRetryScope,
+    ): AdaptiveGraphRetryReceipt | undefined {
+      if (
+        !db.prepare(
+          "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'adaptive_graph_retry_requests'",
+        ).get()
+      ) return;
+      const row = db.prepare(
+        "SELECT receipt FROM adaptive_graph_retry_requests WHERE requestId = ?",
+      ).get(scope.requestId);
+      if (!row) return;
+      const saved = JSON.parse(
+        String(row.receipt),
+      ) as AdaptiveGraphRetryReceipt;
+      if (
+        saved.requestId !== scope.requestId || saved.runId !== scope.runId ||
+        saved.evidenceRevision !== scope.evidenceRevision ||
+        saved.adaptiveRevision !== scope.adaptiveRevision ||
+        !isDeepStrictEqual(saved.taskIds, scope.taskIds)
+      ) throw new Error("Conflicting Sentinel graph retry request");
+      return saved;
+    },
+
+    retryFailedGraphBatch(
+      scope: AdaptiveGraphRetryScope,
+      review: Pick<
+        AdaptiveGraphRetryReceipt,
+        "tasks" | "constraintsVersion" | "paused"
+      >,
+    ): AdaptiveGraphRetryReceipt | undefined {
+      return transaction(db, () => {
+        const prior = this.readGraphRetryReceipt(scope);
+        if (prior) return prior;
+        const revision = scope.adaptiveRevision;
+        if (
+          activeRevision() !== revision ||
+          this.forEvidence(scope.evidenceRevision)?.goal.id !== scope.runId ||
+          !isDeepStrictEqual(
+            selectAdaptiveGraphRetries(this.list(revision), scope.taskIds),
+            review.tasks,
+          )
+        ) return;
+        const time = now();
+        for (const { id, attempts } of review.tasks) {
+          updateStatus.run("queued", id);
+          event.run(
+            revision,
+            id,
+            "retry_queued",
+            attempts,
+            time,
+            "Operator approved a graph investigation batch retry.",
+          );
+        }
+        const receipt = {
+          ...scope,
+          ...review,
+          recordedAt: new Date(time).toISOString(),
+        };
+        db.exec(`CREATE TABLE IF NOT EXISTS adaptive_graph_retry_requests (
+          requestId TEXT PRIMARY KEY, receipt TEXT NOT NULL
+        ) STRICT`);
+        db.prepare("INSERT INTO adaptive_graph_retry_requests VALUES (?, ?)")
+          .run(scope.requestId, JSON.stringify(receipt));
+        return receipt;
       });
     },
 

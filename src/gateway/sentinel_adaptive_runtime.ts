@@ -76,6 +76,7 @@ import {
   validateSentinelPlanSuggestions,
 } from "../sentinel/adaptive_planner.ts";
 import {
+  type AdaptiveGraphRetryScope,
   type AdaptiveIncidentImpactSource,
   type AdaptivePeerFindingCitation,
   type AdaptivePeerFindingVerification,
@@ -91,6 +92,7 @@ import {
   querySentinelWorkerObservations,
   readAdaptiveAssetSnapshotCitations,
   roundWithUpstreamCitations,
+  selectAdaptiveGraphRetries,
   SentinelAdaptiveQueueChanged,
   sentinelAdaptiveTaskId,
   taskUpstreamCitations,
@@ -1757,6 +1759,57 @@ export function requestSentinelWorkerControl(
       store.close();
     }
   });
+}
+
+interface SentinelGraphRetryPreview {
+  readonly tasks: NonNullable<ReturnType<typeof selectAdaptiveGraphRetries>>;
+  readonly paused: boolean;
+  readonly constraintsVersion: number;
+}
+
+export function reviewSentinelGraphRetries(
+  path: string,
+  scope: AdaptiveGraphRetryScope,
+  approved?: SentinelGraphRetryPreview,
+) {
+  const outcome = withSentinelAssessmentWriteLock(path, (state) => {
+    if (
+      !state?.active || state.plan.runId !== scope.runId ||
+      state.revision !== scope.evidenceRevision
+    ) return;
+    const store = openSentinelAdaptiveStore(storePath(path));
+    try {
+      if (revisionForStore(state, store) !== scope.adaptiveRevision) return;
+      const prior = store.readGraphRetryReceipt(scope);
+      if (prior) return { receipt: prior };
+      const queue = store.list(scope.adaptiveRevision);
+      const selected = selectAdaptiveGraphRetries(queue, scope.taskIds);
+      if (!selected) return;
+      const assets = new Set(
+        state.result?.sharedGraph.snapshot?.nodes
+          .filter(({ kind }) => kind === "asset").map(({ id }) => id),
+      );
+      const allowed = caseOperatingScope(path, state.revision);
+      if (selected.some((task) => !assets.has(task.nodeId) || !allowed(task))) {
+        return;
+      }
+      const selection: SentinelGraphRetryPreview = {
+        tasks: selected,
+        paused: state.paused,
+        constraintsVersion: operatingConstraints(path, state)?.version ?? 0,
+      };
+      if (!approved) return { selection };
+      if (!isDeepStrictEqual(selection, approved)) return;
+      const receipt = store.retryFailedGraphBatch(scope, selection);
+      return receipt && { receipt, state };
+    } finally {
+      store.close();
+    }
+  });
+  if (outcome && "state" in outcome && outcome.state) {
+    advanceAdaptiveSentinel(path, outcome.state);
+  }
+  return outcome;
 }
 
 export function previewSentinelQueueControl(

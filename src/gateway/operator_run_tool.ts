@@ -243,6 +243,7 @@ import {
   readSentinelModelSettings,
   readSentinelTaskQueue,
   readSentinelWorkflowPublicationStep,
+  reviewSentinelGraphRetries,
   submitSentinelAssignmentIntent,
   updateSentinelWorkerLimit,
 } from "./sentinel_adaptive_runtime.ts";
@@ -396,6 +397,7 @@ export const operatorRunTool: ToolDefinition = {
         "propose_graph_fact_discovery",
         "preview_inventory_withdrawal",
         "withdraw_inventory_host",
+        "retry_graph_tasks",
         "set_case_membership",
         "traces",
         "search_case_traces",
@@ -801,6 +803,12 @@ export const operatorRunTool: ToolDefinition = {
     factId: {
       type: "string",
       description: "Exact retained Sentinel graph fact ID",
+    },
+    taskIds: {
+      type: "array",
+      items: { type: "string" },
+      description:
+        "Exact failed graph task IDs to retry together, up to eight.",
     },
     taskId: {
       type: "string",
@@ -3320,6 +3328,69 @@ ${
             ? "applied"
             : "dismissed",
         });
+      }
+      if (action === "retry_graph_tasks") {
+        const { runId, adaptiveRevision, requestId, taskIds } = args;
+        if (
+          ref.kind !== "sentinel" || ref.revision === undefined ||
+          !canFlowTo("INTERNAL", context?.ceiling ?? "INTERNAL") ||
+          typeof runId !== "string" || !digestPattern.test(runId) ||
+          typeof adaptiveRevision !== "string" ||
+          !/^[a-f0-9]{64}$/.test(adaptiveRevision) ||
+          typeof requestId !== "string" || !digestPattern.test(requestId) ||
+          !Array.isArray(taskIds) || !taskIds.length || taskIds.length > 8 ||
+          new Set(taskIds).size !== taskIds.length ||
+          taskIds.some((id) =>
+            typeof id !== "string" || !/^adaptive:[a-f0-9]{64}$/.test(id)
+          ) ||
+          Object.keys(args).some((key) =>
+            ![
+              "action",
+              "kind",
+              "id",
+              "revision",
+              "runId",
+              "adaptiveRevision",
+              "requestId",
+              "taskIds",
+            ].includes(key)
+          ) ||
+          !await controller.inspect(ref)
+        ) return unavailable;
+        const path = resolveSentinelCasePath(options.baseDir, ref.id);
+        const scope = {
+          runId: runId.toLowerCase(),
+          requestId: requestId.toLowerCase(),
+          adaptiveRevision,
+          evidenceRevision: ref.revision,
+          taskIds: [...taskIds].sort(),
+        };
+        const before = reviewSentinelGraphRetries(path, scope);
+        if (before?.receipt) {
+          return safeProjection({ run: ref, receipt: before.receipt });
+        }
+        if (!before?.selection) return unavailable;
+        const preview = JSON.stringify({
+          run: ref,
+          ...scope,
+          ...before.selection,
+        });
+        if (preview.length > 8000) return unavailable;
+        if (
+          !await options.confirm(
+            `Retry these exact failed graph investigations?\n${preview}`,
+          )
+        ) {
+          return "Error: The operator declined the run action.";
+        }
+        const committed = reviewSentinelGraphRetries(
+          path,
+          scope,
+          before.selection,
+        );
+        return committed?.receipt
+          ? safeProjection({ run: ref, receipt: committed.receipt })
+          : unavailable;
       }
       const queueAction = [...sentinelQueueActions].find(([name]) =>
         name === action
