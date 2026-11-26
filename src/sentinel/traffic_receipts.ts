@@ -498,6 +498,32 @@ export function readSentinelTrafficReceipt(
     );
 }
 
+/** Stable metadata projection for exact traffic reads and retained citations. */
+export function projectSentinelTrafficMetadata(
+  receipt: SentinelTrafficReceipt,
+  onlyAsset?: string,
+) {
+  const { digest, family, evidenceId, assetIds, observation } = receipt;
+  return {
+    digest,
+    family,
+    evidenceId,
+    assetIds: onlyAsset ? [onlyAsset] : assetIds,
+    observation: "origin" in observation
+      ? {
+        origin: observation.origin,
+        method: observation.method,
+        status: observation.status,
+        ...(observation.startedAt && { startedAt: observation.startedAt }),
+      }
+      : {
+        hostname: observation.hostname,
+        addresses: observation.addresses,
+        timestamp: observation.timestamp,
+      },
+  };
+}
+
 function validReviewedSearchPhrase(phrase: unknown): boolean {
   return phrase === undefined ||
     (typeof phrase === "string" && phrase.trim() === phrase &&

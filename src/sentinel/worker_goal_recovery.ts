@@ -715,6 +715,7 @@ type GoalReceiptReadArguments =
     kind?: string;
     origin?: string;
     evidenceId?: string;
+    trafficDigest?: string;
     summary?: string;
     confidence?: "observed" | "inferred";
     digest?: string;
@@ -890,8 +891,13 @@ export function sentinelGoalReceiptReadArguments(
       sourceSha256: "0".repeat(64),
     });
     if (receipt) {
-      const { summary, confidence, evidenceId } = receipt;
-      return { summary, confidence, evidenceId };
+      const { summary, confidence, evidenceId, trafficDigest } = receipt;
+      return {
+        summary,
+        confidence,
+        evidenceId,
+        ...(trafficDigest && { trafficDigest }),
+      };
     }
     return;
   }

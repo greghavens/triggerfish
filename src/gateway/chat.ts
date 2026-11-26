@@ -1198,6 +1198,38 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
       ) return;
       return { ...page, runId, currentRevision, scopeVersion };
     },
+    async readSentinelWorkerNarrative(caseId, revision, currentRevision, node) {
+      const owner = getSession();
+      const path = caseId === "main"
+        ? snapshotPath
+        : config.resolveSentinelChatCase?.(caseId);
+      if (!path) return;
+      const activeRun = readSentinelAssessment(path)?.plan.runId;
+      const scope = activeRun &&
+        readSentinelOperatingConstraints(path, activeRun)?.digest;
+      const current = () =>
+        state.activeSessionId === state.ownerSessionId &&
+        getSession().id === owner.id && owner.id === state.ownerSessionId &&
+        canFlowTo(
+          maxClassification(getSessionTaint(), "INTERNAL"),
+          ownerTargetClassification,
+        ) &&
+        readSentinelAssessment(path)?.revision === currentRevision &&
+        readSentinelAssessment(path)?.plan.runId === activeRun &&
+        !!activeRun &&
+        readSentinelOperatingConstraints(path, activeRun)?.digest === scope;
+      if (!current()) return;
+      const result = await orchestrator.executeOperatorTool({
+        name: operatorRunTool.name,
+        args: { action: "node", kind: "sentinel", id: caseId, revision, node },
+      }, {
+        session: owner,
+        targetClassification: ownerTargetClassification,
+        suppressToolEvents: true,
+      });
+      if (!result.ok || !result.value.startsWith("{") || !current()) return;
+      return JSON.parse(result.value).page?.node?.workerNarrative;
+    },
     async readSentinelDiscoverySource(request) {
       if (!config.operatorRunExecutor) return;
       const owner = getSession();

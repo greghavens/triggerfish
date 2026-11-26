@@ -3323,11 +3323,17 @@ export function readAdaptiveWorkerNarrative(
       stepIndex === select.stepIndex
     );
     return (occupied ? [occupied] : records).find(({ stepIndex, receipt }) => {
-      const { summary, confidence, evidenceId, sourceSha256 } = receipt;
+      const { summary, confidence, evidenceId, sourceSha256, trafficDigest } =
+        receipt;
       return stepIndex <= select.stepIndex &&
         sourceSha256 === select.sourceSha256 &&
         createHash("sha256").update(
-            JSON.stringify({ summary, confidence, evidenceId }),
+            JSON.stringify({
+              summary,
+              confidence,
+              evidenceId,
+              ...(trafficDigest && { trafficDigest }),
+            }),
           )
             .digest("hex") === select.argsDigest;
     });
@@ -8349,10 +8355,18 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
         if (
           typeof producer?.nodeId !== "string" ||
           source?.outcome !== "returned" ||
-          source.tool !== ASSIGNED_TARGET_CHECKPOINT_TOOL ||
-          source.assignedTarget?.targetId !== producer.nodeId ||
-          !source.assignedTarget.linkedNodeIds.includes(receipt.evidenceId) ||
-          source.resultSnapshot?.sha256 !== receipt.sourceSha256
+          (receipt.trafficDigest
+            ? source.tool !== SENTINEL_TRAFFIC_READ ||
+              source.trafficRead?.sha256 !== receipt.sourceSha256 ||
+              source.trafficRead.evidenceId !== receipt.evidenceId ||
+              source.trafficRead.digest !== receipt.trafficDigest ||
+              source.trafficRead.revision !== evidenceRevision
+            : source.tool !== ASSIGNED_TARGET_CHECKPOINT_TOOL ||
+              source.assignedTarget?.targetId !== producer.nodeId ||
+              !source.assignedTarget.linkedNodeIds.includes(
+                receipt.evidenceId,
+              ) ||
+              source.resultSnapshot?.sha256 !== receipt.sourceSha256)
         ) return;
         const committed = narrativeJournal.publish({
           revision,
@@ -8388,7 +8402,11 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
         targetIds?: readonly string[];
         excludeTaskId?: string;
       },
-      allowed: (asset: string, evidence: string) => boolean,
+      allowed: (
+        asset: string,
+        evidence: string,
+        trafficDigest?: string,
+      ) => boolean,
       limit = 6,
       offset = 0,
     ) {
@@ -8407,7 +8425,13 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
           latestFirst: true,
         });
         for (const record of page) {
-          if (!allowed(record.targetId, record.receipt.evidenceId)) continue;
+          if (
+            !allowed(
+              record.targetId,
+              record.receipt.evidenceId,
+              record.receipt.trafficDigest,
+            )
+          ) continue;
           if (authorized++ < offset) continue;
           records.push(record);
           if (records.length === limit) return records;
@@ -11021,36 +11045,48 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
               stepIndex < 16 && progress.length === stepIndex
             ) {
               const admitted = marker.journalRequests?.[index];
-              const sourceIndex = progress.slice(0, earlierResults.length)
-                .findLastIndex(({ tool, outcome }) =>
-                  tool === ASSIGNED_TARGET_CHECKPOINT_TOOL &&
-                  outcome === "returned"
-                );
-              const source = progress[sourceIndex];
-              const sourceSha256 = source?.resultSnapshot?.sha256;
-              const sourceResult = earlierResults[sourceIndex]?.content;
               if (
                 typeof admitted?.requestId !== "string" ||
-                typeof admitted.argsDigest !== "string" ||
-                !sourceSha256 || typeof sourceResult !== "string" ||
-                source.assignedTarget?.targetId !== row.nodeId ||
-                !source.assignedTarget.linkedNodeIds.includes(
-                  admitted.requestId,
-                ) ||
-                createHash("sha256").update(sourceResult).digest("hex") !==
-                  sourceSha256
+                typeof admitted.argsDigest !== "string"
               ) break;
-              const verified = lookupMutation?.(
-                id,
-                row.nodeId,
-                tool,
-                admitted.requestId,
-                {
-                  stepIndex: sourceIndex,
-                  sourceSha256,
-                  argsDigest: admitted.argsDigest,
-                },
-              );
+              const verified = progress.slice(0, earlierResults.length)
+                .map((source, index) => ({ source, index })).reverse()
+                .flatMap(({ source, index }) => {
+                  if (source.outcome !== "returned") return [];
+                  const isTraffic = source.tool === SENTINEL_TRAFFIC_READ;
+                  const metadata = source.trafficRead;
+                  const sourceSha256 = isTraffic
+                    ? metadata?.sha256
+                    : source.resultSnapshot?.sha256;
+                  const sourceResult = earlierResults[index]?.content;
+                  if (
+                    !sourceSha256 || typeof sourceResult !== "string" ||
+                    typeof row.nodeId !== "string" ||
+                    (isTraffic
+                      ? !metadata ||
+                        metadata.evidenceId !== admitted.requestId ||
+                        metadata.revision !== evidenceRevision
+                      : source.tool !== ASSIGNED_TARGET_CHECKPOINT_TOOL ||
+                        source.assignedTarget?.targetId !== row.nodeId ||
+                        !source.assignedTarget.linkedNodeIds.includes(
+                          admitted.requestId!,
+                        )) ||
+                    createHash("sha256").update(sourceResult).digest("hex") !==
+                      sourceSha256
+                  ) return [];
+                  const exact = lookupMutation?.(
+                    id,
+                    row.nodeId,
+                    tool,
+                    admitted.requestId!,
+                    {
+                      stepIndex: index,
+                      sourceSha256,
+                      argsDigest: admitted.argsDigest!,
+                    },
+                  );
+                  return exact ? [exact] : [];
+                })[0];
               if (
                 !verified || verified.args.evidenceId !== admitted.requestId ||
                 createHash("sha256").update(JSON.stringify(verified.args))

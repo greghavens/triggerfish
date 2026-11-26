@@ -59,6 +59,10 @@ import {
   sentinelExecutionEvidenceFile,
   validateCaseExecutionEvidence,
 } from "./case_execution_evidence.ts";
+import {
+  projectSentinelTrafficMetadata,
+  readSentinelTrafficReceipt,
+} from "./traffic_receipts.ts";
 import { createHash } from "node:crypto";
 import { publishSentinelRestoreReservation } from "./restore_reservation.ts";
 import {
@@ -591,6 +595,7 @@ function restoreAssessment(
 function validateArchivedWorkerNarratives(
   db: DatabaseSync,
   assessment: string,
+  caseId: string,
   latestRevision: number,
 ) {
   const invalid = () =>
@@ -647,6 +652,21 @@ function validateArchivedWorkerNarratives(
   const rows = db.prepare(
     "SELECT rowid AS position, * FROM adaptive_worker_narratives WHERE ? IS NULL OR rowid > ? ORDER BY rowid LIMIT 256",
   );
+  const snapshotPath = join(dirname(assessment), snapshotFile);
+  const hasTable = (name: string) =>
+    db.prepare("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = ?")
+      .get(name);
+  const archivedSteps = hasTable("adaptive_archived_worker_traces")
+    ? db.prepare(
+      "SELECT steps FROM adaptive_archived_worker_traces WHERE revision = ? AND taskId = ?",
+    )
+    : undefined;
+  const completeSteps =
+    hasTable("adaptive_model_reviews") && hasTable("adaptive_note_steps")
+      ? db.prepare(`SELECT trace.steps FROM adaptive_note_steps AS trace
+      JOIN adaptive_model_reviews AS review ON trace.note_id = review.noteId
+      WHERE review.taskId = ?`)
+      : undefined;
   let after: number | null = null;
   for (;;) {
     const page: ReturnType<typeof rows.all> = rows.all(after, after);
@@ -726,6 +746,40 @@ function validateArchivedWorkerNarratives(
         (!exact.edges.has(JSON.stringify([targetId, record.id])) &&
           !exact.edges.has(JSON.stringify([record.id, targetId])))
       ) throw invalid();
+      if (receipt.trafficDigest) {
+        const traffic = readSentinelTrafficReceipt(
+          snapshotPath,
+          evidenceRevision,
+          {
+            evidenceId: receipt.evidenceId,
+            digest: receipt.trafficDigest,
+          },
+          targetId,
+        );
+        const steps = completeSteps?.get(taskId)?.steps ??
+          archivedSteps?.get(revision, taskId)?.steps;
+        const decoded = typeof steps === "string"
+          ? JSON.parse(steps)
+          : undefined;
+        const step = Array.isArray(decoded) && decoded.length <= 16
+          ? decoded[stepIndex]
+          : undefined;
+        const proof = step?.trafficRead;
+        if (
+          !traffic || step?.tool !== "sentinel_traffic_get" ||
+          step.outcome !== "returned" ||
+          proof?.revision !== evidenceRevision ||
+          proof.evidenceId !== receipt.evidenceId ||
+          proof.digest !== receipt.trafficDigest ||
+          proof.sha256 !== receipt.sourceSha256 ||
+          createHash("sha256").update(JSON.stringify({
+              caseId,
+              evidenceRevision,
+              _classification: "INTERNAL",
+              receipt: projectSentinelTrafficMetadata(traffic, targetId),
+            })).digest("hex") !== receipt.sourceSha256
+        ) throw invalid();
+      }
     }
   }
 }
@@ -994,7 +1048,7 @@ function restoreAdaptive(
       if (!hasMapping) {
         throw new Error("Invalid archived Sentinel worker revision");
       }
-      validateArchivedWorkerNarratives(db, assessment, revision);
+      validateArchivedWorkerNarratives(db, assessment, caseId, revision);
     }
     if (tables.has(visibilityResultsTable)) {
       if (!hasMapping) {

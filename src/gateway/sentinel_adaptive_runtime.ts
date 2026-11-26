@@ -2284,6 +2284,21 @@ export function retainedNarrativeForProvenance(
   ] as const;
   const evidenceId = record.receipt.evidenceId;
   const evidence = saved?.nodes.find(({ id }) => id === evidenceId);
+  if (record.receipt.trafficDigest) {
+    const caseId = locateSentinelCase(path)?.caseId;
+    const traffic = caseId && readProjectedSentinelTrafficReceipt(
+      path,
+      caseId,
+      revision,
+      { evidenceId, digest: record.receipt.trafficDigest },
+      record.targetId,
+    );
+    if (
+      !traffic ||
+      createHash("sha256").update(JSON.stringify(traffic)).digest("hex") !==
+        record.receipt.sourceSha256
+    ) return;
+  }
   if (
     !saved || !current ||
     evidence?.kind !== "evidence" ||
@@ -4128,7 +4143,7 @@ function plannerWorkerNarratives(path: string, state: State) {
     if (map?.goal.id !== runId) return [];
     return store.listWorkerNarratives(map.revision, {
       evidenceRevision: state.revision,
-    }, (asset, evidence) => !!scope(asset, evidence)).map((
+    }, (asset, evidence, digest) => !!scope(asset, evidence, digest)).map((
       { id, taskId, targetId, stepIndex },
     ) => ({ id, taskId, targetId, stepIndex }));
   } finally {
@@ -6450,12 +6465,14 @@ export function createSentinelModelPlanner(
           selection,
         );
         if (!record || record.targetId !== targetId) return;
-        const { evidenceId, summary, confidence } = record.receipt;
+        const { evidenceId, summary, confidence, trafficDigest } =
+          record.receipt;
         const args = committedBeforeProgress
           ? sentinelGoalReceiptReadArguments(tool, {
             summary,
             confidence,
             evidenceId,
+            ...(trafficDigest && { trafficDigest }),
           })
           : requested;
         if (
@@ -6463,6 +6480,7 @@ export function createSentinelModelPlanner(
             ? record.taskId === taskId
             : summary !== args.summary || confidence !== args.confidence ||
               evidenceId !== args.evidenceId ||
+              trafficDigest !== args.trafficDigest ||
               (committedBeforeProgress && evidenceId !== requestId)) ||
           !currentWorkerNarrative(
             snapshotPath,
@@ -7078,6 +7096,7 @@ export function createSentinelModelPlanner(
                 record.receipt.evidenceId,
                 signal,
                 currentSource,
+                record.receipt.trafficDigest,
               )
             ) return false;
           }
@@ -7795,6 +7814,7 @@ export function createSentinelModelPlanner(
               record.receipt.evidenceId,
               signal,
               currentSource,
+              record.receipt.trafficDigest,
             )
           ) return;
         }
@@ -9684,6 +9704,7 @@ export function createSentinelModelPlanner(
               record.receipt.evidenceId,
               signal,
               authorizeCurrent,
+              record.receipt.trafficDigest,
             )
           ) checkedNarratives.set(id, asset);
         }

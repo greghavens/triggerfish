@@ -533,6 +533,7 @@ export interface SentinelAgent {
     evidenceId: string,
     signal: AbortSignal,
     isCurrent: () => boolean,
+    trafficDigest?: string,
   ) => Promise<boolean>;
   readonly authorizeLinkedWorkerReview?: (
     reference: SentinelPeerWorkerReviewReference,
@@ -1122,8 +1123,13 @@ const workerNarrativeCommit: ToolDefinition = {
     evidenceId: {
       type: "string",
       description:
-        "An exact linked local evidence ID from the assigned target read",
+        "An exact linked local evidence ID from the assigned target or an approved retained traffic read",
       required: true,
+    },
+    trafficDigest: {
+      type: "string",
+      description:
+        "Exact receipt digest, required only for a previously opened traffic metadata receipt",
     },
   },
 };
@@ -3256,7 +3262,10 @@ type ProvenanceScope =
     | "assignedTaskLeaseToken"
     | "plannerExecutionEvidenceRunId"
   >
-  & { readonly scopeCaseGraph?: boolean };
+  & {
+    readonly scopeCaseGraph?: boolean;
+    readonly allowScopedTrafficNarrative?: boolean;
+  };
 
 function readAgentProvenance(
   options: ProvenanceScope,
@@ -4026,7 +4035,12 @@ export function inspectSentinelProvenance(
     const provenance = readAgentProvenance(options, revision, node);
     if ("error" in provenance) return provenance.error;
     const record = provenance.graph.inspect(node);
-    if (!record) return "Error: The requested provenance node is unavailable.";
+    if (
+      !record ||
+      ("workerNarrative" in record.node &&
+        record.node.workerNarrative?.receipt.trafficDigest &&
+        !options.allowScopedTrafficNarrative)
+    ) return "Error: The requested provenance node is unavailable.";
     return pageProvenance(
       record.connections,
       offset,
@@ -6030,6 +6044,38 @@ function createAgent(
               )
             )
           ) return { ...result, allowed: false, action: "BLOCK" };
+          for (const { id, targetId } of receiptIds) {
+            const selected = currentWorkerNarrative(
+              options.snapshotPath,
+              runId,
+              revision,
+              id,
+              targetId,
+            );
+            if (
+              selected?.receipt.trafficDigest &&
+              !await authorizeWorkerNarrative(
+                runId,
+                revision,
+                targetId,
+                selected.receipt.evidenceId,
+                turn.signal,
+                () =>
+                  permits(targetId) &&
+                  isDeepStrictEqual(
+                    selected,
+                    currentWorkerNarrative(
+                      options.snapshotPath,
+                      runId,
+                      revision,
+                      id,
+                      targetId,
+                    ),
+                  ),
+                selected.receipt.trafficDigest,
+              )
+            ) return { ...result, allowed: false, action: "BLOCK" };
+          }
         }
         if (
           result.allowed && name === "POST_TOOL_RESPONSE" &&
@@ -8976,6 +9022,7 @@ function createAgent(
     evidenceId: string,
     signal: AbortSignal,
     isCurrent: () => boolean,
+    trafficDigest?: string,
   ) {
     const scope = () =>
       currentWorkerNarrativeEvidence(
@@ -8984,10 +9031,29 @@ function createAgent(
         revision,
         asset,
         evidenceId,
+        trafficDigest,
       );
     const origin = scope();
-    const call = workerNarrativeEvidenceCall(evidenceId, revision);
     if (!origin) return false;
+    const sources: {
+      call: { name: string; args: Record<string, unknown> };
+      result: string;
+    }[] = [{
+      call: workerNarrativeEvidenceCall(evidenceId, revision),
+      result: boundResult({
+        _classification: "INTERNAL",
+        evidence: origin.evidence,
+      }),
+    }];
+    if (trafficDigest && origin.traffic) {
+      sources.push({
+        call: {
+          name: SENTINEL_TRAFFIC_READ,
+          args: { evidenceId, digest: trafficDigest, revision },
+        },
+        result: JSON.stringify(origin.traffic),
+      });
+    }
     const sourceConfig = {
       ...config,
       hookRunner: {
@@ -8999,6 +9065,7 @@ function createAgent(
             case_id: origin.caseId,
             run_id: runId,
             evidence_revision: revision,
+            target_id: asset,
             resource_classification: "INTERNAL",
             operation_type: "read",
           };
@@ -9010,31 +9077,26 @@ function createAgent(
         },
       },
     };
-    if (
-      !isCurrent() || signal.aborted ||
-      !await authorizeSavedToolCalls(
-        [call],
-        sourceConfig,
-        session,
-        undefined,
-        signal,
-      ) ||
-      !isCurrent() || !isDeepStrictEqual(scope(), origin)
-    ) return false;
-    const approved = await enforcePostToolResponse(
-      call.name,
-      sourceConfig,
-      session,
-      {
-        resultText: boundResult({
-          _classification: "INTERNAL",
-          evidence: origin.evidence,
-        }),
-        blocked: false,
-      },
-    );
-    return !approved.blocked && !signal.aborted && isCurrent() &&
+    const current = () =>
+      !signal.aborted && isCurrent() &&
       isDeepStrictEqual(scope(), origin);
+    for (const { call, result } of sources) {
+      if (
+        !current() || !await authorizeSavedToolCalls(
+          [call],
+          sourceConfig,
+          session,
+          undefined,
+          signal,
+        ) || !current() || (await enforcePostToolResponse(
+          call.name,
+          sourceConfig,
+          session,
+          { resultText: result, blocked: false },
+        )).blocked || !current()
+      ) return false;
+    }
+    return true;
   }
 
   async function workerNarrative(
@@ -9060,10 +9122,28 @@ function createAgent(
       const mapped = store.forEvidence(revision);
       if (mapped?.goal.id !== runId) return unavailable;
       if (name === SENTINEL_WORKER_NARRATIVE_COMMIT) {
-        const source = turn.narrativeSource;
         const token = options.assignedTaskLeaseToken;
+        const parsed = sentinelGoalReceiptReadArguments(name, args);
+        if (!task?.nodeId || !parsed?.evidenceId || !token) return unavailable;
+        const scope = () =>
+          readAssignedModelReview(options)?.id === task.id &&
+          currentWorkerNarrativeEvidence(
+            options.snapshotPath,
+            runId,
+            revision,
+            task.nodeId!,
+            parsed.evidenceId!,
+            parsed.trafficDigest,
+          );
+        const origin = scope();
+        if (!origin) return unavailable;
+        const trafficKey = origin.traffic &&
+          approvedSentinelTrafficAttachmentKey(JSON.stringify(origin.traffic));
+        const source = parsed.trafficDigest
+          ? trafficKey && turn.approvedTrafficReads.get(trafficKey)
+          : turn.narrativeSource;
         if (
-          !task?.nodeId || !token || !source ||
+          !source ||
           (turn.narrativeBatchStart !== undefined &&
             source.stepIndex >= turn.narrativeBatchStart) ||
           Object.hasOwn(args, "sourceSha256")
@@ -9073,24 +9153,19 @@ function createAgent(
           sourceSha256: source.sha256,
         });
         if (!receipt) return unavailable;
-        const scope = () =>
-          readAssignedModelReview(options)?.nodeId === task.nodeId &&
-          currentWorkerNarrativeEvidence(
-            options.snapshotPath,
-            runId,
-            revision,
-            task.nodeId!,
-            receipt.evidenceId,
-          );
-        const origin = scope();
         if (
-          !origin || !await authorizeWorkerNarrative(
+          (origin.traffic &&
+            createHash("sha256").update(JSON.stringify(origin.traffic)).digest(
+                "hex",
+              ) !== source.sha256) ||
+          !await authorizeWorkerNarrative(
             runId,
             revision,
             task.nodeId,
             receipt.evidenceId,
             turn.signal,
             () => isDeepStrictEqual(scope(), origin),
+            receipt.trafficDigest,
           )
         ) return unavailable;
         const committed = withSentinelAssessmentWriteLock(
@@ -9145,13 +9220,15 @@ function createAgent(
             ...(task?.nodeId &&
               { targetIds: [task.nodeId], excludeTaskId: task.id }),
           },
-          (asset, evidence) => !!scope(asset, evidence),
-          query === undefined ? 7 : MAX_WORKER_NARRATIVES,
-          query === undefined ? offset : 0,
+          (asset, evidence, digest) => !!scope(asset, evidence, digest),
+          MAX_WORKER_NARRATIVES,
         );
-        let records = candidates;
+        let records = candidates.slice(offset, offset + 7);
         let searchCurrent: (() => boolean) | undefined;
-        if (typeof query === "string") {
+        if (
+          typeof query === "string" ||
+          candidates.some(({ receipt }) => receipt.trafficDigest)
+        ) {
           const savedPolicy = readSentinelOperatingConstraints(
             options.snapshotPath,
             runId,
@@ -9174,16 +9251,22 @@ function createAgent(
                 ? currentPlannerReceiptScope(turn)
                 : !!task && readAssignedModelReview(options)?.id === task.id);
           };
-          const term = query.trim().toLowerCase();
+          const term = typeof query === "string"
+            ? query.trim().toLowerCase()
+            : undefined;
           const sourceAccess = new Map<string, boolean>();
           const matches: typeof candidates = [];
           let skipped = 0;
           for (const candidate of candidates) {
             if (turn.signal.aborted) return unavailable;
             const { targetId, receipt } = candidate;
-            const source = JSON.stringify([targetId, receipt.evidenceId]);
+            const source = JSON.stringify([
+              targetId,
+              receipt.evidenceId,
+              receipt.trafficDigest,
+            ]);
             let allowed = sourceAccess.get(source);
-            if (allowed === undefined) {
+            if (allowed === undefined && (term || receipt.trafficDigest)) {
               if (!searchCurrent()) return unavailable;
               allowed = await authorizeWorkerNarrative(
                 runId,
@@ -9192,11 +9275,15 @@ function createAgent(
                 receipt.evidenceId,
                 turn.signal,
                 searchCurrent,
+                receipt.trafficDigest,
               );
               if (!searchCurrent()) return unavailable;
               sourceAccess.set(source, allowed);
             }
-            if (!allowed || !receipt.summary.toLowerCase().includes(term)) {
+            if (
+              allowed === false ||
+              (term && !receipt.summary.toLowerCase().includes(term))
+            ) {
               continue;
             }
             if (skipped < offset) {
@@ -9255,6 +9342,7 @@ function createAgent(
           record.receipt.evidenceId,
           turn.signal,
           current,
+          record.receipt.trafficDigest,
         )
       ) return unavailable;
       return boundResult({ _classification: "INTERNAL", ...record });
@@ -9802,7 +9890,9 @@ function createAgent(
                         : (record.taskId !== task.id ||
                           record.receipt.summary !== args.summary ||
                           record.receipt.confidence !== args.confidence ||
-                          record.receipt.evidenceId !== args.evidenceId)) ||
+                          record.receipt.evidenceId !== args.evidenceId ||
+                          record.receipt.trafficDigest !==
+                            args.trafficDigest)) ||
                       saved !==
                         boundResult({
                           _classification: "INTERNAL",
@@ -9815,6 +9905,7 @@ function createAgent(
                         record.receipt.evidenceId,
                         signal,
                         current,
+                        record.receipt.trafficDigest,
                       )
                     ) return false;
                     continue;

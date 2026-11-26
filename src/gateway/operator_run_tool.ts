@@ -10,6 +10,7 @@ import {
   SENTINEL_LIVE_REPOSITORY_VISIBILITY,
 } from "../sentinel/github_repository_visibility.ts";
 import { isWorkerNarrativeId } from "../sentinel/worker_narratives.ts";
+import { workerNarrativeEvidenceCall } from "./sentinel_worker_narratives.ts";
 import {
   readLinkedSentinelWorkerReview,
   readLocalSentinelReview,
@@ -2796,6 +2797,57 @@ export async function reopenOwnedSentinelRepositoryVisibility(
     !current()
   ) return;
   return stored.projection;
+}
+
+async function authorizeRetainedNarrativeTraffic(
+  context: OperatorRunToolContext | undefined,
+  caseId: string,
+  path: string,
+  revision: number,
+  record: NonNullable<ReturnType<typeof retainedNarrativeForProvenance>>,
+  isCurrent: () => boolean,
+) {
+  const { evidenceId, trafficDigest, sourceSha256 } = record.receipt;
+  if (!trafficDigest) return true;
+  const authorize = context?.authorizeSentinelTraceRead;
+  const scope = { caseId, revision, taskId: record.taskId };
+  const args = { evidenceId, digest: trafficDigest, revision };
+  const load = () => {
+    const runId = readSentinelRunIdForRevision(path, revision);
+    const exact = runId &&
+      retainedNarrativeForProvenance(path, revision, runId, record.id);
+    const traffic = exact && isDeepStrictEqual(exact, record) &&
+      readProjectedSentinelTrafficReceipt(
+        path,
+        caseId,
+        revision,
+        args,
+        record.targetId,
+      );
+    return traffic ? JSON.stringify(traffic) : undefined;
+  };
+  const source = load();
+  const evidence = readSentinelAssessmentRevision(path, revision)?.result
+    .sharedGraph.snapshot?.nodes.find(({ id }) => id === evidenceId);
+  const graph = workerNarrativeEvidenceCall(evidenceId, revision);
+  return !!authorize && !!source && isCurrent() &&
+    !!evidence && await authorize(scope, graph.name, graph.args) &&
+    isCurrent() && load() === source &&
+    await authorize(
+      scope,
+      graph.name,
+      graph.args,
+      JSON.stringify({
+        _classification: "INTERNAL",
+        evidence,
+      }),
+    ) &&
+    isCurrent() && load() === source &&
+    createHash("sha256").update(source).digest("hex") === sourceSha256 &&
+    await authorize(scope, SENTINEL_TRAFFIC_READ, args) &&
+    isCurrent() && load() === source &&
+    await authorize(scope, SENTINEL_TRAFFIC_READ, args, source) &&
+    isCurrent() && load() === source;
 }
 
 export function createOperatorRunToolExecutor(options: {
@@ -6510,6 +6562,14 @@ ${request}`)
                 node: `evidence:${record.receipt.evidenceId}`,
               }) ||
               !current() || !isDeepStrictEqual(read(), record) ||
+              !await authorizeRetainedNarrativeTraffic(
+                context,
+                ref.id,
+                path,
+                ref.revision!,
+                record,
+                current,
+              ) ||
               !await context.authorizeSavedResponse(
                 operatorRunTool.name,
                 safeProjection({ ...record }),
@@ -12873,6 +12933,7 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
           snapshotPath: resolveSentinelCasePath(options.baseDir, ref.id),
           assessmentRevision: ref.revision,
           scopeCaseGraph: !!authorizeCaseRead,
+          allowScopedTrafficNarrative: true,
         };
         const page = {
           revision: ref.revision,
@@ -12911,6 +12972,20 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
           });
         if (response.startsWith("Error:")) return response;
         const graphPage = JSON.parse(response);
+        const narrative = graphPage.node?.workerNarrative;
+        if (
+          narrative?.receipt.trafficDigest &&
+          !await authorizeRetainedNarrativeTraffic(
+            context,
+            ref.id,
+            scope.snapshotPath,
+            ref.revision,
+            narrative,
+            () =>
+              context?.authorizeSentinelCaseRead?.(ref.id, ref.revision!) !==
+                false,
+          )
+        ) return unavailable;
         if (!includeFindingTraffic) {
           return safeProjection({ run: ref, page: graphPage });
         }

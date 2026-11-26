@@ -427,6 +427,7 @@ export function createTidepoolSentinelHandler(
   coordinatorState?: SentinelCoordinatorLookup,
   readDiscoverySource?: ChatSession["readSentinelDiscoverySource"],
   readTrafficDownloadPage?: ChatSession["readSentinelTrafficDownloadPage"],
+  readWorkerNarrative?: ChatSession["readSentinelWorkerNarrative"],
 ) {
   function readCaseOverview(ids: readonly string[], checkPending = false) {
     return ["main", ...ids].map((id) => {
@@ -1690,6 +1691,23 @@ export function createTidepoolSentinelHandler(
             if (
               !focused || !("workerNarrative" in focused.node) ||
               !focused.node.workerNarrative || !exact
+            ) {
+              throw new SentinelAssignmentError(
+                "That worker observation is unavailable in this evidence revision.",
+              );
+            }
+            const narrative = focused.node.workerNarrative;
+            if (
+              narrative.receipt.trafficDigest &&
+              !isDeepStrictEqual(
+                narrative,
+                await readWorkerNarrative?.(
+                  caseId,
+                  revision,
+                  readSentinelAssessment(path)?.revision ?? revision,
+                  message.focusId,
+                ),
+              )
             ) {
               throw new SentinelAssignmentError(
                 "That worker observation is unavailable in this evidence revision.",

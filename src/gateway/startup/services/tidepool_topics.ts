@@ -52,6 +52,7 @@ export function registerTidepoolTopicHandlers(
   coordinatorState?: SentinelCoordinatorLookup,
   readDiscoverySource?: ChatSession["readSentinelDiscoverySource"],
   readTrafficDownloadPage?: ChatSession["readSentinelTrafficDownloadPage"],
+  readWorkerNarrative?: ChatSession["readSentinelWorkerNarrative"],
 ): void {
   tidepoolHost.registerTopicHandler(
     "sentinel",
@@ -60,6 +61,7 @@ export function registerTidepoolTopicHandlers(
       coordinatorState,
       readDiscoverySource,
       readTrafficDownloadPage,
+      readWorkerNarrative,
     ),
   );
   registerLogsHandler(tidepoolHost);

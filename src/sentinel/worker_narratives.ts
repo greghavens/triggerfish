@@ -14,18 +14,24 @@ export interface SentinelWorkerNarrativeReceipt {
   readonly confidence: "observed" | "inferred";
   readonly sourceSha256: string;
   readonly evidenceId: string;
+  readonly trafficDigest?: string;
 }
 
 export function readWorkerNarrativeReceipt(
   value: unknown,
 ): SentinelWorkerNarrativeReceipt | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) return;
-  const { summary, confidence, sourceSha256, evidenceId } = value as Record<
-    string,
-    unknown
-  >;
+  const { summary, confidence, sourceSha256, evidenceId, trafficDigest } =
+    value as Record<
+      string,
+      unknown
+    >;
   if (
-    Object.keys(value).length !== 4 || typeof summary !== "string" ||
+    Object.keys(value).length !== (trafficDigest === undefined ? 4 : 5) ||
+    (trafficDigest !== undefined &&
+      (typeof trafficDigest !== "string" ||
+        !/^[a-f0-9]{64}$/.test(trafficDigest))) ||
+    typeof summary !== "string" ||
     !summary || summary.trim() !== summary || summary.length > 600 ||
     /[\p{Cc}\p{Cf}]/u.test(summary) ||
     redactCredentialText(summary) !== summary ||
@@ -34,5 +40,11 @@ export function readWorkerNarrativeReceipt(
     redactCredentialText(evidenceId) !== evidenceId ||
     typeof sourceSha256 !== "string" || !/^[a-f0-9]{64}$/.test(sourceSha256)
   ) return;
-  return { summary, confidence, sourceSha256, evidenceId };
+  return {
+    summary,
+    confidence,
+    sourceSha256,
+    evidenceId,
+    ...(trafficDigest && { trafficDigest }),
+  };
 }

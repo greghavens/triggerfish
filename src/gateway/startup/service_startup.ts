@@ -338,6 +338,7 @@ export async function launchTidepoolService(
     coordinatorState,
     chatSession.readSentinelDiscoverySource,
     chatSession.readSentinelTrafficDownloadPage,
+    chatSession.readSentinelWorkerNarrative,
   );
 
   return tidepoolHost;

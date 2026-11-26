@@ -1,4 +1,5 @@
 import { dirname, join } from "@std/path";
+import { createHash } from "node:crypto";
 import {
   readSentinelAssessment,
   readSentinelOperatingConstraints,
@@ -7,6 +8,7 @@ import { readAdaptiveWorkerNarrative } from "../sentinel/adaptive_store.ts";
 import { SENTINEL_PROVENANCE_NODE_READ } from "../sentinel/worker_goal_recovery.ts";
 import { sentinelOperatingConstraintsAllow } from "../sentinel/operating_constraints.ts";
 import { locateSentinelCase } from "../sentinel/cases.ts";
+import { readProjectedSentinelTrafficReceipt } from "./sentinel_traffic_tool.ts";
 
 export function currentWorkerNarrativeScope(
   path: string,
@@ -46,17 +48,28 @@ export function currentWorkerNarrativeScope(
     if (!owned) links.set(asset, owned = new Set());
     owned.add(evidence);
   }
-  return (asset: string, evidenceId: string) => {
+  return (asset: string, evidenceId: string, trafficDigest?: string) => {
     const evidence = nodes.get(evidenceId);
     if (
       evidence?.kind !== "evidence" || evidence.executionSource ||
       evidence.nativeWorkflowSource || !links.get(asset)?.has(evidenceId) ||
       !canRead(asset) || !canRead(evidenceId)
     ) return;
+    const traffic = trafficDigest
+      ? readProjectedSentinelTrafficReceipt(
+        path,
+        location.caseId,
+        revision,
+        { evidenceId, digest: trafficDigest },
+        asset,
+      )
+      : undefined;
+    if (trafficDigest && !traffic) return;
     return {
       caseId: location.caseId,
       runId,
       evidence,
+      ...(traffic && { traffic }),
       constraintsVersion: constraints?.version,
       constraintsDigest: constraints?.digest,
     };
@@ -69,10 +82,12 @@ export function currentWorkerNarrativeEvidence(
   revision: number,
   asset: string,
   evidenceId: string,
+  trafficDigest?: string,
 ) {
   return currentWorkerNarrativeScope(path, runId, revision)?.(
     asset,
     evidenceId,
+    trafficDigest,
   );
 }
 
@@ -89,15 +104,23 @@ export function currentWorkerNarrative(
     revision,
     { id },
   );
+  if (record?.targetId !== asset || record.evidenceRevision !== revision) {
+    return;
+  }
+  const source = currentWorkerNarrativeEvidence(
+    path,
+    runId,
+    revision,
+    asset,
+    record.receipt.evidenceId,
+    record.receipt.trafficDigest,
+  );
   if (
-    record?.targetId !== asset || record.evidenceRevision !== revision ||
-    !currentWorkerNarrativeEvidence(
-      path,
-      runId,
-      revision,
-      asset,
-      record.receipt.evidenceId,
-    )
+    !source || (source.traffic &&
+      createHash("sha256").update(JSON.stringify(source.traffic)).digest(
+          "hex",
+        ) !==
+        record.receipt.sourceSha256)
   ) return;
   return record;
 }

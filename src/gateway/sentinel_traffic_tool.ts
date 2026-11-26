@@ -18,6 +18,7 @@ import {
 } from "../sentinel/assessment_store.ts";
 import { locateSentinelCase } from "../sentinel/cases.ts";
 import {
+  projectSentinelTrafficMetadata,
   readSentinelTrafficReceipt,
   readSentinelTrafficReceiptPage,
   type SentinelTrafficReceipt,
@@ -168,25 +169,8 @@ export function projectSentinelTrafficReceipt(
   onlyAsset?: string,
   includePayloadMetadata = false,
 ) {
-  const { digest, family, evidenceId, assetIds, observation } = receipt;
-  const metadata = "origin" in observation
-    ? {
-      origin: observation.origin,
-      method: observation.method,
-      status: observation.status,
-      ...(observation.startedAt && { startedAt: observation.startedAt }),
-    }
-    : {
-      hostname: observation.hostname,
-      addresses: observation.addresses,
-      timestamp: observation.timestamp,
-    };
   return {
-    digest,
-    family,
-    evidenceId,
-    assetIds: onlyAsset ? [onlyAsset] : assetIds,
-    observation: metadata,
+    ...projectSentinelTrafficMetadata(receipt, onlyAsset),
     ...(includePayloadMetadata && receipt.reviewedHeaders !== undefined && {
       headersPayload: trafficPayloadMetadata(receipt.reviewedHeaders),
     }),

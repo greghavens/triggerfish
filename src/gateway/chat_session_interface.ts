@@ -57,6 +57,12 @@ export interface ChatSession {
   readonly readSentinelTrafficDownloadPage?: (
     request: SentinelTrafficDownloadPageRequest,
   ) => Promise<unknown>;
+  readonly readSentinelWorkerNarrative?: (
+    caseId: string,
+    revision: number,
+    currentRevision: number,
+    node: string,
+  ) => Promise<unknown>;
   readonly resolveSentinelChatCase?: (caseId: string) => string | undefined;
   readonly sentinelWebContainmentConfigured?: boolean;
   readonly readSentinelOutputLanguage?: (
