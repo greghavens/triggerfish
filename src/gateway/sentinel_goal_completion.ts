@@ -154,6 +154,7 @@ export function digestSentinelGoalProof(record: GoalRecord): string {
 
 const defaultGoal = "Investigate prioritized defensive findings";
 const workerProofPrefix = "Verified Sentinel assignment ";
+const workerProofResultDigest = /result SHA-256 ([a-f0-9]{64})\.$/;
 
 export interface SentinelGoalCriterion {
   readonly id: string;
@@ -731,8 +732,7 @@ function goalEvidenceVerifier(
         result.digest !== assignment.digest)
     ) return false;
     if (!detail.startsWith(workerProofPrefix)) return true;
-    return /result SHA-256 ([a-f0-9]{64})\.$/.exec(detail)?.[1] ===
-      result.digest;
+    return workerProofResultDigest.exec(detail)?.[1] === result.digest;
   };
 }
 
@@ -911,6 +911,9 @@ export function readSentinelWorkerGoalProofReceipt(
     const saved = store.readEvidenceSubmission(scope, requestId);
     if (!saved || !registered) return;
     const { criterionId, proof, status } = saved.receipt;
+    const digest = proof.source === "adaptive_task"
+      ? workerProofResultDigest.exec(proof.detail)?.[1]
+      : undefined;
     const [goalId, localCriterion] = criterionId.split("/");
     if (!state.plan.activeFormalGoalIds?.includes(goalId)) return;
     const args = sentinelGoalProofArguments({
@@ -959,7 +962,7 @@ export function readSentinelWorkerGoalProofReceipt(
       )(
         criterionId,
         proof,
-        { target: targetId },
+        { target: targetId, digest },
       )
     ) return;
     const protectedVerdict = historical && grants?.has(proof.reference)
