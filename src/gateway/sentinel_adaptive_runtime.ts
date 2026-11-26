@@ -30,6 +30,7 @@ import {
 import {
   executionFindingAsset,
   readVerifiedPassingFindingRecheck,
+  verifyWorkerFindingRecheck,
 } from "../sentinel/worker_finding_evidence.ts";
 import { latestAssignedControlCheck } from "../sentinel/assigned_relationship_facts.ts";
 import { reopenSentinelGoalReceiptRead } from "./sentinel_goal_receipt_read.ts";
@@ -2648,14 +2649,54 @@ export function readSentinelFindingFollowup(
     const report = journal.readFindingReport(findingId, state.revision);
     const finding = report?.finding;
     if (
-      !report || !finding?.taskId || finding.caseId !== caseId ||
+      !report || !finding || finding.caseId !== caseId ||
       finding.runId !== state.plan.runId || finding.targetId !== nodeId ||
       finding.evidenceRevision > state.revision ||
       !findingRecheckStillApplies(snapshot, finding)
     ) return;
+    let sourceAnalystSha256: string | undefined;
+    if ("analyst" in finding) {
+      if (
+        readSentinelRunIdForRevision(path, finding.evidenceRevision) !==
+          finding.runId
+      ) return;
+      const sourceAllowed = caseOperatingScope(path, finding.evidenceRevision);
+      const targets = [
+        { kind: "review_finding" as const, nodeId: finding.graphFindingId },
+        { kind: "review_evidence" as const, nodeId: finding.evidenceId },
+      ];
+      if (
+        targets.some((target) => !allowed(target) || !sourceAllowed(target))
+      ) return;
+      const source = readSentinelAssessmentRevision(
+        path,
+        finding.evidenceRevision,
+      )
+        ?.result.sharedGraph.snapshot;
+      const proof = source && verifyWorkerFindingRecheck(source, {
+        caseId,
+        evidenceRevision: finding.evidenceRevision,
+        evaluatedAt: finding.evaluatedAt,
+      }, {
+        assetId: nodeId,
+        findingId: finding.graphFindingId,
+        controlId: finding.controlId,
+        evidenceId: finding.evidenceId,
+      });
+      if (
+        proof?.outcome !== "fail" ||
+        proof.snapshotDigest !== finding.snapshotDigest ||
+        proof.observedAt !== finding.observedAt ||
+        proof.validUntil !== finding.validUntil
+      ) return;
+      sourceAnalystSha256 = createHash("sha256").update(
+        JSON.stringify(finding.analyst),
+      ).digest("hex");
+    }
     return {
       findingId,
-      sourceTaskId: finding.taskId,
+      ...(finding.taskId && { sourceTaskId: finding.taskId }),
+      ...(sourceAnalystSha256 && { sourceAnalystSha256 }),
       evidenceId: finding.evidenceId,
       sourceRevision: finding.evidenceRevision,
       assignedRevision: state.revision,

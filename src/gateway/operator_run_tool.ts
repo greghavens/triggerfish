@@ -6628,6 +6628,26 @@ ${request}`)
           )
           : undefined;
         if (finding && !findingFollowup) return unavailable;
+        const authorizeAnalyst = async () =>
+          !findingFollowup?.sourceAnalystSha256 || (
+            await authorize({
+              ...ref,
+              action: "finding_receipt",
+              receiptId: findingFollowup.findingId,
+            }) &&
+            await authorize({
+              ...ref,
+              action: "node",
+              node: `evidence:${findingFollowup.evidenceId}`,
+              revision: findingFollowup.sourceRevision,
+            }) &&
+            await context.authorizeSavedResponse(
+              operatorRunTool.name,
+              safeProjection({ ...findingFollowup }),
+              "INTERNAL",
+            )
+          );
+        if (!await authorizeAnalyst()) return unavailable;
         const intent = {
           requestId: requestId.toLowerCase(),
           runId: runId.toLowerCase(),
@@ -6694,7 +6714,7 @@ ${request}`)
           return unavailable;
         }
         if (
-          !await authorize(args) ||
+          !await authorize(args) || !await authorizeAnalyst() ||
           context.authorizeSelectedSentinelCase?.() === false
         ) return unavailable;
         const receipt = submitSentinelAssignmentIntent(

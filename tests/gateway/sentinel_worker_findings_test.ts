@@ -1030,6 +1030,22 @@ Deno.test("Reviewed analyst finding uses exact local failing evidence and surviv
     assert(deniedDelivery > 0);
     assert(frames.every((frame) => !frame.includes(request.title)));
     const receiptId = saved.id;
+    const followupRequest = {
+      ...ref,
+      action: "assign",
+      runId,
+      adaptiveRevision: adaptiveRevision(state),
+      taskKind: "trace",
+      node: "app",
+      receiptId,
+      note: "Review the original retained analyst finding.",
+      requestId: crypto.randomUUID(),
+    };
+    let followup: {
+      taskId: string;
+      findingFollowup:
+        import("../../src/sentinel/adaptive_store.ts").AdaptiveFindingFollowup;
+    };
     const archiveId = crypto.randomUUID();
     await withFindingAssignmentGateway(baseDir, confirm, async (turn) => {
       assertEquals(JSON.parse(await turn(request)).receipt, saved);
@@ -1044,6 +1060,36 @@ Deno.test("Reviewed analyst finding uses exact local failing evidence and surviv
         saved,
       );
       assertEquals(
+        JSON.parse(await turn({ ...ref, action: "pause" })).run.status,
+        "paused",
+      );
+      const beforeScope = reviews;
+      for (
+        const invalid of [
+          { ...followupRequest, revision: state.revision + 1 },
+          { ...followupRequest, node: "other" },
+        ]
+      ) {
+        assertStringIncludes(await turn(invalid), "unavailable");
+      }
+      assertEquals(reviews, beforeScope);
+      const response = await turn(followupRequest);
+      assert(response.startsWith("{"), response);
+      followup = JSON.parse(response).receipt;
+      const source = followup.findingFollowup;
+      assertEquals(source.sourceTaskId, undefined);
+      assertEquals(
+        source.sourceAnalystSha256,
+        createHash("sha256").update(JSON.stringify({ operatorScope: "owner" }))
+          .digest("hex"),
+      );
+      assertEquals(source.findingId, receiptId);
+      assertEquals(source.evidenceId, request.evidenceId);
+      assertEquals(source.sourceRevision, state.revision);
+      assertEquals(source.snapshotDigest, saved?.snapshotDigest);
+      assertEquals(source.reportVersion, 1);
+      assertEquals(reviews, beforeScope + 1);
+      assertEquals(
         JSON.parse(await turn({ ...ref, runId, action: "cancel" })).run.status,
         "stopped",
       );
@@ -1056,6 +1102,9 @@ Deno.test("Reviewed analyst finding uses exact local failing evidence and surviv
       assert(archived.startsWith("{"), archived);
       assertEquals(JSON.parse(archived).receipt.status, "succeeded");
     });
+    assert(followup!);
+    coordinator.stop();
+    planner.stop();
     await Deno.rename(dirname(path), join(baseDir, "before-analyst-restore"));
     await withFindingAssignmentGateway(baseDir, confirm, async (turn) => {
       assertEquals(
@@ -1075,7 +1124,43 @@ Deno.test("Reviewed analyst finding uses exact local failing evidence and surviv
           .record,
         saved,
       );
+      const beforeReplay = reviews;
+      assertEquals(JSON.parse(await turn(followupRequest)).receipt, followup);
+      assertEquals(reviews, beforeReplay);
+      assertEquals(
+        JSON.parse(await turn({ ...ref, action: "resume" })).run.status,
+        "running",
+      );
     });
+    const adaptive = openSentinelAdaptiveStore(
+      join(dirname(path), "sentinel-adaptive.db"),
+    );
+    const restoredLease = (() => {
+      try {
+        const leased = adaptive.claimModelReview(
+          followupRequest.adaptiveRevision,
+          MODEL_ASSIGNMENT_REASON,
+          ({ id }) => id === followup.taskId,
+        );
+        assert(leased);
+        assertEquals(leased.task.prerequisites, []);
+        assertEquals(
+          leased.task.plannerRound?.findingFollowup,
+          followup.findingFollowup,
+        );
+        return {
+          assessmentRevision: state.revision,
+          assignedTaskId: leased.task.id,
+          assignedTaskLeaseToken: leased.token,
+        };
+      } finally {
+        adaptive.close();
+      }
+    })();
+    const exactFinding = tool(findings, { receiptId });
+    const worker = await workerTurn(path, restoredLease, [[exactFinding]]);
+    assertEquals(JSON.parse(worker.results[0][0]).record, saved);
+    assertEquals(worker.receiptHooks, ["PRE_TOOL_CALL", "POST_TOOL_RESPONSE"]);
     await withTidepool(baseDir, async (list) => {
       assertEquals(await list(state.revision, caseId), [saved!]);
     });
@@ -1099,7 +1184,10 @@ Deno.test("Reviewed analyst finding uses exact local failing evidence and surviv
         }),
         "unavailable",
       );
+      assertStringIncludes(await turn(followupRequest), "unavailable");
     });
+    const revoked = await workerTurn(path, restoredLease, [[exactFinding]]);
+    assertStringIncludes(revoked.results[0][0], "unavailable");
     await withTidepool(baseDir, async (list) => {
       assertEquals(await list(state.revision, caseId), []);
     });

@@ -933,7 +933,8 @@ export type AdaptiveCommittedObservationCitation = NonNullable<
 
 export interface AdaptiveFindingFollowup {
   readonly findingId: string;
-  readonly sourceTaskId: string;
+  readonly sourceTaskId?: string;
+  readonly sourceAnalystSha256?: string;
   readonly evidenceId: string;
   readonly sourceRevision: number;
   readonly assignedRevision: number;
@@ -2515,7 +2516,11 @@ function normalizePlannerRound(round: AdaptivePlannerRound | undefined) {
     findingFollowup !== undefined && (
       !/^operator:[a-f0-9-]{36}$/.test(identity) ||
       !/^worker-finding:[a-f0-9]{64}$/.test(findingFollowup.findingId) ||
-      !/^adaptive:[a-f0-9]{64}$/.test(findingFollowup.sourceTaskId) ||
+      (findingFollowup.sourceTaskId === undefined
+        ? typeof findingFollowup.sourceAnalystSha256 !== "string" ||
+          !/^[a-f0-9]{64}$/.test(findingFollowup.sourceAnalystSha256)
+        : !/^adaptive:[a-f0-9]{64}$/.test(findingFollowup.sourceTaskId) ||
+          findingFollowup.sourceAnalystSha256 !== undefined) ||
       !Number.isSafeInteger(findingFollowup.sourceRevision) ||
       findingFollowup.sourceRevision < 1 ||
       !Number.isSafeInteger(findingFollowup.assignedRevision) ||
@@ -2667,7 +2672,11 @@ function normalizePlannerRound(round: AdaptivePlannerRound | undefined) {
     ...(findingFollowup && {
       findingFollowup: {
         findingId: findingFollowup.findingId,
-        sourceTaskId: findingFollowup.sourceTaskId,
+        ...(findingFollowup.sourceTaskId &&
+          { sourceTaskId: findingFollowup.sourceTaskId }),
+        ...(findingFollowup.sourceAnalystSha256 && {
+          sourceAnalystSha256: findingFollowup.sourceAnalystSha256,
+        }),
         evidenceId: findingFollowup.evidenceId,
         sourceRevision: findingFollowup.sourceRevision,
         assignedRevision: findingFollowup.assignedRevision,
