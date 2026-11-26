@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+import { createSentinelLiveWorkflowReader } from "../../src/gateway/sentinel_live_workflow.ts";
 import { createOperatorRunToolExecutor } from "../../src/gateway/operator_run_tool.ts";
 import { assignmentRecoveryKey } from "../../src/core/durable_assignment.ts";
 import {
@@ -254,6 +256,16 @@ Deno.test("authenticated Sentinel /btw reads only the selected running worker's 
   const scopeTransitionQuestion = "Wait for the worker scope change.";
   const scopeSideStarted = Promise.withResolvers<void>();
   const releaseScopeSide = Promise.withResolvers<void>();
+  const credentialTransitionQuestion = "Wait for credential revocation.";
+  const credentialSideStarted = Promise.withResolvers<void>();
+  const releaseCredentialSide = Promise.withResolvers<void>();
+  const repository = "fixture/side-repo";
+  const syntheticToken = "fixture-side-metadata-token";
+  let credential: string | undefined = syntheticToken;
+  let metaChecks = 0;
+  let listingCalls = 0;
+  const workflowHooks = new Set<string>();
+  const hooks = createHookRunner(createPolicyEngine());
   const snapshot = {
     version: 1,
     nodes: [
@@ -293,13 +305,52 @@ Deno.test("authenticated Sentinel /btw reads only the selected running worker's 
         scopeSideStarted.resolve();
         await releaseScopeSide.promise;
       }
+      if (prompt.includes(credentialTransitionQuestion)) {
+        credentialSideStarted.resolve();
+        await releaseCredentialSide.promise;
+      }
       return textResult(
         prompt.includes(revokedAsset)
           ? `The worker observed ${revokedAsset}.`
+          : prompt.includes(repository)
+          ? `The worker observed ${repository}.`
           : "The authorized worker observed the scoped evidence.",
       );
     },
     { path, base },
+    {
+      operatorRunExecutor: createOperatorRunToolExecutor({
+        baseDir: base,
+        confirm: () => Promise.resolve(false),
+        readLiveWorkflow: createSentinelLiveWorkflowReader({
+          scopes: [{
+            case: "main",
+            asset: "app",
+            owner: "fixture",
+            repo: "side-repo",
+            workflow_id: 22,
+          }],
+          resolveToken: () => Promise.resolve(credential),
+          ssrfChecker: () => Promise.resolve({ ok: true, value: "192.0.2.1" }),
+          verifyAccess: () => {
+            metaChecks++;
+            return Promise.resolve(true);
+          },
+          readRuns: () => {
+            listingCalls++;
+            throw new Error("Saved side context must not list runs again");
+          },
+        }),
+      }),
+      hookRunner: {
+        evaluateHook(hook, context) {
+          if (context.input.tool_name === "sentinel_live_workflow_status") {
+            workflowHooks.add(hook);
+          }
+          return hooks.evaluateHook(hook, context);
+        },
+      },
+    },
   );
   await messages.append({
     session_id: owner.id,
@@ -325,6 +376,22 @@ Deno.test("authenticated Sentinel /btw reads only the selected running worker's 
           sha256: "a".repeat(64),
           excerpt: "Private raw draft",
           truncated: false,
+        },
+      });
+      const runs = [{ id: 91, status: "completed", conclusion: "success" }];
+      record?.({
+        tool: "sentinel_live_workflow_status",
+        target: "app",
+        outcome: "returned",
+        githubWorkflowRead: {
+          repository,
+          workflowId: 22,
+          connectorId: "github-actions",
+          observedAt: new Date().toISOString(),
+          evidenceRevision: state.revision,
+          resultSha256: createHash("sha256").update(JSON.stringify(runs))
+            .digest("hex"),
+          runs,
         },
       });
       assertExists(signal);
@@ -467,10 +534,41 @@ Deno.test("authenticated Sentinel /btw reads only the selected running worker's 
     assertEquals((await ws.send(selection, "side_history")).entries, [
       current.entry,
     ]);
+    assertStringIncludes(prompt, repository);
+    assertStringIncludes(prompt, '"id":91');
+    assert(!prompt.includes(syntheticToken));
+    assert(metaChecks > 0);
+    assert(workflowHooks.has("PRE_TOOL_CALL"));
+    assert(workflowHooks.has("POST_TOOL_RESPONSE"));
+
+    const revokedSide = ws.next("side_error");
+    ws.socket.send(JSON.stringify({
+      type: "message",
+      content: `${selection} ${credentialTransitionQuestion}`,
+    }));
+    await credentialSideStarted.promise;
+    assertStringIncludes(prompt, repository);
+    credential = undefined;
+    releaseCredentialSide.resolve();
+    await revokedSide;
+    assertEquals((await ws.send(selection, "side_history")).entries, []);
+    const safe = await ws.send(
+      `${selection} Read remaining authorized evidence.`,
+      "side_answer",
+    );
+    assertStringIncludes(prompt, '"linkedNodeIds":["evidence"]');
+    assert(!prompt.includes(repository));
+    assert(!prompt.includes(syntheticToken));
+    assertEquals((await ws.send(selection, "side_history")).entries, [
+      safe.entry,
+    ]);
+    assertEquals(listingCalls, 0);
+    assert(!workerSignal.aborted);
     releaseWorker.resolve();
     await workerClosed.promise;
   } finally {
     releaseScopeSide.resolve();
+    releaseCredentialSide.resolve();
     releaseWorker.resolve();
     planner.stop();
     await ws.close();

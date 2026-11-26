@@ -66,6 +66,7 @@ import type {
 import type { ChatHistoryEntry } from "./chat_session_interface.ts";
 import {
   readSentinelAssessment,
+  readSentinelGitHubWorkflowReadReceipt,
   readSentinelOperatingConstraints,
   readSentinelRunIdForRevision,
 } from "../sentinel/assessment_store.ts";
@@ -1267,19 +1268,90 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
             key: [owner, "session", target.id, target.channelId],
           };
         }
-        if (!config.allowSentinelModelAccess) return undefined;
+        const taint = maxClassification(ownerTaint, "INTERNAL");
+        if (
+          !config.allowSentinelModelAccess ||
+          !canFlowTo(taint, ownerTargetClassification)
+        ) return;
         const { path, caseId, worker } = selection;
-        const authorizedPath = caseId === "main"
-          ? snapshotPath
-          : config.resolveSentinelChatCase?.(caseId);
-        if (authorizedPath !== path) return undefined;
-        const context = readSentinelWorkerSideContext(
-          path,
-          worker.revision,
-          worker.taskId,
-        );
+        const authorizedPath = () =>
+          caseId === "main"
+            ? snapshotPath
+            : config.resolveSentinelChatCase?.(caseId);
+        if (authorizedPath() !== path) return undefined;
+        const readContext = () =>
+          readSentinelWorkerSideContext(
+            path,
+            worker.revision,
+            worker.taskId,
+          );
+        const context = readContext();
         if (!context) return;
-        const { constraintsKey, ...committedContext } = context;
+        const { constraintsKey, runId, steps, ...committedContext } = context;
+        const isCurrent = () => {
+          if (state.ownerSessionId !== owner || authorizedPath() !== path) {
+            return false;
+          }
+          const latest = readContext();
+          return latest?.runId === runId &&
+            latest.adaptiveRevision === context.adaptiveRevision &&
+            latest.constraintsKey === constraintsKey;
+        };
+        const resultKeys: string[] = [];
+        const approvedSteps = [];
+        const authority = savedToolAuthorization(
+          ownerSession,
+          () => ownerTaint,
+          isCurrent,
+        );
+        for (const { workflowReference, ...step } of steps) {
+          if (step.tool !== "sentinel_live_workflow_status") {
+            approvedSteps.push(step);
+            continue;
+          }
+          if (!workflowReference || !runCaseRead) continue;
+          const { index, digest } = workflowReference;
+          const call = {
+            action: "worker_trace_result",
+            kind: "sentinel",
+            id: caseId,
+            revision: worker.revision,
+            taskId: worker.taskId,
+            stepIndices: [index],
+          };
+          if (!await authority.authorizeOwnerRunCall?.(call)) continue;
+          const text = await runCaseRead(call, authority);
+          if (!text.startsWith("{") || !isCurrent()) continue;
+          const result = JSON.parse(text);
+          const receipt = readSentinelGitHubWorkflowReadReceipt(
+            result.result,
+            worker.revision,
+          );
+          if (
+            !receipt || result.run?.kind !== "sentinel" ||
+            result.run.id !== caseId ||
+            result.run.revision !== worker.revision ||
+            result.runId !== runId || result.taskId !== worker.taskId ||
+            result.index !== index ||
+            result.result.targetId !== context.nodeId ||
+            createHash("sha256").update(JSON.stringify(receipt)).digest(
+                "hex",
+              ) !==
+              digest
+          ) continue;
+          resultKeys.push(`${index}:${digest}`);
+          approvedSteps.push({
+            ...step,
+            workflow: {
+              repository: receipt.repository,
+              workflowId: receipt.workflowId,
+              runs: receipt.runs.slice(0, 5).map(
+                ({ id, status, conclusion }) => ({ id, status, conclusion }),
+              ),
+            },
+          });
+        }
+        if (!isCurrent()) return;
         return {
           key: [
             owner,
@@ -1287,11 +1359,13 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
             caseId,
             context.adaptiveRevision,
             worker.taskId,
+            "authorized-worker-evidence",
             ...(constraintsKey ? [constraintsKey] : []),
+            ...resultKeys,
           ],
-          taint: maxClassification(ownerTaint, "INTERNAL"),
+          taint,
           ceiling: ownerTargetClassification,
-          context: committedContext,
+          context: { ...committedContext, steps: approvedSteps },
         };
       },
       async approveInput(text, taint) {

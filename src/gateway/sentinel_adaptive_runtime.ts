@@ -32,7 +32,10 @@ import {
 } from "../sentinel/worker_finding_evidence.ts";
 import { latestAssignedControlCheck } from "../sentinel/assigned_relationship_facts.ts";
 import { reopenSentinelGoalReceiptRead } from "./sentinel_goal_receipt_read.ts";
-import { readSentinelWorkerGoalProposalReceipt } from "../sentinel/assessment_store.ts";
+import {
+  readSentinelGitHubWorkflowReadReceipt,
+  readSentinelWorkerGoalProposalReceipt,
+} from "../sentinel/assessment_store.ts";
 import {
   isSentinelGoalReceiptRead,
   SENTINEL_CASE_INVENTORY_READ,
@@ -3455,32 +3458,40 @@ export function readSentinelWorkerSideContext(
       const saved = store.modelReviewNotes(revision).find((item) =>
         item.taskId === taskId
       );
-      const steps = (saved?.steps ?? review.progressSteps ?? []).slice(-8).map((
-        step,
-      ) => ({
-        tool: step.tool,
-        outcome: step.outcome,
-        ...(step.assignedTarget?.targetId === task.nodeId &&
-          step.assignedTarget && {
-          assignedTarget: {
-            targetId: step.assignedTarget.targetId,
-            linkedNodeIds: step.assignedTarget.linkedNodeIds
-              .filter((id) => id.length <= 256 && allowsEvidenceId(id))
-              .slice(0, 12),
-          },
-        }),
-        ...(step.githubWorkflowRead?.evidenceRevision === evidenceRevision && {
-          workflow: {
-            repository: step.githubWorkflowRead.repository,
-            workflowId: step.githubWorkflowRead.workflowId,
-            runs: step.githubWorkflowRead.runs.slice(0, 5).map((
-              { id, status, conclusion },
-            ) => ({ id, status, conclusion })),
-          },
-        }),
-      }));
+      const allSteps = saved?.steps ?? review.progressSteps ?? [];
+      const firstIndex = Math.max(0, allSteps.length - 8);
+      const steps = allSteps.slice(firstIndex).map((step, index) => {
+        const workflow = step.tool === "sentinel_live_workflow_status" &&
+            step.outcome === "returned" && step.target === task.nodeId
+          ? readSentinelGitHubWorkflowReadReceipt(
+            step.githubWorkflowRead,
+            evidenceRevision,
+          )
+          : undefined;
+        return {
+          tool: step.tool,
+          outcome: step.outcome,
+          ...(step.assignedTarget?.targetId === task.nodeId &&
+            step.assignedTarget && {
+            assignedTarget: {
+              targetId: step.assignedTarget.targetId,
+              linkedNodeIds: step.assignedTarget.linkedNodeIds
+                .filter((id) => id.length <= 256 && allowsEvidenceId(id))
+                .slice(0, 12),
+            },
+          }),
+          ...(workflow && {
+            workflowReference: {
+              index: firstIndex + index,
+              digest: createHash("sha256").update(JSON.stringify(workflow))
+                .digest("hex"),
+            },
+          }),
+        };
+      });
       return {
         adaptiveRevision: revision,
+        runId: goal.id,
         ...(policy && { constraintsKey: `${policy.version}:${policy.digest}` }),
         taskId,
         kind: task.kind,
