@@ -2682,7 +2682,7 @@ export function createOperatorRunToolExecutor(options: {
       return unavailable;
     }
     const controllingTeam = args.kind === "team_delivery" &&
-      (action === "pause" || action === "resume");
+      (action === "pause" || action === "resume" || action === "cancel");
     const teamControl = controllingTeam && typeof args.id === "string"
       ? args.id.toLowerCase().split(":")
       : [];
@@ -2701,6 +2701,20 @@ export function createOperatorRunToolExecutor(options: {
         ),
       }
       : undefined;
+    const publicTeamControlRef = teamControlRef && {
+      kind: "team_delivery",
+      id: teamControl.join(":"),
+    };
+    const teamControlAdmission = (run: ExecutionTraceRun) => {
+      if (!teamControlRef) return;
+      const team = parseTeamDeliveryTraceSource(run.scope.sourceId);
+      return team?.sender === backgroundOwner &&
+          team?.teamId === controlTeamId &&
+          team.delivery === controlDelivery &&
+          run.scope.sessionId === controlMember
+        ? teamAdmissionArchive(options.baseDir, run.scope)
+        : undefined;
+    };
     const backgroundRole = teamControlRef?.kind ??
       (args.kind === "delegated" || args.kind === "scheduled"
         ? args.kind
@@ -11335,9 +11349,7 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
         }
         const pausing = action === "pause";
         const delegated = !pausing && backgroundRole === "delegated";
-        const publicRef = teamControlRef
-          ? { kind: "team_delivery", id: teamControl.join(":") }
-          : ref;
+        const publicRef = publicTeamControlRef ?? ref;
         const { executionId, originalTask } = args;
         if (
           Object.keys(args).some((key) =>
@@ -11378,17 +11390,9 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
             !canReadBackgroundTrace(initial)
           ) return unavailable;
           const team = parseTeamDeliveryTraceSource(initial.scope.sourceId);
-          const exactAdmission = teamControlRef &&
-            teamAdmissionArchive(options.baseDir, initial.scope);
-          const reviewedAdmission = exactAdmission &&
-            await exactAdmission.read();
-          if (
-            teamControlRef && (!reviewedAdmission || !team ||
-              team.sender !== backgroundOwner ||
-              team.teamId !== controlTeamId ||
-              team.delivery !== controlDelivery ||
-              initial.scope.sessionId !== controlMember)
-          ) return unavailable;
+          const exactAdmission = teamControlAdmission(initial);
+          const reviewedAdmission = await exactAdmission?.read();
+          if (teamControlRef && !reviewedAdmission) return unavailable;
           if (pausing && before.status === "paused") return await present();
           if (before.status !== (pausing ? "running" : "paused")) {
             return unavailable;
@@ -11512,9 +11516,23 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
         if (!before || (sentinel && before.details?.runId !== exactRunId)) {
           return unavailable;
         }
+        const publicRef = publicTeamControlRef ?? ref;
+        const approvedTeamAdmission = teamControlRef &&
+          await (async () => {
+            const journal = openExecutionTraces(backgroundTracePath);
+            try {
+              const run = journal.readRun("delegated", ref.id, "INTERNAL");
+              return run && await teamControlAdmission(run)?.read();
+            } finally {
+              journal.close();
+            }
+          })();
+        if (teamControlRef && !approvedTeamAdmission) return unavailable;
         if (before.status === (sentinel ? "stopped" : "cancelled")) {
           return safeProjection({
-            run: backgroundRole ? projectBackgroundRun(before) : before,
+            run: backgroundRole
+              ? { ...projectBackgroundRun(before), ref: publicRef }
+              : before,
           });
         }
         if (!["running", "paused", "interrupted"].includes(before.status)) {
@@ -11523,20 +11541,30 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
         if (
           !await options.confirm(
             `Cancel this exact operator run?\n${
-              JSON.stringify({ ref, ...(sentinel && { runId: exactRunId }) })
+              JSON.stringify({
+                ref: publicRef,
+                ...(sentinel && { runId: exactRunId }),
+              })
             }`,
           )
         ) return "Error: The operator declined the run action.";
         if (backgroundRole) {
-          if (!await authorize?.(args)) return unavailable;
-          const journal = openExecutionTraces(
-            join(options.baseDir, "execution-traces.db"),
-          );
+          const journal = openExecutionTraces(backgroundTracePath);
           try {
             const current = journal.readRun(backgroundRole, ref.id, "INTERNAL");
-            if (!current || !canReadBackgroundTrace(current)) {
-              return unavailable;
-            }
+            if (
+              !current || !canReadBackgroundTrace(current) ||
+              (teamControlRef && !isDeepStrictEqual(
+                await teamControlAdmission(current)?.read(),
+                approvedTeamAdmission,
+              )) ||
+              !await authorize?.(args)
+            ) return unavailable;
+            const latest = journal.readRun(backgroundRole, ref.id, "INTERNAL");
+            if (
+              !latest || !canReadBackgroundTrace(latest) ||
+              !isDeepStrictEqual(current.scope, latest.scope)
+            ) return unavailable;
             const cancelled = journal.cancelRun(
               backgroundRole,
               ref.id,
@@ -11544,7 +11572,10 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
             );
             return cancelled
               ? safeProjection({
-                run: projectBackgroundRun(backgroundRunSummary(cancelled)),
+                run: {
+                  ...projectBackgroundRun(backgroundRunSummary(cancelled)),
+                  ref: publicRef,
+                },
               })
               : unavailable;
           } finally {
