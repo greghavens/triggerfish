@@ -1,3 +1,4 @@
+import { matchesPortableSentinelProvenanceNode } from "./portable_provenance.ts";
 import { readSentinelIncidentRecommendationEvidence } from "../core/sentinel_incident_review_intent.ts";
 import {
   projectSentinelIncidentAlertPage,
@@ -1144,15 +1145,25 @@ function restoreAdaptive(
         db,
         revision,
         true,
-        (args, targetId) =>
-          readPortableSentinelTrafficMetadata(
-            join(dirname(assessment), "sentinel.json"),
-            caseId,
-            runId,
-            revision,
-            targetId,
-            args,
-          ),
+        {
+          traffic: (args, targetId) =>
+            readPortableSentinelTrafficMetadata(
+              join(dirname(assessment), "sentinel.json"),
+              caseId,
+              runId,
+              revision,
+              targetId,
+              args,
+            ),
+          provenanceNode: (page, text) =>
+            matchesPortableSentinelProvenanceNode(
+              join(dirname(assessment), "sentinel.json"),
+              runId,
+              revision,
+              page,
+              text,
+            ),
+        },
       );
       if (tables.has(visibilityResultsTable)) {
         db.exec(

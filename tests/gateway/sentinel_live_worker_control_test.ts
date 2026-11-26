@@ -909,6 +909,7 @@ async function verifyPausedGraphWorker(
   pinnedTemplate = false,
   askCheckpoint?: "approved" | "missing",
   trafficCheckpoint = false,
+  provenanceCheckpoint = false,
 ) {
   const baseDir = await Deno.makeTempDir();
   const caseId = cold ? "portable-worker" : "main";
@@ -926,10 +927,18 @@ async function verifyPausedGraphWorker(
   let exactTraffic:
     | { revision: number; evidenceId: string; digest: string }
     | undefined;
-  let originalTraffic: string | undefined;
+  let originalRead: string | undefined;
+  let exactProvenance: {
+    revision: number;
+    node: string;
+    offset: number;
+    limit: number;
+  } | undefined;
   let heldAssignmentId: string | undefined;
   const approvalTool = trafficCheckpoint
     ? "sentinel_traffic_get"
+    : provenanceCheckpoint
+    ? "sentinel_provenance_node"
     : "sentinel_assigned_target";
   const approvalPath = join(baseDir, "tool-approvals.db");
   const toolApprovalInbox = askCheckpoint
@@ -975,21 +984,36 @@ async function verifyPausedGraphWorker(
                 type: "function",
                 function: { name: "sentinel_assigned_target", arguments: "{}" },
               },
-              ...(trafficCheckpoint && id === heldAsset
+              ...((trafficCheckpoint || provenanceCheckpoint) &&
+                  id === heldAsset
                 ? [{
                   id: "portable-traffic",
                   type: "function" as const,
                   function: {
-                    name: "sentinel_traffic_get",
-                    arguments: JSON.stringify(exactTraffic),
+                    name: approvalTool,
+                    arguments: JSON.stringify(exactTraffic ?? exactProvenance),
                   },
                 }]
                 : []),
             ],
           };
         }
-        assert(String(saved.content).includes(id));
+        if (!provenanceCheckpoint || id !== heldAsset) {
+          assert(String(saved.content).includes(id));
+        }
         if (id === heldAsset) {
+          if (provenanceCheckpoint) {
+            assert(exactProvenance);
+            const text = String(saved.content);
+            const result = JSON.parse(text);
+            assertEquals(result.revision, exactProvenance.revision);
+            assertEquals(result.node.id, exactProvenance.node);
+            assertEquals(result.node.label, "Exact portable evidence");
+            assertEquals(result.totalConnections, 1);
+            assertEquals(result.connections.length, 1);
+            if (heldStep) assertEquals(text, originalRead);
+            else originalRead = text;
+          }
           if (trafficCheckpoint) {
             const [target, traffic] = messages.filter(({ role }) =>
               role === "tool"
@@ -1004,8 +1028,8 @@ async function verifyPausedGraphWorker(
             assertEquals(result.receipt.digest, exactTraffic.digest);
             assertEquals(result.receipt.assetIds, [heldAsset]);
             assert(!text.includes("private-response-fixture"));
-            if (heldStep) assertEquals(text, originalTraffic);
-            else originalTraffic = text;
+            if (heldStep) assertEquals(text, originalRead);
+            else originalRead = text;
           }
           if (!heldStep) {
             heldStep = true;
@@ -1057,7 +1081,7 @@ async function verifyPausedGraphWorker(
       }
       if (
         enforceReadRevocation && hook === "PRE_TOOL_CALL" &&
-        input.tool_name === "sentinel_assigned_target"
+        input.tool_name === approvalTool
       ) {
         blockedSavedRead++;
         return Promise.resolve({
@@ -1128,13 +1152,24 @@ async function verifyPausedGraphWorker(
       path,
       JSON.stringify({
         version: 1,
-        nodes: (trafficCheckpoint ? ["peer-graph"] : [heldAsset, "peer-graph"])
-          .map((id) => ({
-            kind: "asset",
-            id,
-            label: id,
-          })),
-        edges: [],
+        nodes: [
+          ...(trafficCheckpoint ? ["peer-graph"] : [heldAsset, "peer-graph"])
+            .map((id) => ({ kind: "asset", id, label: id })),
+          ...(provenanceCheckpoint
+            ? [{
+              kind: "evidence",
+              id: "portable-source",
+              label: "Exact portable evidence",
+            }]
+            : []),
+        ],
+        edges: provenanceCheckpoint
+          ? [{
+            from: "portable-source",
+            to: heldAsset,
+            relation: "observed_on",
+          }]
+          : [],
       }),
     );
     const goals: SentinelFormalGoal[] = [{
@@ -1192,6 +1227,14 @@ async function verifyPausedGraphWorker(
         revision: initial.revision,
         evidenceId: receipt.evidenceId,
         digest: receipt.digest,
+      };
+    }
+    if (provenanceCheckpoint) {
+      exactProvenance = {
+        revision: initial.revision,
+        node: "evidence:portable-source",
+        offset: 0,
+        limit: 1,
       };
     }
     advanceAdaptiveSentinel(path, initial);
@@ -1452,7 +1495,7 @@ async function verifyPausedGraphWorker(
         assertEquals(readSentinelAssessment(path)?.revision, initial.revision);
       });
     }
-    if (trafficCheckpoint && cold) {
+    if ((trafficCheckpoint || provenanceCheckpoint) && cold) {
       const decisions = JSON.parse(
         await Deno.readTextFile(
           join(dirname(path), "sentinel-tool-decisions.json"),
@@ -1463,7 +1506,7 @@ async function verifyPausedGraphWorker(
         decisions.map((
           { tool, decision, dispatchOutcome }: ApprovalInboxRecord,
         ) => [tool, decision, dispatchOutcome]),
-        [["sentinel_traffic_get", "approved", "returned"]],
+        [[approvalTool, "approved", "returned"]],
       );
       const checkpointStore = new DatabaseSync(
         join(dirname(path), "sentinel-adaptive.db"),
@@ -1479,7 +1522,7 @@ async function verifyPausedGraphWorker(
           JSON.parse(saved.checkpoint).history.findLast(
             ({ role }: { role: string }) => role === "tool",
           )?.content,
-          originalTraffic,
+          originalRead,
         );
       } finally {
         checkpointStore.close();
@@ -1594,6 +1637,36 @@ Deno.test("Portable resumed Sentinel worker reuses only an exactly approved pinn
 Deno.test("Portable Sentinel worker restores exact approved traffic metadata and target reads", async () => {
   await verifyPausedGraphWorker(true, false, undefined, true, "approved", true);
   await verifyPausedGraphWorker(true, false, undefined, true, "missing", true);
+});
+
+Deno.test("Portable Sentinel worker restores an exactly approved local provenance node", async () => {
+  await verifyPausedGraphWorker(
+    true,
+    false,
+    undefined,
+    true,
+    "approved",
+    false,
+    true,
+  );
+  await verifyPausedGraphWorker(
+    true,
+    false,
+    undefined,
+    true,
+    "missing",
+    false,
+    true,
+  );
+  await verifyPausedGraphWorker(
+    true,
+    true,
+    undefined,
+    true,
+    "approved",
+    false,
+    true,
+  );
 });
 
 Deno.test("Owner gateway restores a portable paused graph worker before reusing its checkpoint", () =>

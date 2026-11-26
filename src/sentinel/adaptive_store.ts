@@ -88,6 +88,7 @@ import {
   SENTINEL_GOAL_PROPOSE,
   SENTINEL_GOAL_PROVE,
   SENTINEL_GOAL_RECHECK_READ,
+  SENTINEL_PROVENANCE_NODE_READ,
   SENTINEL_SHARED_WORKER_REVIEW,
   sentinelDefenseReadArgs,
   sentinelGoalProofArguments,
@@ -704,6 +705,18 @@ function portablePausedWorkerRead(
       args && typeof args === "object" && !Array.isArray(args) &&
       Object.keys(args).length === 0
     ) return { id: call.id, tool: ASSIGNED_TARGET_CHECKPOINT_TOOL } as const;
+    if (call.function.name === SENTINEL_PROVENANCE_NODE_READ) {
+      const provenance = sentinelGoalReceiptReadArguments(
+        SENTINEL_PROVENANCE_NODE_READ,
+        args,
+      );
+      if (provenance?.revision !== evidenceRevision || !provenance.node) return;
+      return {
+        id: call.id,
+        tool: SENTINEL_PROVENANCE_NODE_READ,
+        provenance,
+      } as const;
+    }
     if (call.function.name !== SENTINEL_TRAFFIC_READ) return;
     const traffic = sentinelTrafficReadArgs(args);
     if (traffic?.revision !== evidenceRevision) return;
@@ -713,10 +726,16 @@ function portablePausedWorkerRead(
   }
 }
 
-type PortableTrafficRead = (
-  args: NonNullable<ReturnType<typeof sentinelTrafficReadArgs>>,
-  targetId: string,
-) => string | undefined;
+type PortableWorkerSources = {
+  readonly traffic: (
+    args: NonNullable<ReturnType<typeof sentinelTrafficReadArgs>>,
+    targetId: string,
+  ) => string | undefined;
+  readonly provenanceNode: (
+    page: NonNullable<ReturnType<typeof readSentinelProvenanceNodeReference>>,
+    text: string,
+  ) => boolean;
+};
 
 function portablePausedWorkerProgress(
   value: AgentTurnCheckpoint,
@@ -724,7 +743,7 @@ function portablePausedWorkerProgress(
   evidenceRevision: number,
   taskId: string,
   nodeId: string,
-  readTraffic?: PortableTrafficRead,
+  sources?: PortableWorkerSources,
 ): SentinelReviewStep[] | undefined {
   const calls = value.history.flatMap(({ tool_calls = [] }) => tool_calls);
   const results = value.history.filter(({ role }) => role === "tool");
@@ -747,12 +766,37 @@ function portablePausedWorkerProgress(
       const proof = { ...call.traffic, sha256: hash };
       if (
         !isDeepStrictEqual(step.trafficRead, proof) ||
-        readTraffic?.(call.traffic, nodeId) !== result.content
+        sources?.traffic(call.traffic, nodeId) !== result.content
       ) return;
       safe.push({
         tool: SENTINEL_TRAFFIC_READ,
         outcome: "returned",
         trafficRead: proof,
+      });
+      continue;
+    }
+    if (call.tool === SENTINEL_PROVENANCE_NODE_READ) {
+      const page = readSentinelProvenanceNodeReference(step.provenanceNodePage);
+      if (
+        !page || !isDeepStrictEqual(page.args, call.provenance) ||
+        step.target !== page.args.node ||
+        step.workerProvenanceNodeResult !== result.content ||
+        !isDeepStrictEqual(step.goalReceiptRead?.args, page.args) ||
+        step.goalReceiptRead?.sha256 !== hash ||
+        !readSavedSentinelProvenanceNode(
+          result.content,
+          page,
+          evidenceRevision,
+        ) ||
+        !sources?.provenanceNode(page, result.content)
+      ) return;
+      safe.push({
+        tool: SENTINEL_PROVENANCE_NODE_READ,
+        outcome: "returned",
+        target: page.args.node,
+        provenanceNodePage: page,
+        goalReceiptRead: { args: page.args, sha256: hash },
+        workerProvenanceNodeResult: result.content,
       });
       continue;
     }
@@ -792,7 +836,7 @@ export function retainPortablePausedGraphCheckpoints(
   db: DatabaseSync,
   evidenceRevision: number,
   verifyingArchive = false,
-  readTraffic?: PortableTrafficRead,
+  sources?: PortableWorkerSources,
 ) {
   const hasTable = (name: string) =>
     !!db.prepare(
@@ -890,7 +934,7 @@ export function retainPortablePausedGraphCheckpoints(
           evidenceRevision,
           taskId,
           nodeId,
-          readTraffic,
+          sources,
         );
         if (!safeSteps) continue;
         const normalized = normalizeWorkerCheckpoint(

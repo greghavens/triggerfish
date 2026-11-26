@@ -1,3 +1,4 @@
+import { matchesPortableSentinelProvenanceNode } from "./portable_provenance.ts";
 import { SENTINEL_LIVE_REPOSITORY_VISIBILITY } from "./github_repository_visibility.ts";
 import { readSentinelCaseFindingReceipts } from "./worker_finding_store.ts";
 import { retainPortablePausedGraphCheckpoints } from "./adaptive_store.ts";
@@ -879,15 +880,25 @@ function scrubAdaptive(
     db,
     evidenceRevision,
     false,
-    (args, targetId) =>
-      readPortableSentinelTrafficMetadata(
-        snapshotPath,
-        caseId,
-        runId,
-        evidenceRevision,
-        targetId,
-        args,
-      ),
+    {
+      traffic: (args, targetId) =>
+        readPortableSentinelTrafficMetadata(
+          snapshotPath,
+          caseId,
+          runId,
+          evidenceRevision,
+          targetId,
+          args,
+        ),
+      provenanceNode: (page, text) =>
+        matchesPortableSentinelProvenanceNode(
+          snapshotPath,
+          runId,
+          evidenceRevision,
+          page,
+          text,
+        ),
+    },
   );
 }
 
