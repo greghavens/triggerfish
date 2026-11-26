@@ -3652,6 +3652,7 @@ async function verifyPlannerArchive(
     | "facts"
     | "digests"
     | "coverage"
+    | "coverage-rollup"
     | "inventory-text"
     | "organization-inventory",
 ) {
@@ -4244,6 +4245,20 @@ async function verifyPlannerArchive(
         args: { view: "assets", assetIds: ["db", "app"], limit: 1 },
       });
     }
+    if (mode === "coverage-rollup") {
+      plannerCalls.splice(10, 2, {
+        name: "sentinel_case_inventory",
+        args: { view: "coverage", limit: 1, includeCoverageTotals: true },
+      }, {
+        name: "sentinel_case_inventory",
+        args: {
+          view: "coverage",
+          limit: 1,
+          coverageGap: "unreviewed",
+          includeCoverageTotals: true,
+        },
+      });
+    }
     if (mode === "inventory-text") {
       const first = querySentinelAssetInventory(
         state.result?.sharedGraph.snapshot,
@@ -4546,6 +4561,24 @@ async function verifyPlannerArchive(
         );
         assertEquals(approvals.length, 1);
       });
+    } else if (mode === "coverage-rollup") {
+      assertEquals(observed.assets.length, 1);
+      assertEquals(observed.assets[0].asset.id, "app");
+      assert(observed.nextCursor);
+      assertEquals(observed.coverageTotals.assets, 2);
+      assertEquals(observed.coverageTotals.reviewed, 0);
+      assertEquals(observed.coverageTotals.matchedAssets, 2);
+      assertEquals(
+        JSON.parse(responses[11]).coverageTotals,
+        observed.coverageTotals,
+      );
+      assert(recordSentinelFindingReview(
+        path,
+        state.revision,
+        "control-finding",
+        "confirmed",
+        "Newer finding review",
+      ));
     } else if (mode === "digests") {
       assertEquals(observed.page.digests.length, 1);
       const expanded = JSON.parse(responses[11]);
@@ -5302,7 +5335,8 @@ async function verifyPlannerArchive(
           "hex",
         );
         if (
-          (mode === "coverage" || mode === "inventory-text" ||
+          (mode === "coverage" || mode === "coverage-rollup" ||
+            mode === "inventory-text" ||
             mode === "organization-inventory") && index >= 10
         ) {
           assertEquals(round.reads?.[index].plannerCoverageResult, undefined);
@@ -5358,8 +5392,19 @@ async function verifyPlannerArchive(
         "PRE_TOOL_CALL",
         "POST_TOOL_RESPONSE",
       ]);
+      if (mode === "coverage-rollup") {
+        assertStringIncludes(
+          await turn({ ...resultRead, ordinal: 11 }),
+          "unavailable",
+        );
+        assertEquals(policy.workerSourceHooks.splice(0), [
+          "PRE_TOOL_CALL",
+          "POST_TOOL_RESPONSE",
+        ]);
+      }
       if (
-        mode === "coverage" || mode === "inventory-text" ||
+        mode === "coverage" || mode === "coverage-rollup" ||
+        mode === "inventory-text" ||
         mode === "organization-inventory"
       ) {
         policy.denyWorkerSourceAfter = false;
@@ -5489,3 +5534,6 @@ Deno.test("dispatched Sentinel planner literal inventory pages survive archive u
 
 Deno.test("gateway reopens exact archived planner organization inventory", () =>
   verifyPlannerArchive("organization-inventory"));
+
+Deno.test("gateway reopens archived planner coverage totals only with the full current asset scope", () =>
+  verifyPlannerArchive("coverage-rollup"));

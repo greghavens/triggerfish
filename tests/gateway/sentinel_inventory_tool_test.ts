@@ -492,6 +492,17 @@ Deno.test("Sentinel inventory enforces the real leased asset and stops flow on h
         JSON.parse(worker.resultFrames[2]).assets[0].reviewed,
         false,
       );
+      const deniedTotals = await query(
+        main,
+        [{
+          view: "coverage",
+          includeCoverageTotals: true,
+        }],
+        undefined,
+        lease,
+      );
+      assertStringIncludes(deniedTotals.resultFrames[0], "Error:");
+      assert(!deniedTotals.resultFrames[0].includes("coverageTotals"));
 
       for (
         const hook of [

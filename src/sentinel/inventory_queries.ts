@@ -50,6 +50,7 @@ export type SentinelAssetCoverageGap = typeof sentinelAssetCoverageGaps[number];
 export interface SentinelAssetReviewCoverageOptions
   extends SentinelAssetInventoryOptions {
   readonly includeCoverageTotals?: true;
+  readonly bindCoverageScope?: true;
   readonly evidenceRevision: number;
   readonly coverageGap?: SentinelAssetCoverageGap;
   readonly asOf?: string;
@@ -315,6 +316,10 @@ function addToGroup<T>(groups: Map<string, T[]>, key: string, value: T): void {
   else groups.set(key, [value]);
 }
 
+function coverageScopeDigest(assets: readonly Asset[]) {
+  return hash(JSON.stringify(assets.map(({ id }) => id).sort()));
+}
+
 /** List observed evidence and independently verified review markers by exact asset. */
 export function querySentinelAssetReviewCoverage(
   input: unknown,
@@ -326,6 +331,7 @@ export function querySentinelAssetReviewCoverage(
     coverageGap,
     asOf,
     includeCoverageTotals,
+    bindCoverageScope,
     reviewedAssetIds = [],
     peerCoverage,
     evidenceReviewTasks = [],
@@ -505,26 +511,88 @@ export function querySentinelAssetReviewCoverage(
     evidenceRevision,
     nextCursor,
     assets: visible,
-    ...(coverageTotals && { coverageTotals }),
+    ...(coverageTotals && {
+      coverageTotals,
+      ...(bindCoverageScope &&
+        { coverageScopeDigest: coverageScopeDigest(assets) }),
+    }),
     ...(peerCoverage && { peerCoverage }),
   };
+}
+
+function validPlannerCoverageTotals(
+  value: unknown,
+  pageLength: number,
+  asOf: unknown,
+): value is { assets: number } {
+  if (!value || typeof value !== "object") return false;
+  const { byAssetType, matchedAssets, ...overall } = value as Record<
+    string,
+    unknown
+  >;
+  const fields = [
+    "assets",
+    "reviewed",
+    "withEvidence",
+    ...(asOf !== undefined ? ["withCurrentVerification"] : []),
+  ];
+  const count = (value: unknown): value is number =>
+    typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+  const counts = (candidate: Record<string, unknown>) => {
+    const { assets } = candidate;
+    return Object.keys(candidate).length === fields.length && count(assets) &&
+      fields.every((field) => {
+        const value = candidate[field];
+        return count(value) && value <= assets;
+      });
+  };
+  if (
+    !counts(overall) || !count(matchedAssets) || matchedAssets < pageLength ||
+    matchedAssets > (overall.assets as number) || !Array.isArray(byAssetType) ||
+    byAssetType.length > sentinelAssetTypes.length + 1
+  ) return false;
+  const types = new Set<unknown>();
+  const totals = fields.map(() => 0);
+  for (const entry of byAssetType) {
+    if (!entry || typeof entry !== "object") return false;
+    const { assetType, ...group } = entry as Record<string, unknown>;
+    if (
+      (assetType !== null &&
+        !sentinelAssetTypes.some((type) => type === assetType)) ||
+      types.has(assetType) || !counts(group) || group.assets === 0
+    ) return false;
+    types.add(assetType);
+    fields.forEach((field, index) => totals[index] += group[field] as number);
+  }
+  return fields.every((field, index) => totals[index] === overall[field]);
 }
 
 /** Validate the bounded coverage projection before retaining its exact bytes. */
 export function readSentinelPlannerCoverageResult(
   args: Record<string, unknown>,
   text: string,
-  scope?: { caseId: string; evidenceRevision: number; snapshotDigest: string },
+  scope?: PlannerInventoryScope,
 ) {
   if (
     !args || args.view !== "coverage" || typeof text !== "string" ||
     text.length > 6000 || redactCredentialText(text) !== text ||
     redactCredentialText(JSON.stringify(args)) !== JSON.stringify(args)
   ) return;
-  const { view, coverageGap, asOf, limit = 5, linkedFinding, ...filters } =
-    args;
+  const {
+    view,
+    coverageGap,
+    asOf,
+    limit = 5,
+    linkedFinding,
+    includeCoverageTotals,
+    ...filters
+  } = args;
   const linkedSelector = readSentinelPeerCoverageSelector(linkedFinding);
   if (
+    (includeCoverageTotals !== undefined &&
+      (includeCoverageTotals !== true || linkedFinding !== undefined ||
+        (filters.assetType !== undefined &&
+          !sentinelAssetTypes.some((type) => type === filters.assetType)))) ||
     (linkedFinding !== undefined &&
       (!linkedSelector || filters.assetId !== linkedSelector.asset ||
         Object.keys(filters).some((key) => key !== "assetId") ||
@@ -549,7 +617,8 @@ export function readSentinelPlannerCoverageResult(
       (linkedSelector &&
         (!peerCoverage ||
           !isDeepStrictEqual(peerCoverage.selector, linkedSelector))) ||
-      Object.keys(page).length !== (linkedSelector ? 7 : 6) ||
+      Object.keys(page).length !==
+        (includeCoverageTotals ? 8 : linkedSelector ? 7 : 6) ||
       page._classification !== "INTERNAL" ||
       !isSentinelCaseId(page.caseId) ||
       !Number.isSafeInteger(page.evidenceRevision) ||
@@ -564,6 +633,36 @@ export function readSentinelPlannerCoverageResult(
           page.nextCursor.length > 1800)) ||
       !Array.isArray(page.assets) || page.assets.length > limit
     ) return;
+    if (includeCoverageTotals) {
+      if (
+        !validPlannerCoverageTotals(
+          page.coverageTotals,
+          page.assets.length,
+          asOf,
+        ) ||
+        (coverageGap === undefined &&
+          page.coverageTotals.matchedAssets !== page.coverageTotals.assets) ||
+        typeof page.coverageScopeDigest !== "string" ||
+        !/^[a-f0-9]{64}$/.test(page.coverageScopeDigest)
+      ) return;
+      if (scope) {
+        if (!scope.snapshot || !scope.scopedQueryOptions) return;
+        const { assets } = filterAssets(scope.snapshot, {
+          onlyAsset: filters.assetId as string | undefined,
+          organizationId: filters.organizationId as string | undefined,
+          assetType: sentinelAssetTypes.find((type) =>
+            type === filters.assetType
+          ),
+          parentId: filters.parentId as string | undefined,
+          alias: filters.alias as string | undefined,
+          allowedAssetIds: scope.scopedQueryOptions.allowedAssetIds,
+        });
+        if (
+          assets.length !== page.coverageTotals.assets ||
+          coverageScopeDigest(assets) !== page.coverageScopeDigest
+        ) return;
+      }
+    }
     const assetIds: string[] = [];
     for (const row of page.assets) {
       const id = row?.asset?.id;
@@ -584,6 +683,7 @@ export function readSentinelPlannerCoverageResult(
         view,
         ...filters,
         ...(linkedSelector && { linkedFinding: linkedSelector }),
+        ...(includeCoverageTotals === true && { includeCoverageTotals: true }),
         ...(coverageGap !== undefined && { coverageGap }),
         ...(asOf !== undefined && { asOf }),
         ...(args.limit !== undefined && { limit }),

@@ -110,11 +110,16 @@ export function sentinelInventoryToolForScope(
       options.assessmentRevision,
     ) !== false
   ) {
-    return options.plannerExecutionEvidenceRunId
+    return options.plannerExecutionEvidenceRunId && !options.assignedTaskId
       ? {
         ...sentinelInventoryTool,
         parameters: {
           ...sentinelInventoryTool.parameters,
+          includeCoverageTotals: {
+            type: "boolean",
+            description:
+              "Planner only. Include totals by asset type for the complete inventory coverage scope.",
+          },
           linkedFinding: {
             type: "object",
             description:
@@ -175,6 +180,7 @@ function queryOptions(
         "assetText",
         "organizationText",
         "includeMembers",
+        "includeCoverageTotals",
         ...filters,
       ].includes(
         key,
@@ -388,6 +394,7 @@ export async function executeSentinelInventoryTool(
   signal?: AbortSignal,
   allowedAssetIds?: readonly string[],
   peerCoverage?: SentinelPeerCoverageReceipt,
+  allowCoverageTotals = false,
 ): Promise<string> {
   try {
     const { view } = args;
@@ -400,6 +407,9 @@ export async function executeSentinelInventoryTool(
     if (
       (args.coverageGap !== undefined &&
         (view !== "coverage" || !coverageGap)) ||
+      (args.includeCoverageTotals !== undefined &&
+        (!allowCoverageTotals || view !== "coverage" ||
+          args.includeCoverageTotals !== true || peerCoverage !== undefined)) ||
       !validSentinelCoverageTime(coverageGap, args.asOf)
     ) {
       return "Error: Select a supported gap filter for coverage.";
@@ -457,6 +467,10 @@ export async function executeSentinelInventoryTool(
         {
           ...page,
           evidenceRevision: state.revision,
+          ...(args.includeCoverageTotals === true && {
+            includeCoverageTotals: true,
+            bindCoverageScope: true,
+          }),
           coverageGap,
           asOf: args.asOf as string | undefined,
           reviewedAssetIds: reviewedAssets(options, state),

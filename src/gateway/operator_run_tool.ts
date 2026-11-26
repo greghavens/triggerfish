@@ -8654,7 +8654,8 @@ ${
           const scopedInventoryQuery = inventory &&
             (inventory.args.assetText !== undefined ||
               inventory.args.organizationText !== undefined ||
-              inventory.args.includeMembers === true);
+              inventory.args.includeMembers === true ||
+              inventory.args.includeCoverageTotals === true);
           const inventoryScope = () =>
             snapshot && ({
               caseId: ref.id,

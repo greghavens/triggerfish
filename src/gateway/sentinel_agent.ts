@@ -4362,6 +4362,7 @@ function createAgent(
           turn.signal,
           constraints?.allowedAssetIds,
           peerCoverage,
+          true,
         );
         return currentPlannerReceiptScope(turn)
           ? result
