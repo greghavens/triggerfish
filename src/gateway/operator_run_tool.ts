@@ -10064,6 +10064,42 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
             limit: 1,
           });
           if (link?.caseId !== ref.id) return unavailable;
+          if (payloadPart !== undefined) {
+            const runId = readSentinelRunIdForRevision(
+              snapshotPath,
+              ref.revision,
+            );
+            const selected = readSentinelAssessmentRevision(
+              snapshotPath,
+              ref.revision,
+            );
+            const current = readSentinelAssessment(snapshotPath);
+            const snapshot = selected?.result.sharedGraph.snapshot;
+            const target = {
+              kind: "review_evidence",
+              nodeId: link.assetId,
+            } as const;
+            if (
+              !runId || !snapshot || !current?.plan.runId ||
+              !sentinelOperatingConstraintsAllow(
+                readSentinelOperatingConstraints(
+                  snapshotPath,
+                  runId,
+                  ref.revision,
+                )?.constraints,
+                target,
+                snapshot,
+              ) ||
+              !sentinelOperatingConstraintsAllow(
+                readSentinelOperatingConstraints(
+                  snapshotPath,
+                  current.plan.runId,
+                )?.constraints,
+                target,
+                snapshot,
+              )
+            ) return unavailable;
+          }
           const receipt = readSentinelTrafficReceipt(
             snapshotPath,
             ref.revision,

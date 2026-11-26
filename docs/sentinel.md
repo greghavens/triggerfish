@@ -384,6 +384,9 @@ For retained payload reads, set `byteLength` (1–1024) to page by UTF-8
 byte position or binary byte position. Use returned `nextOffset` with
 `byteLength` on the next call. Text pages end at a character boundary.
 Without `byteLength`, text offsets continue to use Unicode code points.
+In Tidepool's Traffic evidence panel, enter the finding receipt and attachment
+IDs to download the complete retained body or headers. Tidepool verifies the
+payload's SHA-256 before saving the file. The maximum assembled size is 64 KiB.
 
 A leased worker can include `trafficEvidenceId` and `trafficDigest` in
 `sentinel_report_finding` after opening that exact retained traffic receipt

@@ -2,9 +2,12 @@
   import type { SentinelGraph, SentinelNode } from "./types.js";
   import { sentinelWorkspaceText, type WorkspaceLanguage } from "./workspace_language.js";
 
-  let { graph, onFocus, language = "en" }: {
+  type PayloadPart = "headers" | "request" | "response";
+  let { graph, onFocus, onDownload, downloadDisabled = false, language = "en" }: {
     graph: SentinelGraph | null;
     onFocus: (id: string) => void;
+    onDownload?: (findingId: string, trafficLinkId: string, payloadPart: PayloadPart) => void;
+    downloadDisabled?: boolean;
     language?: WorkspaceLanguage;
   } = $props();
 
@@ -45,6 +48,13 @@
     return !term || [item.node, ...item.assets].some(({ label, id, sourceId }) =>
       [label, id, sourceId].some(value => value?.toLocaleLowerCase(language).includes(term)));
   }));
+
+  let findingId = $state("");
+  let trafficLinkId = $state("");
+  let payloadPart = $state<PayloadPart>("response");
+  const canDownload = $derived(!downloadDisabled &&
+    /^worker-finding:[a-f0-9]{64}$/.test(findingId.trim()) &&
+    /^finding-traffic-link:[a-f0-9]{64}$/.test(trafficLinkId.trim()));
 
   function resetPage() {
     limit = 20;
@@ -96,6 +106,26 @@
     {/if}
   {:else}
     <p>{t("HTTP and DNS observations appear here when the case receives capture evidence.")}</p>
+  {/if}
+  {#if onDownload}
+    <details>
+      <summary>{t("Download retained traffic")}</summary>
+      <div class="filters">
+        <label>{t("Finding receipt ID")} <input bind:value={findingId} /></label>
+        <label>{t("Traffic attachment ID")} <input bind:value={trafficLinkId} /></label>
+        <label>{t("Payload part")}
+          <select bind:value={payloadPart}>
+            <option value="response">{t("Response body")}</option>
+            <option value="request">{t("Request body")}</option>
+            <option value="headers">{t("Headers")}</option>
+          </select>
+        </label>
+        <button type="button" disabled={!canDownload}
+          onclick={() => onDownload?.(findingId.trim(), trafficLinkId.trim(), payloadPart)}>
+          {t("Download retained traffic")}
+        </button>
+      </div>
+    </details>
   {/if}
 </section>
 

@@ -1,5 +1,7 @@
 import { DatabaseSync } from "node:sqlite";
 import { INCONCLUSIVE_RECHECK_TOOL } from "../../src/sentinel/recheck_inconclusive.ts";
+import { createTrafficDownload } from "../../tidepool-ui/src/screens/Sentinel/traffic_download.ts";
+import type { ChatSession } from "../../src/gateway/chat_session_interface.ts";
 import { createFindingDownload } from "../../tidepool-ui/src/screens/Sentinel/finding_download.ts";
 import { startSentinelAssessmentCoordinator } from "../../src/gateway/sentinel_assessment_service.ts";
 import { createMemorySecretStore } from "../../src/core/secrets/mod.ts";
@@ -343,12 +345,18 @@ async function withTidepool(
       fields: Record<string, unknown>,
     ) => Promise<Record<string, unknown>>,
   ) => Promise<void>,
+  readTrafficDownloadPage?: ChatSession["readSentinelTrafficDownloadPage"],
 ) {
   const key = crypto.randomUUID();
-  const handler = createTidepoolSentinelHandler({
-    baseDir,
-    config: { sentinel: { allow_model_access: true } },
-  } as BootstrapResult);
+  const handler = createTidepoolSentinelHandler(
+    {
+      baseDir,
+      config: { sentinel: { allow_model_access: true } },
+    } as BootstrapResult,
+    undefined,
+    undefined,
+    readTrafficDownloadPage,
+  );
   const state: A2UIHostState = {
     clients: new Set(),
     server: null,
@@ -5545,6 +5553,13 @@ async function verifyInitialTrafficPublication(
     (hook, input) =>
       !(hook === "PRE_TOOL_CALL" && input.tool_name === "sentinel_traffic_get"),
   );
+  await verifyTidepoolTrafficDownload(
+    baseDir,
+    path,
+    ref.id,
+    state.revision,
+    recovered.link,
+  );
   await withTidepool(baseDir, async (_list, _provenance, request) => {
     const result = await request("export", {
       format: "provenance",
@@ -5557,6 +5572,148 @@ async function verifyInitialTrafficPublication(
       recovered!.link,
     ]);
   });
+}
+
+async function verifyTidepoolTrafficDownload(
+  baseDir: string,
+  path: string,
+  caseId: string,
+  revision: number,
+  link: SentinelFindingTrafficLink,
+) {
+  const providers = createProviderRegistry();
+  let denied: "PRE_TOOL_CALL" | "POST_TOOL_RESPONSE" | "PRE_OUTPUT" | undefined;
+  const ownership = createSession({
+    userId: "owner" as UserId,
+    channelId: "tidepool-fixture" as ChannelId,
+  });
+  let handlerCalls = 0;
+  let revokeOnResponse = false;
+  const dispatch = createOperatorRunToolExecutor({
+    baseDir,
+    confirm: () => Promise.resolve(false),
+  });
+  const observed: string[] = [];
+  const chat = createChatSession({
+    session: ownership,
+    providerRegistry: providers,
+    targetClassification: "INTERNAL",
+    resolveSentinelChatCase: (id) => id === caseId ? path : undefined,
+    operatorRunExecutor: (args, context) => {
+      handlerCalls++;
+      return dispatch(args, context);
+    },
+    hookRunner: {
+      evaluateHook(hook, { session, input, auditInput }) {
+        if (hook === "PRE_OUTPUT" || input.tool_name === "operator_runs") {
+          observed.push(hook);
+          assertEquals(session.id, ownership.id);
+          assert(!JSON.stringify(auditInput ?? {}).includes("Boundary🙂"));
+          if (hook === "PRE_OUTPUT") {
+            assertEquals(input.target_classification, "INTERNAL");
+          }
+        }
+        if (
+          revokeOnResponse && hook === "POST_TOOL_RESPONSE" &&
+          input.tool_name === "operator_runs"
+        ) {
+          const current = readSentinelAssessment(path);
+          assert(current?.plan.runId);
+          assert(recordSentinelOperatingConstraints(path, {
+            runId: current.plan.runId,
+            evidenceRevision: current.revision,
+            expectedVersion: 0,
+            requestId: crypto.randomUUID(),
+            operatorScope: "traffic-download-fixture",
+            constraints: { deniedKinds: ["review_evidence"] },
+          }));
+        }
+        const allowed = hook !== denied;
+        return Promise.resolve({
+          allowed,
+          action: allowed ? "ALLOW" : "BLOCK",
+          duration: 0,
+          ruleId: null,
+        });
+      },
+    },
+  });
+  const selection = {
+    caseId,
+    revision,
+    currentRevision: revision,
+    findingId: link.findingId,
+    trafficLinkId: link.id,
+    payloadPart: "response" as const,
+  };
+  await withTidepool(baseDir, async (_list, _provenance, request) => {
+    const page = (input: ReturnType<typeof createTrafficDownload>["initial"]) =>
+      request("finding_traffic_download_page", { caseId, ...input });
+    const first = createTrafficDownload(selection).initial;
+    for (
+      const hook of [
+        "PRE_TOOL_CALL",
+        "POST_TOOL_RESPONSE",
+        "PRE_OUTPUT",
+      ] as const
+    ) {
+      denied = hook;
+      const count = handlerCalls;
+      const response = await page(first);
+      assertEquals(response.type, "error", JSON.stringify(response));
+      assert(!JSON.stringify(response).includes("Boundary🙂"));
+      assertEquals(handlerCalls - count, hook === "PRE_TOOL_CALL" ? 0 : 1);
+      assert(observed.includes(hook));
+    }
+    denied = undefined;
+    const before = handlerCalls;
+    assertEquals(
+      (await page({ ...first, currentRevision: revision + 1 })).type,
+      "error",
+    );
+    assertEquals(handlerCalls, before);
+    const interrupted = createTrafficDownload(selection);
+    const start = await interrupted.accept(await page(interrupted.initial));
+    assert("request" in start);
+    denied = "POST_TOOL_RESPONSE";
+    const blocked = await interrupted.accept(await page(start.request));
+    assert("error" in blocked);
+    denied = undefined;
+
+    const download = createTrafficDownload(selection);
+    let input = download.initial;
+    let pages = 0;
+    for (;;) {
+      assert(pages++ < 5);
+      const outcome = await download.accept(await page(input));
+      if ("request" in outcome) {
+        input = outcome.request;
+        continue;
+      }
+      assert("content" in outcome);
+      assertEquals(
+        new TextDecoder().decode(outcome.content),
+        "Boundary🙂".repeat(240),
+      );
+      break;
+    }
+    assert(pages > 1);
+    const changed = createTrafficDownload(selection);
+    const modified = await page(changed.initial);
+    const payload = (modified.page as { payload: { text: string } }).payload;
+    payload.text = payload.text.replace("Boundary", "Xoundary");
+    let outcome = await changed.accept(modified);
+    while ("request" in outcome) {
+      outcome = await changed.accept(await page(outcome.request));
+    }
+    assert(
+      "error" in outcome,
+      "The complete body digest must reject a corrupted page",
+    );
+    revokeOnResponse = true;
+    assertEquals((await page(first)).type, "error");
+    revokeOnResponse = false;
+  }, chat.readSentinelTrafficDownloadPage);
 }
 
 async function testScopedReporterRestart(
@@ -5579,7 +5736,14 @@ async function testScopedReporterRestart(
     ) => ({
       startedDateTime: new Date(time - 1000 - index).toISOString(),
       request: { url: `https://${host}/review/${index}`, method: "GET" },
-      response: { status: 403, content: { text: "Reviewed response." } },
+      response: {
+        status: 403,
+        content: {
+          text: initialPublication
+            ? "Boundary🙂".repeat(240)
+            : "Reviewed response.",
+        },
+      },
     }));
     const { observations } = importSentinelHar({
       log: { version: "1.2", entries },

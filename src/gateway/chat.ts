@@ -58,7 +58,12 @@ import type {
   ChatSessionConfig,
 } from "./chat_types.ts";
 import type { ChatHistoryEntry } from "./chat_session_interface.ts";
-import { readSentinelAssessment } from "../sentinel/assessment_store.ts";
+import {
+  readSentinelAssessment,
+  readSentinelOperatingConstraints,
+  readSentinelRunIdForRevision,
+} from "../sentinel/assessment_store.ts";
+import { listSentinelFindingTrafficLinks } from "../sentinel/finding_traffic_links.ts";
 import { isSentinelCaseId } from "../sentinel/cases.ts";
 import { loadChatHistoryEntries } from "./chat_history.ts";
 import {
@@ -918,6 +923,76 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
   }
   const session: ChatSession = {
     approvalInbox: config.hookRunner.toolApprovalInbox,
+    async readSentinelTrafficDownloadPage(request) {
+      if (!config.operatorRunExecutor) return;
+      const {
+        caseId,
+        revision,
+        currentRevision,
+        findingId,
+        trafficLinkId,
+        payloadPart,
+        offset,
+      } = request;
+      const owner = getSession();
+      const path = caseId === "main"
+        ? snapshotPath
+        : config.resolveSentinelChatCase?.(caseId);
+      if (!path) return;
+      const runId = readSentinelRunIdForRevision(path, revision);
+      const activeRunId = readSentinelAssessment(path)?.plan.runId;
+      if (!activeRunId) return;
+      const readScopeVersion = () =>
+        readSentinelOperatingConstraints(path, activeRunId)?.version ?? 0;
+      const scopeVersion = readScopeVersion();
+      const current = () => {
+        if (
+          !runId || state.activeSessionId !== state.ownerSessionId ||
+          getSession().id !== owner.id || owner.id !== state.ownerSessionId ||
+          !canFlowTo(
+            maxClassification(getSessionTaint(), "INTERNAL"),
+            ownerTargetClassification,
+          )
+        ) return false;
+        const assessment = readSentinelAssessment(path);
+        return assessment?.revision === currentRevision &&
+          assessment.plan.runId === activeRunId &&
+          readScopeVersion() === scopeVersion &&
+          readSentinelRunIdForRevision(path, revision) === runId;
+      };
+      if (!current()) return;
+      const result = await orchestrator.executeOperatorTool({
+        name: operatorRunTool.name,
+        args: {
+          action: "finding_traffic",
+          kind: "sentinel",
+          id: caseId,
+          revision,
+          receiptId: findingId,
+          trafficLinkId,
+          payloadPart,
+          offset,
+          byteLength: 1024,
+        },
+      }, {
+        session: owner,
+        targetClassification: ownerTargetClassification,
+        suppressToolEvents: true,
+      });
+      if (!result.ok || !result.value.startsWith("{") || !current()) return;
+      const page = JSON.parse(result.value);
+      const [link] = listSentinelFindingTrafficLinks(path, {
+        id: trafficLinkId,
+        evidenceRevision: revision,
+        findingId,
+        limit: 1,
+      });
+      if (
+        !link || page.link?.id !== link.id ||
+        page.link.trafficDigest !== link.trafficDigest || !current()
+      ) return;
+      return { ...page, runId, currentRevision, scopeVersion };
+    },
     async readSentinelDiscoverySource(request) {
       if (!config.operatorRunExecutor) return;
       const owner = getSession();

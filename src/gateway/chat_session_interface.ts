@@ -36,6 +36,16 @@ export interface SentinelDiscoverySourceRequest {
   readonly evidenceId: string;
 }
 
+export interface SentinelTrafficDownloadPageRequest {
+  readonly caseId: string;
+  readonly revision: number;
+  readonly currentRevision: number;
+  readonly findingId: string;
+  readonly trafficLinkId: string;
+  readonly payloadPart: "headers" | "request" | "response";
+  readonly offset: number;
+}
+
 /** Shared chat session that serializes access to the orchestrator. */
 export interface ChatSession {
   readonly approvalInbox?: ApprovalInboxSocketService;
@@ -43,6 +53,9 @@ export interface ChatSession {
   readonly sentinelSnapshotPath?: string;
   readonly readSentinelDiscoverySource?: (
     request: SentinelDiscoverySourceRequest,
+  ) => Promise<unknown>;
+  readonly readSentinelTrafficDownloadPage?: (
+    request: SentinelTrafficDownloadPageRequest,
   ) => Promise<unknown>;
   readonly resolveSentinelChatCase?: (caseId: string) => string | undefined;
   readonly sentinelWebContainmentConfigured?: boolean;

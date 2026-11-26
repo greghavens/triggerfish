@@ -46,6 +46,7 @@
 
   import { createFindingDownload, type FindingDownloadFormat } from "./finding_download.js";
 
+  import { createTrafficDownload, type TrafficDownloadRequest, type TrafficDownloadSelection } from "./traffic_download.js";
   type ExportFormat = FindingDownloadFormat | "provenance" | "inventory" | "alerts" | "decisions" | "incidents";
   const incidentDispositions = ["investigating", "resolved", "dismissed", "requires_review"];
   type DecisionDetail = {
@@ -83,7 +84,7 @@
     approvalVersion: number;
     evidence: { id: string; label: string; kind: "evidence" };
   };
-  type RequestPayload =
+  type RequestPayload = TrafficDownloadRequest |
     (DiscoveryTrace & { revision: number; sourceCase: string; snapshotDigest: string; evidenceId: string }) |
     { readonly revision: number; readonly taskId: string } |
     (AliasTrace & { revision: number; sourceCase: string; snapshotDigest: string }) |
@@ -108,6 +109,7 @@
     { readonly revision: string; readonly kind: string; readonly nodeId: string } |
     { readonly revision: string; readonly taskId: string } | { readonly revision: number; readonly baseline?: number; readonly before?: number; readonly priorTask?: string; readonly focusId?: string; readonly focusTarget?: boolean; readonly focusAlertKey?: string; readonly focusIncidentId?: string; readonly focusTaskAlert?: { readonly taskId: string; readonly alertId: string } };
   type Request =
+    | "finding_traffic_download_page"
     | "status"
     | "start"
     | "stop"
@@ -286,6 +288,7 @@
     pages: WorkerHistory[] | null;
     cursor?: number | null;
   };
+  let trafficDownload = $state.raw<ReturnType<typeof createTrafficDownload>>();
   let findingDownload = $state.raw<ReturnType<typeof createFindingDownload>>();
   let historyDownload = $state.raw<{
     timelines: TimelineDownload[];
@@ -650,6 +653,7 @@
         completeRequest();
         historyDownload = undefined;
         findingDownload = undefined;
+        trafficDownload = undefined;
         error =
           "The request timed out. Refresh to check the assessment status.";
       }, 15000);
@@ -909,6 +913,25 @@
         comparison = { ...comparison, workerHistory: [...(comparison.workerHistory ?? []), ...events], historyCursor };
       }
       completeRequest();
+    } else if (pending === "finding_traffic_download_page" &&
+      trafficDownload && message.requestId === pendingId) {
+      const download = trafficDownload;
+      const activeCase = caseId;
+      const currentRevision = assessment?.revision;
+      const expectedRequest = pendingId;
+      void download.accept(message).then(outcome => {
+        if (trafficDownload !== download || caseId !== activeCase ||
+          pendingId !== expectedRequest || assessment?.revision !== currentRevision ||
+          getConnectionState() !== "connected") return;
+        completeRequest();
+        if ("request" in outcome) {
+          request("finding_traffic_download_page", outcome.request);
+          return;
+        }
+        trafficDownload = undefined;
+        if ("error" in outcome) error = outcome.error;
+        else saveTrafficPayload(outcome.content, activeCase, message.revision as number);
+      });
     } else if ((message.type === "export" || message.type === "error") &&
       pending === "export" && findingDownload && message.requestId === pendingId) {
       const outcome = findingDownload.accept(message);
@@ -936,6 +959,7 @@
       }
       completeRequest();
     } else if (message.type === "error" || message.type === "sentinel_error") {
+      trafficDownload = undefined;
       historyDownload = undefined;
       findingDownload = undefined;
       error =
@@ -952,6 +976,8 @@
     if (message.type === "ws_disconnected") {
       if (historyDownload) error = "The worker history download was interrupted.";
       if (findingDownload) error = "The findings download was interrupted.";
+      if (trafficDownload) error = "The retained traffic download was interrupted.";
+      trafficDownload = undefined;
       findingDownload = undefined;
       historyDownload = undefined;
       completeRequest();
@@ -1028,6 +1054,26 @@
     const download = createFindingDownload(caseId, revision, format, { findingFilter: {} }, reportLanguage);
     findingDownload = download;
     request("export", download.initial);
+  }
+
+  function startTrafficDownload(findingId: string, trafficLinkId: string, payloadPart: TrafficDownloadSelection["payloadPart"]) {
+    const currentRevision = assessment?.revision;
+    const revision = displayedRevision;
+    if (pending || !online || revision === undefined || currentRevision === undefined) return;
+    const download = createTrafficDownload({ caseId, revision, currentRevision, findingId, trafficLinkId, payloadPart });
+    trafficDownload = download;
+    request("finding_traffic_download_page", download.initial);
+  }
+
+  function saveTrafficPayload(content: ArrayBuffer, caseId: string, revision: number) {
+    const url = URL.createObjectURL(new Blob([content], { type: "application/octet-stream" }));
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `sentinel-${caseId}-r${revision}-traffic.bin`;
+    document.body.append(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 0);
   }
 
   function downloadReport(format: ExportFormat, content: string | readonly (string | ArrayBuffer)[], revision?: number, baseline?: number, suffix?: string) {
@@ -1142,6 +1188,7 @@
   function selectCase(id: string) {
     if (id === caseId || pending) return;
     caseId = id;
+    trafficDownload = undefined;
     recheckLineage = undefined;
     sourceSnapshot = undefined;
     discoverySource = undefined;
@@ -2597,7 +2644,8 @@
                 {/each}
               </section>
             {/if}
-            <TrafficEvidence graph={displayGraph} language={workspaceLanguage} onFocus={focusDisplayedNode} />
+            <TrafficEvidence graph={displayGraph} language={workspaceLanguage} onFocus={focusDisplayedNode}
+              onDownload={startTrafficDownload} downloadDisabled={!online || !!pending || displayedRevision === undefined} />
           {/if}
         </div>
       {/key}

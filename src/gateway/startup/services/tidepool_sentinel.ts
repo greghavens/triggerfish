@@ -147,6 +147,7 @@ export function createTidepoolSentinelHandler(
   bootstrap: BootstrapResult,
   coordinatorState?: SentinelCoordinatorLookup,
   readDiscoverySource?: ChatSession["readSentinelDiscoverySource"],
+  readTrafficDownloadPage?: ChatSession["readSentinelTrafficDownloadPage"],
 ) {
   function readCaseOverview(ids: readonly string[], checkPending = false) {
     return ["main", ...ids].map((id) => {
@@ -1764,6 +1765,57 @@ export function createTidepoolSentinelHandler(
             type: "sentinel_source_asset_lineage",
             caseId,
             lineage,
+          });
+          return;
+        }
+        case "finding_traffic_download_page": {
+          const {
+            revision,
+            currentRevision,
+            findingId,
+            trafficLinkId,
+            payloadPart,
+            offset,
+          } = message;
+          const unavailable = () =>
+            new SentinelAssignmentError(
+              "The exact retained traffic download page is unavailable.",
+            );
+          if (
+            !readTrafficDownloadPage ||
+            typeof revision !== "number" || !Number.isSafeInteger(revision) ||
+            revision < 1 ||
+            typeof currentRevision !== "number" ||
+            !Number.isSafeInteger(currentRevision) ||
+            currentRevision < revision ||
+            typeof findingId !== "string" ||
+            !/^worker-finding:[a-f0-9]{64}$/.test(findingId) ||
+            typeof trafficLinkId !== "string" ||
+            !/^finding-traffic-link:[a-f0-9]{64}$/.test(trafficLinkId) ||
+            (payloadPart !== "request" && payloadPart !== "response" &&
+              payloadPart !== "headers") ||
+            typeof offset !== "number" || !Number.isSafeInteger(offset) ||
+            offset < 0 || offset > 64 * 1024
+          ) {
+            throw unavailable();
+          }
+          const page = await readTrafficDownloadPage({
+            caseId,
+            revision,
+            currentRevision,
+            findingId,
+            trafficLinkId,
+            payloadPart,
+            offset,
+          });
+          if (!page) throw unavailable();
+          send({
+            topic: "sentinel",
+            type: "finding_traffic_download_page",
+            caseId,
+            revision,
+            payloadPart,
+            page,
           });
           return;
         }
