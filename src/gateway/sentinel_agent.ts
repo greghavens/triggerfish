@@ -4031,7 +4031,8 @@ export function isSentinelNativeGraphRead(name: unknown) {
     name === SENTINEL_PATH_READ ||
     isSentinelInventoryFindingRead(name) ||
     isSentinelInventoryNeighborhoodRead(name) ||
-    name === "sentinel_worker_trace_search";
+    name === "sentinel_worker_trace_search" ||
+    name === "sentinel_worker_observation";
 }
 
 /** Reopen native console graph tools from the same exact scoped saved case. */
@@ -4063,6 +4064,9 @@ export async function readScopedSentinelConsoleGraph(
   }
   if (name === "sentinel_worker_trace_search") {
     return searchSentinelWorkerTraces(options, args, true);
+  }
+  if (name === "sentinel_worker_observation") {
+    return inspectSentinelWorkerObservation(options, args, true);
   }
   if (name === SENTINEL_PATH_READ && args.graph === "provenance") {
     return await queryPath(
@@ -4655,7 +4659,7 @@ function createAgent(
         const scoped = typeof toolName === "string" &&
           (toolName === assessmentTool.name ||
             toolName === sentinelInventoryTool.name || provenanceRead ||
-            inventoryGraphRead ||
+            inventoryGraphRead || toolName === "sentinel_worker_observation" ||
             isSentinelWorkerFindingTool(toolName) ||
             isSentinelGraphFactTool(toolName) ||
             toolName === proposeWorkerGoalTool.name ||

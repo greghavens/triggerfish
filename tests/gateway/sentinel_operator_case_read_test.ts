@@ -1,5 +1,5 @@
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
-import { dirname } from "@std/path";
+import { dirname, join } from "@std/path";
 import { createProviderRegistry } from "../../src/agent/llm.ts";
 import { createSession } from "../../src/core/types/session.ts";
 import type { ChannelId, UserId } from "../../src/core/types/session.ts";
@@ -17,6 +17,7 @@ import {
   recordSentinelOperatingConstraints,
   startSentinelAssessment,
 } from "../../src/sentinel/assessment_store.ts";
+import { openSentinelAdaptiveStore } from "../../src/sentinel/adaptive_store.ts";
 import { resolveSentinelCaseMembership } from "../../src/sentinel/case_membership.ts";
 import { resolveSentinelCasePath } from "../../src/sentinel/cases.ts";
 import { sentinelAlertsPath } from "../../src/sentinel/paths.ts";
@@ -210,6 +211,7 @@ Deno.test("Authenticated Sentinel chat reads exact approved cross-case graph fin
     | "sentinel_trace"
     | "sentinel_provenance_node"
     | "sentinel_assessment"
+    | "sentinel_worker_observation"
     | undefined;
   let revokeAssessmentDuringResponse = false;
   let forensicGraph = false;
@@ -1657,6 +1659,66 @@ Deno.test("Authenticated Sentinel chat reads exact approved cross-case graph fin
     assert(!modelContext.includes(visibleAlert.subject));
 
     localTelemetry = undefined;
+    const observationSearch = "Worker observation scope fixture";
+    const observationResult = new Map<
+      string,
+      { id: string; summary: string }
+    >();
+    const store = openSentinelAdaptiveStore(
+      join(dirname(approved.path), "sentinel-adaptive.db"),
+    );
+    try {
+      const revision = store.activeRevision();
+      assert(revision);
+      const assignments = store.sync(
+        revision,
+        ["asset-a", "asset-c"].map(
+          (nodeId) => ({
+            nodeId,
+            kind: "impact" as const,
+            depth: 10,
+            reason: observationSearch,
+          }),
+        ),
+      ).filter(({ reason }) => reason === observationSearch);
+      assertEquals(assignments.length, 2);
+      for (const task of assignments) {
+        const excluded = new Set(
+          store.list(revision).flatMap(({ id }) => id === task.id ? [] : [id]),
+        );
+        const claim = store.claim(revision, 60, excluded);
+        assert(claim?.task.nodeId);
+        assertEquals(claim.task.id, task.id);
+        const summary = `${observationSearch} for ${claim.task.nodeId}.`;
+        assert(store.complete({
+          taskId: task.id,
+          leaseToken: claim.leaseToken,
+          observation: { summary },
+        }));
+        observationResult.set(claim.task.nodeId, { id: task.id, summary });
+      }
+    } finally {
+      store.close();
+    }
+    const withdrawnObservation = observationResult.get("asset-a");
+    const allowedObservation = observationResult.get("asset-c");
+    assert(withdrawnObservation && allowedObservation);
+    localGraph = "sentinel_worker_observation";
+    await turn("Read an authorized exact worker result", {
+      task: withdrawnObservation.id,
+    });
+    assertEquals(JSON.parse(result).task, withdrawnObservation.id);
+    assertStringIncludes(result, withdrawnObservation.summary);
+    assert(
+      hooks.includes("PRE_TOOL_CALL") && hooks.includes("POST_TOOL_RESPONSE") &&
+        hooks.includes("PRE_OUTPUT"),
+    );
+    await turn("Search both currently approved observations", {
+      query: observationSearch,
+    });
+    assertEquals(JSON.parse(result).observations.length, 2);
+    localGraph = undefined;
+
     revokeTelemetry = "PRE_OUTPUT";
     const staleDelivery = await turn(
       "Narrow asset authority during destination review",
@@ -1668,6 +1730,36 @@ Deno.test("Authenticated Sentinel chat reads exact approved cross-case graph fin
     );
     await turn("Reject exact evidence after asset revocation", exactAlert);
     assertStringIncludes(result, "unavailable");
+    captureModelContext = true;
+    await turn("Do not reuse the withdrawn worker observation.");
+    assert(!modelContext.includes(withdrawnObservation.summary));
+
+    localGraph = "sentinel_worker_observation";
+    for (const unleased of [false, true]) {
+      unleasedTelemetry = unleased;
+      const prefix = unleased ? "/sentinel-agent " : "";
+      const rejected = await turn(prefix + "Reject the withdrawn observation", {
+        task: withdrawnObservation.id,
+      });
+      assertStringIncludes(result, "unavailable");
+      assert(
+        rejected.every((frame) =>
+          !frame.includes(withdrawnObservation.summary)
+        ),
+      );
+      await turn(prefix + "Search only currently approved observations", {
+        query: observationSearch,
+      });
+      assertEquals(
+        JSON.parse(result).observations.map(({ id }: { id: string }) => id),
+        [allowedObservation.id],
+      );
+      await turn(prefix + "Read the remaining authorized observation", {
+        task: allowedObservation.id,
+      });
+      assertEquals(JSON.parse(result).task, allowedObservation.id);
+      assertStringIncludes(result, allowedObservation.summary);
+    }
   } finally {
     socket.close();
     await gateway.stop();
