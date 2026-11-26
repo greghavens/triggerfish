@@ -138,6 +138,7 @@ const adaptiveTables = new Set([
   "adaptive_model_language",
   "adaptive_model_leases",
   "adaptive_model_reads",
+  "adaptive_model_read_events",
   "adaptive_model_review_constraint_proofs",
   "adaptive_model_reviews",
   "adaptive_model_usage",

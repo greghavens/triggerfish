@@ -7361,12 +7361,14 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
       identity: string,
       attempt: number,
       read: AdaptivePlannerRead,
+      recordToolEvent = false,
     ): boolean {
       identity = revisionKey(identity);
       if (!Number.isSafeInteger(attempt) || attempt < 1) {
         throw new Error("Invalid Sentinel planning attempt");
       }
-      const encoded = JSON.stringify(normalizePlannerRead(read));
+      const normalized = normalizePlannerRead(read);
+      const encoded = JSON.stringify(normalized);
       if (encoded.length > 32_768) {
         throw new Error("Sentinel planner read metadata is too large");
       }
@@ -7382,7 +7384,10 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
           JOIN adaptive_model_input_manifests USING (identity, attempt)
           WHERE identity = ? AND attempt = ? AND completed = 0 AND outcome = 0
         `).get(identity, attempt);
-        if (!lease || now() >= Number(lease.started) + 30_000) return false;
+        const recordedAt = now();
+        if (!lease || recordedAt >= Number(lease.started) + 30_000) {
+          return false;
+        }
         db.exec(`CREATE TABLE IF NOT EXISTS adaptive_model_reads (
           identity TEXT NOT NULL,
           attempt INTEGER NOT NULL,
@@ -7396,7 +7401,31 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
           SET plannerReads = json_insert(plannerReads, '$[#]', json(?))
           WHERE json_array_length(plannerReads) < ?
         `).run(identity, attempt, encoded, encoded, MAX_PLANNER_READS);
-        return Number(saved.changes) === 1;
+        if (Number(saved.changes) !== 1) return false;
+        if (recordToolEvent) {
+          db.exec(`CREATE TABLE IF NOT EXISTS adaptive_model_read_events (
+            identity TEXT NOT NULL,
+            attempt INTEGER NOT NULL,
+            ordinal INTEGER NOT NULL,
+            tool TEXT NOT NULL,
+            outcome TEXT NOT NULL CHECK(outcome IN ('returned', 'error')),
+            recordedAt INTEGER NOT NULL,
+            PRIMARY KEY(identity, attempt, ordinal),
+            FOREIGN KEY(identity, attempt) REFERENCES adaptive_model_reads(identity, attempt)
+          ) STRICT`);
+          db.prepare(`
+            INSERT INTO adaptive_model_read_events
+            SELECT identity, attempt, json_array_length(plannerReads) - 1, ?, ?, ?
+            FROM adaptive_model_reads WHERE identity = ? AND attempt = ?
+          `).run(
+            normalized.tool,
+            normalized.outcome,
+            recordedAt,
+            identity,
+            attempt,
+          );
+        }
+        return true;
       });
     },
 
@@ -10918,6 +10947,36 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
         }
       }
       return matched;
+    },
+
+    committedPlannerToolResponses() {
+      if (
+        !db.prepare(
+          "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'adaptive_model_read_events'",
+        ).get()
+      ) return [];
+      return db.prepare(`
+        SELECT identity, attempt, ordinal, tool, outcome, recordedAt
+        FROM adaptive_model_read_events ORDER BY rowid
+      `).all().flatMap((row) => {
+        if (
+          typeof row.tool !== "string" || typeof row.recordedAt !== "number" ||
+          (row.outcome !== "returned" && row.outcome !== "error")
+        ) return [];
+        const identity = JSON.stringify([
+          row.identity,
+          row.attempt,
+          row.ordinal,
+        ]);
+        return [{
+          tool: row.tool,
+          outcome: row.outcome,
+          recordedAt: row.recordedAt,
+          receipt: `planner-step:${
+            createHash("sha256").update(identity).digest("hex")
+          }`,
+        }];
+      });
     },
 
     committedModelToolResponses() {

@@ -18,7 +18,10 @@ import {
   startSentinelAssessment,
 } from "../../src/sentinel/assessment_store.ts";
 import { reconcileSentinelDeadlineGoal } from "../../src/gateway/sentinel_goal_completion.ts";
-import { advanceAdaptiveSentinel } from "../../src/gateway/sentinel_adaptive_runtime.ts";
+import {
+  advanceAdaptiveSentinel,
+  createSentinelModelPlanner,
+} from "../../src/gateway/sentinel_adaptive_runtime.ts";
 import {
   adaptiveRevision,
   MODEL_ASSIGNMENT_REASON,
@@ -910,6 +913,108 @@ Deno.test("Reviewed event subscription dispatches committed case metadata only o
       assertEquals(messages.length, 9);
     } finally {
       liveQueue.close();
+    }
+
+    scheduler.stop();
+    const planningSubscription = await manage({
+      action: "set_agent_event_subscription",
+      expectedVersion: 0,
+      subscriptionSettings: {
+        id: "live-planner-steps",
+        agent: "review-agent",
+        caseId: fifoCaseId,
+        kinds: ["tool_completed"],
+        tool: "sentinel_graph_overview",
+        merge: "by_case",
+        maxConcurrent: 1,
+        enabled: true,
+      },
+    });
+    assertEquals(JSON.parse(planningSubscription).saved.version, 1);
+    const planningRegistry = createProviderRegistry();
+    const plannerRead = Promise.withResolvers<void>();
+    const finishPlanning = Promise.withResolvers<void>();
+    let planningCalls = 0;
+    let checkedPlannerCalls = 0;
+    let plannerResults: string[] = [];
+    planningRegistry.register({
+      name: "planner-event-fixture",
+      supportsStreaming: false,
+      async complete(messages) {
+        const usage = { inputTokens: 1, outputTokens: 1 };
+        if (++planningCalls <= 2) {
+          return {
+            content: "",
+            usage,
+            toolCalls: [{
+              id: `overview-${planningCalls}`,
+              type: "function",
+              function: { name: "sentinel_graph_overview", arguments: "{}" },
+            }],
+          };
+        }
+        plannerResults = messages.filter(({ role }) => role === "tool")
+          .map(({ content }) => String(content));
+        plannerRead.resolve();
+        await finishPlanning.promise;
+        return { content: "[]", usage, toolCalls: [] };
+      },
+    });
+    planningRegistry.setDefault("planner-event-fixture");
+    const planner = createSentinelModelPlanner(
+      fifoPath,
+      (state, taskId) =>
+        taskId
+          ? { execute: () => Promise.resolve(), clear() {} }
+          : createSentinelSubagent({
+            snapshotPath: fifoPath,
+            assessmentRevision: state.revision,
+            plannerExecutionEvidenceRunId: state.plan.runId,
+            providerRegistry: planningRegistry,
+            allowModelAccess: true,
+            hookRunner: {
+              evaluateHook(hook, context) {
+                const blocked = hook === "PRE_TOOL_CALL" &&
+                  context.input.tool_name === "sentinel_graph_overview" &&
+                  ++checkedPlannerCalls === 1;
+                return Promise.resolve({
+                  allowed: !blocked,
+                  action: blocked ? "BLOCK" : "ALLOW",
+                  ruleId: null,
+                  duration: 0,
+                });
+              },
+            },
+          }),
+    );
+    const timeout = setTimeout(() => {
+      plannerRead.reject(
+        new Error("Planner did not reach the saved tool result"),
+      );
+    }, 5_000);
+    try {
+      planner.advance(newest);
+      await plannerRead.promise;
+      assertEquals(checkedPlannerCalls, 2);
+      assertEquals(plannerResults.length, 2);
+      assertStringIncludes(plannerResults[0], "blocked by policy");
+      assert(plannerResults[1].startsWith("{"), plannerResults[1]);
+      scheduler.start();
+      await manage({ action: "agent_event_subscriptions" });
+      assertEquals(messages.length, 10);
+      const receipts = receiptsIn(messages[9]);
+      assertEquals(receipts.length, 1);
+      assert(/^planner-step:[a-f0-9]{64}$/.test(receipts[0]));
+      assertStringIncludes(messages[9], '"tool":"sentinel_graph_overview"');
+      assert(!messages[9].includes('"nodes"'));
+      scheduler.stop();
+      scheduler.start();
+      await manage({ action: "agent_event_subscriptions" });
+      assertEquals(messages.length, 10);
+    } finally {
+      clearTimeout(timeout);
+      finishPlanning.resolve();
+      planner.stop();
     }
   } finally {
     scheduler.stop();

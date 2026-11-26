@@ -10029,6 +10029,7 @@ export function createSentinelModelPlanner(
                     recheckFindingIds,
                     peerWorkerReview,
                   },
+                  checkpointCurrent(),
                 );
                 if (
                   recorded && outcome === "returned" &&

@@ -78,7 +78,12 @@ export function sentinelAgentEventSources(
           try {
             const committed = store.committedModelToolResponses();
             const modernTasks = new Set(committed.map(({ taskId }) => taskId));
-            for (const { tool, outcome, receipt, recordedAt } of committed) {
+            for (
+              const { tool, outcome, receipt, recordedAt } of [
+                ...committed,
+                ...store.committedPlannerToolResponses(),
+              ]
+            ) {
               if (
                 !toolNames.has(tool) ||
                 (outcome === "error" && tool === "sentinel_report_finding")
