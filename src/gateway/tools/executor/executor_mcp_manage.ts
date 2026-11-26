@@ -33,7 +33,7 @@ export interface McpManageContext {
   readonly configPath: string;
   readonly listCredentialNames?: SecretStore["listSecrets"];
   readonly getConfirmPrompt?: () => (message: string) => Promise<boolean>;
-  readonly withdrawConnectorTools?: (id: string) => void;
+  readonly withdrawConnectorTools?: (id: string) => Promise<void>;
   readonly prepareToolRefresh?: (
     id: string,
     saved: Record<string, unknown>,
@@ -329,7 +329,7 @@ async function executeLifecycle(
     });
   }
 
-  if (!enable) ctx.withdrawConnectorTools?.(intent.connectorId);
+  if (!enable) await ctx.withdrawConnectorTools?.(intent.connectorId);
   return JSON.stringify({
     success: true,
     server_id: intent.connectorId,

@@ -101,6 +101,7 @@ export interface McpClient {
 export function createMcpClient(
   transport: Transport,
   timeoutMs = 30000,
+  signal?: AbortSignal,
 ): McpClient {
   const pendingRequests = new Map<
     number,
@@ -129,39 +130,33 @@ export function createMcpClient(
     method: string,
     params?: Record<string, unknown>,
   ): Promise<JsonRpcResponse> {
+    signal?.throwIfAborted();
     const request = formatRequest(method, params);
-    const promise = new Promise<JsonRpcResponse>((resolve, reject) => {
-      pendingRequests.set(request.id, { resolve, reject });
-
-      // Set up timeout
-      const timer = setTimeout(() => {
-        pendingRequests.delete(request.id);
-        reject(
-          new Error(`MCP request timed out after ${timeoutMs}ms: ${method}`),
-        );
-      }, timeoutMs);
-
-      // Clear timeout when resolved
-      const originalResolve = resolve;
-      pendingRequests.set(request.id, {
-        resolve: (value) => {
-          clearTimeout(timer);
-          originalResolve(value);
-        },
-        reject: (reason) => {
-          clearTimeout(timer);
-          reject(reason);
-        },
-      });
-    });
-
-    await transport.send(JSON.stringify(request));
-    return promise;
+    const response = Promise.withResolvers<JsonRpcResponse>();
+    pendingRequests.set(request.id, response);
+    const timer = setTimeout(() => {
+      response.reject(
+        new Error(`MCP request timed out after ${timeoutMs}ms: ${method}`),
+      );
+    }, timeoutMs);
+    const abort = () => response.reject(signal?.reason);
+    signal?.addEventListener("abort", abort, { once: true });
+    try {
+      const [, result] = await Promise.all([
+        transport.send(JSON.stringify(request)),
+        response.promise,
+      ]);
+      return result;
+    } finally {
+      clearTimeout(timer);
+      pendingRequests.delete(request.id);
+      signal?.removeEventListener("abort", abort);
+    }
   }
 
   return {
     async initialize(): Promise<McpInitializeResult> {
-      await transport.connect();
+      await transport.connect(signal);
 
       const response = await sendRequest("initialize", {
         protocolVersion: "2024-11-05",
@@ -180,6 +175,7 @@ export function createMcpClient(
         jsonrpc: "2.0",
         method: "notifications/initialized",
       };
+      signal?.throwIfAborted();
       await transport.send(JSON.stringify(notification));
 
       return response.result as McpInitializeResult;

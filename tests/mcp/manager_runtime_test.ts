@@ -4,6 +4,7 @@
  * Tests addServer, removeServer, reconnectServer on the concrete manager.
  */
 import { assertEquals } from "@std/assert";
+import { fromFileUrl, join } from "@std/path";
 import { createMcpServerManager } from "../../src/mcp/manager.ts";
 
 Deno.test("McpServerManager: addServer increments configuredCount", () => {
@@ -96,4 +97,52 @@ Deno.test("McpServerManager: onStatusChange fires on removeServer", async () => 
   assertEquals(callCount > 0, true);
 
   unsubscribe();
+});
+
+Deno.test({
+  name:
+    "Removing an MCP connector invalidates its pending reconnect generation",
+  ignore: Deno.build.os === "windows",
+  async fn() {
+    const dir = await Deno.makeTempDir();
+    const manager = createMcpServerManager();
+    try {
+      const probe = join(dir, "attempts");
+      const fixture = fromFileUrl(
+        new URL(
+          "../gateway/fixtures/mcp_configured_connector.ts",
+          import.meta.url,
+        ),
+      );
+      manager.startAll([{
+        id: "pending-retry",
+        command: Deno.execPath(),
+        args: [
+          "run",
+          "--no-check",
+          `--allow-write=${probe}`,
+          fixture,
+          "retry",
+          probe,
+        ],
+        maxRetries: 10,
+      }]);
+      for (
+        let attempt = 0;
+        attempt < 100 && manager.getStatus()[0]?.state !== "disconnected";
+        attempt++
+      ) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      assertEquals(manager.getStatus()[0]?.state, "disconnected");
+      assertEquals(await Deno.readTextFile(probe), "attempt\n");
+      await manager.removeServer("pending-retry");
+      await new Promise((resolve) => setTimeout(resolve, 2_100));
+      assertEquals(await Deno.readTextFile(probe), "attempt\n");
+      assertEquals(manager.getStatus(), []);
+    } finally {
+      await manager.disconnectAll();
+      await Deno.remove(dir, { recursive: true });
+    }
+  },
 });

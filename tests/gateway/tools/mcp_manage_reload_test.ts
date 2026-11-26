@@ -204,6 +204,7 @@ Deno.test({
     const dir = await Deno.makeTempDir();
     try {
       const probe = join(dir, "retry-attempts");
+      const lifecycleProbe = join(dir, "inventory-lifecycle");
       const configPath = join(dir, "triggerfish.yaml");
       const expectedInventory = "Configured inventory is available.";
       await Deno.writeTextFile(
@@ -218,8 +219,10 @@ mcp_servers:
             "run",
             "--no-check",
             "--allow-env=MCP_FIXTURE_CREDENTIAL",
+            `--allow-write=${lifecycleProbe}`,
             connectorFixture,
             "inventory",
+            lifecycleProbe,
           ])
         }
     env:
@@ -353,6 +356,7 @@ mcp_servers:
         assertEquals(await Deno.readTextFile(configPath), external);
         await Deno.writeTextFile(configPath, before);
 
+        const beforeWithdrawal = await Deno.readTextFile(lifecycleProbe);
         const apply = turn(request);
         const approved = await nextApproval(
           inbox,
@@ -377,6 +381,20 @@ mcp_servers:
         assertStringIncludes(
           await turn("Refresh inventory tools"),
           "unavailable",
+        );
+        const expectedLifecycle = beforeWithdrawal + "stopped\n";
+        for (
+          let attempt = 0;
+          attempt < 100 &&
+          await Deno.readTextFile(lifecycleProbe) !== expectedLifecycle;
+          attempt++
+        ) {
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+        assertEquals(
+          await Deno.readTextFile(lifecycleProbe),
+          expectedLifecycle,
+          "The approved connector must stop before gateway restart.",
         );
         const completed = await nextApproval(
           inbox,

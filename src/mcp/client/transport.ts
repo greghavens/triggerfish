@@ -26,7 +26,7 @@ export type UrlValidator = (url: string) => Promise<Result<void, string>>;
 /** Transport interface for MCP client-server communication. */
 export interface Transport {
   /** Establish connection to the MCP server. */
-  connect(): Promise<void>;
+  connect(signal?: AbortSignal): Promise<void>;
   /** Disconnect from the MCP server. */
   disconnect(): Promise<void>;
   /** Send a JSON-RPC message string to the server. */
@@ -59,7 +59,8 @@ export class StdioTransport implements Transport {
   }
 
   // deno-lint-ignore require-await
-  async connect(): Promise<void> {
+  async connect(signal?: AbortSignal): Promise<void> {
+    signal?.throwIfAborted();
     const cmd = new Deno.Command(this.#command, {
       args: [...this.#args],
       stdin: "piped",
@@ -242,6 +243,7 @@ export class SSETransport implements Transport {
   #readLoop: Promise<void> | null = null;
   #reconnectTimer: ReturnType<typeof setTimeout> | undefined;
   #closed = true;
+  #generation = 0;
 
   constructor(
     url: string,
@@ -253,10 +255,20 @@ export class SSETransport implements Transport {
     this.#ssrfChecker = ssrfChecker;
   }
 
-  async connect(): Promise<void> {
+  async connect(signal?: AbortSignal): Promise<void> {
+    signal?.throwIfAborted();
+    const generation = ++this.#generation;
     await this.#enforceConnectPolicy();
+    signal?.throwIfAborted();
+    if (generation !== this.#generation) {
+      throw new DOMException("MCP connection was replaced.", "AbortError");
+    }
     this.#closed = false;
-    const body = await this.#openValidatedEventStream();
+    const body = await this.#openValidatedEventStream(signal);
+    if (generation !== this.#generation || signal?.aborted) {
+      await body.cancel();
+      throw new DOMException("MCP connection was stopped.", "AbortError");
+    }
     this.#readLoop = this.#consumeEventStream(body);
   }
 
@@ -282,13 +294,18 @@ export class SSETransport implements Transport {
   }
 
   /** Open the SSE stream; every redirect hop is SSRF-re-checked. */
-  async #openValidatedEventStream(): Promise<ReadableStream<Uint8Array>> {
+  async #openValidatedEventStream(
+    signal?: AbortSignal,
+  ): Promise<ReadableStream<Uint8Array>> {
     this.#abort = new AbortController();
+    const connectionSignal = this.#abort.signal;
     const result = await safeFetchWithRedirects(
       this.#url,
       {
         headers: { "Accept": "text/event-stream" },
-        signal: this.#abort.signal,
+        signal: signal
+          ? AbortSignal.any([connectionSignal, signal])
+          : connectionSignal,
       },
       this.#ssrfChecker,
     );
@@ -347,6 +364,7 @@ export class SSETransport implements Transport {
   }
 
   async disconnect(): Promise<void> {
+    this.#generation++;
     this.#closed = true;
     if (this.#reconnectTimer !== undefined) {
       clearTimeout(this.#reconnectTimer);
@@ -365,6 +383,7 @@ export class SSETransport implements Transport {
       this.#url,
       {
         method: "POST",
+        signal: this.#abort?.signal,
         headers: { "Content-Type": "application/json" },
         body: msg,
       },

@@ -91,6 +91,8 @@ export interface McpExecutorOptions {
   readonly getSession: () => SessionState;
   /** Current exposure for an already-connected exact server. */
   readonly isServerAvailable?: (id: string) => boolean;
+  /** Reserve withdrawn namespaces so invocation cannot fall through to another server. */
+  readonly getReservedServerIds?: () => readonly string[];
 }
 
 /**
@@ -113,17 +115,20 @@ export function createMcpExecutor(
   ): Promise<string | null> => {
     // Resolve the live server list on each invocation
     const servers = getServers();
-    const serverIds = servers.map((s) => s.id);
+    const serverIds = [
+      ...servers.map((s) => s.id),
+      ...options.getReservedServerIds?.() ?? [],
+    ];
     const serverMap = new Map(servers.map((s) => [s.id, s]));
 
     const decoded = decodeMcpToolName(name, serverIds);
     if (!decoded) return null;
 
-    const server = serverMap.get(decoded.serverId);
-    if (!server) return `Error: MCP server '${decoded.serverId}' not found`;
     const available = () => isServerAvailable(decoded.serverId);
     const unavailable = "The selected MCP server is unavailable.";
     if (!available()) return `Error: ${unavailable}`;
+    const server = serverMap.get(decoded.serverId);
+    if (!server) return `Error: MCP server '${decoded.serverId}' not found`;
     if (!server.tools.some(({ name }) => name === decoded.toolName)) {
       return "Error: The selected MCP tool is not registered.";
     }
@@ -191,9 +196,10 @@ function sanitizeMcpToolDescription(opts: {
 export function getMcpToolDefinitions(
   servers: readonly ConnectedMcpServer[],
   connectorId?: string,
+  reservedServerIds: readonly string[] = [],
 ): readonly McpToolDef[] {
   const defs: McpToolDef[] = [];
-  const serverIds = servers.map(({ id }) => id);
+  const serverIds = [...servers.map(({ id }) => id), ...reservedServerIds];
 
   for (const server of servers) {
     if (connectorId !== undefined && server.id !== connectorId) continue;

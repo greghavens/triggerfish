@@ -4,6 +4,21 @@ import { createInterface } from "node:readline";
 import { stdin } from "node:process";
 
 const [kind, retryLog] = Deno.args;
+const lifecycle = (kind === "inventory" || kind === "inventory-v2") && retryLog
+  ? retryLog
+  : undefined;
+const stopped = () => {
+  if (lifecycle) {
+    Deno.writeTextFileSync(lifecycle, "stopped\n", { append: true });
+  }
+};
+if (lifecycle) {
+  Deno.writeTextFileSync(lifecycle, "started\n", { append: true });
+  Deno.addSignalListener("SIGTERM", () => {
+    stopped();
+    Deno.exit();
+  });
+}
 const input = createInterface({ input: stdin });
 for await (const line of input) {
   const { id, method, params } = JSON.parse(line);
@@ -76,3 +91,6 @@ for await (const line of input) {
   }
   console.log(JSON.stringify({ jsonrpc: "2.0", id, result }));
 }
+
+stopped();
+if (lifecycle) Deno.exit();

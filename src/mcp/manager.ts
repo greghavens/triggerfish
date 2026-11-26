@@ -104,6 +104,10 @@ export function createMcpServerManager(): McpServerManager {
         });
         return;
       }
+      state.retryControllers.get(id)?.abort();
+      state.statusMap.delete(id);
+      state.configuredCount = Math.max(0, state.configuredCount - 1);
+      notifyMcpStatusListeners(state);
       if (status.server) {
         try {
           await status.server.transport.disconnect();
@@ -118,9 +122,6 @@ export function createMcpServerManager(): McpServerManager {
           );
         }
       }
-      state.statusMap.delete(id);
-      state.configuredCount = Math.max(0, state.configuredCount - 1);
-      notifyMcpStatusListeners(state);
       mcpLog.info(`MCP server '${id}' removed`, {
         operation: "removeServer",
         serverId: id,
@@ -162,7 +163,10 @@ export function createMcpServerManager(): McpServerManager {
         });
         return;
       }
-      // Mark as disconnected so health poll exits, then re-launch retry loop
+      state.retryControllers.get(id)?.abort();
+      if (status.server) {
+        void status.server.transport.disconnect().catch(() => {});
+      }
       state.statusMap.set(id, {
         ...status,
         state: "disconnected",

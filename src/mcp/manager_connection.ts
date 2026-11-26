@@ -29,6 +29,7 @@ export interface McpManagerState {
   connected: ConnectedMcpServer[];
   configuredCount: number;
   readonly statusMap: Map<string, McpServerStatus>;
+  readonly retryControllers: Map<string, AbortController>;
   readonly statusListeners: Set<(status: readonly McpServerStatus[]) => void>;
 }
 
@@ -47,6 +48,7 @@ export function buildMcpManagerState(): McpManagerState {
     connected: [],
     configuredCount: 0,
     statusMap: new Map(),
+    retryControllers: new Map(),
     statusListeners: new Set(),
   };
 }
@@ -148,7 +150,9 @@ function assembleConnectedServer(
 export async function connectOneMcpServer(
   cfg: McpServerConfig,
   ctx: McpConnectionContext,
+  signal?: AbortSignal,
 ): Promise<ConnectedMcpServer> {
+  signal?.throwIfAborted();
   if (cfg.command) {
     const validation = enforceCommandAllowlist(
       cfg.command,
@@ -179,10 +183,22 @@ export async function connectOneMcpServer(
     ? await resolveEnvVars(cfg.env, ctx.secretStore)
     : undefined;
 
+  signal?.throwIfAborted();
   const transport = createTransportForConfig(cfg, resolvedEnv);
-  const client = createMcpClient(transport, cfg.toolCallTimeoutMs ?? 60_000);
-  await client.initialize();
-  const tools = await client.listTools();
+  const client = createMcpClient(
+    transport,
+    cfg.toolCallTimeoutMs ?? 60_000,
+    signal,
+  );
+  let tools;
+  try {
+    await client.initialize();
+    tools = await client.listTools();
+    signal?.throwIfAborted();
+  } catch (error) {
+    await transport.disconnect().catch(() => {});
+    throw error;
+  }
 
   ctx.mcpLog.info(
     `MCP server '${cfg.id}' connected (${tools.length} tools)`,
@@ -257,6 +273,7 @@ export async function disconnectAllMcpServers(
   state: McpManagerState,
 ): Promise<void> {
   const log = createLogger("mcp");
+  for (const controller of state.retryControllers.values()) controller.abort();
   for (const entry of state.connected) {
     try {
       await entry.transport.disconnect();

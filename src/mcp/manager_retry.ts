@@ -25,18 +25,33 @@ import {
 
 // ─── Health polling ──────────────────────────────────────────────────────────
 
+function waitWhileActive(delay: number, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) return Promise.resolve();
+  return new Promise((resolve) => {
+    const finish = () => {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", finish);
+      resolve();
+    };
+    const timer = setTimeout(finish, delay);
+    signal.addEventListener("abort", finish, { once: true });
+  });
+}
+
 /** Poll until an MCP server disconnects or is externally marked disconnected. */
 async function pollMcpServerHealth(
   entry: ConnectedMcpServer,
   statusMap: Map<string, McpServerStatus>,
+  signal: AbortSignal,
 ): Promise<void> {
-  while (true) {
-    await new Promise<void>((resolve) => setTimeout(resolve, 5000));
+  while (!signal.aborted) {
+    await waitWhileActive(5000, signal);
     const current = statusMap.get(entry.id);
-    if (!current || current.state !== "connected") return;
+    if (signal.aborted || current?.server?.client !== entry.client) return;
     try {
       await entry.client.listTools();
     } catch (err: unknown) {
+      if (signal.aborted) return;
       createLogger("mcp").warn(
         `MCP server '${entry.id}' health check failed — marking unhealthy`,
         { serverId: entry.id, err },
@@ -52,16 +67,18 @@ async function pollMcpServerHealth(
 async function runMcpRetryLoop(
   cfg: McpServerConfig,
   ctx: McpConnectionContext,
+  signal: AbortSignal,
 ): Promise<void> {
   let delay = 2000;
   let attempts = 0;
   const maxRetries = cfg.maxRetries ?? 10;
-  while (true) {
+  while (!signal.aborted) {
     setMcpServerConnecting(cfg, ctx.state);
     try {
-      delay = await attemptMcpConnection(cfg, ctx);
+      delay = await attemptMcpConnection(cfg, ctx, signal);
       attempts = 0; // reset on successful connection
     } catch (err: unknown) {
+      if (signal.aborted) return;
       attempts++;
       if (attempts >= maxRetries) {
         markMcpServerPermanentlyFailed(
@@ -80,7 +97,7 @@ async function runMcpRetryLoop(
         maxRetries,
       });
     }
-    await new Promise<void>((resolve) => setTimeout(resolve, delay));
+    await waitWhileActive(delay, signal);
     delay = Math.min(delay * 2, 30000);
   }
 }
@@ -102,8 +119,13 @@ function setMcpServerConnecting(
 async function attemptMcpConnection(
   cfg: McpServerConfig,
   ctx: McpConnectionContext,
+  signal: AbortSignal,
 ): Promise<number> {
-  const entry = await connectOneMcpServer(cfg, ctx);
+  const entry = await connectOneMcpServer(cfg, ctx, signal);
+  if (signal.aborted) {
+    await entry.transport.disconnect().catch(() => {});
+    return 2000;
+  }
   ctx.state.statusMap.set(cfg.id, {
     id: cfg.id,
     config: cfg,
@@ -112,7 +134,10 @@ async function attemptMcpConnection(
   });
   notifyMcpStatusListeners(ctx.state);
 
-  await pollMcpServerHealth(entry, ctx.state.statusMap);
+  await pollMcpServerHealth(entry, ctx.state.statusMap, signal);
+  if (signal.aborted) return 2000;
+  await entry.transport.disconnect().catch(() => {});
+  if (signal.aborted) return 2000;
   ctx.mcpLog.warn(
     `MCP server '${cfg.id}' disconnected — reconnecting`,
   );
@@ -185,11 +210,17 @@ export function launchMcpServerRetryLoop(
   cfg: McpServerConfig,
   ctx: McpConnectionContext,
 ): void {
-  runMcpRetryLoop(cfg, ctx).catch((err: unknown) => {
+  const controllers = ctx.state.retryControllers;
+  controllers.get(cfg.id)?.abort();
+  const controller = new AbortController();
+  controllers.set(cfg.id, controller);
+  runMcpRetryLoop(cfg, ctx, controller.signal).catch((err: unknown) => {
     ctx.mcpLog.error(
       `MCP retry loop for '${cfg.id}' crashed`,
       { operation: "mcp-retry-loop", serverId: cfg.id, err },
     );
+  }).finally(() => {
+    if (controllers.get(cfg.id) === controller) controllers.delete(cfg.id);
   });
 }
 

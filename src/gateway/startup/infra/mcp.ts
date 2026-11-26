@@ -61,7 +61,7 @@ export interface McpWiringResult {
     saved: Record<string, unknown>,
   ) => Promise<ReturnType<McpServerManager["prepareToolRefresh"]>>;
   /** Withdraw model-visible operations until the next configured connection startup. */
-  readonly withdrawConnectorTools: (id: string) => void;
+  readonly withdrawConnectorTools: (id: string) => Promise<void>;
   /** Live getter for MCP system prompt section (for getExtraSystemPromptSections). */
   readonly getSystemPrompt: () => string | null;
 }
@@ -139,6 +139,7 @@ export function wireMcpServers(
     getServers: () => mcpManager.getConnected(),
     getSession,
     isServerAvailable: (id) => !withdrawn.has(id),
+    getReservedServerIds: () => [...withdrawn],
   });
 
   // Install status-change callback
@@ -210,7 +211,11 @@ export function wireMcpServers(
     manager: mcpManager,
     executor,
     getToolDefinitions: () =>
-      getMcpToolDefinitions(visibleServers()) as readonly ToolDefinition[],
+      getMcpToolDefinitions(
+        visibleServers(),
+        undefined,
+        [...withdrawn],
+      ) as readonly ToolDefinition[],
     getConnectorTools(id) {
       if (withdrawn.has(id)) return;
       const servers = visibleServers();
@@ -218,7 +223,9 @@ export function wireMcpServers(
       if (!connector) return undefined;
       return {
         classification: connector.classification,
-        tools: getMcpToolDefinitions(servers, id).map(({ name }) => name),
+        tools: getMcpToolDefinitions(servers, id, [...withdrawn]).map((
+          { name },
+        ) => name),
       };
     },
     async prepareToolRefresh(id, saved) {
@@ -234,8 +241,11 @@ export function wireMcpServers(
       return (authorize) =>
         refresh(async () => await matchesRuntime() && await authorize());
     },
-    withdrawConnectorTools: (id) => {
+    async withdrawConnectorTools(id) {
       withdrawn.add(id);
+      if (mcpManager.getStatus().some((status) => status.id === id)) {
+        await mcpManager.removeServer(id);
+      }
     },
     getSystemPrompt: () =>
       buildMcpSystemPrompt(
