@@ -28,6 +28,7 @@ export interface AgentEventSchedulerConfig {
       ReturnType<typeof openAgentEventSchedule>["list"]
     >,
     publish: (event: AgentEvent) => void,
+    earliestRegistration?: number,
   ) => void;
 }
 
@@ -135,7 +136,11 @@ export function createAgentEventScheduler(config: SchedulerServiceConfig) {
           subscription.enabled
         );
         if (subscriptions.length) {
-          options!.readSources(subscriptions, store.publish);
+          options!.readSources(
+            subscriptions,
+            store.publish,
+            store.earliestSubscriptionRegistration(),
+          );
         }
         while (active.size < 16) {
           const delivery = store.claim();

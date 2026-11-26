@@ -19,7 +19,7 @@ export function sentinelAgentEventSources(
 ): AgentEventSchedulerConfig {
   return {
     baseDir,
-    readSources(entries, publish) {
+    readSources(entries, publish, earliestRegistration) {
       const subscriptions = entries.map(({ subscription }) => subscription);
       const toolNames = new Set(
         subscriptions.flatMap(({ tool, tools }) =>
@@ -118,29 +118,37 @@ export function sentinelAgentEventSources(
       const journal = openExecutionTraces(tracePath);
       try {
         for (const tool of backgroundTools) {
-          const hits = journal.search({
-            query: tool,
-            ceiling: "INTERNAL",
-            limit: 50,
-            backgroundOwner: null,
-          });
-          for (const hit of hits?.matches ?? []) {
-            if (
-              hit.tool !== tool ||
-              (hit.outcome !== "returned" && hit.outcome !== "failed") ||
-              (hit.outcome === "failed" && tool === "sentinel_report_finding")
-            ) continue;
-            const source = journal.readRun(hit.role, hit.runId, "INTERNAL")
-              ?.scope.sourceId;
-            if (source?.startsWith("agent-event:")) continue;
-            publish({
-              kind: "tool_completed",
-              receipt: hit.id,
-              tool,
-              ...(hit.outcome === "failed" && { outcome: "error" }),
-              recordedAt: Date.parse(hit.recordedAt),
+          let cursor: string | null = null;
+          do {
+            const hits = journal.search({
+              query: tool,
+              ceiling: "INTERNAL",
+              limit: 50,
+              backgroundOwner: null,
+              recordedSince: earliestRegistration,
+              ...(cursor && { cursor }),
             });
-          }
+            for (const hit of hits?.matches ?? []) {
+              if (
+                hit.tool !== tool ||
+                (hit.outcome !== "returned" && hit.outcome !== "failed") ||
+                (hit.outcome === "failed" && tool === "sentinel_report_finding")
+              ) continue;
+              const source = journal.readRun(hit.role, hit.runId, "INTERNAL")
+                ?.scope.sourceId;
+              if (source === undefined || source.startsWith("agent-event:")) {
+                continue;
+              }
+              publish({
+                kind: "tool_completed",
+                receipt: hit.id,
+                tool,
+                ...(hit.outcome === "failed" && { outcome: "error" }),
+                recordedAt: Date.parse(hit.recordedAt),
+              });
+            }
+            cursor = hits?.nextCursor ?? null;
+          } while (cursor);
         }
       } finally {
         journal.close();

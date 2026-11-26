@@ -609,6 +609,47 @@ Deno.test("Reviewed event subscription dispatches committed case metadata only o
     assertStringIncludes(messages[4], '"tool":"list_directory"');
     assertStringIncludes(messages[4], '"outcome":"error"');
     assert(!messages[4].includes('"outcome":"blocked"'));
+
+    scheduler.stop();
+    const burst = {
+      action: "set_agent_event_subscription",
+      expectedVersion: 0,
+      subscriptionSettings: {
+        id: "background-burst",
+        agent: "review-agent",
+        kinds: ["tool_completed"],
+        tool: "fixture_background_burst",
+        merge: "all",
+        maxConcurrent: 1,
+        enabled: true,
+      },
+    };
+    assertEquals(JSON.parse(await manage(burst)).saved.version, 1);
+    const burstTraces = openExecutionTraces(
+      join(baseDir, "execution-traces.db"),
+    );
+    const burstIds: string[] = [];
+    try {
+      for (let index = 0; index < 53; index++) {
+        const entry = burstTraces.appendNext(backgroundScope, {
+          tool: burst.subscriptionSettings.tool,
+          outcome: "returned",
+          classification: "INTERNAL",
+        });
+        assert(entry);
+        burstIds.push(entry.id);
+      }
+    } finally {
+      burstTraces.close();
+    }
+    scheduler.start();
+    await manage({ action: "agent_event_subscriptions" });
+    assertEquals(messages.length, 6);
+    for (const receipt of burstIds) assertStringIncludes(messages[5], receipt);
+    scheduler.stop();
+    scheduler.start();
+    await manage({ action: "agent_event_subscriptions" });
+    assertEquals(messages.length, 6);
   } finally {
     scheduler.stop();
     socket?.close();

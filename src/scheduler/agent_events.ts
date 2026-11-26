@@ -321,6 +321,13 @@ export function openAgentEventSchedule(path: string, now = Date.now) {
       db.prepare(
         "SELECT version,spec FROM agent_event_subscriptions WHERE spec != 'null' ORDER BY id",
       ).all().map(decode),
+    earliestSubscriptionRegistration: () => {
+      const registeredAt = db.prepare(`
+        SELECT MIN(registered_at) AS at FROM agent_event_subscriptions
+        WHERE json_extract(spec, '$.enabled') = 1
+      `).get()?.at;
+      return typeof registeredAt === "number" ? registeredAt : undefined;
+    },
     deliveries: () =>
       db.prepare(
         "SELECT id,subscription,version,agent,state FROM agent_event_deliveries ORDER BY rowid DESC LIMIT 20",

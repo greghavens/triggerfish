@@ -1766,6 +1766,7 @@ export function openExecutionTraces(path: string, now = Date.now) {
       approvedResults = false,
       ownerSessionId,
       backgroundOwner,
+      recordedSince,
     }: {
       readonly query: string;
       readonly ceiling: ClassificationLevel;
@@ -1777,6 +1778,7 @@ export function openExecutionTraces(path: string, now = Date.now) {
       readonly ownerSessionId?: string;
       /** Trusted owner of background executions; null excludes owner-bound runs. */
       readonly backgroundOwner?: string | null;
+      readonly recordedSince?: number;
     }) {
       const queryPattern = approvedResults
         ? /^[A-Za-z0-9_.:/-]{1,128}$/
@@ -1784,6 +1786,8 @@ export function openExecutionTraces(path: string, now = Date.now) {
       if (
         typeof query !== "string" || !queryPattern.test(query) ||
         !levelOf(ceiling) || !pageSize(limit) ||
+        (recordedSince !== undefined &&
+          (!Number.isSafeInteger(recordedSince) || recordedSince < 0)) ||
         (role !== undefined && !roleOf(role)) ||
         (runId !== undefined && (!role || !reference(runId))) ||
         (role === "owner_chat"
@@ -1791,10 +1795,16 @@ export function openExecutionTraces(path: string, now = Date.now) {
           : ownerSessionId !== undefined)
       ) return;
       const term = query.toLowerCase();
-      const matchStep = approvedResults
+      const matchTool = approvedResults
         ? "step.outcome = 'returned' AND step.tool IN ('github_actions', 'github_repos', 'github_pulls')"
         : "(instr(lower(step.tool), ?) > 0 OR step.outcome = ?)";
-      const matchArgs = approvedResults ? [] : [term, term];
+      const matchStep = recordedSince === undefined
+        ? matchTool
+        : `${matchTool} AND step.recordedAt >= ?`;
+      const matchArgs = [
+        ...(approvedResults ? [] : [term, term]),
+        ...(recordedSince === undefined ? [] : [recordedSince]),
+      ];
       const filter = hashId("execution-trace-search", [
         role ?? null,
         runId ?? null,
@@ -1802,6 +1812,9 @@ export function openExecutionTraces(path: string, now = Date.now) {
         ceiling,
         ...(approvedResults ? ["approved-results"] : []),
         ...(ownerSessionId ? ["owner-session", ownerSessionId] : []),
+        ...(recordedSince === undefined
+          ? []
+          : ["recorded-since", recordedSince]),
         ...(backgroundOwner !== undefined
           ? ["background-owner", backgroundOwner]
           : []),
