@@ -1,4 +1,5 @@
 /** Exact Sentinel case adapter for authenticated operator run control. */
+import type { SelectedModelProfile } from "../core/model_profile_selection.ts";
 import type {
   OperatorRunLinkInput,
   OperatorRunProvider,
@@ -15,6 +16,7 @@ import {
   readSentinelAssessment,
   readSentinelAssessmentRevision,
   readSentinelCaseStatus,
+  readSentinelModelProfileForRevision,
   readSentinelRunTimeoutForRevision,
   resumeSentinelAssessment,
   startSentinelAssessment,
@@ -38,6 +40,7 @@ export function createOperatorSentinelRuns(
     runId: string,
   ): OperatorRunSummary | undefined;
   publishedStartDigest(ref: OperatorRunRef): string | undefined;
+  modelProfile(ref: OperatorRunRef): SelectedModelProfile | undefined;
   matchesStartTimeout(ref: OperatorRunRef, timeoutSeconds?: number): boolean;
   startLinked(
     ref: OperatorRunRef,
@@ -46,6 +49,7 @@ export function createOperatorSentinelRuns(
       input: Omit<OperatorRunLinkInput, "right">;
       graphDigest: string;
       timeoutSeconds?: number;
+      modelProfile?: SelectedModelProfile;
     },
   ): OperatorRunSummary | undefined;
   workerControl(
@@ -119,11 +123,16 @@ export function createOperatorSentinelRuns(
       path,
       publicRef.revision,
     );
+    const modelProfile = readSentinelModelProfileForRevision(
+      path,
+      publicRef.revision,
+    );
     return {
       ...summary,
       details: {
         runId: state.plan?.runId ?? null,
         adaptiveRevision: adaptive?.revision ?? null,
+        ...(modelProfile && { modelProfile }),
         ...(publicRef.revision === current.revision &&
           state.plan?.timeoutSeconds !== undefined && {
           timeoutSeconds: state.plan.timeoutSeconds,
@@ -201,6 +210,12 @@ export function createOperatorSentinelRuns(
         readSentinelCaseStatus(path)
       ) return;
       return publishedSentinelGraphDigest(path);
+    },
+    modelProfile(ref) {
+      const path = pathFor(ref);
+      return path && ref.revision !== undefined
+        ? readSentinelModelProfileForRevision(path, ref.revision)
+        : undefined;
     },
     matchesStartTimeout(ref, timeoutSeconds) {
       const path = pathFor(ref);

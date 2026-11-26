@@ -108,6 +108,10 @@ import {
 } from "./sentinel_execution_rechecks.ts";
 import { createHash } from "node:crypto";
 import type { EffectiveModelProfile } from "../agent/llm.ts";
+import {
+  isModelProfileName,
+  type SelectedModelProfile,
+} from "../core/model_profile_selection.ts";
 import type { RecoveryToolCall } from "../core/types/orchestrator.ts";
 import {
   canFlowTo,
@@ -637,6 +641,11 @@ export const operatorRunTool: ToolDefinition = {
     timeoutSeconds: {
       type: "integer",
       description: "Optional wall-clock limit for a new linked Sentinel run",
+    },
+    modelProfile: {
+      type: "string",
+      description:
+        "Permitted provider name for a linked Sentinel run. Omit to inherit the parent run selection.",
     },
     targetRevision: {
       type: "integer",
@@ -1881,6 +1890,7 @@ export function createOperatorRunToolExecutor(options: {
   readonly profiles?: (
     ceiling: ClassificationLevel,
   ) => readonly EffectiveModelProfile[];
+  readonly sentinelProfiles?: () => readonly SelectedModelProfile[];
 }): OperatorRunToolExecutor {
   const providers = {
     sentinel: createOperatorSentinelRuns(
@@ -2318,7 +2328,13 @@ export function createOperatorRunToolExecutor(options: {
           maxClassification(highest, profile.classification),
         "INTERNAL",
       );
-      return safeProjection({ profiles }, classification);
+      const sentinelProfiles = canFlowTo("INTERNAL", ceiling)
+        ? options.sentinelProfiles?.().slice(0, 10)
+        : undefined;
+      return safeProjection({
+        profiles,
+        ...(sentinelProfiles?.length && { sentinelProfiles }),
+      }, classification);
     }
     const linkPath = join(options.baseDir, "operator-run-links.db");
     const linkScope = "workspace-operator";
@@ -7836,7 +7852,13 @@ export function createOperatorRunToolExecutor(options: {
         return run ? safeProjection({ run }) : unavailable;
       }
       if (action === "spawn") {
-        const { targetKind, targetId, requestId, timeoutSeconds } = args;
+        const {
+          targetKind,
+          targetId,
+          requestId,
+          timeoutSeconds,
+          modelProfile: namedProfile,
+        } = args;
         const workflows = options.workflows;
         const ceiling = context?.ceiling ?? "INTERNAL";
         if (
@@ -7854,8 +7876,11 @@ export function createOperatorRunToolExecutor(options: {
               "targetId",
               "requestId",
               "timeoutSeconds",
+              "modelProfile",
             ].includes(key)
           ) ||
+          (namedProfile !== undefined &&
+            (targetKind !== "sentinel" || !isModelProfileName(namedProfile))) ||
           (timeoutSeconds !== undefined &&
             (targetKind !== "sentinel" || typeof timeoutSeconds !== "number" ||
               !Number.isSafeInteger(timeoutSeconds) || timeoutSeconds < 1 ||
@@ -7867,6 +7892,25 @@ export function createOperatorRunToolExecutor(options: {
         ) return unavailable;
         const parent = (await controller.inspect(ref))?.ref;
         if (!parent) return unavailable;
+        const inheritedProfile =
+          targetKind === "sentinel" && namedProfile === undefined &&
+            parent.kind === "sentinel"
+            ? providers.sentinel.modelProfile(parent)
+            : undefined;
+        const selectableProfile = () =>
+          options.sentinelProfiles?.().find(
+            (profile) =>
+              namedProfile !== undefined
+                ? profile.provider === namedProfile
+                : isDeepStrictEqual(profile, inheritedProfile),
+          );
+        const modelProfile = selectableProfile();
+        if (
+          (namedProfile !== undefined || inheritedProfile !== undefined) &&
+          !modelProfile
+        ) {
+          return unavailable;
+        }
         const parentScope = backgroundRole &&
           readBackgroundTrace(backgroundRole, parent.id)?.scope;
         if (backgroundRole && !parentScope) return unavailable;
@@ -7891,7 +7935,11 @@ export function createOperatorRunToolExecutor(options: {
             if (
               link.origin !== "spawn" || link.requestId !== request ||
               other.id !== targetId || other.revision === undefined ||
-              !providers.sentinel.matchesStartTimeout(other, timeoutSeconds)
+              !providers.sentinel.matchesStartTimeout(other, timeoutSeconds) ||
+              !isDeepStrictEqual(
+                providers.sentinel.modelProfile(other),
+                modelProfile,
+              )
             ) return unavailable;
             const child = await controller.inspect(other);
             return child ? safeProjection({ run: child, link }) : unavailable;
@@ -7920,12 +7968,15 @@ export function createOperatorRunToolExecutor(options: {
                 requestId: request,
                 ...(graphDigest && { graphDigest }),
                 ...(timeoutSeconds !== undefined && { timeoutSeconds }),
+                ...(modelProfile && { modelProfile }),
               })
             }`,
           )
         ) return "Error: The operator declined the run action.";
         if (
-          !await controller.inspect(parent) || (backgroundRole &&
+          !await controller.inspect(parent) ||
+          !isDeepStrictEqual(selectableProfile(), modelProfile) ||
+          (backgroundRole &&
             !isDeepStrictEqual(
               readBackgroundTrace(backgroundRole, parent.id)?.scope,
               parentScope,
@@ -7946,6 +7997,7 @@ export function createOperatorRunToolExecutor(options: {
               ...link,
               graphDigest,
               timeoutSeconds,
+              modelProfile,
             });
           } else {
             workflows?.start(target.id, ceiling, childRequest, link);

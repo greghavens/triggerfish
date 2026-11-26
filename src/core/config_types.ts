@@ -7,6 +7,7 @@
  * @module
  */
 
+import type { ModelProfileAllowlists } from "./model_profile_selection.ts";
 import type { DelegatedGoalConfig } from "./delegated_goal_config.ts";
 
 export const sentinelOutputLanguages = ["en", "es", "ko", "zh", "ja"] as const;
@@ -288,6 +289,7 @@ export interface TriggerFishConfig {
     readonly output_language?: SentinelOutputLanguage;
     readonly model_worker_limit?: number;
     readonly planner_heartbeat_seconds?: number;
+    readonly model_profile_allowlists?: ModelProfileAllowlists;
     readonly capture_origins?: readonly string[];
     readonly scheduled_observation_reads?:
       readonly SentinelScheduledObservationRead[];

@@ -58,6 +58,14 @@ enabled. After a planning round settles, the planner checks the same case
 and evidence again at the next interval if no new input has triggered a
 round. The saved round history preserves the interval across gateway
 restarts. Paused, stopped, and completed assessments skip idle rounds.
+To make an existing provider selectable for linked assessments, list its
+name in `sentinel.model_profile_allowlists.INTERNAL` (for example,
+`INTERNAL: [ollama]`). The owner tool lists permitted choices with
+`operator_runs profiles`. Pass the provider name as `modelProfile` when
+requesting a linked Sentinel run. Omit it to inherit the exact parent
+selection, or use the standard classification route when the parent had
+no explicit selection. Sentinel planner and worker turns use the approved
+selection while its provider, model, and current grant still match.
 Sentinel workers use an allowlist of read-only evidence tools. This registry
 excludes HTTP clients, shells, target connections, and credential tools.
 Background workers read their assigned case and evidence revision. Shared

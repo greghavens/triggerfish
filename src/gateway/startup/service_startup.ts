@@ -40,6 +40,7 @@ import type { buildSchedulerConfig } from "./factory/scheduler_config.ts";
 import { createTidePoolTools } from "../../tools/tidepool/mod.ts";
 import { createChatSession } from "../chat.ts";
 import { createSentinelSubagent } from "../sentinel_agent.ts";
+import { sentinelAssessmentModelRouting } from "../sentinel_model_routing.ts";
 import {
   readSentinelSharedAssetDiscoveries,
   submitSentinelAssetDiscovery,
@@ -126,6 +127,12 @@ export function buildMainChatSession(
         bootstrap.config.web?.domains?.sentinel_containment === true,
       profiles: (ceiling) =>
         listEffectiveModelProfiles(toolInfra.registry, ceiling),
+      sentinelProfiles: bootstrap.config.sentinel?.allow_model_access === true
+        ? sentinelAssessmentModelRouting(
+          toolInfra.registry,
+          bootstrap.config.sentinel.model_profile_allowlists,
+        ).list
+        : undefined,
     }),
     runTeamRecoveryCommand: toolInfra.runTeamRecoveryCommand,
     runSubagentRecoveryCommand: buildOwnerSubagentRecoveryCommand(
@@ -457,6 +464,10 @@ export async function startServicesAndChannels(
       bootstrap.config,
       toolInfra.mainKeychain,
     );
+  const modelRouting = sentinelAssessmentModelRouting(
+    toolInfra.registry,
+    bootstrap.config.sentinel?.model_profile_allowlists,
+  );
   const workerFactory = bootstrap.config.sentinel?.allow_model_access === true
     ? (casePath: string) =>
     (
@@ -466,7 +477,7 @@ export async function startServicesAndChannels(
       role?: "planner",
     ) =>
       createSentinelSubagent({
-        providerRegistry: toolInfra.registry,
+        ...modelRouting.workerOptions(state.plan.modelProfile),
         hookRunner: toolInfra.hookRunner,
         snapshotPath: casePath,
         sharedInventoryBaseDir: bootstrap.baseDir,
@@ -577,7 +588,6 @@ export async function startServicesAndChannels(
             bootstrap.log.warn("Sentinel model usage could not be recorded");
           }
         },
-        allowModelAccess: true,
         outputLanguage: bootstrap.config.sentinel?.output_language,
         readOutputLanguage: () =>
           readSentinelModelSettings(casePath)?.outputLanguage,

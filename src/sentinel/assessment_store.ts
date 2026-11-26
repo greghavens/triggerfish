@@ -1,4 +1,8 @@
 import {
+  isSelectedModelProfile,
+  type SelectedModelProfile,
+} from "../core/model_profile_selection.ts";
+import {
   parseSavedPlannerProvenancePath,
   readSavedSentinelProvenanceNode,
   readSavedSentinelProvenanceSearch,
@@ -83,6 +87,7 @@ export type AssessmentPlan =
     readonly runId?: string;
     readonly timeoutSeconds?: number;
     readonly deadlineAt?: number;
+    readonly modelProfile?: SelectedModelProfile;
     readonly formalGoals?: readonly SentinelFormalGoal[];
     readonly activeFormalGoalIds?: readonly string[];
     readonly completedFormalGoalIds?: readonly string[];
@@ -694,22 +699,32 @@ function saveAssessmentRunRevision(
   revision: number,
   runId: string | undefined,
   timeoutSeconds?: number,
+  modelProfile?: SelectedModelProfile,
 ) {
   if (!runId) return;
   db.exec(`CREATE TABLE IF NOT EXISTS assessment_run_revisions (
-    revision INTEGER PRIMARY KEY, runId TEXT NOT NULL, timeoutSeconds INTEGER
+    revision INTEGER PRIMARY KEY, runId TEXT NOT NULL, timeoutSeconds INTEGER, modelProfile TEXT
   )`);
-  if (
-    !db.prepare("PRAGMA table_info(assessment_run_revisions)").all()
-      .some(({ name }) => name === "timeoutSeconds")
-  ) {
+  const columns = db.prepare("PRAGMA table_info(assessment_run_revisions)")
+    .all().map(({ name }) => name);
+  if (!columns.includes("timeoutSeconds")) {
     db.exec(
       "ALTER TABLE assessment_run_revisions ADD COLUMN timeoutSeconds INTEGER",
     );
   }
+  if (!columns.includes("modelProfile")) {
+    db.exec(
+      "ALTER TABLE assessment_run_revisions ADD COLUMN modelProfile TEXT",
+    );
+  }
   db.prepare(
-    "INSERT OR IGNORE INTO assessment_run_revisions (revision, runId, timeoutSeconds) VALUES (?, ?, ?)",
-  ).run(revision, runId, timeoutSeconds ?? null);
+    "INSERT OR IGNORE INTO assessment_run_revisions (revision, runId, timeoutSeconds, modelProfile) VALUES (?, ?, ?, ?)",
+  ).run(
+    revision,
+    runId,
+    timeoutSeconds ?? null,
+    modelProfile ? JSON.stringify(modelProfile) : null,
+  );
 }
 
 function pruneAssessmentRevisions(db: DatabaseSync, through: number) {
@@ -1145,7 +1160,13 @@ function refresh(
     updatedAt,
     result,
   );
-  saveAssessmentRunRevision(db, revision, plan.runId, plan.timeoutSeconds);
+  saveAssessmentRunRevision(
+    db,
+    revision,
+    plan.runId,
+    plan.timeoutSeconds,
+    plan.modelProfile,
+  );
   saveFormalGoalHistory(db, revision, plan);
   if (
     prior && incidentCandidateCount(assessment) > incidentCandidateCount(prior)
@@ -1240,13 +1261,20 @@ export function startSentinelAssessment(
     caseId: string;
     graphDigest: string;
     timeoutSeconds?: number;
+    modelProfile?: SelectedModelProfile;
   },
 ): StoredAssessment {
   if (
     plan.formalGoals !== undefined || plan.activeFormalGoalIds !== undefined ||
     plan.completedFormalGoalIds !== undefined
   ) throw new Error("Formal Sentinel goals require an approved goal proposal");
-  const { timeoutSeconds } = linkedStart ?? {};
+  const { timeoutSeconds, modelProfile } = linkedStart ?? {};
+  if (
+    plan.modelProfile !== undefined ||
+    (modelProfile !== undefined && !isSelectedModelProfile(modelProfile))
+  ) {
+    throw new Error("Invalid Sentinel assessment model profile");
+  }
   if (
     timeoutSeconds !== undefined &&
     (!Number.isSafeInteger(timeoutSeconds) || timeoutSeconds < 1 ||
@@ -1282,6 +1310,7 @@ export function startSentinelAssessment(
           const asJson = JSON.stringify({
             ...settings,
             runId: crypto.randomUUID(),
+            ...(modelProfile && { modelProfile }),
             ...(timeoutSeconds !== undefined && {
               timeoutSeconds,
               deadlineAt: startedAt + timeoutSeconds * 1000,
@@ -2156,6 +2185,40 @@ export function readSentinelRunIdForRevision(
     return typeof runId === "string" && constraintUuid.test(runId)
       ? runId
       : undefined;
+  } finally {
+    db.close();
+  }
+}
+
+/** Reopen the immutable selected model for an exact saved revision. */
+export function readSentinelModelProfileForRevision(
+  path: string,
+  revision: number,
+): SelectedModelProfile | undefined {
+  const db = openStore(path, false);
+  if (!db) return;
+  try {
+    const current = getRow(db);
+    let profile: unknown;
+    if (current?.revision === revision) {
+      profile = (JSON.parse(current.plan) as AssessmentPlan).modelProfile;
+    } else if (
+      hasTable(db, "assessment_run_revisions") &&
+      db.prepare("PRAGMA table_info(assessment_run_revisions)").all()
+        .some(({ name }) => name === "modelProfile")
+    ) {
+      const encoded = db.prepare(
+        "SELECT modelProfile FROM assessment_run_revisions WHERE revision = ?",
+      ).get(revision)?.modelProfile;
+      profile = typeof encoded === "string"
+        ? JSON.parse(encoded)
+        : encoded ?? undefined;
+    }
+    if (profile === undefined) return;
+    if (!isSelectedModelProfile(profile)) {
+      throw new Error("Invalid saved Sentinel assessment model profile");
+    }
+    return profile;
   } finally {
     db.close();
   }

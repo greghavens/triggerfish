@@ -7,6 +7,7 @@
  */
 
 import { parse as parseYaml } from "@std/yaml";
+import { isModelProfileName } from "./model_profile_selection.ts";
 import { resolveConfigSecrets } from "./secrets/resolver.ts";
 import type { SecretStore } from "./secrets/keychain/keychain.ts";
 
@@ -127,6 +128,24 @@ export function enforceConfig(
       ok: false,
       error:
         "sentinel.planner_heartbeat_seconds must be an integer from 600 to 86400",
+    };
+  }
+  const modelAllowlists = sentinel?.model_profile_allowlists;
+  if (
+    modelAllowlists !== undefined &&
+    (!modelAllowlists || typeof modelAllowlists !== "object" ||
+      Array.isArray(modelAllowlists) ||
+      Object.entries(modelAllowlists).some(([level, providers]) =>
+        !["PUBLIC", "INTERNAL", "CONFIDENTIAL", "RESTRICTED"].includes(level) ||
+        !Array.isArray(providers) || providers.length > 10 ||
+        !providers.every(isModelProfileName) ||
+        new Set(providers).size !== providers.length
+      ))
+  ) {
+    return {
+      ok: false,
+      error:
+        "sentinel.model_profile_allowlists must contain unique provider names by classification",
     };
   }
   const workflowReads = sentinel?.github_workflow_reads;

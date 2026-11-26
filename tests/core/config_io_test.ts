@@ -232,3 +232,25 @@ Deno.test("Sentinel validates the opt-in idle planner heartbeat interval", () =>
     );
   }
 });
+
+Deno.test("Sentinel validates named model profile grants by data classification", () => {
+  const models = { primary: "test-model" };
+  const valid = { PUBLIC: ["public"], INTERNAL: ["local", "review"] };
+  assertEquals(
+    enforceConfig({ models, sentinel: { model_profile_allowlists: valid } }).ok,
+    true,
+  );
+  for (
+    const model_profile_allowlists of [
+      { internal: ["review"] },
+      { INTERNAL: ["review", "review"] },
+      { INTERNAL: "review" },
+      { INTERNAL: ["external/provider"] },
+    ]
+  ) {
+    assertEquals(
+      enforceConfig({ models, sentinel: { model_profile_allowlists } }).ok,
+      false,
+    );
+  }
+});

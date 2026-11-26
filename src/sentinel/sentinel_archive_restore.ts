@@ -1,3 +1,4 @@
+import { isSelectedModelProfile } from "../core/model_profile_selection.ts";
 import {
   decodeSentinelToolDecisions,
   sentinelArchivedToolDecisionsFile,
@@ -327,7 +328,12 @@ function restoreAssessment(
         "Sentinel archive does not match the exact stopped case run",
       );
     }
-    const { timeoutSeconds, deadlineAt } = object(JSON.parse(row.plan));
+    const { timeoutSeconds, deadlineAt, modelProfile } = object(
+      JSON.parse(row.plan),
+    );
+    if (modelProfile !== undefined && !isSelectedModelProfile(modelProfile)) {
+      throw new Error("Invalid archived Sentinel assessment model profile");
+    }
     if (
       (timeoutSeconds !== undefined || deadlineAt !== undefined ||
         row.active === SENTINEL_ASSESSMENT_TIMED_OUT) &&

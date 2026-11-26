@@ -18,7 +18,11 @@ import {
 import { createSentinelSubagent } from "../../src/gateway/sentinel_agent.ts";
 import type { BootstrapResult } from "../../src/gateway/startup/bootstrap.ts";
 import { createTidepoolSentinelHandler } from "../../src/gateway/startup/services/tidepool_sentinel.ts";
-import { readSentinelAssessment } from "../../src/sentinel/assessment_store.ts";
+import {
+  readSentinelAssessment,
+  refreshSentinelAssessment,
+} from "../../src/sentinel/assessment_store.ts";
+import { sentinelAssessmentModelRouting } from "../../src/gateway/sentinel_model_routing.ts";
 import { resolveSentinelCasePath } from "../../src/sentinel/cases.ts";
 import { routeHostRequest } from "../../src/tools/tidepool/host/host_server.ts";
 import type { A2UIHostState } from "../../src/tools/tidepool/host/host_types.ts";
@@ -128,6 +132,9 @@ async function withOwnerControl(
     request: (args: Record<string, unknown>) => Promise<string>,
     approvals: string[],
   ) => Promise<void>,
+  sentinelProfiles?: Parameters<
+    typeof createOperatorRunToolExecutor
+  >[0]["sentinelProfiles"],
 ) {
   const approvals: string[] = [];
   const providers = createProviderRegistry();
@@ -195,6 +202,7 @@ async function withOwnerControl(
     },
     operatorRunExecutor: createOperatorRunToolExecutor({
       baseDir,
+      sentinelProfiles,
       confirm(message) {
         approvals.push(message);
         return Promise.resolve(true);
@@ -735,6 +743,136 @@ Deno.test("An enabled idle planner heartbeat resumes from durable case history a
   } finally {
     planner.stop();
     await until(() => !planner.hasInFlightWork());
+    await Deno.remove(baseDir, { recursive: true });
+  }
+});
+
+Deno.test("Owner gateway selects a permitted Sentinel model for a child and omission inherits it", async () => {
+  const baseDir = await Deno.makeTempDir();
+  const providerRegistry = createProviderRegistry();
+  const calls: string[] = [];
+  for (const provider of ["default", "review", "public-only"]) {
+    providerRegistry.register({
+      name: provider,
+      model: provider + "-model",
+      supportsStreaming: false,
+      complete() {
+        calls.push(provider);
+        return Promise.resolve({
+          content: "[]",
+          usage: { inputTokens: 1, outputTokens: 1 },
+          toolCalls: [],
+        });
+      },
+    });
+  }
+  providerRegistry.setDefault("default");
+  const allowed = ["review"];
+  const routing = sentinelAssessmentModelRouting(providerRegistry, {
+    PUBLIC: ["public-only"],
+    INTERNAL: allowed,
+  });
+  const hookRunner: HookRunner = {
+    evaluateHook: () =>
+      Promise.resolve({
+        allowed: true,
+        action: "ALLOW",
+        ruleId: null,
+        duration: 0,
+      }),
+  };
+  const planners: ReturnType<typeof createSentinelModelPlanner>[] = [];
+  const pathFor = (id: string) => resolveSentinelCasePath(baseDir, id);
+  try {
+    for (const id of ["main", "selected", "inherited", "denied", "default"]) {
+      const path = pathFor(id);
+      await Deno.mkdir(dirname(path), { recursive: true });
+      await Deno.writeTextFile(
+        path,
+        JSON.stringify({ version: 1, nodes: [], edges: [] }),
+      );
+    }
+    await withTidepoolSocket(baseDir, async (request) => {
+      assertEquals((await request("start", {})).type, "sentinel_state");
+    });
+    const source = readSentinelAssessment(pathFor("main"));
+    assert(source);
+    const root = { kind: "sentinel", id: "main", revision: source.revision };
+    const profile = { provider: "review", model: "review-model" };
+    await withOwnerControl(baseDir, async (request, approvals) => {
+      const listed = JSON.parse(await request({ action: "profiles" }));
+      assertEquals(listed.sentinelProfiles, [profile]);
+      const denied = await request({
+        action: "spawn",
+        ...root,
+        targetKind: "sentinel",
+        targetId: "denied",
+        requestId: crypto.randomUUID(),
+        modelProfile: "public-only",
+      });
+      assert(denied.startsWith("Error:"));
+      assertEquals(approvals.length, 0);
+      assertEquals(readSentinelAssessment(pathFor("denied")), undefined);
+
+      const proposed = {
+        action: "spawn",
+        ...root,
+        targetKind: "sentinel",
+        targetId: "selected",
+        requestId: crypto.randomUUID(),
+        modelProfile: "review",
+      };
+      const selected = JSON.parse(await request(proposed));
+      assertEquals(selected.run.details.modelProfile, profile);
+      assert(approvals[0].includes(JSON.stringify(profile)));
+      assertEquals(JSON.parse(await request(proposed)), selected);
+      assertEquals(approvals.length, 1);
+      const inherited = JSON.parse(
+        await request({
+          action: "spawn",
+          ...selected.run.ref,
+          targetKind: "sentinel",
+          targetId: "inherited",
+          requestId: crypto.randomUUID(),
+        }),
+      );
+      assertEquals(inherited.run.details.modelProfile, profile);
+      const fallback = JSON.parse(
+        await request({
+          action: "spawn",
+          ...root,
+          targetKind: "sentinel",
+          targetId: "default",
+          requestId: crypto.randomUUID(),
+        }),
+      );
+      assertEquals(fallback.run.details.modelProfile, undefined);
+      assertEquals(approvals.length, 3);
+    }, routing.list);
+    for (const id of ["selected", "inherited", "default"]) {
+      const path = pathFor(id);
+      const child = readSentinelAssessment(path);
+      assert(child);
+      const planner = createSentinelModelPlanner(
+        path,
+        (state) =>
+          createSentinelSubagent({
+            ...routing.workerOptions(state.plan.modelProfile),
+            snapshotPath: path,
+            assessmentRevision: state.revision,
+            plannerExecutionEvidenceRunId: state.plan.runId,
+            hookRunner,
+          }),
+      );
+      planners.push(planner);
+      planner.advance(child);
+      await until(() => !planner.hasInFlightWork());
+    }
+    assertEquals(calls, ["review", "review", "default"]);
+    allowed.length = 0;
+    assertFalse(routing.workerOptions(profile).allowModelAccess);
+  } finally {
+    for (const planner of planners) planner.stop();
     await Deno.remove(baseDir, { recursive: true });
   }
 });
