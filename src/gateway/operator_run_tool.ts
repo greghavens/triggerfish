@@ -116,6 +116,7 @@ import {
   isSentinelArchivedInventoryRead,
   isSentinelInventoryFindingRead,
   isSentinelInventoryNeighborhoodRead,
+  isSentinelPinnedSourceRead,
   normalizeSentinelGraphFactQuery,
   parseSentinelPinnedFindingRead,
   readSavedSentinelProvenanceNode,
@@ -289,6 +290,7 @@ import {
   readSentinelGraphOverview,
   readSentinelGraphProjection,
   readSentinelPrerequisiteWorkflowReceipt,
+  readSentinelSharedFindingLocalScope,
   reopenSentinelProvenanceNode,
   reopenSentinelProvenanceSearch,
   reopenSentinelWorkerTraceSearch,
@@ -1893,13 +1895,19 @@ async function reopenSentinelSourceResult(
   } else if (step.tool === "sentinel_shared_finding_source") {
     const finding = parseSentinelPinnedFindingRead(selector);
     if (!finding || step.target !== finding.finding) return;
+    const scope = readSentinelSharedFindingLocalScope(
+      path,
+      revision,
+      finding.asset,
+    );
+    if (!scope) return;
     const source = await readArchivedSentinelFindingSource(baseDir, {
       caseId: finding.sourceCase,
       assetId: finding.sourceAsset,
       findingId: finding.finding,
       snapshotDigest: finding.snapshotDigest,
     }, path);
-    if (source) {
+    if (source && scope.isCurrent()) {
       text = projectSentinelSharedFindingSource(source, revision, finding);
     }
   } else if (step.tool === "sentinel_shared_asset_links") {
@@ -7742,14 +7750,13 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
               if (
                 !text ||
                 !await authorize(scope, step.tool, args, text) ||
-                (step.tool === "sentinel_shared_topology_source" &&
-                  text !== await reopenSentinelSourceResult(
-                      options.baseDir,
-                      path,
-                      ref.revision,
-                      step,
-                      args,
-                    ))
+                text !== await reopenSentinelSourceResult(
+                    options.baseDir,
+                    path,
+                    ref.revision,
+                    step,
+                    args,
+                  )
               ) return unavailable;
               const current = readHistoricalAdaptiveSentinel(
                 path,
@@ -10186,7 +10193,7 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
             );
           }
           const sourceStillAuthorized = async () =>
-            includeResult || read.tool !== "sentinel_shared_topology_source" ||
+            includeResult || !isSentinelPinnedSourceRead(read.tool) ||
             !!await reopenSentinelSourceResult(
               options.baseDir,
               path,
@@ -10232,6 +10239,7 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
               "sentinel_worker_observation",
               "sentinel_shared_asset_links",
               "sentinel_shared_topology_source",
+              "sentinel_shared_finding_source",
               "sentinel_defense",
               "sentinel_incident_alerts",
               "sentinel_provenance_node",
@@ -11185,8 +11193,8 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
         if (!selector || !await authorize(scope, step.tool, selector)) {
           return unavailable;
         }
-        const topologySourceIsAuthorized = async () =>
-          step.tool !== "sentinel_shared_topology_source" ||
+        const pinnedSourceIsAuthorized = async () =>
+          !isSentinelPinnedSourceRead(step.tool) ||
           !!await reopenSentinelSourceResult(
             options.baseDir,
             path,
@@ -11194,7 +11202,7 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
             step,
             selector,
           );
-        if (!await topologySourceIsAuthorized()) return unavailable;
+        if (!await pinnedSourceIsAuthorized()) return unavailable;
         const discovery = step.sharedAssetDiscovery && task.nodeId &&
             args.assetId === undefined
           ? reopenCitedDiscovery(
@@ -11220,7 +11228,7 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
             selector,
             JSON.stringify(source),
           ) ||
-          !await topologySourceIsAuthorized() ||
+          !await pinnedSourceIsAuthorized() ||
           (discovery && !discovery.allowsEndpoints()) ||
           !isDeepStrictEqual(
             select(readHistoricalAdaptiveSentinel(path, ref.revision)),

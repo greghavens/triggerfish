@@ -4029,7 +4029,7 @@ async function readScopedSentinelAssessment(
   }
 }
 
-function readSharedTopologyScope(
+function readSharedEvidenceAssetScope(
   path: string,
   revision: number,
   snapshot: ReturnType<Graph["snapshot"]>,
@@ -4064,6 +4064,19 @@ function readSharedTopologyScope(
   };
 }
 
+/** Check the local asset cited by a retained shared finding before and after reading it. */
+export function readSentinelSharedFindingLocalScope(
+  path: string,
+  revision: number,
+  asset: string,
+) {
+  const snapshot = readSentinelAssessmentRevision(path, revision)?.result
+    .sharedGraph.snapshot;
+  if (!snapshot) return;
+  const scope = readSharedEvidenceAssetScope(path, revision, snapshot);
+  return scope?.allowsAsset(asset) ? scope : undefined;
+}
+
 /** Resolve an exact retained topology source only while both local endpoints are authorized. */
 export async function readScopedSentinelTopologySource(
   baseDir: string,
@@ -4075,7 +4088,7 @@ export async function readScopedSentinelTopologySource(
   const snapshot = readSentinelAssessmentRevision(path, revision)?.result
     .sharedGraph.snapshot;
   if (!snapshot) return;
-  const scope = readSharedTopologyScope(path, revision, snapshot);
+  const scope = readSharedEvidenceAssetScope(path, revision, snapshot);
   const relationship = indexSharedSentinelTopologyEvidence(snapshot).get(
     evidenceId,
   );
@@ -4102,7 +4115,7 @@ export function allowsRetainedSentinelSharedTopology(
   const snapshot = readSentinelAssessmentRevision(path, revision)?.result
     .sharedGraph.snapshot;
   if (!snapshot) return false;
-  const scope = readSharedTopologyScope(path, revision, snapshot);
+  const scope = readSharedEvidenceAssetScope(path, revision, snapshot);
   return !!scope?.allowsAsset(page.asset) &&
     page.links.every((link) =>
       typeof link?.from === "string" && typeof link.to === "string" &&
@@ -4131,7 +4144,7 @@ async function readScopedSentinelSharedTopology(
   const snapshot = readSentinelAssessmentRevision(path, revision)?.result
     .sharedGraph.snapshot;
   if (!snapshot) return unavailable;
-  const scope = readSharedTopologyScope(path, revision, snapshot);
+  const scope = readSharedEvidenceAssetScope(path, revision, snapshot);
   if (!scope?.allowsAsset(asset)) return unavailable;
   try {
     const { unavailable: sources, ...links } =
@@ -4811,7 +4824,7 @@ function createAgent(
             toolName === sentinelInventoryTool.name || provenanceRead ||
             inventoryGraphRead || toolName === "sentinel_worker_observation" ||
             toolName === SENTINEL_SHARED_ASSET_LINKS_READ ||
-            toolName === SENTINEL_PINNED_TOPOLOGY_READ ||
+            isSentinelPinnedSourceRead(toolName) ||
             isSentinelWorkerFindingTool(toolName) ||
             isSentinelGraphFactTool(toolName) ||
             toolName === proposeWorkerGoalTool.name ||
@@ -4961,11 +4974,14 @@ function createAgent(
             !fence.isCurrent()
           )
         ) return { ...result, allowed: false, action: "BLOCK" };
+        const pinnedSourceEvidence = isSentinelPinnedSourceRead(toolName) &&
+          typeof context.input.tool_response === "string" &&
+          context.input.tool_response.startsWith("{");
         if (
           result.allowed && name === "POST_TOOL_RESPONSE" &&
           (provenanceRead || digestRead || inventoryGraphRead ||
             toolName === SENTINEL_SHARED_ASSET_LINKS_READ ||
-            toolName === SENTINEL_PINNED_TOPOLOGY_READ ||
+            pinnedSourceEvidence ||
             toolName === SENTINEL_DEFENSE_READ ||
             toolName === SENTINEL_INCIDENT_ALERTS_READ) &&
           canReadPlannerCase && (!turn || !currentPlannerReceiptScope(turn))
@@ -4974,7 +4990,7 @@ function createAgent(
           result.allowed && name === "POST_TOOL_RESPONSE" &&
           (provenanceRead || inventoryGraphRead ||
             toolName === SENTINEL_SHARED_ASSET_LINKS_READ ||
-            toolName === SENTINEL_PINNED_TOPOLOGY_READ ||
+            pinnedSourceEvidence ||
             toolName === SENTINEL_DEFENSE_READ ||
             toolName === SENTINEL_INCIDENT_ALERTS_READ) &&
           options.assignedTaskLeaseToken !== undefined
@@ -5843,6 +5859,14 @@ function createAgent(
         if (canReadPlannerCase && !currentPlannerReceiptScope(turn, asset)) {
           return "Error: The local asset is unavailable to this planner.";
         }
+        const localScope = readSentinelSharedFindingLocalScope(
+          options.snapshotPath,
+          options.assessmentRevision,
+          asset,
+        );
+        if (!localScope) {
+          return "Error: The local asset is unavailable to this assignment.";
+        }
         try {
           const discovered = turn.sharedFindings.has(
             sharedFindingReference(
@@ -5916,6 +5940,7 @@ function createAgent(
           }
           turn.signal.throwIfAborted();
           if (
+            !localScope.isCurrent() ||
             (needsAssignment && !assignedPeerFinding(options, citation)) ||
             (canReadPlannerCase && !currentPlannerReceiptScope(turn, asset))
           ) {
@@ -5936,7 +5961,7 @@ function createAgent(
                 original,
                 turn.signal,
                 () =>
-                  active === turn &&
+                  active === turn && localScope.isCurrent() &&
                   (!needsAssignment ||
                     !!assignedPeerFinding(options, citation)) &&
                   (!canReadPlannerCase ||
@@ -5946,6 +5971,9 @@ function createAgent(
             ) {
               return "Error: The selected finding source is no longer authorized.";
             }
+          }
+          if (!localScope.isCurrent()) {
+            return "Error: The selected finding source is no longer authorized.";
           }
           return projectSentinelSharedFindingSource(
             sourceGraph,
@@ -6038,7 +6066,7 @@ function createAgent(
           const scoped = canReadPlannerCase || leased;
           const topologyScope =
             scoped && options.assessmentRevision !== undefined
-              ? readSharedTopologyScope(
+              ? readSharedEvidenceAssetScope(
                 options.snapshotPath,
                 options.assessmentRevision,
                 local,

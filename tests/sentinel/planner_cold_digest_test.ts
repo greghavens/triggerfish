@@ -2539,15 +2539,36 @@ Deno.test("Sentinel plans from an exact published case finding and keeps its evi
       },
     });
     registry.setDefault("published-finding-planner");
-    const makeAgent = () =>
+    let assignedRead = "";
+    const assignedProviders = createProviderRegistry();
+    assignedProviders.register({
+      name: "assigned-shared-finding",
+      supportsStreaming: false,
+      complete(messages) {
+        const result = messages.findLast(({ role }) => role === "tool");
+        if (!result) return Promise.resolve(completion("", sourceRead, exact));
+        assignedRead = String(result.content);
+        return Promise.resolve(
+          completion(
+            '{"summary":"Reviewed the exact published finding.","followUps":[]}',
+          ),
+        );
+      },
+    });
+    assignedProviders.setDefault("assigned-shared-finding");
+    const makeAgent = (_current = state, assignment?: string, token?: string) =>
       createSentinelSubagent({
         snapshotPath: path,
-        snapshotOverride: state.result?.sharedGraph.snapshot,
-        assessmentRevision: state.revision,
-        plannerExecutionEvidenceRunId: state.plan.runId,
+        snapshotOverride: _current.result?.sharedGraph.snapshot,
+        assessmentRevision: _current.revision,
+        plannerExecutionEvidenceRunId: assignment
+          ? undefined
+          : _current.plan.runId,
+        assignedTaskId: assignment,
+        assignedTaskLeaseToken: token,
         sharedInventoryBaseDir: directory,
         allowModelAccess: true,
-        providerRegistry: registry,
+        providerRegistry: assignment ? assignedProviders : registry,
         hookRunner: allowHooks,
       });
     planner = createSentinelModelPlanner(path, makeAgent);
@@ -2612,6 +2633,37 @@ Deno.test("Sentinel plans from an exact published case finding and keeps its evi
       reads?.some(({ tool }) => tool === sourceRead)
     );
     assert(round);
+    const findingTrace = {
+      ...ref,
+      action: "planner_reads",
+      plannerIdentity: round.identity,
+      attempt: round.attempt,
+      ordinal: (round.reads?.findLastIndex(({ tool }) =>
+        tool === sourceRead
+      ) ?? -1) + 1,
+      includeResult: true,
+    };
+    const workerDeadline = Date.now() + 3500;
+    let modelReview;
+    while (!modelReview && Date.now() < workerDeadline) {
+      advanceAdaptiveSentinel(path, state);
+      planner.advance(state);
+      modelReview = readAdaptiveSentinel(path, state)?.modelReviews.find(
+        ({ taskId }) => taskId === task.id,
+      );
+      if (!modelReview) await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    const findingStep = modelReview?.steps.findIndex(({ tool, outcome }) =>
+      tool === sourceRead && outcome === "returned"
+    );
+    assert(findingStep !== undefined && findingStep >= 0, assignedRead);
+    assertEquals(JSON.parse(assignedRead), JSON.parse(opened));
+    const workerFindingTrace = {
+      ...ref,
+      action: "worker_trace_result",
+      taskId: task.id,
+      stepIndices: [findingStep],
+    };
 
     const selectedCase = "selected-finding-source";
     const selectedPath = resolveSentinelCasePath(directory, selectedCase);
@@ -3199,6 +3251,74 @@ Deno.test("Sentinel plans from an exact published case finding and keeps its evi
         assert((await read(selection, true)).includes("unavailable"));
       }
     });
+    const sourceReference = {
+      sourceCase: source,
+      snapshotDigest: exact.snapshotDigest,
+      assetId: exact.sourceAsset,
+    };
+    const sourceFromPlanner = {
+      ...findingTrace,
+      includeResult: undefined,
+      ...sourceReference,
+    };
+    const sourceFromWorker = {
+      ...workerFindingTrace,
+      action: "worker_trace_source",
+      ...sourceReference,
+    };
+    await withArchivedPlannerRead(directory, async (read) => {
+      assertEquals(
+        JSON.parse(await read(workerFindingTrace)).result,
+        JSON.parse(assignedRead),
+      );
+      assertEquals(
+        JSON.parse(await read(sourceFromPlanner)).source.asset.id,
+        exact.sourceAsset,
+      );
+      assertEquals(
+        JSON.parse(await read(sourceFromWorker)).source.asset.id,
+        exact.sourceAsset,
+      );
+    });
+    let localScopeNarrowed = false;
+    await withArchivedPlannerRead(
+      directory,
+      async (read) => {
+        assertStringIncludes(await read(findingTrace), "unavailable");
+        assert(localScopeNarrowed);
+        for (
+          const selector of [
+            workerFindingTrace,
+            sourceFromPlanner,
+            sourceFromWorker,
+          ]
+        ) {
+          assertStringIncludes(await read(selector), "unavailable");
+        }
+      },
+      undefined,
+      undefined,
+      undefined,
+      false,
+      async (hook, input) => {
+        if (
+          !localScopeNarrowed && hook === "POST_TOOL_RESPONSE" &&
+          input.tool_name === sourceRead &&
+          String(input.tool_response).includes(exact.finding)
+        ) {
+          await Promise.resolve();
+          assert(recordSentinelOperatingConstraints(path, {
+            runId: state.plan.runId!,
+            evidenceRevision: state.revision,
+            expectedVersion: restoredPolicy.version,
+            requestId: crypto.randomUUID(),
+            operatorScope: "shared-finding-saved-scope-fixture",
+            constraints: { allowedAssetIds: [], deniedKinds: [] },
+          }));
+          localScopeNarrowed = true;
+        }
+      },
+    );
   } finally {
     selectedPlanner?.stop();
     planner?.stop();
