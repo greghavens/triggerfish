@@ -238,7 +238,7 @@ export function startSentinelAssessmentCoordinator(
     }
   }
 
-  let managedNotification: string | undefined;
+  let notifyingIncident = false;
   let notifyingFindings = false;
   function tick() {
     if (stopped) return;
@@ -308,27 +308,17 @@ export function startSentinelAssessmentCoordinator(
         ).catch(report);
       }
       const notifyManaged = options.notifyManagedIncidentIncrease;
-      const notificationKey = JSON.stringify([
-        state.plan.runId,
-        state.revision,
-      ]);
       if (
-        notifyManaged && caseId && state.plan.runId &&
-        notificationKey !== managedNotification
+        notifyManaged && caseId && state.plan.runId && !notifyingIncident
       ) {
-        managedNotification = notificationKey;
+        notifyingIncident = true;
         void notifyManaged({
           kind: "sentinel_incident_increase",
           caseId,
           runId: state.plan.runId,
           revision: state.revision,
-        }, () => !stopped && managedNotification === notificationKey)
-          .catch((error) => {
-            if (managedNotification === notificationKey) {
-              managedNotification = undefined;
-            }
-            report(error);
-          });
+        }, () => !stopped)
+          .catch(report).finally(() => notifyingIncident = false);
       }
       options.advanceAdaptive?.(state);
       if (active) {

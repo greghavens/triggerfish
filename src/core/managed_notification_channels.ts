@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from "node:util";
 import type { StorageProvider } from "./storage/provider.ts";
 import type { ClassificationLevel } from "./types/classification.ts";
 
@@ -83,6 +84,7 @@ interface ManagedNotificationAttempt {
 }
 
 export const maxManagedNotificationRetries = 3;
+const subscriptionRetryDelays = [5_000, 30_000] as const;
 
 export interface ManagedNotificationDelivery {
   readonly id: string;
@@ -91,6 +93,7 @@ export interface ManagedNotificationDelivery {
   readonly createdAt: string;
   readonly source?: ManagedNotificationSource;
   readonly state: DeliveryState;
+  readonly scheduledRetryAt?: number;
   readonly retries?: readonly ManagedNotificationAttempt[];
 }
 
@@ -98,7 +101,10 @@ const channelPrefix = "managed-notification-channel:";
 const deliveryPrefix = "managed-notification-delivery:";
 
 /** Durable channel versions and send claims, with only metadata in the ledger. */
-export function createManagedNotificationChannels(storage: StorageProvider) {
+export function createManagedNotificationChannels(
+  storage: StorageProvider,
+  now = Date.now,
+) {
   const compareAndSet = storage.compareAndSet?.bind(storage);
   if (!compareAndSet) {
     throw new Error("Notification administration requires atomic storage.");
@@ -156,6 +162,19 @@ export function createManagedNotificationChannels(storage: StorageProvider) {
         b.createdAt.localeCompare(a.createdAt) || a.id.localeCompare(b.id)
       );
     },
+    async dueFindingRetries(channel: ManagedNotificationChannel) {
+      if (channel.provider !== "feishu") return [];
+      const due = now();
+      return (await list<ManagedNotificationDelivery>(
+        deliveryPrefix + channel.id + ":",
+      )).flatMap(({ channelVersion, state, scheduledRetryAt, source }) =>
+        channelVersion === channel.version && state === "rate_limited" &&
+          scheduledRetryAt !== undefined && scheduledRetryAt <= due &&
+          source && source.kind !== "sentinel_incident_increase"
+          ? [source]
+          : []
+      );
+    },
     async delivery(channelId: string, id: string) {
       return await load<ManagedNotificationDelivery>(
         deliveryPrefix + channelId + ":" + id,
@@ -180,7 +199,16 @@ export function createManagedNotificationChannels(storage: StorageProvider) {
       const existing = raw === null
         ? undefined
         : JSON.parse(raw) as ManagedNotificationDelivery;
-      const retry = options?.retry;
+      const automatic = !options?.retry && options?.source &&
+        existing?.state === "rate_limited" &&
+        existing.scheduledRetryAt !== undefined &&
+        existing.scheduledRetryAt <= now() &&
+        isDeepStrictEqual(existing.source, options.source);
+      const expectedRetries = existing?.retries?.length ?? 0;
+      const retry = options?.retry ??
+        (automatic
+          ? { requestId: `scheduled:${expectedRetries + 1}`, expectedRetries }
+          : undefined);
       if (existing && existing.channelVersion !== channel.version) return;
       if (!retry && existing) return existing;
       if (retry) {
@@ -201,13 +229,18 @@ export function createManagedNotificationChannels(storage: StorageProvider) {
           latest.enabled && !latest.retired;
       };
       if (!await stillCurrent()) return;
-      const createdAt = new Date().toISOString();
+      const createdAt = new Date(now()).toISOString();
       const attempt = retry
         ? { requestId: retry.requestId, createdAt, state: "in_flight" as const }
         : undefined;
       const previous = existing?.retries ?? [];
       const claim: ManagedNotificationDelivery = existing && attempt
-        ? { ...existing, state: "in_flight", retries: [...previous, attempt] }
+        ? {
+          ...existing,
+          scheduledRetryAt: undefined,
+          state: "in_flight",
+          retries: [...previous, attempt],
+        }
         : {
           id,
           channelId: channel.id,
@@ -235,9 +268,15 @@ export function createManagedNotificationChannels(storage: StorageProvider) {
       } catch {
         // Once a transport starts, an exception cannot prove it did not send.
       }
+      const retryDelay = state === "rate_limited" && options?.source &&
+          !options.retry
+        ? subscriptionRetryDelays[previous.length + Number(!!attempt)]
+        : undefined;
       const result: ManagedNotificationDelivery = {
         ...claim,
         state,
+        ...(retryDelay !== undefined &&
+          { scheduledRetryAt: now() + retryDelay }),
         ...(attempt && { retries: [...previous, { ...attempt, state }] }),
       };
       await compareAndSet(key, claimed, JSON.stringify(result));

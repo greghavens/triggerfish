@@ -79,12 +79,14 @@ Deno.test("gateway reviews notification subscriptions and durably deduplicates s
         : [],
     ]),
   );
+  let deliveryClock = Date.now();
   let providerCode = 0;
   let providerHttpStatus = 200;
   const providerRequests: { url: URL; body: Record<string, unknown> }[] = [];
   let preDenied = false;
   let outputDenied = false;
   let denyIncident = true;
+  let denyAutomatic = false;
   let responseLost = false;
   let rotateDuringReview = false;
   let allowReview = true;
@@ -134,6 +136,8 @@ Deno.test("gateway reviews notification subscriptions and durably deduplicates s
           (hook === "PRE_TOOL_CALL" && preDenied) ||
           (hook === "PRE_OUTPUT" &&
             ((outputDenied && context.input.destination === origin) ||
+              (denyAutomatic && context.input.notification_channel_id ===
+                  "scheduled-feishu") ||
               (denyIncident &&
                 context.input.notification_channel_id ===
                   "blocked-subscription")))
@@ -153,7 +157,7 @@ Deno.test("gateway reviews notification subscriptions and durably deduplicates s
       },
     };
     channels = {
-      store: createManagedNotificationChannels(storage),
+      store: createManagedNotificationChannels(storage, () => deliveryClock),
       readSentinelFindingScope: (caseId) =>
         readSentinelFindingNotificationScope(baseDir, caseId),
       isCurrentSentinelFinding: (source) =>
@@ -877,6 +881,104 @@ Deno.test("gateway reviews notification subscriptions and durably deduplicates s
     assertEquals(providerRequests.length, requestsBeforeRetry + 1);
     assertEquals(await turn(retryRateLimit), retried);
     assertEquals(providerRequests.length, requestsBeforeRetry + 1);
+    const autoChannel = "scheduled-feishu";
+    const autoSetting = {
+      ...findingSubscription,
+      notificationChannelId: autoChannel,
+      notificationChannelSettings: {
+        ...findingSubscription.notificationChannelSettings,
+        provider: "feishu",
+        destinationOrigin: new URL(providerFixtures[1].url).origin,
+        endpointRef: "notification_feishu",
+      },
+    };
+    assertEquals(JSON.parse(await turn(autoSetting)).channel.version, 1);
+    const autoJournal = openSentinelWorkerFindingStore(path);
+    let autoReceipt: string;
+    try {
+      autoReceipt = autoJournal.recordFinding({
+        ...findingScope,
+        taskId: "scheduled-retry-assignment",
+        requestId: crypto.randomUUID(),
+      }).id;
+    } finally {
+      autoJournal.close();
+    }
+    const autoDelivery = async () => {
+      const listing = JSON.parse(
+        await turn({
+          action: "notification_deliveries",
+          notificationChannelId: autoChannel,
+        }),
+      ).deliveries;
+      assertEquals(listing.length, 1);
+      assertEquals(listing[0].source.receiptId, autoReceipt);
+      return listing[0];
+    };
+
+    const requestsBeforeAutomatic = providerRequests.length;
+    providerCode = 11232;
+    await tickFindingCoordinator(path);
+    assertEquals(providerRequests.length, requestsBeforeAutomatic + 1);
+    const initialDelivery = await autoDelivery();
+    assertEquals(initialDelivery.state, "rate_limited");
+    assertEquals(initialDelivery.scheduledRetryAt, deliveryClock + 5_000);
+
+    deliveryClock = initialDelivery.scheduledRetryAt - 1;
+    await disconnect();
+    await connect();
+    await tickFindingCoordinator(path);
+    assertEquals(providerRequests.length, requestsBeforeAutomatic + 1);
+    deliveryClock++;
+    await Promise.all([
+      tickFindingCoordinator(path),
+      tickFindingCoordinator(path),
+    ]);
+    assertEquals(providerRequests.length, requestsBeforeAutomatic + 2);
+    const firstRetry = await autoDelivery();
+    assertEquals(firstRetry.state, "rate_limited");
+    assertEquals(firstRetry.retries.length, 1);
+    assertEquals(firstRetry.scheduledRetryAt, deliveryClock + 30_000);
+
+    deliveryClock = firstRetry.scheduledRetryAt;
+    await tickFindingCoordinator(path);
+    assertEquals(providerRequests.length, requestsBeforeAutomatic + 3);
+    const exhausted = await autoDelivery();
+    assertEquals(exhausted.state, "rate_limited");
+    assertEquals(exhausted.retries.length, 2);
+    assertEquals(exhausted.scheduledRetryAt, undefined);
+    deliveryClock += 60_000;
+    await tickFindingCoordinator(path);
+    assertEquals(providerRequests.length, requestsBeforeAutomatic + 3);
+
+    const deniedJournal = openSentinelWorkerFindingStore(path);
+    let deniedReceipt: string;
+    try {
+      deniedReceipt = deniedJournal.recordFinding({
+        ...findingScope,
+        taskId: "scheduled-denial-assignment",
+        requestId: crypto.randomUUID(),
+      }).id;
+    } finally {
+      deniedJournal.close();
+    }
+    await tickFindingCoordinator(path);
+    assertEquals(providerRequests.length, requestsBeforeAutomatic + 4);
+    deliveryClock += 5_000;
+    denyAutomatic = true;
+    await tickFindingCoordinator(path);
+    assertEquals(providerRequests.length, requestsBeforeAutomatic + 4);
+    const deniedRetry = JSON.parse(
+      await turn({
+        action: "notification_delivery",
+        notificationChannelId: autoChannel,
+        notificationDeliveryId: deniedReceipt,
+      }),
+    ).delivery;
+    assertEquals(deniedRetry.state, "blocked");
+    assertEquals(deniedRetry.retries.length, 1);
+    assertEquals(deniedRetry.scheduledRetryAt, undefined);
+
     for (const key of await storage.list()) {
       const value = await storage.get(key);
       assert(!value?.includes("synthetic-dingtalk-token"));

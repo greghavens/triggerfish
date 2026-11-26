@@ -205,7 +205,15 @@ export function createSentinelFindingDelivery(
         ? previous.sequence
         : subscription.afterSequence;
       const events = findEvents(path, selected, after, 32);
-      for (const source of events) {
+      const due = (await channels.store.dueFindingRetries(channel)).filter(
+        (source) =>
+          matchesSentinelFindingSubscription(subscription, source) &&
+          isCurrentSentinelFindingNotification(baseDir, source),
+      ).slice(0, 5);
+      const candidateSources = new Map(
+        [...due, ...events].map((source) => [source.receiptId, source]),
+      );
+      for (const source of candidateSources.values()) {
         if (!coordinatorCurrent()) return;
         const isCurrent = () =>
           coordinatorCurrent() &&
@@ -241,8 +249,9 @@ export function createSentinelFindingDelivery(
             { source },
           );
         }
-        scanned.set(channel.id, { cursor, sequence: source.sequence });
       }
+      const last = events.at(-1);
+      if (last) scanned.set(channel.id, { cursor, sequence: last.sequence });
     }
   };
 }
