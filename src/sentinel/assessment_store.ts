@@ -34,6 +34,7 @@ import {
 } from "./worker_goal_recovery.ts";
 import {
   type OperatorRunLinkInput,
+  type OperatorRunRef,
   recordOperatorRunLink,
   withOperatorRunLinks,
 } from "../core/operator_runs.ts";
@@ -111,6 +112,9 @@ export type AssessmentPlan =
     readonly goal?: string;
     readonly runId?: string;
     readonly admissionAt?: number;
+    readonly runStartedAt?: number;
+    readonly runInactiveAt?: number;
+    readonly spawnParent?: OperatorRunRef;
     readonly timeoutSeconds?: number;
     readonly deadlineAt?: number;
     readonly modelProfile?: SelectedModelProfile;
@@ -1559,6 +1563,8 @@ export function startSentinelAssessment(
           const {
             timeoutSeconds: _timeout,
             deadlineAt: _deadline,
+            runInactiveAt: _inactive,
+            spawnParent: _parent,
             ...settings
           } = plan;
           const startedAt = Date.now();
@@ -1566,6 +1572,8 @@ export function startSentinelAssessment(
             ...settings,
             runId: crypto.randomUUID(),
             admissionAt: nextAssessmentAdmission(),
+            runStartedAt: startedAt,
+            ...(linkedStart && { spawnParent: linkedStart.input.left }),
             ...(modelProfile && { modelProfile }),
             ...(modelFallbackProfiles && { modelFallbackProfiles }),
             ...(linkedCaseSources && { linkedCaseSources }),
@@ -2230,6 +2238,7 @@ export function applySentinelFormalGoals(
         ...planChanges,
         goal: planChanges.goal ?? current.goal ?? goals[0].title,
         runId: current.runId ?? crypto.randomUUID(),
+        ...(mode === "start" && { runStartedAt: Date.now() }),
         ...(row?.active !== 1 && { admissionAt: nextAssessmentAdmission() }),
         formalGoals,
         activeFormalGoalIds,
@@ -3390,6 +3399,22 @@ export function completeSentinelAssessmentGoal(
   }
 }
 
+function markAssessmentInactive(
+  db: DatabaseSync,
+  row: AssessmentRow,
+  plan: AssessmentPlan,
+  active: 0 | 2,
+): boolean {
+  return db.prepare(
+    "UPDATE assessment SET active = ?, plan = ? WHERE id = 1 AND active = ?",
+  )
+    .run(
+      active,
+      JSON.stringify({ ...plan, runInactiveAt: Date.now() }),
+      row.active,
+    ).changes === 1;
+}
+
 export function stopSentinelAssessment(
   path: string,
   expected?: { revision: number; runId: string },
@@ -3397,26 +3422,17 @@ export function stopSentinelAssessment(
   const db = openStore(path, false);
   if (!db) return false;
   try {
-    if (expected) {
-      return transact(db, () => {
-        const row = getRow(db);
-        if (
-          !row || row.revision !== expected.revision ||
-          (JSON.parse(row.plan) as AssessmentPlan).runId !== expected.runId
-        ) return false;
-        if (row.active === 0) return true;
-        return db.prepare(
-          "UPDATE assessment SET active = 0 WHERE id = 1 AND active IN (1, 2)",
-        ).run().changes === 1;
-      });
-    }
     return transact(db, () => {
       const row = getRow(db);
-      if (row?.active !== 1 && row?.active !== 2) return false;
-      return Boolean(
-        db.prepare("UPDATE assessment SET active = 0 WHERE id = 1")
-          .run().changes,
-      );
+      if (!row) return false;
+      const plan = JSON.parse(row.plan) as AssessmentPlan;
+      if (
+        expected &&
+        (row.revision !== expected.revision || plan.runId !== expected.runId)
+      ) return false;
+      if (row.active === 0) return expected !== undefined;
+      if (row.active !== 1 && row.active !== 2) return false;
+      return markAssessmentInactive(db, row, plan, 0);
     });
   } finally {
     db.close();
@@ -3626,9 +3642,11 @@ export function pauseSentinelAssessment(
         (expectedRunId !== undefined &&
           (JSON.parse(row.plan) as AssessmentPlan).runId !== expectedRunId)
       ) return false;
-      return Boolean(
-        db.prepare("UPDATE assessment SET active = 2 WHERE id = 1")
-          .run().changes,
+      return markAssessmentInactive(
+        db,
+        row,
+        JSON.parse(row.plan) as AssessmentPlan,
+        2,
       );
     });
   } finally {
@@ -3666,7 +3684,7 @@ export function updateSentinelAssessmentGoal(
 }
 
 /** Read case lifecycle without loading retained evidence. */
-export function readSentinelCaseStatus(path: string) {
+export function readSentinelCaseStatus(path: string, includeDiscovery = false) {
   const db = openStore(path, false);
   if (!db) return undefined;
   try {
@@ -3677,9 +3695,43 @@ export function readSentinelCaseStatus(path: string) {
         | Pick<AssessmentRow, "plan" | "active" | "revision" | "updatedAt">
         | undefined;
     const saved = read();
-    const row = saved && (expireAssessmentRow(db, saved, Date.now()) ?? read());
+    const now = Date.now();
+    const row = saved && (expireAssessmentRow(db, saved, now) ?? read());
     if (!row) return undefined;
+    const plan = includeDiscovery
+      ? JSON.parse(row.plan) as AssessmentPlan
+      : undefined;
+    const end = row.active === 1
+      ? now
+      : row.active === 0 || row.active === 2
+      ? plan?.runInactiveAt
+      : Date.parse(row.updatedAt);
+    const start = plan?.runStartedAt;
+    const timed = start !== undefined && Number.isSafeInteger(start) &&
+      start >= 0 &&
+      end !== undefined && Number.isSafeInteger(end) && end >= start &&
+      end <= 8_640_000_000_000_000;
+    const configured = plan?.modelFallbackIndex
+      ? plan.modelFallbackProfiles?.[plan.modelFallbackIndex - 1]
+      : plan?.modelProfile;
     return {
+      ...(plan && {
+        discovery: {
+          runId: plan.runId,
+          goal: plan.goal,
+          modelProfile: configured,
+          spawnParent: plan.spawnParent,
+          ...(timed && {
+            startedAt: new Date(start).toISOString(),
+            ...(row.active !== 1 &&
+              { elapsedThrough: new Date(end).toISOString() }),
+            ...([0, 3, SENTINEL_ASSESSMENT_TIMED_OUT].includes(row.active) && {
+              completedAt: new Date(end).toISOString(),
+            }),
+            elapsedSeconds: Math.floor((end - start) / 1000),
+          }),
+        },
+      }),
       status: row.active === assessmentDeadlineReview
         ? "settling_timeout"
         : row.active === SENTINEL_ASSESSMENT_TIMED_OUT

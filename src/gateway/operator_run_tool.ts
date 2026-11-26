@@ -3093,31 +3093,93 @@ ${
         const filter = kind(args.kind);
         if (args.kind !== undefined && !filter) return unavailable;
         const listed = (await controller.list(filter)).slice(0, 20);
-        return safeProjection({
-          runs: canReadRunCategories
-            ? listed.map((run) => {
-              const { kind, id, revision } = run.ref;
-              const runId = kind === "workflow" && digestPattern.test(id)
-                ? id
-                : kind === "sentinel" && revision !== undefined
-                ? readSentinelRunIdForRevision(
-                  resolveSentinelCasePath(options.baseDir, id),
-                  revision,
-                )
-                : undefined;
-              if (
-                !runId || (kind !== "sentinel" && kind !== "workflow")
-              ) return run;
-              const category = links.categories.forRun({
-                kind,
-                id,
-                runId,
-                revision,
-              });
-              return category ? { ...run, category } : run;
-            })
-            : listed,
-        });
+        if (!canReadRunCategories) return safeProjection({ runs: listed });
+        const origins = (await controller.listLinks()).filter(({ origin }) =>
+          origin === "spawn"
+        );
+        const ceiling = context?.ceiling ?? "PUBLIC";
+        const runs = await Promise.all(listed.map(async (run) => {
+          if (!canFlowTo(run.classification ?? "PUBLIC", ceiling)) return run;
+          const { kind, id, revision } = run.ref;
+          const discovery = kind === "sentinel"
+            ? providers.sentinel.discovery(run.ref)
+            : undefined;
+          const runId = kind === "workflow" && digestPattern.test(id)
+            ? id
+            : discovery?.runId;
+          if (!runId || (kind !== "sentinel" && kind !== "workflow")) {
+            return run;
+          }
+          const category = links.categories.forRun({
+            kind,
+            id,
+            runId,
+            revision,
+          });
+          const parentRef = discovery?.spawnParent;
+          const sameRef = (ref: OperatorRunRef) =>
+            isDeepStrictEqual(ref, parentRef);
+          const sameChild = (ref: OperatorRunRef) =>
+            ref.kind === kind && ref.id === id && ref.revision !== undefined &&
+            readSentinelRunIdForRevision(
+                resolveSentinelCasePath(options.baseDir, id),
+                ref.revision,
+              ) === runId;
+          // Link records are canonicalized, so only the child's admission
+          // metadata supplies direction. The durable visible link supplies scope.
+          const linked = parentRef &&
+            origins.some(({ left, right }) =>
+              (sameRef(left) && sameChild(right)) ||
+              (sameRef(right) && sameChild(left))
+            );
+          const parent = linked && await controller.inspect(parentRef);
+          const visibleParent = parent &&
+              canFlowTo(
+                parent.classification ?? "PUBLIC",
+                ceiling,
+              )
+            ? parent.ref
+            : undefined;
+          const startedAt = discovery?.startedAt ?? run.startedAt;
+          const completedAt = discovery?.completedAt ?? run.completedAt;
+          const workflowSeconds = kind === "workflow" && startedAt &&
+              (completedAt || run.status === "running")
+            ? Math.floor(
+              ((completedAt ? Date.parse(completedAt) : Date.now()) -
+                Date.parse(startedAt)) / 1000,
+            )
+            : undefined;
+          const elapsedSeconds = discovery?.elapsedSeconds ?? workflowSeconds;
+          const profile = discovery?.modelProfile;
+          return {
+            ...run,
+            ...(category && { category }),
+            ...(discovery && { status: discovery.status }),
+            ...(startedAt && { startedAt }),
+            ...(completedAt && { completedAt }),
+            details: {
+              ...run.details,
+              ...(discovery?.goal &&
+                { goal: redactCredentialText(discovery.goal).slice(0, 300) }),
+              ...(discovery && {
+                modelProfile: profile
+                  ? {
+                    provider: profile.provider,
+                    ...(profile.model &&
+                      { model: redactCredentialText(profile.model) }),
+                  }
+                  : null,
+              }),
+              ...(visibleParent && { parent: visibleParent }),
+              ...(discovery?.elapsedThrough &&
+                { elapsedThrough: discovery.elapsedThrough }),
+              ...(typeof elapsedSeconds === "number" &&
+                Number.isSafeInteger(elapsedSeconds) && elapsedSeconds >= 0 &&
+                { elapsedSeconds }),
+            },
+          };
+        }));
+        return safeProjection({ runs });
       }
       if (action === "finding_asset_tree") {
         const { findingIds, id, revision } = args;

@@ -61,6 +61,13 @@ export function createOperatorSentinelRuns(
   baseDir: string,
   webContainmentConfigured?: boolean,
 ): OperatorRunProvider & {
+  discovery(
+    ref: OperatorRunRef,
+  ):
+    | (NonNullable<ReturnType<typeof readSentinelCaseStatus>>["discovery"] & {
+      status: NonNullable<ReturnType<typeof readSentinelCaseStatus>>["status"];
+    })
+    | undefined;
   cancelExact(
     ref: OperatorRunRef,
     runId: string,
@@ -309,6 +316,13 @@ export function createOperatorSentinelRuns(
         )
       ),
     inspect,
+    discovery(ref) {
+      const path = pathFor(ref);
+      if (!path || ref.revision === undefined) return;
+      const status = readSentinelCaseStatus(path, true);
+      if (status?.revision !== ref.revision || !status.discovery) return;
+      return { ...status.discovery, status: status.status };
+    },
     cancelExact(ref, runId) {
       const path = pathFor(ref);
       if (

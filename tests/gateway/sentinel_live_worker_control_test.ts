@@ -923,6 +923,20 @@ Deno.test("Owner gateway selects a permitted Sentinel model for a child and omis
         }),
       );
       assertEquals(fallback.run.details.modelProfile, undefined);
+      const discovery =
+        JSON.parse(await request({ action: "list", kind: "sentinel" })).runs;
+      assertEquals(
+        discovery.find(({ ref }: { ref: { id: string } }) =>
+          ref.id === "selected"
+        )?.details.modelProfile,
+        profile,
+      );
+      assertEquals(
+        discovery.find(({ ref }: { ref: { id: string } }) =>
+          ref.id === "inherited"
+        )?.details.parent,
+        selected.run.ref,
+      );
       assertEquals(approvals.length, 3);
     }, routing.list);
     for (const id of ["selected", "inherited", "default"]) {

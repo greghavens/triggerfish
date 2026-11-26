@@ -357,6 +357,9 @@ function restoreAssessment(
       modelProfile,
       plannerHeartbeatSeconds,
       inventoryCoverageEnabled,
+      runStartedAt,
+      runInactiveAt,
+      spawnParent,
     } = object(
       JSON.parse(row.plan),
     );
@@ -382,6 +385,34 @@ function restoreAssessment(
       typeof inventoryCoverageEnabled !== "boolean"
     ) {
       throw new Error("Invalid archived Sentinel inventory coverage setting");
+    }
+    if (spawnParent !== undefined) {
+      const parent = object(spawnParent);
+      const { kind, id, revision } = parent;
+      if (
+        (kind !== "sentinel" && kind !== "workflow" && kind !== "delegated" &&
+          kind !== "scheduled") ||
+        typeof id !== "string" || !id.trim() || id.length > 256 ||
+        id.includes("\0") ||
+        (revision !== undefined &&
+          (kind === "delegated" || kind === "scheduled" ||
+            typeof revision !== "number" || !Number.isSafeInteger(revision) ||
+            revision < 1)) ||
+        Object.keys(parent).some((key) =>
+          !["kind", "id", "revision"].includes(key)
+        )
+      ) {
+        throw new Error("Invalid archived Sentinel spawn parent");
+      }
+    }
+    for (const time of [runStartedAt, runInactiveAt]) {
+      if (
+        time !== undefined &&
+        (typeof time !== "number" || !Number.isSafeInteger(time) ||
+          time < 0 || time > 8_640_000_000_000_000)
+      ) {
+        throw new Error("Invalid archived Sentinel run timing");
+      }
     }
     if (
       plannerHeartbeatSeconds !== undefined &&

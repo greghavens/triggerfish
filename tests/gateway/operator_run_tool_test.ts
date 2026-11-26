@@ -4645,6 +4645,133 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
         assertEquals(confirmations.length, emptyApprovals);
       }, reopenedWorkflows);
 
+      const exactDiscoveryParent = emptyRun.link.left.id === emptyCase
+        ? emptyRun.link.right
+        : emptyRun.link.left;
+      const discoverChild = async (request: Turn) =>
+        JSON.parse(
+          (await request({ action: "list", kind: "sentinel" })).result,
+        ).runs.find(({ ref }: { ref: { id: string } }) => ref.id === emptyCase);
+      let terminalDiscovery: unknown;
+      await withGateway(async (restartTurn) => {
+        const running = await discoverChild(restartTurn);
+        assert(
+          running,
+          "The linked case must be discoverable in the owner run list",
+        );
+        assertEquals(running.details.goal, emptySpawn.childGoal);
+        assertEquals(running.details.parent, exactDiscoveryParent);
+        assertEquals(running.details.modelProfile, null);
+        assert(Number.isSafeInteger(running.details.elapsedSeconds));
+        assertEquals(running.completedAt, undefined);
+        assertEquals(
+          JSON.parse(
+            (await restartTurn({
+              action: "pause",
+              ...emptyRun.run.ref,
+            })).result,
+          ).run.status,
+          "paused",
+        );
+        const paused = await discoverChild(restartTurn);
+        assertEquals(paused.startedAt, running.startedAt);
+        assert(typeof paused.details.elapsedThrough === "string");
+        assertEquals(paused.completedAt, undefined);
+        assertEquals(
+          JSON.parse(
+            (await restartTurn({
+              action: "resume",
+              ...emptyRun.run.ref,
+            })).result,
+          ).run.status,
+          "running",
+        );
+        assertEquals(
+          JSON.parse(
+            (await restartTurn({
+              action: "cancel",
+              ...emptyRun.run.ref,
+              runId: emptyRun.run.details.runId,
+            })).result,
+          ).run.status,
+          "stopped",
+        );
+        const stopped = await discoverChild(restartTurn);
+        assertEquals(stopped.startedAt, running.startedAt);
+        assert(stopped.completedAt >= stopped.startedAt);
+        assertEquals(
+          stopped.details.elapsedSeconds,
+          Math.floor(
+            (Date.parse(stopped.completedAt) - Date.parse(stopped.startedAt)) /
+              1000,
+          ),
+        );
+        terminalDiscovery = stopped;
+      }, reopenedWorkflows);
+      await withGateway(async (restartTurn) => {
+        assertEquals(await discoverChild(restartTurn), terminalDiscovery);
+      }, reopenedWorkflows);
+      assertEquals(exactDiscoveryParent.kind, "sentinel");
+      const parentDirectory = dirname(
+        resolveSentinelCasePath(baseDir, exactDiscoveryParent.id),
+      );
+      const unavailableParentDirectory = join(
+        baseDir,
+        "temporarily-unavailable-parent",
+      );
+      await Deno.rename(parentDirectory, unavailableParentDirectory);
+      try {
+        await withGateway(async (restartTurn) => {
+          const undisclosedParent = await discoverChild(restartTurn);
+          assertEquals(undisclosedParent.details.goal, emptySpawn.childGoal);
+          assertEquals(undisclosedParent.details.parent, undefined);
+        }, reopenedWorkflows);
+      } finally {
+        await Deno.rename(unavailableParentDirectory, parentDirectory);
+      }
+      const metadataArchiveId = crypto.randomUUID();
+      await withGateway(async (restartTurn) => {
+        const response = JSON.parse(
+          (await restartTurn({
+            action: "archive",
+            ...emptyRun.run.ref,
+            runId: emptyRun.run.details.runId,
+            requestId: metadataArchiveId,
+          })).result,
+        );
+        assertEquals(response.receipt.status, "succeeded");
+      }, reopenedWorkflows);
+      await Deno.rename(
+        dirname(emptyPath),
+        join(baseDir, "old-discovery-child"),
+      );
+      await withGateway(async (restartTurn) => {
+        const response = JSON.parse(
+          (await restartTurn({
+            action: "restore",
+            ...emptyRun.run.ref,
+            runId: emptyRun.run.details.runId,
+            archiveId: metadataArchiveId,
+            requestId: crypto.randomUUID(),
+          })).result,
+        );
+        assertEquals(response.receipt.status, "succeeded");
+        const after = await discoverChild(restartTurn);
+        const before = terminalDiscovery as {
+          startedAt: string;
+          completedAt: string;
+          details: { elapsedSeconds: number };
+        };
+        assertEquals(after.status, "paused");
+        assertEquals(after.startedAt, before.startedAt);
+        assertEquals(after.details.elapsedThrough, before.completedAt);
+        assertEquals(
+          after.details.elapsedSeconds,
+          before.details.elapsedSeconds,
+        );
+        assertEquals(after.details.parent, exactDiscoveryParent);
+      }, reopenedWorkflows);
+
       const collisionCase = "linked-empty-collision";
       const collisionPath = resolveSentinelCasePath(baseDir, collisionCase);
       const collisionGraph = JSON.stringify(childGraph);
