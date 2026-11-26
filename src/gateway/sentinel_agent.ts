@@ -6200,6 +6200,7 @@ function createAgent(
           (toolName === assessmentTool.name ||
             toolName === sentinelInventoryTool.name || provenanceRead ||
             inventoryGraphRead || toolName === "sentinel_worker_observation" ||
+            toolName === SENTINEL_WORKER_TRACE_SEARCH ||
             toolName === SENTINEL_SHARED_ASSET_LINKS_READ ||
             isSentinelPinnedSourceRead(toolName) ||
             isSentinelWorkerFindingTool(toolName) ||

@@ -15271,8 +15271,13 @@ Deno.test("An ordinary leased worker discovers and cites an exact same-asset pee
         options: [undefined, (step) => {
           if (step.workerTrace) citations.push(step.workerTrace);
         }],
-        beforeHook(hook, toolName) {
-          if (toolName === name) hooks.push(hook);
+        beforeHook(hook, toolName, input) {
+          if (toolName !== name) return;
+          hooks.push(hook);
+          assertEquals(input.case_id, "main");
+          assertEquals(input.evidence_revision, state.revision);
+          assertEquals(input.assignment_id, consumer.assignedTaskId);
+          assertEquals(input.operation_type, "read");
         },
       },
     );
