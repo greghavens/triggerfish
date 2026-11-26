@@ -134,6 +134,7 @@ export async function handleSentinelFormalGoalChat(
       formalGoals: state?.plan.formalGoals ?? [],
       activeFormalGoalIds: state?.plan.activeFormalGoalIds ?? [],
       completedFormalGoalIds: state?.plan.completedFormalGoalIds ?? [],
+      withdrawnFormalGoalIds: state?.plan.withdrawnFormalGoalIds ?? [],
       revision: state?.revision,
       runId: state?.plan.runId,
       active: state?.active ?? false,

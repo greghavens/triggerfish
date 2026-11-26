@@ -3995,6 +3995,7 @@ function createAgent(
           selectedCaseAction === "hint_batch" ||
           selectedCaseAction === "assign_batch" ||
           selectedCaseAction === "append_goals" ||
+          selectedCaseAction === "withdraw_goal" ||
           selectedCaseAction === "add_case_membership";
         const selectedCaseCall = selectedCaseAction === "constraints" ||
           selectedCaseWrite;

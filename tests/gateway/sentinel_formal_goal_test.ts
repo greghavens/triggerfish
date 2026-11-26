@@ -13,6 +13,7 @@ import {
   type UserId,
 } from "../../src/core/types/session.ts";
 import { createChatSession } from "../../src/gateway/chat.ts";
+import { subscribeCommittedEvidence } from "../../src/core/evidence_task_progression.ts";
 import { createOperatorRunToolExecutor } from "../../src/gateway/operator_run_tool.ts";
 import { createSentinelSubagent } from "../../src/gateway/sentinel_agent.ts";
 import { readSentinelGoalCompletion } from "../../src/gateway/sentinel_goal_completion.ts";
@@ -88,6 +89,7 @@ Deno.test("authenticated Sentinel chat drafts, approves and extends independentl
     [];
   const errors: unknown[] = [];
   const reviewedModelGoalRequests: string[] = [];
+  const withdrawalReviews: string[] = [];
   let denyModelGoal = false;
   let revokeModelGoalOnConfirmation = false;
   let sawClassifiedModelGoalResult = false;
@@ -175,7 +177,10 @@ Deno.test("authenticated Sentinel chat drafts, approves and extends independentl
           }
           assert(typeof content === "string");
           const input = JSON.parse(content.split("\n").at(-1)!);
-          assert(input.goalCompletion);
+          if (!input.goalCompletion) {
+            send({ type: "response", text: "[]", taint: "INTERNAL" });
+            return Promise.resolve();
+          }
           assertEquals(input.goal, objective);
           assertEquals(input.goalCompletion.policy, "automatic");
           const criteria = input.goalCompletion.criteria.map(
@@ -245,7 +250,9 @@ Deno.test("authenticated Sentinel chat drafts, approves and extends independentl
           } | undefined;
           if (
             hook === "PRE_TOOL_CALL" && call?.name === "operator_runs" &&
-            call.args?.action === "append_goals" && denyModelGoal
+            (call.args?.action === "append_goals" ||
+              call.args?.action === "withdraw_goal") &&
+            denyModelGoal
           ) {
             return Promise.resolve({
               allowed: false,
@@ -270,6 +277,11 @@ Deno.test("authenticated Sentinel chat drafts, approves and extends independentl
       operatorRunExecutor: createOperatorRunToolExecutor({
         baseDir: directory,
         confirm(message) {
+          if (message.startsWith("Withdraw this exact Sentinel formal goal?")) {
+            withdrawalReviews.push(message);
+            if (revokeModelGoalOnConfirmation) denyModelGoal = true;
+            return Promise.resolve(true);
+          }
           assertMatch(
             message,
             /^Approve these exact Sentinel formal goal definitions/,
@@ -405,6 +417,8 @@ Deno.test("authenticated Sentinel chat drafts, approves and extends independentl
     let revise = "";
     let modelAppend: Record<string, unknown> | undefined;
     let modelRevision = 0;
+    let withdrawalRevision = 0;
+    let pausedWithdrawal: Record<string, unknown> | undefined;
     await withGateway(async (turn, tick) => {
       const proposal = JSON.parse(
         await turn(
@@ -703,6 +717,128 @@ Deno.test("authenticated Sentinel chat drafts, approves and extends independentl
         finalEvidence,
       );
       await tick();
+      const goalRequest = {
+        action: "append_goals",
+        kind: "sentinel",
+        id: "local-service",
+        revision: modelRevision,
+        runId,
+        requestId: crypto.randomUUID(),
+        goals: [{ ...additional, id: "keep-goal" }, {
+          ...additional,
+          id: "withdraw-goal",
+        }],
+      };
+      const reopened = JSON.parse(await operator(goalRequest));
+      const discard = {
+        action: "withdraw_goal",
+        kind: "sentinel",
+        id: "local-service",
+        revision: reopened.receipt.appliedRevision,
+        runId,
+        requestId: crypto.randomUUID(),
+        goalId: "withdraw-goal",
+      };
+      assertMatch(
+        await operator({ ...discard, revision: modelRevision }),
+        /unavailable/,
+      );
+      assertMatch(
+        await operator({ ...discard, goalId: "inventory" }),
+        /unavailable/,
+      );
+      assertEquals(withdrawalReviews, []);
+      const observed: string[] = [];
+      const unsubscribe = subscribeCommittedEvidence(
+        "local-service",
+        (entry) => {
+          observed.push(entry.observation_id);
+        },
+      );
+      try {
+        const previous = readSentinelAssessment(path);
+        revokeModelGoalOnConfirmation = true;
+        assertMatch(await operator(discard), /unavailable/);
+        assertEquals(readSentinelAssessment(path), previous);
+        assertEquals(observed, []);
+        denyModelGoal = false;
+        revokeModelGoalOnConfirmation = false;
+        const withdrawn = JSON.parse(await operator(discard));
+        assertEquals(withdrawn.withdrawnGoalId, discard.goalId);
+        withdrawalRevision = withdrawn.receipt.appliedRevision;
+        assertEquals(withdrawalRevision, discard.revision + 1);
+        assertEquals(readSentinelAssessment(path)?.result, previous?.result);
+        assertEquals(
+          JSON.parse(await operator(discard)).receipt.duplicate,
+          true,
+        );
+        assertMatch(
+          await operator({ ...discard, goalId: "keep-goal" }),
+          /unavailable/,
+        );
+        assertEquals(observed, [`formal-goal-withdrawal:${discard.requestId}`]);
+        assertEquals(withdrawalReviews.length, 2);
+      } finally {
+        unsubscribe();
+      }
+      await tick();
+      const remaining = JSON.parse(await turn(status));
+      assertEquals(remaining.active, false);
+      assert(remaining.completedFormalGoalIds.includes("keep-goal"));
+      assert(!remaining.completedFormalGoalIds.includes("withdraw-goal"));
+      assertEquals(remaining.withdrawnFormalGoalIds, ["withdraw-goal"]);
+      assertEquals(
+        remaining.formalGoals.find(({ id }: { id: string }) =>
+          id === "withdraw-goal"
+        ),
+        goalRequest.goals[1],
+      );
+      assertEquals(
+        JSON.parse(await turn(evidence(finalRevision))),
+        finalEvidence,
+      );
+
+      const finalOpen = JSON.parse(
+        await operator({
+          ...goalRequest,
+          revision: withdrawalRevision,
+          requestId: crypto.randomUUID(),
+          goals: [{ ...additional, id: "paused-withdrawal" }],
+        }),
+      );
+      await turn("assessment pause");
+      pausedWithdrawal = {
+        ...discard,
+        revision: finalOpen.receipt.appliedRevision,
+        requestId: crypto.randomUUID(),
+        goalId: "paused-withdrawal",
+      };
+      assertEquals(
+        JSON.parse(await operator(pausedWithdrawal)).receipt.duplicate,
+        false,
+      );
+      const paused = JSON.parse(await turn(status));
+      assertEquals(paused.paused, true);
+      assertEquals(paused.activeFormalGoalIds, []);
+      assertEquals(paused.completion, null);
+    });
+    await withGateway(async (turn, tick, operator) => {
+      assert(pausedWithdrawal);
+      assertEquals(
+        JSON.parse(await operator(pausedWithdrawal)).receipt.duplicate,
+        true,
+      );
+      assertEquals(withdrawalReviews.length, 3);
+      assertEquals(JSON.parse(await turn(status)).paused, true);
+      await turn("assessment resume");
+      await tick();
+      const pending = JSON.parse(await turn(status));
+      assertEquals(pending.active, true);
+      assertEquals(pending.completion, null);
+      assertEquals(
+        JSON.parse(await turn(evidence(finalRevision))),
+        finalEvidence,
+      );
     });
     assertEquals(draftPrompts.length, 1);
     assertEquals(rounds, [
@@ -720,6 +856,11 @@ Deno.test("authenticated Sentinel chat drafts, approves and extends independentl
         revision: modelRevision,
         goalIds: ["model-followup"],
         criteria: ["model-followup/record=proof-c"],
+      },
+      {
+        revision: withdrawalRevision,
+        goalIds: ["keep-goal"],
+        criteria: ["keep-goal/record=proof-c"],
       },
     ]);
   } finally {

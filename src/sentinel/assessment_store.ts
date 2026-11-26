@@ -129,6 +129,7 @@ export type AssessmentPlan =
     readonly formalGoals?: readonly SentinelFormalGoal[];
     readonly activeFormalGoalIds?: readonly string[];
     readonly completedFormalGoalIds?: readonly string[];
+    readonly withdrawnFormalGoalIds?: readonly string[];
   };
 
 type FormalGoalPlan = Pick<
@@ -142,7 +143,7 @@ type FormalGoalPlan = Pick<
 >;
 
 export interface SentinelFormalGoalApproval {
-  readonly mode: "start" | "append" | "revise";
+  readonly mode: "start" | "append" | "revise" | "withdraw";
   readonly requestId: string;
   readonly proposalDigest: string;
   readonly sourceProposalId?: string;
@@ -730,6 +731,7 @@ function saveFormalGoalHistory(
         formalGoals: plan.formalGoals,
         activeFormalGoalIds: plan.activeFormalGoalIds,
         completedFormalGoalIds: plan.completedFormalGoalIds,
+        withdrawnFormalGoalIds: plan.withdrawnFormalGoalIds,
       }),
       closedIds ? JSON.stringify(closedIds) : null,
     );
@@ -1461,7 +1463,8 @@ export function startSentinelAssessment(
 ): StoredAssessment {
   if (
     plan.formalGoals !== undefined || plan.activeFormalGoalIds !== undefined ||
-    plan.completedFormalGoalIds !== undefined
+    plan.completedFormalGoalIds !== undefined ||
+    plan.withdrawnFormalGoalIds !== undefined
   ) throw new Error("Formal Sentinel goals require an approved goal proposal");
   const childDescription = linkedStart?.childDescription;
   if (
@@ -1954,7 +1957,8 @@ function formalGoalApprovalBinding(approval: SentinelFormalGoalApproval) {
   const { mode, requestId, proposalDigest, expectedRevision, expectedRunId } =
     approval;
   if (
-    (mode !== "start" && mode !== "append" && mode !== "revise") ||
+    (mode !== "start" && mode !== "append" && mode !== "revise" &&
+      mode !== "withdraw") ||
     typeof requestId !== "string" ||
     !/^[A-Za-z0-9_.:-]{1,128}$/.test(requestId) ||
     (expectedRevision !== undefined &&
@@ -1974,6 +1978,11 @@ function formalGoalApprovalBinding(approval: SentinelFormalGoalApproval) {
       !/^goal-proposal:[a-f0-9]{64}$/.test(approval.sourceProposalId))
   ) {
     throw new Error("Invalid Sentinel worker goal proposal source");
+  }
+  if (
+    mode === "withdraw" && (goals.length !== 1 || approval.plan !== undefined)
+  ) {
+    throw new Error("Withdraw requires one exact registered Sentinel goal");
   }
   if (mode === "revise" && approval.plan !== undefined) {
     throw new Error("Revise changes only existing active formal goals");
@@ -2122,6 +2131,44 @@ export function readSentinelFormalGoalApproval(
 }
 
 /** Apply a trusted operator approval and publish its new revision atomically. */
+function publishSentinelGoalWithdrawal(
+  db: DatabaseSync,
+  row: AssessmentRow,
+  plan: AssessmentPlan,
+  encoded: string,
+) {
+  const result = JSON.parse(row.result) as Result | null;
+  if (!result || (row.active !== 1 && row.active !== 2)) {
+    throw new Error("There is no active or paused Sentinel evidence to amend");
+  }
+  const revision = row.revision + 1;
+  const updatedAt = new Date().toISOString();
+  db.prepare(
+    "UPDATE assessment SET plan = ?, revision = ?, updatedAt = ? WHERE id = 1",
+  )
+    .run(encoded, revision, updatedAt);
+  db.prepare("INSERT INTO assessment_history VALUES (?, ?, ?)")
+    .run(revision, updatedAt, row.result);
+  saveAssessmentRunRevision(db, revision, plan);
+  saveFormalGoalHistory(db, revision, plan);
+  carrySentinelReviews(db, "finding", row.revision, revision, () => [
+    findingEvidenceSignatures(result),
+    findingEvidenceSignatures(result),
+  ]);
+  if (hasAssessmentAlertHistory(db)) {
+    db.prepare(
+      "INSERT INTO assessment_alert_history SELECT ?, alerts FROM assessment_alert_history WHERE revision = ?",
+    )
+      .run(revision, row.revision);
+    carrySentinelReviews(db, "incident", row.revision, revision, (subjects) => [
+      incidentEvidenceSignatures(db, row.revision, result, subjects),
+      incidentEvidenceSignatures(db, revision, result, subjects),
+    ]);
+  }
+  pruneAssessmentRevisions(db, revision - 20);
+  return readState(db, { ...row, plan: encoded, revision, updatedAt });
+}
+
 export function applySentinelFormalGoals(
   path: string,
   approval: SentinelFormalGoalApproval,
@@ -2217,8 +2264,25 @@ export function applySentinelFormalGoals(
           );
         }
       }
+      const withdrawn = mode === "withdraw" ? goals[0].id : undefined;
+      if (
+        withdrawn && (
+          !pending.includes(withdrawn) ||
+          completedFormalGoalIds.includes(withdrawn) ||
+          !isDeepStrictEqual(
+            existingGoals.find(({ id }) => id === withdrawn),
+            goals[0],
+          )
+        )
+      ) {
+        throw new Error(
+          "Withdraw requires the exact current active, uncompleted Sentinel goal",
+        );
+      }
       const formalGoals = mode === "revise"
         ? existingGoals.map((goal) => replacements.get(goal.id) ?? goal)
+        : withdrawn
+        ? existingGoals
         : [...existingGoals, ...goals];
       if (
         new Set(formalGoals.map(({ id }) => id)).size !== formalGoals.length
@@ -2227,7 +2291,9 @@ export function applySentinelFormalGoals(
           "The approved Sentinel goal IDs already exist in this assessment",
         );
       }
-      const activeFormalGoalIds = mode === "revise"
+      const activeFormalGoalIds = withdrawn
+        ? pending.filter((id) => id !== withdrawn)
+        : mode === "revise"
         ? [...pending]
         : [...pending, ...goals.map(({ id }) => id)];
       const active = new Set(activeFormalGoalIds);
@@ -2240,7 +2306,15 @@ export function applySentinelFormalGoals(
         goal: planChanges.goal ?? current.goal ?? goals[0].title,
         runId: current.runId ?? crypto.randomUUID(),
         ...(mode === "start" && { runStartedAt: Date.now() }),
-        ...(row?.active !== 1 && { admissionAt: nextAssessmentAdmission() }),
+        ...(row?.active !== 1 && !withdrawn &&
+          { admissionAt: nextAssessmentAdmission() }),
+        ...(withdrawn &&
+          {
+            withdrawnFormalGoalIds: [
+              ...current.withdrawnFormalGoalIds ?? [],
+              withdrawn,
+            ],
+          }),
         formalGoals,
         activeFormalGoalIds,
         completedFormalGoalIds,
@@ -2255,18 +2329,20 @@ export function applySentinelFormalGoals(
           ON CONFLICT(id) DO UPDATE SET
             plan = excluded.plan, active = 1, fingerprint = '', result = 'null'
         `).run(encoded, row?.revision ?? 0, new Date().toISOString());
-      } else {
+      } else if (!withdrawn) {
         db.prepare("UPDATE assessment SET plan = ?, active = 1 WHERE id = 1")
           .run(encoded);
       }
-      const state = refresh(
-        db,
-        getRow(db)!,
-        path,
-        webContainmentConfigured,
-        undefined,
-        true,
-      );
+      const state = withdrawn
+        ? publishSentinelGoalWithdrawal(db, row!, plan, encoded)
+        : refresh(
+          db,
+          getRow(db)!,
+          path,
+          webContainmentConfigured,
+          undefined,
+          true,
+        );
       saveInitialSentinelConstraints(db, state, requestId, constraints);
       if (approval.sourceProposalId) {
         const prior = JSON.parse(row!.result) as Result;

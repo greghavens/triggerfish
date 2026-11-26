@@ -24,7 +24,10 @@ import {
   parseSentinelLinkedCaseSources,
   type SentinelLinkedCaseSource,
 } from "../sentinel/linked_case_sources.ts";
-import { validPlannerHeartbeatSeconds } from "../core/evidence_task_progression.ts";
+import {
+  notifyCommittedEvidence,
+  validPlannerHeartbeatSeconds,
+} from "../core/evidence_task_progression.ts";
 import {
   readSentinelArchivedToolDecisions,
   sentinelArchivedToolDecisionsFile,
@@ -486,6 +489,7 @@ export const operatorRunTool: ToolDefinition = {
         "constraints",
         "goals",
         "append_goals",
+        "withdraw_goal",
         "revise_goals",
         "goal_proposals",
         "approve_goal_proposal",
@@ -1213,6 +1217,7 @@ export const sentinelOperatorCaseControlActions = [
   "hint_batch",
   "assign_batch",
   "append_goals",
+  "withdraw_goal",
   "add_case_membership",
 ] as const;
 
@@ -1222,6 +1227,7 @@ export const sentinelOperatorCaseControlParameters = [
   "assignments",
   "hints",
   "goals",
+  "goalId",
   "version",
   "expectedVersion",
   "requestId",
@@ -9526,12 +9532,16 @@ ${
       }
       if (
         action === "goals" || action === "append_goals" ||
-        action === "revise_goals" || action === "goal_proposals" ||
+        action === "revise_goals" || action === "withdraw_goal" ||
+        action === "goal_proposals" ||
         action === "approve_goal_proposal"
       ) {
         const read = action === "goals" || action === "goal_proposals";
         const proposalAction = action === "approve_goal_proposal";
+        const withdrawal = action === "withdraw_goal";
         if (
+          (withdrawal && (!context?.authenticatedOwnerSessionId ||
+            !canFlowTo("INTERNAL", context.ceiling ?? "PUBLIC"))) ||
           ref.kind !== "sentinel" || ref.revision === undefined ||
           Object.keys(args).some((key) =>
             ![
@@ -9546,7 +9556,11 @@ ${
                 : [
                   "runId",
                   "requestId",
-                  proposalAction ? "proposalId" : "goals",
+                  proposalAction
+                    ? "proposalId"
+                    : withdrawal
+                    ? "goalId"
+                    : "goals",
                 ]),
             ].includes(key)
           ) || !await controller.inspect(ref)
@@ -9590,6 +9604,7 @@ ${
             formalGoals = [],
             activeFormalGoalIds = [],
             completedFormalGoalIds = [],
+            withdrawnFormalGoalIds = [],
           } = plan ?? {};
           const describe = (
             { id, title, policy, criteria }: typeof formalGoals[number],
@@ -9600,6 +9615,8 @@ ${
             criteriaCount: criteria.length,
             status: completedFormalGoalIds.includes(id)
               ? "completed"
+              : withdrawnFormalGoalIds.includes(id)
+              ? "withdrawn"
               : activeFormalGoalIds.includes(id)
               ? "active"
               : "inactive",
@@ -9650,11 +9667,22 @@ ${
           )
             .find(({ id }) => id === args.proposalId);
         if (proposalAction && !proposal) return unavailable;
+        const current = readSentinelAssessment(path);
+        const exactPlan = current?.revision === ref.revision
+          ? current.plan
+          : readSentinelAssessmentRevision(path, ref.revision)?.plan;
+        const withdrawn = withdrawal &&
+          exactPlan?.formalGoals?.find(({ id }) => id === args.goalId);
+        if (
+          withdrawal && (!withdrawn || exactPlan?.runId !== runId.toLowerCase())
+        ) return unavailable;
         const goals = normalizeSentinelFormalGoals(
-          proposal ? [proposal.goal] : args.goals,
+          proposal ? [proposal.goal] : withdrawn ? [withdrawn] : args.goals,
         );
         const approval = {
-          mode: action === "append_goals" || proposalAction
+          mode: withdrawal
+            ? "withdraw" as const
+            : action === "append_goals" || proposalAction
             ? "append" as const
             : "revise" as const,
           requestId: requestId.toLowerCase(),
@@ -9666,29 +9694,43 @@ ${
         };
         const selectedCase = context?.authorizeSelectedSentinelCase;
         if (
-          selectedCase && (action !== "append_goals" || !selectedCase() ||
+          selectedCase &&
+          ((action !== "append_goals" && !withdrawal) || !selectedCase() ||
             redactCredentialText(JSON.stringify(goals)) !==
               JSON.stringify(goals))
         ) {
           return unavailable;
         }
         const prior = readSentinelFormalGoalApproval(path, approval);
-        if (prior) return safeProjection({ run: ref, receipt: prior });
-        const current = readSentinelAssessment(path);
+        const withdrawnGoalId = withdrawn ? withdrawn.id : undefined;
+        if (prior) {
+          return safeProjection({
+            run: ref,
+            receipt: prior,
+            ...(withdrawnGoalId && { withdrawnGoalId }),
+          });
+        }
         if (
           current?.revision !== ref.revision ||
-          current.plan.runId !== approval.expectedRunId
+          current.plan.runId !== approval.expectedRunId ||
+          (withdrawn &&
+            (!current.active ||
+              !current.plan.activeFormalGoalIds?.includes(withdrawn.id) ||
+              current.plan.completedFormalGoalIds?.includes(withdrawn.id)))
         ) return unavailable;
         if (
           !await options.confirm(
-            `Approve these exact Sentinel formal goal definitions?\n${
-              JSON.stringify({ run: ref, ...approval })
-            }`,
+            `${
+              withdrawal
+                ? "Withdraw this exact Sentinel formal goal?"
+                : "Approve these exact Sentinel formal goal definitions?"
+            }\n${JSON.stringify({ run: ref, ...approval })}`,
           )
         ) return "Error: The operator declined the run action.";
         if (
-          selectedCase &&
-          (!await context.authorizeOwnerRunCall?.(args) || !selectedCase())
+          (withdrawal || selectedCase) &&
+          (!await context?.authorizeOwnerRunCall?.(args) ||
+            (selectedCase && !selectedCase()))
         ) {
           return unavailable;
         }
@@ -9700,8 +9742,20 @@ ${
         if (!receipt.duplicate) {
           ensureSentinelFormalGoalContract(path, state);
           advanceAdaptiveSentinel(path, state);
+          if (withdrawn && state.active && !state.paused && state.plan.runId) {
+            notifyCommittedEvidence({
+              case: ref.id,
+              run_id: state.plan.runId,
+              revision: state.revision,
+              observation_id: `formal-goal-withdrawal:${approval.requestId}`,
+            });
+          }
         }
-        return safeProjection({ run: ref, receipt });
+        return safeProjection({
+          run: ref,
+          receipt,
+          ...(withdrawnGoalId && { withdrawnGoalId }),
+        });
       }
       if (backgroundRole && (action === "pause" || action === "resume")) {
         const pausing = action === "pause";

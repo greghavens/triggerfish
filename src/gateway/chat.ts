@@ -393,7 +393,7 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
                   (action === "narrow_constraints" ||
                     action === "constraints" || action === "steer" ||
                     action === "hint_batch" || action === "assign_batch" ||
-                    action === "append_goals" ||
+                    action === "append_goals" || action === "withdraw_goal" ||
                     action === "add_case_membership") &&
                   {
                     case_id: typeof call.args?.id === "string" &&
@@ -879,9 +879,9 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
           if (casePath !== selectedPath) return false;
           const assessment = readSentinelAssessment(selectedPath);
           if (!assessment || assessment.plan.runId !== runId) return false;
-          // Goal append issues a new revision and can reopen a completed run.
-          // Only the handler's exact saved receipt can replay an older request.
-          return action === "append_goals"
+          // Goal edits commit a new revision. Only an exact saved receipt
+          // can replay an older request, and only append can reopen a run.
+          return action === "append_goals" || action === "withdraw_goal"
             ? (assessment.active || assessment.completion !== undefined) &&
               assessment.revision >= revision
             : assessment.active && assessment.revision === revision;
