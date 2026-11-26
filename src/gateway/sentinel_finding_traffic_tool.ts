@@ -300,17 +300,49 @@ export function currentSentinelFindingTrafficRead(
     !caseId || !scope || page.caseId !== caseId ||
     page.evidenceRevision !== revision
   ) return false;
+  if (typeof args.findingId === "string") {
+    const original = findingTrafficOriginal(
+      path,
+      caseId,
+      revision,
+      scope,
+      args.findingId,
+    );
+    if (
+      !original || (page.evidenceVersion !== undefined &&
+        page.evidenceVersion !== sentinelFindingTrafficEvidenceVersion(
+            path,
+            revision,
+            original.id,
+            original.targetId,
+          ).digest)
+    ) return false;
+  }
   if (
-    typeof args.findingId === "string" &&
-    !findingTrafficOriginal(path, caseId, revision, scope, args.findingId)
+    typeof args.graphFindingId === "string" &&
+    !allowsSentinelGraphFindingTrafficPage(
+      path,
+      caseId,
+      revision,
+      args.graphFindingId,
+      page.links,
+      typeof args.assetId === "string" ? args.assetId : undefined,
+    )
   ) return false;
   return (page.link ? [page.link] : page.links).every((link: {
+    id: string;
     caseId: string;
     evidenceRevision: number;
     assetId: string;
   }) =>
     link.caseId === caseId && link.evidenceRevision === revision &&
-    scope.assets.has(link.assetId)
+    scope.assets.has(link.assetId) &&
+    listSentinelFindingTrafficLinks(path, {
+      id: link.id,
+      assetId: link.assetId,
+      evidenceRevision: revision,
+      limit: 1,
+    }).some(({ id }) => id === link.id)
   );
 }
 

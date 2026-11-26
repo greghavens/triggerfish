@@ -4446,10 +4446,68 @@ function createAgent(
         options.assignedTaskLeaseToken === undefined
       ? options.operatorRunReader
       : undefined);
-  const fenceFindingContextHistory = options.snapshotOverride === undefined &&
+  const fenceFindingReadHistory = options.snapshotOverride === undefined &&
     options.assessmentRevision === undefined &&
     options.assignedTaskId === undefined &&
     options.assignedTaskLeaseToken === undefined;
+  function stageFindingReadHistory(
+    turn: ActiveTurn,
+    name: string,
+    caseId: string,
+    revision: number,
+    read: Readonly<Record<string, unknown>>,
+    result: string,
+    isCurrent: () => boolean,
+  ) {
+    const sourceSession = session;
+    const policy = {
+      tool_name: name,
+      session_taint: sourceSession.taint,
+      case_id: caseId,
+      evidence_revision: revision,
+      assignment_id: null,
+      resource_classification: "INTERNAL",
+      operation_type: "read",
+    };
+    turn.pendingTelemetryFence = {
+      tool: name,
+      revision,
+      sources: [{
+        key: createHash("sha256").update(
+          JSON.stringify([name, caseId, revision, read, result]),
+        ).digest("hex"),
+        isCurrent,
+        async authorize() {
+          if (!isCurrent()) return false;
+          const pre = await options.hookRunner.evaluateHook(
+            "PRE_TOOL_CALL",
+            {
+              session: sourceSession,
+              input: { ...policy, tool_call: { name, args: read } },
+              auditInput: policy,
+            },
+          );
+          if (!pre.allowed || pre.action !== "ALLOW" || !isCurrent()) {
+            return false;
+          }
+          const post = await options.hookRunner.evaluateHook(
+            "POST_TOOL_RESPONSE",
+            {
+              session: sourceSession,
+              input: {
+                ...policy,
+                response_length: result.length,
+                tool_response: result,
+              },
+              auditInput: policy,
+            },
+          );
+          return post.allowed && post.action === "ALLOW" && isCurrent();
+        },
+      }],
+    };
+  }
+
   const availableTools = canDelegate
     ? [
       ...tools,
@@ -4932,7 +4990,7 @@ function createAgent(
         );
         if (
           result.allowed && name === "PRE_CONTEXT_INJECTION" && turn &&
-          (directTelemetryReader || fenceFindingContextHistory)
+          (directTelemetryReader || fenceFindingReadHistory)
         ) {
           const retained = retainedTelemetry;
           if (retained) {
@@ -5464,7 +5522,7 @@ function createAgent(
         if (name === sentinelFindingTrafficListTool.name) {
           turn.findingTrafficRead = args;
         }
-        return executeSentinelFindingTrafficTool(
+        const result = executeSentinelFindingTrafficTool(
           options,
           name,
           args,
@@ -5475,6 +5533,31 @@ function createAgent(
             : undefined,
           reporter ? turn.approvedReporterTraffic : undefined,
         );
+        if (
+          name === sentinelFindingTrafficListTool.name &&
+          fenceFindingReadHistory && result.startsWith("{")
+        ) {
+          const caseId = locateSentinelCase(options.snapshotPath)?.caseId;
+          const revision = sentinelTrafficPolicyRevision(args.revision);
+          if (!caseId || !revision) {
+            return "Error: The finding traffic scope is unavailable.";
+          }
+          stageFindingReadHistory(
+            turn,
+            name,
+            caseId,
+            revision,
+            args,
+            result,
+            () =>
+              currentSentinelFindingTrafficRead(
+                options.snapshotPath,
+                args,
+                result,
+              ),
+          );
+        }
+        return result;
       }
       if (isSentinelTrafficTool(name)) {
         return executeSentinelTrafficTool(options, name, args, turn.signal);
@@ -5667,7 +5750,7 @@ function createAgent(
         if (
           (name === SENTINEL_RECHECK_CONTEXT_TOOL ||
             name === "sentinel_worker_findings") &&
-          fenceFindingContextHistory &&
+          fenceFindingReadHistory &&
           result.startsWith("{")
         ) {
           const isContext = name === SENTINEL_RECHECK_CONTEXT_TOOL;
@@ -5690,53 +5773,15 @@ function createAgent(
                 revision,
                 requireCurrentRevision,
               );
-          const sourceSession = session;
-          const policy = {
-            tool_name: name,
-            session_taint: sourceSession.taint,
-            case_id: caseId,
-            evidence_revision: revision,
-            assignment_id: null,
-            resource_classification: "INTERNAL",
-            operation_type: "read",
-          };
-          turn.pendingTelemetryFence = {
-            tool: name,
+          stageFindingReadHistory(
+            turn,
+            name,
+            caseId,
             revision,
-            sources: [{
-              key: createHash("sha256").update(
-                JSON.stringify([name, caseId, revision, read, result]),
-              ).digest("hex"),
-              isCurrent,
-              async authorize() {
-                if (!isCurrent()) return false;
-                const pre = await options.hookRunner.evaluateHook(
-                  "PRE_TOOL_CALL",
-                  {
-                    session: sourceSession,
-                    input: { ...policy, tool_call: { name, args: read } },
-                    auditInput: policy,
-                  },
-                );
-                if (!pre.allowed || pre.action !== "ALLOW" || !isCurrent()) {
-                  return false;
-                }
-                const post = await options.hookRunner.evaluateHook(
-                  "POST_TOOL_RESPONSE",
-                  {
-                    session: sourceSession,
-                    input: {
-                      ...policy,
-                      response_length: result.length,
-                      tool_response: result,
-                    },
-                    auditInput: policy,
-                  },
-                );
-                return post.allowed && post.action === "ALLOW" && isCurrent();
-              },
-            }],
-          };
+            read,
+            result,
+            isCurrent,
+          );
         }
         return !plannerRead || currentPlannerReceiptScope(turn)
           ? result

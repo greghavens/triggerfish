@@ -6085,14 +6085,41 @@ async function verifyNativeFindingTrafficReadScope(
   let args: Record<string, unknown> = { revision: state.revision };
   let result = "";
   let revokeOnResponse = false;
+  let denyHistoryRead = false;
+  const memory: Array<{ attachment: boolean; payload: boolean }> = [];
   const registry = createProviderRegistry();
   registry.register({
     name: "finding-traffic-scope",
     supportsStreaming: false,
     complete(messages) {
       const last = messages.at(-1);
-      const done = last?.role === "tool";
-      if (done) result = String(last.content);
+      const memoryCheck = last?.role === "user" &&
+        String(last.content).includes("Check saved traffic context");
+      if (memoryCheck) {
+        const retained = messages.filter(({ role }) => role === "tool").map(
+          ({ content }) => {
+            try {
+              return JSON.parse(String(content));
+            } catch {
+              return undefined;
+            }
+          },
+        );
+        memory.push({
+          attachment: retained.some((page) =>
+            page?.links?.some(
+              (link: { id: string }) => link.id === linkId,
+            )
+          ),
+          payload: retained.some((page) =>
+            page?.link?.id === linkId &&
+            typeof page.payload?.text === "string" &&
+            page.payload.text.length > 0
+          ),
+        });
+      }
+      const done = memoryCheck || last?.role === "tool";
+      if (last?.role === "tool") result = String(last.content);
       return Promise.resolve({
         content: done ? "Reviewed retained evidence." : "",
         usage: { inputTokens: 1, outputTokens: 1 },
@@ -6136,12 +6163,14 @@ async function verifyNativeFindingTrafficReadScope(
             revokeOnResponse && hook === "POST_TOOL_RESPONSE" &&
             input.tool_name === name
           ) {
-            setPolicy(0, ["review_evidence"]);
+            setPolicy(2, ["review_evidence"]);
             revokeOnResponse = false;
           }
+          const allowed = !(denyHistoryRead && hook === "PRE_TOOL_CALL" &&
+            input.tool_name === name);
           return Promise.resolve({
-            allowed: true,
-            action: "ALLOW",
+            allowed,
+            action: allowed ? "ALLOW" : "BLOCK",
             ruleId: null,
             duration: 0,
           });
@@ -6158,7 +6187,10 @@ async function verifyNativeFindingTrafficReadScope(
       socket.addEventListener("open", () => resolve(), { once: true });
       socket.addEventListener("error", reject, { once: true });
     });
-    const turn = async (selected: Record<string, unknown>) => {
+    const turn = async (
+      selected: Record<string, unknown>,
+      content = "/sentinel-agent Read the retained finding traffic.",
+    ) => {
       args = { revision: state.revision, ...selected };
       result = "";
       const completed = Promise.withResolvers<void>();
@@ -6175,7 +6207,7 @@ async function verifyNativeFindingTrafficReadScope(
       try {
         socket.send(JSON.stringify({
           type: "message",
-          content: "/sentinel-agent Read the retained finding traffic.",
+          content,
         }));
         await completed.promise;
         return result;
@@ -6197,12 +6229,33 @@ async function verifyNativeFindingTrafficReadScope(
     const retained = JSON.parse(await turn(payload));
     assertEquals(retained.link.id, linkId);
     assert(retained.payload);
+    await turn({}, "/sentinel on");
+    await turn({ findingId }, "Open attachment list.");
+    await turn(payload, "Open exact attachment response.");
+    await turn({}, "Check saved traffic context while authorized.");
+    denyHistoryRead = true;
+    await turn({}, "Check saved traffic context after source denial.");
+    denyHistoryRead = false;
+    await turn({ findingId }, "Open accessible attachment list again.");
+    await turn(payload, "Open accessible exact attachment response again.");
+    setPolicy(0, ["review_evidence"]);
+    await turn(
+      {},
+      "Check saved traffic context after withdrawing case access.",
+    );
+    assertEquals(memory, [
+      { attachment: true, payload: true },
+      { attachment: false, payload: false },
+      { attachment: false, payload: false },
+    ]);
+    setPolicy(1, []);
+    await turn({}, "/sentinel off");
     revokeOnResponse = true;
     assertStringIncludes(await turn(payload), "withheld by policy");
     assertStringIncludes(await turn(payload), "unavailable");
     assertStringIncludes(await turn({ findingId }), "unavailable");
     assertEquals(JSON.parse(await turn({})).links, []);
-    setPolicy(1, []);
+    setPolicy(3, []);
   } finally {
     socket.close();
     await closed.promise;
