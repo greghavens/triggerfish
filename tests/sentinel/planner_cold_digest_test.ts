@@ -3471,6 +3471,9 @@ Deno.test("Scoped incident discovery and assignment require every retained membe
   let allowedIncident = "";
   let mixedIncident = "";
   let approvedReview = "";
+  let reading = true;
+  let clock = Date.now();
+  const observationRead = Promise.withResolvers<string>();
   const providers = createProviderRegistry();
   providers.register({
     name: "scoped-incident-membership",
@@ -3480,6 +3483,18 @@ Deno.test("Scoped incident discovery and assignment require every retained membe
         messages.find(({ role }) => role === "user")?.content,
       );
       if (prompt.startsWith("Plan a defensive investigation")) {
+        if (reading) {
+          const saved = messages.findLast(({ role }) => role === "tool");
+          if (!saved) {
+            return completion("", "sentinel_worker_observation", {
+              task: approvedReview,
+            });
+          }
+          const text = String(saved.content);
+          assertEquals(JSON.parse(text).task, approvedReview);
+          observationRead.resolve(text);
+          return completion("[]");
+        }
         plannerInput.resolve(prompt);
         await held.promise;
         return completion(JSON.stringify([{
@@ -3520,6 +3535,8 @@ Deno.test("Scoped incident discovery and assignment require every retained membe
         hookRunner: allowHooks,
         allowModelAccess: true,
       }),
+    undefined,
+    () => clock,
   );
   try {
     await Deno.mkdir(dirname(path), { recursive: true, mode: 0o700 });
@@ -3605,6 +3622,45 @@ Deno.test("Scoped incident discovery and assignment require every retained membe
       ),
     );
     planner.advance(readSentinelAssessment(path)!);
+    const observationTimeout = setTimeout(
+      () =>
+        observationRead.reject(
+          new Error("Scoped incident observation did not reopen"),
+        ),
+      4000,
+    );
+    const observed = await observationRead.promise.finally(() =>
+      clearTimeout(observationTimeout)
+    );
+    while (planner.hasInFlightWork() && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    const observationRound = readAdaptiveSentinel(path, state)
+      ?.modelPlannerHistory.find(
+        ({ reads }) =>
+          reads?.some(({ tool }) => tool === "sentinel_worker_observation"),
+      );
+    assert(observationRound);
+    const observation = {
+      kind: "sentinel" as const,
+      id: caseId,
+      revision: state.revision,
+      action: "planner_reads",
+      plannerIdentity: observationRound.identity,
+      attempt: observationRound.attempt,
+      ordinal: 1,
+      includeResult: true,
+    };
+    await withArchivedPlannerRead(directory, async (read) => {
+      assertEquals(
+        JSON.parse(await read(observation)).result,
+        JSON.parse(observed),
+      );
+    });
+    reading = false;
+    addSentinelCaseHint(path, "Review currently eligible incident evidence.");
+    clock += 61_000;
+    planner.advance(readSentinelAssessment(path)!);
     const timeout = setTimeout(
       () => plannerInput.reject(new Error("Scoped planner did not run")),
       4000,
@@ -3621,6 +3677,7 @@ Deno.test("Scoped incident discovery and assignment require every retained membe
           .record.constraints.allowedAssetIds,
         ["spare"],
       );
+      assertStringIncludes(await read(observation), "unavailable");
     });
     held.resolve();
     const settlement = Date.now() + 3000;
