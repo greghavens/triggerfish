@@ -1,3 +1,4 @@
+import { retainPortablePausedGraphCheckpoints } from "./adaptive_store.ts";
 import { isDeepStrictEqual } from "node:util";
 import {
   assetLinkProof,
@@ -807,10 +808,13 @@ export function retainArchivedWorkerTraceMetadata(
   }
 }
 
-function scrubAdaptive(db: DatabaseSync, caseId: string) {
+function scrubAdaptive(
+  db: DatabaseSync,
+  caseId: string,
+  evidenceRevision: number,
+) {
   clearRows(db, [
     "adaptive_active",
-    "adaptive_worker_checkpoints",
     "adaptive_assigned_target_batch_receipts",
     "adaptive_recheck_context_batch_receipts",
     "adaptive_traffic_links_batch_receipts",
@@ -842,7 +846,7 @@ function scrubAdaptive(db: DatabaseSync, caseId: string) {
   }
   discardStepExcerpts(db, "adaptive_note_steps");
   retainArchivedWorkerTraceMetadata(db, caseId);
-  clearRows(db, ["adaptive_worker_progress"]);
+  retainPortablePausedGraphCheckpoints(db, evidenceRevision);
 }
 
 function copyDatabase(
@@ -966,7 +970,7 @@ export function captureStoppedSentinelCaseArtifacts(
           adaptive,
           join(directory, "sentinel-adaptive.db"),
           adaptiveTables,
-          (db) => scrubAdaptive(db, scope.caseId),
+          (db) => scrubAdaptive(db, scope.caseId, scope.evidenceRevision),
         );
         files.push(artifact(directory, "sentinel-adaptive.db"));
       }

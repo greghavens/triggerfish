@@ -1,3 +1,4 @@
+import { retainPortablePausedGraphCheckpoints } from "./adaptive_store.ts";
 import { decodeInconclusiveRecheck } from "./recheck_inconclusive.ts";
 import {
   decodeSentinelTrafficComposition,
@@ -614,15 +615,14 @@ function restoreAdaptive(
         );
       }
       retainArchivedWorkerTraceMetadata(db, caseId);
+      retainPortablePausedGraphCheckpoints(db, revision, true);
       for (
         const table of [
-          "adaptive_worker_checkpoints",
           "adaptive_assigned_target_batch_receipts",
           "adaptive_recheck_context_batch_receipts",
           "adaptive_traffic_links_batch_receipts",
           "adaptive_observation_search_batch_receipts",
           "adaptive_live_workflow_results",
-          "adaptive_worker_progress",
           "adaptive_peer_verifications",
         ]
       ) {

@@ -794,9 +794,12 @@ Deno.test("Owner socket steers and stops one exact leased worker with a shared T
   }
 });
 
-Deno.test("Owner gateway pauses and resumes one graph worker from its committed checkpoint", async () => {
+async function verifyPausedGraphWorker(cold: boolean, denySavedRead = false) {
   const baseDir = await Deno.makeTempDir();
-  const path = resolveSentinelCasePath(baseDir);
+  const caseId = cold ? "portable-worker" : "main";
+  const path = resolveSentinelCasePath(baseDir, caseId);
+  let blockedSavedRead = 0;
+  let enforceReadRevocation = false;
   const release = Promise.withResolvers<void>();
   const releasePeer = Promise.withResolvers<void>();
   let peerStarted = false;
@@ -852,7 +855,19 @@ Deno.test("Owner gateway pauses and resumes one graph worker from its committed 
   const peerProvider = provider("peer-graph");
   const workerPool = createSentinelWorkerPool(2);
   const hookRunner: HookRunner = {
-    evaluateHook() {
+    evaluateHook(hook, { input }) {
+      if (
+        enforceReadRevocation && hook === "PRE_TOOL_CALL" &&
+        input.tool_name === "sentinel_assigned_target"
+      ) {
+        blockedSavedRead++;
+        return Promise.resolve({
+          allowed: false,
+          action: "BLOCK",
+          ruleId: null,
+          duration: 0,
+        });
+      }
       return Promise.resolve({
         allowed: true,
         action: "ALLOW",
@@ -931,7 +946,7 @@ Deno.test("Owner gateway pauses and resumes one graph worker from its committed 
     const pause = {
       action: "pause_assignment",
       kind: "sentinel",
-      id: "main",
+      id: caseId,
       revision: initial.revision,
       runId: initial.plan.runId,
       adaptiveRevision: status.revision,
@@ -959,6 +974,48 @@ Deno.test("Owner gateway pauses and resumes one graph worker from its committed 
     first.stop();
     release.resolve();
     await until(() => !first.hasInFlightWork());
+    if (cold) {
+      const ref = {
+        kind: "sentinel",
+        id: caseId,
+        revision: initial.revision,
+        runId: initial.plan.runId,
+      };
+      const archiveId = crypto.randomUUID();
+      await withOwnerControl(baseDir, async (request) => {
+        assertEquals(
+          JSON.parse(await request({ action: "cancel", ...ref })).run.status,
+          "stopped",
+        );
+        assertEquals(
+          JSON.parse(
+            await request({ action: "archive", ...ref, requestId: archiveId }),
+          ).receipt.status,
+          "succeeded",
+        );
+      });
+      await Deno.rename(dirname(path), join(baseDir, "removed-live-case"));
+      assertEquals(readSentinelAssessment(path), undefined);
+      await withOwnerControl(baseDir, async (request) => {
+        assertEquals(
+          JSON.parse(
+            await request({
+              action: "restore",
+              ...ref,
+              archiveId,
+              requestId: crypto.randomUUID(),
+            }),
+          ).receipt.status,
+          "succeeded",
+        );
+        assertEquals(readSentinelAssessment(path)?.paused, true);
+        assertEquals(
+          JSON.parse(await request({ action: "resume", ...ref })).run.status,
+          "running",
+        );
+        assertEquals(readSentinelAssessment(path)?.revision, initial.revision);
+      });
+    }
     const resumed = startPlanner();
     const resume = {
       ...pause,
@@ -993,7 +1050,14 @@ Deno.test("Owner gateway pauses and resumes one graph worker from its committed 
       assertEquals(JSON.parse(await request(resume)).receipt, receipt);
       assertEquals(approvals.length, 1);
     });
-    resumed.advance(initial);
+    enforceReadRevocation = denySavedRead;
+    resumed.advance(readSentinelAssessment(path)!);
+    if (denySavedRead) {
+      await until(() => blockedSavedRead > 0 && !resumed.hasInFlightWork());
+      assertEquals(reused, false);
+      assertEquals(sourceCalls.get("held-graph"), 1);
+      return;
+    }
     await until(() => reused);
     assertEquals(sourceCalls.get("held-graph"), 1);
     await until(() =>
@@ -1010,7 +1074,16 @@ Deno.test("Owner gateway pauses and resumes one graph worker from its committed 
     }
     await Deno.remove(baseDir, { recursive: true });
   }
-});
+}
+
+Deno.test("Owner gateway pauses and resumes one graph worker from its committed checkpoint", () =>
+  verifyPausedGraphWorker(false));
+
+Deno.test("Owner gateway restores a portable paused graph worker before reusing its checkpoint", () =>
+  verifyPausedGraphWorker(true));
+
+Deno.test("Owner gateway reauthorizes a portable paused graph worker before exposing its saved result", () =>
+  verifyPausedGraphWorker(true, true));
 
 Deno.test("An enabled idle planner heartbeat resumes from durable case history and respects gateway pause", async () => {
   const baseDir = await Deno.makeTempDir();

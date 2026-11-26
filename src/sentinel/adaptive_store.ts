@@ -610,6 +610,201 @@ function normalizeWorkerCheckpoint(
     toolCallCounts: counts,
   };
 }
+/** Keep only a validated portable checkpoint for an explicitly held local graph assignment. */
+export function retainPortablePausedGraphCheckpoints(
+  db: DatabaseSync,
+  evidenceRevision: number,
+  verifyingArchive = false,
+) {
+  const hasTable = (name: string) =>
+    !!db.prepare(
+      "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = ?",
+    ).get(name);
+  if (!hasTable("adaptive_worker_progress")) {
+    if (hasTable("adaptive_worker_checkpoints")) {
+      db.exec("DELETE FROM adaptive_worker_checkpoints");
+    }
+    return;
+  }
+  if (hasTable("adaptive_worker_checkpoints")) {
+    const columns = new Set(
+      db.prepare("PRAGMA table_info(adaptive_worker_checkpoints)").all()
+        .map(({ name }) => name),
+    );
+    if (
+      ![
+        "revision",
+        "taskId",
+        "evidenceRevision",
+        "promptSha256",
+        "expiresAt",
+        "version",
+        "checkpoint",
+      ].every((name) => columns.has(name))
+    ) {
+      db.exec(
+        "DELETE FROM adaptive_worker_checkpoints; DELETE FROM adaptive_worker_progress",
+      );
+      return;
+    }
+  }
+  const valid = new Map<string, {
+    revision: string;
+    taskId: string;
+    progress: SentinelReviewStep[];
+    control: string | null;
+  }>();
+  if (hasTable("adaptive_worker_checkpoints")) {
+    const checkpoints = db.prepare(`
+      SELECT checkpoint.*, task.nodeId, task.kind, review.attempts,
+        (
+          SELECT hold.note FROM adaptive_events AS hold
+          WHERE hold.revision = task.revision AND hold.taskId = task.id
+            AND hold.event IN ('model_review_paused', 'model_review_resumed')
+          ORDER BY hold.rowid DESC LIMIT 1
+        ) AS savedHold
+      FROM adaptive_worker_checkpoints AS checkpoint
+      JOIN adaptive_tasks AS task ON task.id = checkpoint.taskId AND task.revision = checkpoint.revision
+      JOIN adaptive_model_reviews AS review ON review.taskId = task.id
+      WHERE checkpoint.evidenceRevision = ? AND checkpoint.version = 1
+        AND checkpoint.expiresAt > ? AND task.kind IN ('trace', 'impact')
+        AND task.status = 'completed' AND review.token IS NULL AND review.noteId IS NULL
+        AND (SELECT hold.event FROM adaptive_events AS hold
+          WHERE hold.revision = task.revision AND hold.taskId = task.id
+            AND hold.event IN ('model_review_paused', 'model_review_resumed')
+          ORDER BY hold.rowid DESC LIMIT 1) = 'model_review_paused'
+    `).all(evidenceRevision, Date.now());
+    const originalProgress = checkpoints.length
+      ? db.prepare(`
+      SELECT steps, controlClaimSha256 FROM adaptive_worker_progress
+      WHERE revision = ? AND taskId = ?
+    `)
+      : undefined;
+    for (const row of checkpoints) {
+      const { revision, taskId, nodeId, promptSha256, checkpoint, savedHold } =
+        row;
+      if (
+        typeof revision !== "string" || typeof taskId !== "string" ||
+        typeof nodeId !== "string" || typeof promptSha256 !== "string" ||
+        typeof checkpoint !== "string" || typeof savedHold !== "string" ||
+        redactCredentialText(checkpoint) !== checkpoint
+      ) continue;
+      try {
+        const hold = JSON.parse(savedHold);
+        const value = JSON.parse(checkpoint);
+        const progress = originalProgress?.get(revision, taskId);
+        const control = value.controlClaimSha256 ?? null;
+        if (
+          typeof progress?.steps !== "string" ||
+          progress.controlClaimSha256 !== control ||
+          (control !== null &&
+            (typeof control !== "string" || !/^[a-f0-9]{64}$/.test(control))) ||
+          hold.scope?.action !== "pause_assignment" ||
+          hold.scope.taskId !== taskId ||
+          hold.scope.evidenceRevision !== evidenceRevision ||
+          hold.scope.attempt !== Number(row.attempts) + 1 ||
+          hold.checkpointSha256 !==
+            createHash("sha256").update(checkpoint).digest("hex") ||
+          value.history?.length !== 3 ||
+          value.history[1]?.tool_calls?.length !== 1 ||
+          value.history[1].tool_calls[0]?.function?.name !==
+            ASSIGNED_TARGET_CHECKPOINT_TOOL
+        ) continue;
+        const [step, ...rest] = JSON.parse(
+          progress.steps,
+        ) as SentinelReviewStep[];
+        const graph = JSON.parse(value.history[2]?.content);
+        if (
+          !step || rest.length ||
+          step.tool !== ASSIGNED_TARGET_CHECKPOINT_TOOL ||
+          step.outcome !== "returned" ||
+          step.assignedTarget?.targetId !== nodeId ||
+          !Array.isArray(step.assignedTarget.linkedNodeIds) ||
+          step.assignedTarget.linkedNodeIds.length > 200 ||
+          step.assignedTarget.linkedNodeIds.some((id) =>
+            typeof id !== "string" || !id || id.length > 4096 ||
+            redactCredentialText(id) !== id
+          ) ||
+          graph.taskId !== taskId || graph.revision !== evidenceRevision ||
+          graph.target?.id !== nodeId || !Array.isArray(graph.linked) ||
+          !isDeepStrictEqual(
+            graph.linked.flatMap((
+              node: { kind?: string; id?: string } | null,
+            ) => node?.kind === "evidence" ? [node.id] : []),
+            step.assignedTarget.linkedNodeIds,
+          )
+        ) continue;
+        const safeSteps: SentinelReviewStep[] = [{
+          tool: ASSIGNED_TARGET_CHECKPOINT_TOOL,
+          outcome: "returned",
+          target: nodeId,
+          assignedTarget: {
+            targetId: nodeId,
+            linkedNodeIds: step.assignedTarget.linkedNodeIds,
+          },
+          ...(step.resultSnapshot && {
+            resultSnapshot: {
+              sha256: step.resultSnapshot.sha256,
+              excerpt: "",
+              truncated: true,
+            },
+          }),
+        }];
+        const normalized = normalizeWorkerCheckpoint(
+          value,
+          promptSha256,
+          nodeId,
+          undefined,
+          safeSteps,
+          undefined,
+          [],
+        );
+        if (
+          !normalized ||
+          !isDeepStrictEqual({
+            ...normalized,
+            ...(control && { controlClaimSha256: control }),
+          }, value)
+        ) continue;
+        valid.set(JSON.stringify([revision, taskId]), {
+          revision,
+          taskId,
+          progress: safeSteps,
+          control,
+        });
+      } catch {
+        // Unrecognized or incomplete checkpoints carry no archive authority.
+      }
+    }
+    if (verifyingArchive && valid.size !== checkpoints.length) {
+      throw new Error("Invalid archived Sentinel paused worker checkpoint");
+    }
+    const drop = db.prepare(
+      "DELETE FROM adaptive_worker_checkpoints WHERE revision = ? AND taskId = ? AND evidenceRevision = ?",
+    );
+    for (
+      const row of db.prepare(
+        "SELECT revision, taskId, evidenceRevision FROM adaptive_worker_checkpoints",
+      ).all()
+    ) {
+      if (
+        row.evidenceRevision !== evidenceRevision ||
+        !valid.has(JSON.stringify([row.revision, row.taskId]))
+      ) {
+        drop.run(row.revision, row.taskId, row.evidenceRevision);
+      }
+    }
+  }
+  db.exec("DELETE FROM adaptive_worker_progress");
+  if (!valid.size) return;
+  const retain = db.prepare(
+    "INSERT INTO adaptive_worker_progress (revision, taskId, steps, controlClaimSha256) VALUES (?, ?, ?, ?)",
+  );
+  for (const { revision, taskId, progress, control } of valid.values()) {
+    retain.run(revision, taskId, JSON.stringify(progress), control);
+  }
+}
+
 const MAX_PLANNER_RELATED_NODE_IDS = 50;
 
 function validatedPlannerObservationNodeIds(raw: unknown): string[] {
