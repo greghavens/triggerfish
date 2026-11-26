@@ -43,7 +43,7 @@ export interface WebToolsResult {
 }
 
 /** Build domain security config from the application YAML config. */
-function buildDomainSecurityConfig(
+export function buildDomainSecurityConfig(
   config: TriggerFishConfig,
 ): DomainSecurityConfig {
   const webConfig = config.web;

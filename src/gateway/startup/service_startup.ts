@@ -1,3 +1,7 @@
+import { createManagedNotificationChannels } from "../../core/managed_notification_channels.ts";
+import { createNotificationWebhookTransport } from "../notifications/webhook_transport.ts";
+import { createDomainPolicy } from "../../tools/web/policy.ts";
+import { buildDomainSecurityConfig } from "./factory/web_tools.ts";
 import { listSelectableModelProfiles } from "../../core/model_profile_selection.ts";
 import { liveProviderRouteSettings } from "../../agent/providers/live_routes.ts";
 import type { ModelsConfig } from "../../agent/providers/config.ts";
@@ -130,6 +134,13 @@ export function buildMainChatSession(
       coreInfra.enhancedSessionManager.get(id as SessionId),
     operatorRunExecutor: createOperatorRunToolExecutor({
       baseDir: bootstrap.baseDir,
+      notificationChannels: {
+        store: createManagedNotificationChannels(coreInfra.storage),
+        sendWebhook: createNotificationWebhookTransport(
+          toolInfra.mainKeychain,
+          createDomainPolicy(buildDomainSecurityConfig(bootstrap.config)),
+        ),
+      },
       resumeScheduledExecution: coreInfra.schedulerService
         ?.resumeScheduledExecution,
       readLiveWorkflow,

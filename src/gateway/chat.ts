@@ -784,6 +784,20 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
         );
         return allowed && isCurrent();
       },
+      async authorizeNotificationOutput(origin, classification, body) {
+        if (!isCurrent() || !canFlowTo(taint(), classification)) return false;
+        const metadata = {
+          destination: origin,
+          target_classification: classification,
+        };
+        const decision = await config.hookRunner.evaluateHook("PRE_OUTPUT", {
+          session: { ...session, taint: taint() },
+          input: { ...metadata, content: body },
+          auditInput: metadata,
+        });
+        return decision.allowed && isCurrent() &&
+          canFlowTo(taint(), classification);
+      },
       ...(config.recoverAgentTurn && { ownerRecoverySessionId: session.id }),
       ...(config.runSubagentRecoveryCommand && {
         delegatedRecovery: {

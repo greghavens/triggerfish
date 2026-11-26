@@ -1,4 +1,9 @@
 import {
+  executeOperatorNotificationChannel,
+  notificationChannelActions,
+  type OperatorNotificationChannels,
+} from "./notifications/operator_channels.ts";
+import {
   executeOperatorModelMonitor,
   modelMonitoringActions,
 } from "./operator_model_monitor.ts";
@@ -552,6 +557,7 @@ export const operatorRunTool: ToolDefinition = {
         "set_company_scope",
         "company_assets",
         ...modelMonitoringActions,
+        ...notificationChannelActions,
         "live_model_route",
         "set_live_model_route",
         "reset_live_model_route",
@@ -921,6 +927,15 @@ export const operatorRunTool: ToolDefinition = {
       type: "string",
       description:
         "Exact Sentinel worker assignment revision from run inspection",
+    },
+    notificationChannelId: {
+      type: "string",
+      description: "ID of the managed notification channel.",
+    },
+    notificationChannelSettings: {
+      type: "object",
+      description:
+        "Complete webhook settings: name, destinationOrigin, endpointRef, classification and enabled. Use only an existing notification secret reference.",
     },
     expectedVersion: {
       type: "integer",
@@ -1801,6 +1816,11 @@ export interface OperatorRunToolContext {
   readonly authenticatedOwnerSessionId?: string;
   readonly authorizeOwnerRunCall?: (
     args: Record<string, unknown>,
+  ) => Promise<boolean>;
+  readonly authorizeNotificationOutput?: (
+    origin: string,
+    classification: ClassificationLevel,
+    body: string,
   ) => Promise<boolean>;
   readonly ownerRecoverySessionId?: string;
   readonly delegatedRecovery?: {
@@ -3066,6 +3086,7 @@ export function createOperatorRunToolExecutor(options: {
   readonly baseDir: string;
   readonly confirm: (message: string) => Promise<boolean>;
   readonly workflows?: OperatorWorkflowRuns;
+  readonly notificationChannels?: OperatorNotificationChannels;
   readonly resumeScheduledExecution?: (id: string) => Promise<boolean>;
   readonly readLiveWorkflow?: ReturnType<
     typeof createSentinelLiveWorkflowReader
@@ -3272,6 +3293,24 @@ export function createOperatorRunToolExecutor(options: {
       )
     ) {
       return "Error: Supply only defined operator run fields.";
+    }
+    const notification = notificationChannelActions.find((candidate) =>
+      candidate === args.action
+    );
+    if (notification) {
+      if (!options.notificationChannels) return unavailable;
+      try {
+        const result = await executeOperatorNotificationChannel(
+          options.notificationChannels,
+          options.confirm,
+          notification,
+          args,
+          context,
+        );
+        return result ? safeProjection(result, "INTERNAL") : unavailable;
+      } catch {
+        return unavailable;
+      }
     }
     const monitoring = modelMonitoringActions.find((action) =>
       action === args.action
