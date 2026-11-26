@@ -1554,6 +1554,20 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
       ).link;
       assert(attachment);
       trafficLinkId = attachment.id;
+      const annotation = JSON.parse(
+        await turn({
+          ...trafficScope,
+          action: "annotate_finding_traffic",
+          trafficLinkId,
+          reportVersion: 1,
+          evidenceVersion: JSON.parse(await turn(findingTraffic)).page
+            .evidenceVersion,
+          evidenceRole: "supporting",
+          evidenceNote: "Reviewed before the archive was created.",
+          requestId: crypto.randomUUID(),
+        }),
+      ).amendment;
+      assertEquals(annotation.linkId, trafficLinkId);
       const evidenceVersion = JSON.parse(await turn(findingTraffic)).page
         .evidenceVersion;
       ownerAmendment = {
@@ -1658,6 +1672,10 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
       assertEquals(
         (preArchiveTraffic as { receipt: { digest: string } }).receipt.digest,
         traffic.digest,
+      );
+      assertEquals(
+        (preArchiveTraffic as { annotations: unknown[] }).annotations,
+        [annotation],
       );
     });
     const linkedRegistry = createProviderRegistry();
