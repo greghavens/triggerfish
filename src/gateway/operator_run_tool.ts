@@ -99,7 +99,6 @@ import {
   isSentinelInventoryFindingRead,
   isSentinelInventoryNeighborhoodRead,
   normalizeSentinelGraphFactQuery,
-  parseSavedPlannerProvenancePath,
   parseSentinelPinnedFindingRead,
   readSavedSentinelProvenanceNode,
   readSavedSentinelProvenanceSearch,
@@ -248,6 +247,8 @@ import {
   validateSentinelOperatingConstraintAssets,
 } from "../sentinel/operating_constraints.ts";
 import {
+  allowsRetainedSentinelProvenancePage,
+  allowsSavedSentinelProvenancePath,
   inspectSentinelProvenance,
   inspectSentinelWorkerObservation,
   projectCaseHints,
@@ -291,6 +292,7 @@ import {
   readSentinelInvestigationFrontier,
   readSentinelModelSettings,
   readSentinelOperatorAssetHint,
+  readSentinelProvenance,
   readSentinelTaskQueue,
   readSentinelWorkflowPublicationStep,
   reviewSentinelAssignmentBatch,
@@ -1799,7 +1801,7 @@ async function reopenSentinelSourceResult(
     const saved = step.plannerProvenancePath;
     if (
       args && args.to === step.target && saved &&
-      parseSavedPlannerProvenancePath(saved, args, revision)
+      allowsSavedSentinelProvenancePath(path, revision, args, saved)
     ) text = saved;
   } else if (step.tool === "sentinel_provenance_search") {
     const page = readSentinelProvenanceSearchReference(
@@ -1816,6 +1818,10 @@ async function reopenSentinelSourceResult(
           page,
           revision,
         );
+      if (
+        text &&
+        !allowsRetainedSentinelProvenancePage(path, revision, page.args, text)
+      ) return;
     }
   } else if (step.tool === "sentinel_provenance_node") {
     const page = readSentinelProvenanceNodeReference(step.provenanceNodePage);
@@ -1831,6 +1837,10 @@ async function reopenSentinelSourceResult(
           page,
           revision,
         );
+      if (
+        text &&
+        !allowsRetainedSentinelProvenancePage(path, revision, page.args, text)
+      ) return;
     }
   } else if (step.tool === "sentinel_worker_trace_search") {
     const page = readSentinelWorkerTracePageReference(step.workerTracePage);
@@ -1905,7 +1915,21 @@ async function reopenSentinelSourceResult(
       projection &&
       (selector.revision === undefined || selector.revision === revision)
     ) {
-      text = JSON.stringify(projection);
+      const graph = readSentinelProvenance(path, revision, null)?.graph
+        .overview();
+      const fits = (
+        retained: Record<string, number>,
+        current: Record<string, number>,
+      ) =>
+        Object.entries(retained).every(([key, count]) =>
+          count <= (current[key] ?? 0)
+        );
+      if (
+        graph &&
+        projection.unresolvedReferenceCount <= graph.unresolvedReferenceCount &&
+        fits(projection.nodesByKind, graph.nodesByKind) &&
+        fits(projection.edgesByRelation, graph.edgesByRelation)
+      ) text = JSON.stringify(projection);
     }
   } else if (step.tool === "sentinel_graph_facts") {
     const runId = readSentinelRunIdForRevision(path, revision);
@@ -7253,17 +7277,30 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
                 !await authorize(scope, step.tool, page.args)
               ) return unavailable;
               const text = step.workerProvenanceNodeResult === undefined
-                ? reopenSentinelProvenanceNode(path, ref.revision, page)
+                ? reopenSentinelProvenanceNode(
+                  path,
+                  ref.revision,
+                  page,
+                  task.id,
+                )
                 : readSavedSentinelProvenanceNode(
                   step.workerProvenanceNodeResult,
                   page,
                   ref.revision,
                 );
+              const scoped = () =>
+                text && allowsRetainedSentinelProvenancePage(
+                  path,
+                  ref.revision!,
+                  page.args,
+                  text,
+                  task.id,
+                );
               if (
-                !text ||
+                !text || !scoped() ||
                 createHash("sha256").update(text).digest("hex") !==
                   page.sha256 ||
-                !await authorize(scope, step.tool, page.args, text)
+                !await authorize(scope, step.tool, page.args, text) || !scoped()
               ) return unavailable;
               const current = readHistoricalAdaptiveSentinel(
                 path,
@@ -7305,17 +7342,30 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
                 !await authorize(scope, step.tool, page.args)
               ) return unavailable;
               const text = step.provenanceSearchResult === undefined
-                ? reopenSentinelProvenanceSearch(path, ref.revision, page)
+                ? reopenSentinelProvenanceSearch(
+                  path,
+                  ref.revision,
+                  page,
+                  task.id,
+                )
                 : readSavedSentinelProvenanceSearch(
                   step.provenanceSearchResult,
                   page,
                   ref.revision,
                 );
+              const scoped = () =>
+                text && allowsRetainedSentinelProvenancePage(
+                  path,
+                  ref.revision!,
+                  page.args,
+                  text,
+                  task.id,
+                );
               if (
-                !text ||
+                !text || !scoped() ||
                 createHash("sha256").update(text).digest("hex") !==
                   page.sha256 ||
-                !await authorize(scope, step.tool, page.args, text)
+                !await authorize(scope, step.tool, page.args, text) || !scoped()
               ) return unavailable;
               const current = readHistoricalAdaptiveSentinel(
                 path,
@@ -7460,10 +7510,12 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
                     goalState,
                   )
                 : step.tool === "sentinel_path" && step.plannerProvenancePath
-                ? parseSavedPlannerProvenancePath(
-                    step.plannerProvenancePath,
-                    args,
+                ? allowsSavedSentinelProvenancePath(
+                    path,
                     ref.revision,
+                    args,
+                    step.plannerProvenancePath,
+                    task.id,
                   )
                   ? step.plannerProvenancePath
                   : undefined
@@ -7477,7 +7529,15 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
                 !text || text.startsWith("Error:") ||
                 createHash("sha256").update(text).digest("hex") !==
                   citation.sha256 ||
-                !await authorize(scope, step.tool, args, text)
+                !await authorize(scope, step.tool, args, text) ||
+                (step.tool === "sentinel_path" && args.graph === "provenance" &&
+                  !allowsSavedSentinelProvenancePath(
+                    path,
+                    ref.revision,
+                    args,
+                    text,
+                    task.id,
+                  ))
               ) return unavailable;
               const current = readHistoricalAdaptiveSentinel(
                 path,
@@ -9351,7 +9411,13 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
             return unavailable;
           }
           if (
-            includeResult && read.tool === "sentinel_worker_observation" &&
+            includeResult && [
+              "sentinel_worker_observation",
+              "sentinel_provenance_node",
+              "sentinel_provenance_search",
+              "sentinel_graph_overview",
+              "sentinel_path",
+            ].includes(read.tool) &&
             text !== await reopenSentinelSourceResult(
                 options.baseDir,
                 path,

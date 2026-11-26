@@ -3766,6 +3766,7 @@ async function verifyPlannerArchive(
   mode:
     | "search"
     | "direct"
+    | "worker-provenance"
     | "goals"
     | "telemetry"
     | "traffic"
@@ -3795,6 +3796,7 @@ async function verifyPlannerArchive(
           "sentinel_coverage",
           "sentinel_provenance_search",
           "sentinel_provenance_node",
+          "sentinel_graph_overview",
           "sentinel_worker_observation",
           "sentinel_worker_trace_search",
           "sentinel_goal_state",
@@ -3946,6 +3948,20 @@ async function verifyPlannerArchive(
         args: { query: "sentinel_assigned_target", limit: 1 },
       },
     ];
+    if (mode === "worker-provenance") {
+      plannerCalls.splice(9, 3, {
+        name: "sentinel_graph_overview",
+        args: {},
+      }, {
+        name: "sentinel_provenance_search",
+        args: { query: "Reviewed committed observation.", origin: "adaptive" },
+      }, {
+        name: "sentinel_provenance_node",
+        get args() {
+          return { node: `observation:adaptive:review:${observedTaskId}` };
+        },
+      });
+    }
     if (mode === "goals") {
       plannerCalls.splice(10, 2, {
         name: "sentinel_goal_state",
@@ -4425,7 +4441,10 @@ async function verifyPlannerArchive(
       if (mode === "goals") {
         store.addCaseHint("Review the recorded dependency.", state.revision);
       }
-      if (mode === "search" || mode === "direct" || mode === "facts") {
+      if (
+        mode === "search" || mode === "direct" || mode === "facts" ||
+        mode === "worker-provenance"
+      ) {
         const reason = "archive planner worker search fixture";
         const task = store.sync(revision, [{
           kind: "trace",
@@ -4527,7 +4546,11 @@ async function verifyPlannerArchive(
       JSON.parse(responses[8]).nodes[0].id,
       "finding:control-finding",
     );
-    assertEquals(JSON.parse(responses[9]).node.id, "finding:control-finding");
+    if (mode === "worker-provenance") {
+      assert(JSON.parse(responses[9]).nodesByKind.task > 0);
+    } else {
+      assertEquals(JSON.parse(responses[9]).node.id, "finding:control-finding");
+    }
     let workerNode: { taskId: string; results: string[] } | undefined;
     const findingReviewRequest = {
       kind: "sentinel",
@@ -4760,6 +4783,10 @@ async function verifyPlannerArchive(
       } finally {
         later.close();
       }
+    } else if (mode === "worker-provenance") {
+      const id = `observation:adaptive:review:${observedTaskId}`;
+      assertEquals(observed.nodes.map(({ id }: { id: string }) => id), [id]);
+      assertEquals(JSON.parse(responses[11]).node.id, id);
     } else if (mode === "direct") {
       assertEquals(observed.task, observedTaskId);
       assertEquals(observed.offset, 5);
@@ -5512,6 +5539,24 @@ async function verifyPlannerArchive(
         "PRE_TOOL_CALL",
         "POST_TOOL_RESPONSE",
       ]);
+      if (mode === "worker-provenance") {
+        policy.denyWorkerSourceAfter = false;
+        assert(run.runId);
+        const prior = readSentinelOperatingConstraints(path, run.runId);
+        assert(recordSentinelOperatingConstraints(path, {
+          evidenceRevision: run.revision,
+          runId: run.runId,
+          requestId: crypto.randomUUID(),
+          expectedVersion: prior?.version ?? 0,
+          operatorScope: "fixture-current-owner",
+          constraints: { deniedKinds: [], allowedAssetIds: ["app"] },
+        }));
+        for (const ordinal of [10, 11, 12]) {
+          const denied = await turn({ ...resultRead, ordinal });
+          assertStringIncludes(denied, "unavailable");
+          assert(!denied.includes(observedTaskId));
+        }
+      }
       if (mode === "direct") {
         policy.denyWorkerSourceAfter = false;
         assert(run.runId);
@@ -5682,3 +5727,6 @@ Deno.test("gateway reopens exact archived planner organization inventory", () =>
 
 Deno.test("gateway reopens archived planner coverage totals only with the full current asset scope", () =>
   verifyPlannerArchive("coverage-rollup"));
+
+Deno.test("gateway reauthorizes archived worker provenance search and exact nodes", () =>
+  verifyPlannerArchive("worker-provenance"));

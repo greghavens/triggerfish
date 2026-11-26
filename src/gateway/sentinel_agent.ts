@@ -2516,6 +2516,7 @@ type ProvenanceScope = Pick<
   | "assessmentRevision"
   | "assignedTaskId"
   | "assignedTaskLeaseToken"
+  | "plannerExecutionEvidenceRunId"
 >;
 
 function readAgentProvenance(options: ProvenanceScope, revision?: number) {
@@ -2529,7 +2530,22 @@ function readAgentProvenance(options: ProvenanceScope, revision?: number) {
         "Error: Provenance is unavailable outside the worker's assigned evidence revision.",
     } as const;
   }
-  return readSentinelProvenance(options.snapshotPath, pinned ?? revision) ?? {
+  const selected = pinned ?? revision;
+  const scopedAssignment = options.assignedTaskId ??
+    (options.plannerExecutionEvidenceRunId !== undefined ? null : undefined);
+  if (
+    options.assignedTaskLeaseToken !== undefined &&
+    (selected === undefined || !liveProgressConsumer(options, selected))
+  ) {
+    return {
+      error: "Error: The requested Sentinel evidence scope is unavailable.",
+    } as const;
+  }
+  return readSentinelProvenance(
+    options.snapshotPath,
+    selected,
+    scopedAssignment,
+  ) ?? {
     error: "Error: The requested Sentinel assessment revision is unavailable.",
   } as const;
 }
@@ -2586,12 +2602,13 @@ export function reopenSentinelProvenanceSearch(
   path: string,
   revision: number,
   page: NonNullable<ReturnType<typeof readSentinelProvenanceSearchReference>>,
+  assignmentId: string | null = null,
 ) {
-  const provenance = readAgentProvenance(
-    { snapshotPath: path, assessmentRevision: revision },
-    page.args.revision,
-  );
-  if ("error" in provenance) return;
+  if (page.args.revision !== undefined && page.args.revision !== revision) {
+    return;
+  }
+  const provenance = readSentinelProvenance(path, revision, assignmentId);
+  if (!provenance) return;
   const matches = new Map(
     provenance.graph.searchNodes(
       page.args.query ?? "",
@@ -2600,7 +2617,7 @@ export function reopenSentinelProvenanceSearch(
     ).map((node) => [node.id, node]),
   );
   const nodes = page.ids.map((id) => matches.get(id));
-  if (nodes.some((node) => !node)) return;
+  if (nodes.some((node) => !node) || page.totalNodes > matches.size) return;
   return JSON.stringify({
     revision,
     totalNodes: page.totalNodes,
@@ -2641,6 +2658,7 @@ function validateSavedProvenanceSearch(
     args.kind,
     args.origin,
   );
+  if (saved.totalNodes > matches.length) return false;
   const retained = new Set(matches.map((node) => JSON.stringify(node)));
   return saved.nodes.every((node: unknown) =>
     retained.delete(JSON.stringify(node))
@@ -3286,14 +3304,15 @@ export function reopenSentinelProvenanceNode(
   path: string,
   revision: number,
   page: NonNullable<ReturnType<typeof readSentinelProvenanceNodeReference>>,
+  assignmentId: string | null = null,
 ) {
-  const provenance = readAgentProvenance(
-    { snapshotPath: path, assessmentRevision: revision },
-    page.args.revision,
-  );
-  if ("error" in provenance) return;
+  if (page.args.revision !== undefined && page.args.revision !== revision) {
+    return;
+  }
+  const provenance = readSentinelProvenance(path, revision, assignmentId);
+  if (!provenance) return;
   const current = provenance.graph.inspect(page.args.node);
-  if (!current) return;
+  if (!current || page.totalConnections > current.connections.length) return;
   const available = new Map(current.connections.map((item) => {
     const text = serializeToolResult(item, true);
     return [createHash("sha256").update(text).digest("hex"), item];
@@ -3308,6 +3327,58 @@ export function reopenSentinelProvenanceNode(
     nextOffset: page.nextOffset,
     connections,
   }, true);
+}
+
+/** Reauthorize saved identities without replacing the original review or note. */
+export function allowsRetainedSentinelProvenancePage(
+  path: string,
+  revision: number,
+  args: {
+    node?: string;
+    query?: string;
+    kind?: string;
+    origin?: string;
+  },
+  text: string,
+  assignmentId: string | null = null,
+) {
+  const visible = readSentinelProvenance(path, revision, assignmentId)?.graph;
+  if (!visible) return false;
+  const page = JSON.parse(text);
+  if (args.node !== undefined) {
+    const node = visible.inspect(args.node);
+    if (!node) return false;
+    const current = new Set(visible.snapshot().nodes.map(({ id }) => id));
+    const allows = (id: unknown) =>
+      typeof id === "string" &&
+      (!/^(?:task|observation):adaptive:/.test(id) || current.has(id));
+    if (
+      !page.connections.every((
+        item: { kind: string; from?: string; to?: string; reference?: string },
+      ) =>
+        item.kind === "edge"
+          ? allows(item.from) && allows(item.to)
+          : !item.reference ||
+            !/^adaptive:[a-f0-9]{64}$/.test(item.reference) ||
+            allows(`task:adaptive:${item.reference}`)
+      )
+    ) return false;
+    if (page.totalConnections <= node.connections.length) return true;
+    const complete = readSentinelProvenance(path, revision)?.graph.inspect(
+      args.node,
+    );
+    return !!complete &&
+      complete.connections.length === node.connections.length;
+  }
+  if (!page.nodes.every(({ id }: { id: string }) => !!visible.inspect(id))) {
+    return false;
+  }
+  const count = (graph: typeof visible) =>
+    graph.searchNodes(args.query ?? "", args.kind, args.origin).length;
+  const visibleCount = count(visible);
+  if (page.totalNodes <= visibleCount) return true;
+  const complete = readSentinelProvenance(path, revision)?.graph;
+  return !!complete && count(complete) === visibleCount;
 }
 
 function validateSavedProvenanceNode(
@@ -3339,7 +3410,9 @@ function validateSavedProvenanceNode(
   const provenance = readAgentProvenance(options, revision);
   if ("error" in provenance) return false;
   const current = provenance.graph.inspect(args.node);
-  if (!current) return false;
+  if (!current || saved.totalConnections > current.connections.length) {
+    return false;
+  }
   if (
     !isDeepStrictEqual(
       JSON.parse(serializeToolResult(current.node, true)),
@@ -3502,6 +3575,38 @@ async function queryPath(
   } catch {
     return "Error: The requested Sentinel graph or path endpoint is unavailable.";
   }
+}
+
+/** Keep the exact retained path, provided all its nodes and edges remain readable. */
+export function allowsSavedSentinelProvenancePath(
+  path: string,
+  revision: number,
+  args: Parameters<typeof parseSavedPlannerProvenancePath>[1],
+  saved: string,
+  assignmentId: string | null = null,
+) {
+  if (!parseSavedPlannerProvenancePath(saved, args, revision)) return false;
+  const graph = readSentinelProvenance(path, revision, assignmentId)?.graph
+    .snapshot();
+  if (!graph) return false;
+  const nodes = new Set(graph.nodes.map(({ id }) => id));
+  if (
+    typeof args.from !== "string" || !nodes.has(args.from) ||
+    typeof args.to !== "string" || !nodes.has(args.to)
+  ) return false;
+  const key = (
+    { from, to, relation }: { from: string; to: string; relation: string },
+  ) => JSON.stringify([from, to, relation]);
+  const edges = new Set(graph.edges.map(key));
+  const savedPage = JSON.parse(saved);
+  const paths = savedPage.path ? [savedPage.path] : savedPage.paths ?? [];
+  return paths.every((route: {
+    nodes: { id: string }[];
+    edges: { from: string; to: string; relation: string }[];
+  }) =>
+    route.nodes.every(({ id }) => nodes.has(id)) &&
+    route.edges.every((edge) => edge && edges.has(key(edge)))
+  );
 }
 
 /** Rebuild a graph read against the saved evidence and evaluation time. */
@@ -4060,9 +4165,12 @@ function createAgent(
           selectedCaseAction === "add_case_membership";
         const selectedCaseCall = selectedCaseAction === "constraints" ||
           selectedCaseWrite;
+        const provenanceRead = toolName === graphOverviewTool.name ||
+          toolName === SENTINEL_PROVENANCE_NODE_READ ||
+          toolName === SENTINEL_PROVENANCE_SEARCH ||
+          toolName === SENTINEL_PATH_READ;
         const scoped = typeof toolName === "string" &&
-          (toolName === sentinelInventoryTool.name ||
-            toolName === graphOverviewTool.name ||
+          (toolName === sentinelInventoryTool.name || provenanceRead ||
             isSentinelWorkerFindingTool(toolName) ||
             isSentinelGraphFactTool(toolName) ||
             toolName === proposeWorkerGoalTool.name ||
@@ -4133,6 +4241,11 @@ function createAgent(
             }
             : context,
         );
+        if (
+          result.allowed && name === "POST_TOOL_RESPONSE" &&
+          provenanceRead && canReadPlannerCase &&
+          (!turn || !currentPlannerReceiptScope(turn))
+        ) return { ...result, allowed: false, action: "BLOCK" };
         if (
           result.allowed && name === "POST_TOOL_RESPONSE" &&
           canReadPlannerCase &&
@@ -5246,6 +5359,9 @@ function createAgent(
         return readSentinelGraphOverview(options, args);
       }
       if (name === SENTINEL_PROVENANCE_SEARCH) {
+        if (canReadPlannerCase && !currentPlannerReceiptScope(turn)) {
+          return "Error: The requested Sentinel evidence scope is unavailable.";
+        }
         return searchSentinelProvenance(options, args);
       }
       if (name === SENTINEL_CASE_HINTS_READ) {
@@ -5300,6 +5416,9 @@ function createAgent(
         );
       }
       if (name === SENTINEL_PROVENANCE_NODE_READ) {
+        if (canReadPlannerCase && !currentPlannerReceiptScope(turn)) {
+          return "Error: The requested Sentinel evidence scope is unavailable.";
+        }
         return inspectSentinelProvenance(options, args);
       }
       if (name === SENTINEL_INCIDENT_ALERTS_READ) {
@@ -5322,6 +5441,9 @@ function createAgent(
         );
       }
       if (name === SENTINEL_PATH_READ) {
+        if (canReadPlannerCase && !currentPlannerReceiptScope(turn)) {
+          return "Error: The requested Sentinel evidence scope is unavailable.";
+        }
         return await queryPath(options, turn.readGraph, args, true);
       }
       let graph: Graph;
@@ -6700,7 +6822,13 @@ function createAgent(
                       args.revision !== undefined && args.revision !== revision
                     ) return false;
                     const retained = args.graph === "provenance" &&
-                      parseSavedPlannerProvenancePath(saved, args, revision) &&
+                      allowsSavedSentinelProvenancePath(
+                        options.snapshotPath,
+                        revision,
+                        args,
+                        saved,
+                        task.id,
+                      ) &&
                       retainedProgress?.some((step) =>
                         step.tool === call.name &&
                         step.outcome === "returned" &&

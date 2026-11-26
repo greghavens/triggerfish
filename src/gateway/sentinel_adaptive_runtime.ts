@@ -1,3 +1,4 @@
+import { readSentinelWorkerEvidenceScope } from "./sentinel_worker_evidence_scope.ts";
 import { INCONCLUSIVE_RECHECK_TOOL } from "../sentinel/recheck_inconclusive.ts";
 import {
   readSentinelTrafficReceipt,
@@ -1846,8 +1847,10 @@ export function readSentinelInteractiveModelUsage(snapshotPath: string) {
 export function readSentinelProvenance(
   snapshotPath: string,
   revision?: number,
+  scopedAssignment?: string | null,
 ) {
   if (revision === undefined) {
+    if (scopedAssignment !== undefined) return;
     const state = readSentinelAssessment(snapshotPath);
     if (!state?.result) return undefined;
     const adaptive = readAdaptiveSentinel(snapshotPath, state, "revision");
@@ -1865,11 +1868,46 @@ export function readSentinelProvenance(
   const state = readSentinelAssessmentRevision(snapshotPath, revision);
   if (!state?.result) return undefined;
   const adaptive = readHistoricalAdaptiveSentinel(snapshotPath, revision);
+  let visible = adaptive ?? undefined;
+  if (visible && scopedAssignment !== undefined) {
+    const scope = readSentinelWorkerEvidenceScope(
+      snapshotPath,
+      revision,
+      scopedAssignment ?? undefined,
+    );
+    const allowed = new Set(scope?.allowedTaskIds);
+    if (scope?.runId !== visible.goal.id) allowed.clear();
+    visible = {
+      ...visible,
+      tasks: visible.tasks.filter(({ id }) => allowed.has(id)).map((task) => ({
+        ...task,
+        prerequisites: task.prerequisites.filter((id) => allowed.has(id)),
+      })),
+      modelReviews: visible.modelReviews.filter(({ taskId }) =>
+        allowed.has(taskId)
+      ),
+      modelReviewStates: visible.modelReviewStates.filter(({ taskId }) =>
+        allowed.has(taskId)
+      ),
+      assetDiscoveries: visible.assetDiscoveries.filter(({ taskId }) =>
+        allowed.has(taskId)
+      ),
+      remediationRechecks: visible.remediationRechecks.filter(({ taskId }) =>
+        allowed.has(taskId)
+      ),
+      graphFacts: visible.graphFacts.filter(({ taskId }) =>
+        allowed.has(taskId)
+      ),
+      workflowObservations: visible.workflowObservations.filter(({ taskId }) =>
+        allowed.has(taskId)
+      ),
+    };
+  }
   return {
     revision: state.revision,
     graph: buildSentinelProvenance(
       state.result,
-      adaptive ?? undefined,
+      visible,
       undefined,
       readSentinelIncidentReviews(snapshotPath, state.revision),
       readSentinelFindingReviews(snapshotPath, state.revision),

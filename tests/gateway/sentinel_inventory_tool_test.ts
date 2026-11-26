@@ -790,6 +790,52 @@ Deno.test("Leased trace search exposes completed peers only on the exact assigne
         plannerObservations.resultFrames,
         workerObservations.resultFrames,
       );
+      const alphaReview = `observation:adaptive:review:${idFor("alpha")}`;
+      const betaReview = `observation:adaptive:review:${idFor("beta")}`;
+      const workerNodes = await query(
+        main,
+        [
+          { node: alphaReview },
+          { node: betaReview },
+          { node: `goal:adaptive:${state.plan.runId}` },
+        ],
+        undefined,
+        lease,
+        undefined,
+        "sentinel_provenance_node",
+      );
+      assertEquals(
+        JSON.parse(workerNodes.resultFrames[0]).node.modelReview.taskId,
+        idFor("alpha"),
+      );
+      assertStringIncludes(workerNodes.resultFrames[1], "unavailable");
+      const scopedGoal = JSON.parse(workerNodes.resultFrames[2]);
+      assertEquals(scopedGoal.node.kind, "goal");
+      assert(!workerNodes.resultFrames[2].includes(idFor("beta")));
+      const plannerEvidence = await query(
+        main,
+        [
+          { query: "Reviewed recorded evidence.", origin: "adaptive" },
+        ],
+        undefined,
+        {
+          assessmentRevision: state.revision,
+          plannerExecutionEvidenceRunId: state.plan.runId,
+        },
+        {
+          operatingConstraints: {
+            version: constraints.version,
+            digest: constraints.digest,
+          },
+        },
+        "sentinel_provenance_search",
+      );
+      assertEquals(
+        JSON.parse(plannerEvidence.resultFrames[0]).nodes.map(
+          ({ id }: { id: string }) => id,
+        ),
+        [alphaReview],
+      );
     } finally {
       store.close();
     }
