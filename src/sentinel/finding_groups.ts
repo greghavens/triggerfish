@@ -146,11 +146,21 @@ export function readSentinelFindingGroup(
     ? openSentinelWorkerFindingStore(path)
     : undefined;
   try {
-    if (filter || order || assetSubtreeId !== undefined) {
-      const saved = readSentinelOperatingConstraints(path, runId, revision)
-        ?.constraints;
-      const current = readSentinelOperatingConstraints(path, runId)
-        ?.constraints;
+    const saved = readSentinelOperatingConstraints(path, runId, revision)
+      ?.constraints;
+    const current = readSentinelOperatingConstraints(path, runId)
+      ?.constraints;
+    const requiresScope = [saved, current].some((policy) =>
+      policy && (
+        policy.allowedAssetIds !== undefined ||
+        policy.deniedKinds.includes("review_finding") ||
+        policy.deniedKinds.includes("review_evidence")
+      )
+    );
+    if (
+      requiresScope || filter || order || assetSubtreeId !== undefined ||
+      categoryOffset !== undefined
+    ) {
       const allowed = (
         kind: "review_finding" | "review_evidence",
         nodeId: string,
@@ -313,52 +323,6 @@ export function readSentinelFindingGroup(
       ) return;
       workerEntries.push(workerEntry(report));
     }
-    const facets = categoryOffset === undefined
-      ? undefined
-      : findingFacets(categoryOffset);
-    if (facets) {
-      const saved = readSentinelOperatingConstraints(path, runId, revision)
-        ?.constraints;
-      const current = readSentinelOperatingConstraints(path, runId)
-        ?.constraints;
-      for (const finding of imported) {
-        const trace = { kind: "review_finding", nodeId: finding.id } as const;
-        if (
-          sentinelOperatingConstraintsAllow(saved, trace, snapshot) &&
-          sentinelOperatingConstraintsAllow(current, trace, snapshot)
-        ) {
-          facets.add(finding.severity, reviews.get(finding.id));
-        }
-      }
-      const scopedWorkers = journal?.pageFindingIds(
-        caseId,
-        runId,
-        revision,
-        0,
-        4097,
-      );
-      if (scopedWorkers && scopedWorkers.total > 4096) return;
-      for (const id of scopedWorkers?.ids ?? []) {
-        const report = journal?.readFindingReport(id, revision);
-        if (
-          report?.finding.caseId !== caseId || report.finding.runId !== runId
-        ) return;
-        const trace = {
-          kind: "review_evidence",
-          nodeId: report.finding.targetId,
-        } as const;
-        if (
-          sentinelOperatingConstraintsAllow(saved, trace, snapshot) &&
-          sentinelOperatingConstraintsAllow(current, trace, snapshot)
-        ) {
-          facets.add(
-            report.severity,
-            report.disposition,
-            report.findingCategory,
-          );
-        }
-      }
-    }
     const entries = [...graphEntries, ...workerEntries];
     const total = imported.length + workers.total;
     return {
@@ -368,7 +332,6 @@ export function readSentinelFindingGroup(
       total,
       imported: imported.length,
       worker: workers.total,
-      ...(facets && { facets: facets.page() }),
       entries,
       nextOffset: offset + entries.length < total
         ? offset + entries.length

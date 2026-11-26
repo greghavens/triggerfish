@@ -1649,6 +1649,37 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
       const ratedFinding = seedRating("application-a");
       const unratedOutside = seedRating("private-parent");
       ratingJournal.close();
+      const defaultFindings = {
+        action: "finding_groups",
+        scopes: [treeRun],
+        limit: 3,
+      };
+      const defaultPage =
+        JSON.parse((await turn(defaultFindings)).result).groups[0];
+      assertEquals(defaultPage.total, 4);
+      assertEquals(defaultPage.imported, 3);
+      assertEquals(defaultPage.worker, 1);
+      assertEquals(defaultPage.nextOffset, 3);
+      assert(
+        defaultPage.entries.every(({ id }: { id: string }) =>
+          id !== "outside-finding" && id !== "selected-finding"
+        ),
+      );
+      await withGateway(async (reconnected) => {
+        const secondPage = JSON.parse(
+          (await reconnected({
+            ...defaultFindings,
+            scopes: [{ ...treeRun, offset: defaultPage.nextOffset }],
+            includeFacets: true,
+          })).result,
+        ).groups[0];
+        assertEquals(secondPage.total, defaultPage.total);
+        assertEquals(secondPage.facets.total, secondPage.total);
+        assertEquals(secondPage.entries.map(({ id }: { id: string }) => id), [
+          ratedFinding.id,
+        ]);
+        assertEquals(secondPage.nextOffset, null);
+      });
       const savedTreeGraph = JSON.parse(await Deno.readTextFile(treePath));
       savedTreeGraph.nodes.push({
         id: "additional-evidence",
