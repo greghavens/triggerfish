@@ -315,7 +315,9 @@ import {
   hasSentinelAssignmentIntent,
   previewSentinelQueueControl,
   readHistoricalAdaptiveSentinel,
+  readProtectedSentinelAssignmentSources,
   readRetainedSentinelAnalystObservation,
+  readReviewedFindingExecutionProof,
   readSentinelAdaptiveEvidenceMapping,
   readSentinelAnalystObservationSource,
   readSentinelFindingFollowup,
@@ -2650,6 +2652,44 @@ export function createOperatorRunToolExecutor(options: {
     null,
     options,
   );
+
+  const authorizeReviewedFindingOperation = async (
+    ref: OperatorRunRef,
+    path: string,
+    asset: string,
+    source: NonNullable<AdaptiveGraphAssignment["sourceEvidence"]>[number],
+    context: OperatorRunToolContext,
+    authorizeScope: () => boolean,
+  ) => {
+    const node = source.executionEvidenceId;
+    if (!node) return false;
+    const proof = readReviewedFindingExecutionProof(path, asset, source);
+    if (!proof) return false;
+    const current = () =>
+      authorizeScope() &&
+      context.authorizeSentinelCaseRead?.(ref.id, source.evidenceRevision) !==
+        false &&
+      isDeepStrictEqual(
+        readReviewedFindingExecutionProof(path, asset, source),
+        proof,
+      );
+    const evidence = await readAuthorizedCaseEvidence(
+      ref.id,
+      path,
+      source.evidenceRevision,
+      node,
+      context,
+      current,
+    );
+    return !!evidence && executionReceiptSupportsCheck(
+      proof.node,
+      proof.runId,
+      asset,
+      proof.controlId,
+      "fail",
+      executionControlReceipt(evidence.payload),
+    ) && current();
+  };
 
   const execute: OperatorRunToolExecutor = async (args, context) => {
     const authorizeCaseRead = context?.authorizeSentinelCaseRead;
@@ -6215,6 +6255,38 @@ ${request}`)
                 receiptId: id,
               },
           );
+        const authorizeSourceResponse = async (
+          asset: string,
+          source: NonNullable<
+            AdaptiveGraphAssignment["sourceEvidence"]
+          >[number],
+        ) => {
+          const current = () => {
+            const latest = readSentinelAssessment(path);
+            return latest?.active === true &&
+              latest.revision === ref.revision &&
+              latest.plan.runId === runId.toLowerCase() &&
+              (!context.authorizeSelectedSentinelCase ||
+                context.authorizeSelectedSentinelCase());
+          };
+          if (
+            source.executionEvidenceId &&
+            !await authorizeReviewedFindingOperation(
+              ref,
+              path,
+              asset,
+              source,
+              context,
+              current,
+            )
+          ) return false;
+          const allowed = await context.authorizeSavedResponse(
+            operatorRunTool.name,
+            safeProjection({ ...source }),
+            "INTERNAL",
+          );
+          return allowed && (!source.executionEvidenceId || current());
+        };
         const selected: AdaptiveGraphAssignment[] = [];
         for (const item of assignments) {
           if (!item || typeof item !== "object" || Array.isArray(item)) {
@@ -6272,11 +6344,7 @@ ${request}`)
           if (sourceIds !== undefined && !sourceEvidence) return unavailable;
           for (const source of sourceEvidence ?? []) {
             if (
-              !await context.authorizeSavedResponse(
-                operatorRunTool.name,
-                safeProjection({ ...source }),
-                "INTERNAL",
-              )
+              !await authorizeSourceResponse(node, source)
             ) return unavailable;
           }
           selected.push({
@@ -6318,11 +6386,7 @@ ${request}`)
           for (const source of selection.sourceEvidence ?? []) {
             if (
               !await authorizeSource(source.id) ||
-              !await context.authorizeSavedResponse(
-                operatorRunTool.name,
-                safeProjection({ ...source }),
-                "INTERNAL",
-              )
+              !await authorizeSourceResponse(selection.nodeId, source)
             ) return unavailable;
           }
         }
@@ -8644,15 +8708,56 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
               } else if (receiptId) {
                 text = reopen(receiptId, revision)?.result;
               }
+              const protectedSources = readProtectedSentinelAssignmentSources(
+                path,
+                ref.revision,
+                task.id,
+              );
+              const relevantIds = new Set(
+                page ? [...page.ids, page.args.beforeReceiptId] : [receiptId],
+              );
+              const currentSources = () =>
+                isDeepStrictEqual(
+                  readProtectedSentinelAssignmentSources(
+                    path,
+                    ref.revision!,
+                    task.id,
+                  ),
+                  protectedSources,
+                );
+              const authorizeSources = async () => {
+                if (!protectedSources) return false;
+                if (!protectedSources.sources.length) return true;
+                if (protectedSources.assetId !== targetId) return false;
+                for (const source of protectedSources.sources) {
+                  if (
+                    relevantIds.has(source.id) &&
+                    !await authorizeReviewedFindingOperation(
+                      ref,
+                      path,
+                      targetId,
+                      source,
+                      context,
+                      currentSources,
+                    )
+                  ) return false;
+                }
+                return currentSources();
+              };
               if (
                 !text ||
                 createHash("sha256").update(text).digest("hex") !==
                   (page?.sha256 ?? citation?.sha256) ||
-                !await authorize(scope, step.tool, call, text)
+                !await authorizeSources() ||
+                !await authorize(scope, step.tool, call, text) ||
+                !await authorizeSources()
               ) return unavailable;
               const current = readHistoricalAdaptiveSentinel(
                 path,
                 ref.revision,
+                undefined,
+                false,
+                true,
               );
               if (
                 current?.goal.id !== runId ||

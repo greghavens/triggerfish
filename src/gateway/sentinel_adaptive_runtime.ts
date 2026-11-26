@@ -1374,6 +1374,48 @@ export function readSentinelFindingRecheckAttempts(
   }
 }
 
+function protectedAssignmentSources(task: AdaptiveTask | undefined) {
+  return task?.plannerRound?.sourceEvidence?.filter(({ executionEvidenceId }) =>
+    executionEvidenceId
+  ) ?? [];
+}
+
+export function readProtectedSentinelAssignmentSources(
+  path: string,
+  revision: number,
+  id: string,
+) {
+  const runId = readSentinelRunIdForRevision(path, revision);
+  if (!runId) return;
+  const store = openSentinelAdaptiveStore(storePath(path));
+  try {
+    const mapping = store.forEvidence(revision);
+    if (!mapping || mapping.goal.id !== runId) return;
+    const task = store.list(mapping.revision).find(({ id: taskId }) =>
+      taskId === id
+    );
+    if (task?.nodeId) {
+      return {
+        assetId: task.nodeId,
+        sources: protectedAssignmentSources(task),
+      };
+    }
+  } finally {
+    store.close();
+  }
+}
+
+function projectReviewedFindingStep(
+  step: SentinelReviewStep,
+  protectedReview: boolean,
+  includeReadResults = false,
+) {
+  return protectedReview && !includeReadResults &&
+      step.tool === "sentinel_worker_findings"
+    ? { tool: step.tool, outcome: step.outcome }
+    : projectSentinelTraceMetadata(step, includeReadResults);
+}
+
 export function readHistoricalAdaptiveSentinel(
   snapshotPath: string,
   evidenceNumber: number,
@@ -1395,13 +1437,24 @@ export function readHistoricalAdaptiveSentinel(
       ? store.recentActivity(101, mapping.revision, before)
       : [];
     const tasks = mapping ? store.list(mapping.revision) : [];
+    const assignments = new Map(tasks.map((task) => [task.id, task]));
     const modelReviews = mapping
-      ? store.modelReviewNotes(mapping.revision).map((review) => ({
-        ...review,
-        steps: review.steps.map((step) =>
-          projectSentinelTraceMetadata(step, includeWorkerReadResults)
-        ),
-      }))
+      ? store.modelReviewNotes(mapping.revision).map((review) => {
+        const protectedReview =
+          protectedAssignmentSources(assignments.get(review.taskId)).length > 0;
+        return {
+          ...review,
+          ...(protectedReview && !includeWorkerReadResults &&
+            { summary: "Reviewed retained connector evidence." }),
+          steps: review.steps.map((step) =>
+            projectReviewedFindingStep(
+              step,
+              protectedReview,
+              includeWorkerReadResults,
+            )
+          ),
+        };
+      })
       : [];
     const result = mapping
       ? readSentinelAssessmentRevision(snapshotPath, evidenceNumber)?.result ??
@@ -2200,10 +2253,19 @@ export function readAdaptiveSentinel(
   try {
     const revision = revisionForStore(state, store);
     const tasks = store.list(revision);
-    const modelReviews = store.modelReviewNotes(revision).map((review) => ({
-      ...review,
-      steps: review.steps.map((step) => projectSentinelTraceMetadata(step)),
-    }));
+    const assignments = new Map(tasks.map((task) => [task.id, task]));
+    const modelReviews = store.modelReviewNotes(revision).map((review) => {
+      const protectedReview =
+        protectedAssignmentSources(assignments.get(review.taskId)).length > 0;
+      return {
+        ...review,
+        ...(protectedReview &&
+          { summary: "Reviewed retained connector evidence." }),
+        steps: review.steps.map((step) =>
+          projectReviewedFindingStep(step, protectedReview)
+        ),
+      };
+    });
     return {
       revision,
       caseId: locateSentinelCase(snapshotPath)?.caseId,
@@ -2800,18 +2862,21 @@ function readRetainedReviewedAssignmentSources(
         const evidence = finding &&
           snapshot.nodes.find(({ id }) => id === finding.evidenceId);
         if (
-          !finding || finding.caseId !== caseId || finding.runId !== runId ||
+          !report || !finding?.taskId || finding.caseId !== caseId ||
+          finding.runId !== runId ||
           finding.evidenceRevision !== revision ||
           finding.targetId !== target ||
           !findingRecheckStillApplies(snapshot, finding) ||
           evidence?.kind !== "evidence" ||
-          evidence.executionSource || evidence.nativeWorkflowSource ||
           !allowNode(evidence.id)
         ) return;
         result.push({
           id,
           taskId: finding.taskId,
           evidenceRevision: finding.evidenceRevision,
+          ...(evidence.executionSource || evidence.nativeWorkflowSource
+            ? { executionEvidenceId: evidence.id }
+            : {}),
           digest: createHash("sha256").update(
             JSON.stringify([finding, report.version]),
           ).digest("hex"),
@@ -2836,22 +2901,62 @@ export function readSentinelReviewedAssignmentSources(
     : undefined;
 }
 
+/** Resolve the exact connector-backed control claim from an immutable assignment source. */
+export function readReviewedFindingExecutionProof(
+  path: string,
+  assetId: string,
+  source: AdaptiveReviewedAssignmentSource,
+) {
+  const { id, evidenceRevision, executionEvidenceId } = source;
+  if (
+    !executionEvidenceId || !isDeepStrictEqual(
+      readRetainedReviewedAssignmentSources(path, evidenceRevision, assetId, [
+        id,
+      ])?.[0],
+      source,
+    )
+  ) return;
+  const snapshot = readSentinelAssessmentRevision(path, evidenceRevision)
+    ?.result.sharedGraph.snapshot;
+  const node = snapshot?.nodes.find(({ id }) => id === executionEvidenceId);
+  if (node?.kind !== "evidence" || !hasSentinelWorkerFindingJournal(path)) {
+    return;
+  }
+  const store = openSentinelWorkerFindingStore(path);
+  try {
+    const record = store.readFinding(id);
+    if (!record) return;
+    return {
+      caseId: record.caseId,
+      runId: record.runId,
+      controlId: record.controlId,
+      node,
+    };
+  } finally {
+    store.close();
+  }
+}
+
 /** Check the whole saved selection before exposing any member. */
 function reviewedSourcesVisible(
   path: string,
   revision: number,
   task: Pick<AdaptiveTask, "nodeId" | "plannerRound">,
+  authorizeConnectorSeparately = false,
 ) {
   const sources = task.plannerRound?.sourceEvidence;
-  return !sources || (task.nodeId !== undefined && isDeepStrictEqual(
-    sources,
-    readRetainedReviewedAssignmentSources(
-      path,
-      revision,
-      task.nodeId,
-      sources.map(({ id }) => id),
-    ),
-  ));
+  return !sources || (task.nodeId !== undefined &&
+    (authorizeConnectorSeparately ||
+      !sources.some(({ executionEvidenceId }) => executionEvidenceId)) &&
+    isDeepStrictEqual(
+      sources,
+      readRetainedReviewedAssignmentSources(
+        path,
+        revision,
+        task.nodeId,
+        sources.map(({ id }) => id),
+      ),
+    ));
 }
 
 export function reviewSentinelAssignmentBatch(
@@ -3663,7 +3768,7 @@ function decisionAllowsClaim(snapshotPath: string, revision: number) {
   return (task: AdaptiveTask) =>
     allowed(task) &&
     (task.reason === OPERATOR_ASSIGNMENT_REASON || !decisionHold(task)) &&
-    reviewedSourcesVisible(snapshotPath, revision, task) &&
+    reviewedSourcesVisible(snapshotPath, revision, task, true) &&
     (!task.plannerRound?.findingFollowup || (() => {
       const current = readSentinelAssessment(snapshotPath);
       const source = task.plannerRound.findingFollowup;
@@ -3868,12 +3973,17 @@ function modelReviewStates(
   evidenceNumber: number,
   includeWorkerReadResults = false,
 ) {
+  const byId = new Map(tasks.map((task) => [task.id, task]));
   const reviews = store.modelReviewStates(revision).map((review) =>
     review.progressSteps
       ? {
         ...review,
         progressSteps: review.progressSteps.map((step) =>
-          projectSentinelTraceMetadata(step, includeWorkerReadResults)
+          projectReviewedFindingStep(
+            step,
+            protectedAssignmentSources(byId.get(review.taskId)).length > 0,
+            includeWorkerReadResults,
+          )
         ),
       }
       : review
@@ -5943,6 +6053,32 @@ export function createSentinelModelPlanner(
       const inspectedEvidence = new Set<string>();
       const worker = createWorker(state, task.id, token);
       try {
+        const protectedSources =
+          task.plannerRound?.sourceEvidence?.filter(({ executionEvidenceId }) =>
+            executionEvidenceId
+          ) ?? [];
+        const currentSource = () => {
+          const latest = readSentinelAssessment(snapshotPath);
+          return !signal.aborted && !!latest?.active && !latest.paused &&
+            adaptiveRevision(latest) === identity &&
+            matchesConstraints(latest) &&
+            decisionAllowsClaim(snapshotPath, latest.revision)(task);
+        };
+        const authorizeSources = async () => {
+          for (const source of protectedSources) {
+            if (
+              !task.nodeId || !currentSource() ||
+              !await worker.authorizeReviewedFindingSource?.(
+                task.nodeId,
+                source,
+                signal,
+                currentSource,
+              )
+            ) return false;
+          }
+          return true;
+        };
+        if (!await authorizeSources()) return;
         const sourceTaskId = task.plannerRound?.workerSources
           ? undefined
           : task.reviewedFrom;
@@ -6530,6 +6666,7 @@ export function createSentinelModelPlanner(
             }
             : undefined;
         }
+        if (!await authorizeSources()) return;
         const parsed = parseModelReview(
           state,
           task,
@@ -6674,14 +6811,14 @@ export function createSentinelModelPlanner(
       >();
       const controls = operatingConstraints(snapshotPath, state)?.constraints;
       const snapshot = state.result?.sharedGraph.snapshot;
-      const eligible = controls &&
-        store.list(revision).filter(({ nodeId }) =>
-          sentinelOperatingConstraintsAllow(
-            controls,
-            { kind: "review_evidence", nodeId },
-            snapshot,
-          )
-        ).map(({ id }) => id);
+      const eligible = store.list(revision).filter((task) =>
+        !protectedAssignmentSources(task).length &&
+        sentinelOperatingConstraintsAllow(
+          controls,
+          { kind: "review_evidence", nodeId: task.nodeId },
+          snapshot,
+        )
+      ).map(({ id }) => id);
       return store.plannerObservations(revision, eligible).map((entry) => {
         if (!entry.priorAssignedTargetCitations?.length) return entry;
         const priorAssignedTargetCitations = entry.priorAssignedTargetCitations

@@ -247,6 +247,7 @@ import {
 import {
   readAssignedSentinelModelReview,
   readHistoricalAdaptiveSentinel,
+  readReviewedFindingExecutionProof,
   readSentinelAssetTrafficHints,
   readSentinelCaseHints,
   readSentinelProvenance,
@@ -457,8 +458,17 @@ export interface SentinelTurnCheckpointOptions {
 type SelectedFinding = Parameters<typeof readLinkedFindingProof>[4];
 type LinkedFindingSources = Parameters<typeof readLinkedFindingProof>[1];
 
+type ReviewedFindingSource =
+  import("../sentinel/adaptive_store.ts").AdaptiveReviewedAssignmentSource;
+
 export interface SentinelAgent {
   readonly canRequestWorkerControl?: boolean;
+  readonly authorizeReviewedFindingSource?: (
+    assetId: string,
+    source: ReviewedFindingSource,
+    signal: AbortSignal,
+    current: () => boolean,
+  ) => Promise<boolean>;
   readonly authorizeLinkedFinding?: (
     caseId: string,
     assetId: string,
@@ -5342,12 +5352,17 @@ function createAgent(
           toolName === "sentinel_worker_findings" &&
           typeof context.input.tool_response === "string" &&
           context.input.tool_response.startsWith("{") &&
-          (!turn || !currentSentinelFindingReceipts(
-            options,
-            context.input.tool_response,
-            turn.findingReceiptRevision ?? options.assessmentRevision,
-            turn.requireCurrentFindingReceiptRevision,
-          ))
+          (!turn ||
+            !await authorizeReviewedFindingResults(
+              context.input.tool_response,
+              turn.signal,
+            ) ||
+            !currentSentinelFindingReceipts(
+              options,
+              context.input.tool_response,
+              turn.findingReceiptRevision ?? options.assessmentRevision,
+              turn.requireCurrentFindingReceiptRevision,
+            ))
         ) return { ...result, allowed: false, action: "BLOCK" };
         if (
           result.allowed && name === "POST_TOOL_RESPONSE" &&
@@ -7667,6 +7682,108 @@ function createAgent(
     },
   });
 
+  async function authorizeReviewedFindingResults(
+    result: string,
+    signal: AbortSignal,
+  ) {
+    const task = readAssignedModelReview(options);
+    const sources = task?.plannerRound?.sourceEvidence?.filter((
+      { executionEvidenceId },
+    ) => executionEvidenceId);
+    if (!sources?.length || !task?.nodeId) return true;
+    const { record, records } = JSON.parse(result);
+    const ids = new Set(
+      (record ? [record] : records ?? []).map(({ id }: { id: string }) => id),
+    );
+    for (const source of sources) {
+      if (
+        ids.has(source.id) &&
+        !await authorizeReviewedFindingSource(task.nodeId, source, signal)
+      ) return false;
+    }
+    return true;
+  }
+
+  async function authorizeReviewedFindingSource(
+    assetId: string,
+    source: ReviewedFindingSource,
+    signal: AbortSignal,
+    current = () => true,
+  ): Promise<boolean> {
+    const {
+      snapshotPath,
+      sharedInventoryBaseDir,
+      authorizeExecutionTracePayload,
+    } = options;
+    const node = source.executionEvidenceId;
+    if (!node || signal.aborted || !current()) return false;
+    const proof = readReviewedFindingExecutionProof(
+      snapshotPath,
+      assetId,
+      source,
+    );
+    if (!proof) return false;
+    const isCurrent = () => {
+      const task = readAssignedModelReview(options);
+      return !signal.aborted && current() && task?.nodeId === assetId &&
+        !!task.plannerRound?.sourceEvidence?.some((entry) =>
+          isDeepStrictEqual(entry, source)
+        ) &&
+        isDeepStrictEqual(
+          readReviewedFindingExecutionProof(snapshotPath, assetId, source),
+          proof,
+        );
+    };
+    if (!isCurrent()) return false;
+    const evidence = proof.node.nativeWorkflowSource
+      ? await readNativeExecutionEvidence(
+        options,
+        { signal },
+        session,
+        source.evidenceRevision,
+        node,
+        assetId,
+        isCurrent,
+      )
+      : sharedInventoryBaseDir && await readCaseExecutionEvidence(
+        sharedInventoryBaseDir,
+        snapshotPath,
+        source.evidenceRevision,
+        node,
+        assetId,
+      );
+    if (!evidence || !isCurrent()) return false;
+    const { payload, classification } = evidence;
+    const call = executionTracePayloadCall(payload);
+    if (
+      (!("stepIndex" in evidence) && (!authorizeExecutionTracePayload ||
+        !await authorizeSavedToolCalls(
+          [call],
+          config,
+          session,
+          undefined,
+          signal,
+        ) ||
+        !isCurrent() ||
+        !await authorizeExecutionTracePayload(payload, classification))) ||
+      !isCurrent() || !executionReceiptSupportsCheck(
+        proof.node,
+        proof.runId,
+        assetId,
+        proof.controlId,
+        "fail",
+        executionControlReceipt(payload),
+      )
+    ) return false;
+    const result = await enforcePostToolResponse(
+      "stepIndex" in evidence ? liveWorkflowStatusTool.name : call.name,
+      config,
+      session,
+      { resultText: executionTracePayloadResponse(payload), blocked: false },
+    );
+    return !result.blocked && isCurrent();
+  }
+
   async function authorizeLinkedFinding(
     caseId: string,
     assetId: string,
@@ -7764,6 +7881,7 @@ function createAgent(
       : undefined;
   return {
     ...(canReadPlannerCase && { authorizeLinkedFinding }),
+    ...(options.assignedTaskId && { authorizeReviewedFindingSource }),
     ...(canRequestWorkerControl && { canRequestWorkerControl }),
     ...(futureWorkflowTargets?.length && {
       futureWorkflowTargets,
@@ -8155,6 +8273,10 @@ function createAgent(
                     ) return false;
                     continue;
                   }
+                  if (
+                    call.name === SENTINEL_GOAL_RECHECK_READ &&
+                    !await authorizeReviewedFindingResults(saved, signal)
+                  ) return false;
                   if (
                     call.name === SENTINEL_GOAL_RECHECK_READ &&
                     !("receiptId" in call.args)

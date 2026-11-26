@@ -479,6 +479,8 @@ async function withFindingAssignmentGateway(
   outputPolicy?: (hook: string, input: Record<string, unknown>) => boolean,
   onFrame?: (frame: string) => void,
   workflows?: ReturnType<typeof createOperatorWorkflowRuns>,
+  readLiveWorkflow?: ReturnType<typeof nativeWorkflowReader>,
+  echoToolResult = false,
 ) {
   const registry = createProviderRegistry();
   let input: Record<string, unknown> = {};
@@ -490,7 +492,11 @@ async function withFindingAssignmentGateway(
       const last = messages.at(-1);
       output = last?.role === "tool" ? String(last.content) : "";
       return Promise.resolve({
-        content: output ? "Reviewed Sentinel assignment." : "",
+        content: echoToolResult
+          ? output
+          : output
+          ? "Reviewed Sentinel assignment."
+          : "",
         usage: { inputTokens: 1, outputTokens: 1 },
         toolCalls: output ? [] : [{
           id: crypto.randomUUID(),
@@ -513,6 +519,7 @@ async function withFindingAssignmentGateway(
       baseDir,
       confirm,
       workflows,
+      readLiveWorkflow,
     }),
     hookRunner: {
       evaluateHook(hook, { input }) {
@@ -4928,6 +4935,312 @@ async function verifyConnectorFindingPublication(
   }
 }
 
+async function verifyConnectorMixedAssignment(
+  baseDir: string,
+  caseId: string,
+  path: string,
+  state: State,
+  finding: SentinelWorkerFindingRecord,
+) {
+  const runId = state.plan.runId!;
+  const graphLease = assignedLease(path, state, "trace");
+  const graph = await workerTurn(path, graphLease, [
+    [tool(assigned)],
+    [tool("sentinel_publish_graph_fact", {
+      from: "gap",
+      to: "app",
+      relation: "affects",
+      requestId: crypto.randomUUID(),
+    })],
+  ]);
+  const fact = JSON.parse(graph.results[1][0]);
+  assert(fact.id);
+  const revision = adaptiveRevision(state);
+  const ref = { kind: "sentinel", id: caseId, revision: state.revision };
+  const assign = {
+    ...ref,
+    action: "assign_batch",
+    runId,
+    adaptiveRevision: revision,
+    requestId: crypto.randomUUID(),
+    assignments: [{
+      taskKind: "trace",
+      node: "app",
+      sourceIds: [fact.id, finding.id],
+    }],
+  };
+  const credential = "synthetic-mixed-assignment-credential";
+  const credentials = createMemorySecretStore();
+  assert((await credentials.setSecret("github-pat", credential)).ok);
+  let credentialsRequested = 0;
+  let metadataChecks = 0;
+  let resultFetches = 0;
+  const reader = createSentinelLiveWorkflowReader({
+    scopes: [{
+      case: caseId,
+      asset: "app",
+      owner: "owner",
+      repo: "repo",
+      workflow_id: 22,
+    }],
+    resolveToken: async () => {
+      credentialsRequested++;
+      const saved = await credentials.getSecret("github-pat");
+      return saved.ok ? saved.value : undefined;
+    },
+    ssrfChecker: () => Promise.resolve({ ok: true, value: "192.0.2.1" }),
+    verifyAccess: (_target, { token }) => {
+      metadataChecks++;
+      assertEquals(token, credential);
+      return Promise.resolve(true);
+    },
+    readRuns: () => {
+      resultFetches++;
+      throw new Error(
+        "A mixed assignment must reuse the approved retained result",
+      );
+    },
+  });
+  let blockHook: "PRE_TOOL_CALL" | "POST_TOOL_RESPONSE" | undefined;
+  let reviews = 0;
+  let denyReceiptOutput = false;
+  let blockedOutputs = 0;
+  const frames: string[] = [];
+  const sourceHooks: string[] = [];
+  const policy = (hook: string, input: Record<string, unknown>) => {
+    if (
+      denyReceiptOutput && hook === "PRE_OUTPUT" &&
+      String(input.content).includes(finding.id)
+    ) {
+      blockedOutputs++;
+      return false;
+    }
+    const name = input.tool_name ??
+      (input.tool_call as { name?: string } | undefined)?.name;
+    if (name !== "sentinel_live_workflow_status") return true;
+    sourceHooks.push(hook);
+    return hook !== blockHook;
+  };
+  const gateway = (body: Parameters<typeof withFindingAssignmentGateway>[2]) =>
+    withFindingAssignmentGateway(
+      baseDir,
+      () => {
+        reviews++;
+        return Promise.resolve(true);
+      },
+      body,
+      policy,
+      (frame) => frames.push(frame),
+      undefined,
+      reader,
+      true,
+    );
+  let saved: {
+    receipts: {
+      taskId: string;
+      sourceEvidence: { id: string; executionEvidenceId?: string }[];
+    }[];
+  } | undefined;
+  const archiveId = crypto.randomUUID();
+  await gateway(async (turn) => {
+    assertEquals(
+      JSON.parse(await turn({ ...ref, action: "pause" })).run.status,
+      "paused",
+    );
+    const beforeReview = reviews;
+    blockHook = "PRE_TOOL_CALL";
+    assertStringIncludes(await turn(assign), "unavailable");
+    assertEquals(credentialsRequested, 0);
+    assertEquals(metadataChecks, 0);
+    blockHook = "POST_TOOL_RESPONSE";
+    assertStringIncludes(await turn(assign), "unavailable");
+    assert(metadataChecks > 0);
+    assertEquals(reviews, beforeReview);
+    blockHook = undefined;
+    saved = JSON.parse(await turn(assign)).receipt;
+    assert(saved);
+    assertEquals(saved.receipts[0].sourceEvidence.map(({ id }) => id), [
+      fact.id,
+      finding.id,
+    ]);
+    assertEquals(
+      saved.receipts[0].sourceEvidence[1].executionEvidenceId,
+      finding.evidenceId,
+    );
+    assertEquals(reviews, beforeReview + 1);
+    const checksBeforeRevoke = metadataChecks;
+    assert((await credentials.deleteSecret("github-pat")).ok);
+    assertStringIncludes(await turn(assign), "unavailable");
+    assertEquals(metadataChecks, checksBeforeRevoke);
+    assertEquals(reviews, beforeReview + 1);
+    assert((await credentials.setSecret("github-pat", credential)).ok);
+    assertEquals(JSON.parse(await turn(assign)).receipt, saved);
+    assertEquals(
+      JSON.parse(await turn({ ...ref, runId, action: "cancel" })).run.status,
+      "stopped",
+    );
+    assertEquals(
+      JSON.parse(
+        await turn({ ...ref, runId, action: "archive", requestId: archiveId }),
+      ).receipt.status,
+      "succeeded",
+    );
+  });
+  assert(saved);
+  const receipt = saved.receipts[0];
+  await Deno.rename(
+    dirname(path),
+    join(baseDir, "before-connector-assignment-restore"),
+  );
+  await gateway(async (turn) => {
+    assertEquals(
+      JSON.parse(
+        await turn({
+          ...ref,
+          runId,
+          action: "restore",
+          archiveId,
+          requestId: crypto.randomUUID(),
+        }),
+      ).receipt.status,
+      "succeeded",
+    );
+    const beforeReplay = reviews;
+    assertEquals(JSON.parse(await turn(assign)).receipt, saved);
+    assertEquals(reviews, beforeReplay);
+    frames.length = 0;
+    denyReceiptOutput = true;
+    try {
+      await assertRejects(() => turn(assign), Error);
+    } finally {
+      denyReceiptOutput = false;
+    }
+    assert(blockedOutputs > 0);
+    assertEquals(reviews, beforeReplay);
+    assert(!frames.join("").includes(finding.id));
+    assertEquals(
+      JSON.parse(await turn({ ...ref, action: "resume" })).run.status,
+      "running",
+    );
+  });
+  const current = readSentinelAssessment(path);
+  assert(current);
+  const providers = createProviderRegistry();
+  let calls = 0;
+  let prompt: Record<string, unknown> | undefined;
+  let responses: string[] = [];
+  providers.register({
+    name: "connector-mixed-assignment",
+    supportsStreaming: false,
+    complete(messages) {
+      calls++;
+      const results = messages.filter(({ role }) => role === "tool");
+      const usage = { inputTokens: 1, outputTokens: 1 };
+      if (results.length) {
+        responses = results.map(({ content }) => String(content));
+        return Promise.resolve({
+          content:
+            '{"summary":"Verified both retained sources.","followUps":[]}',
+          usage,
+          toolCalls: [],
+        });
+      }
+      const text = String(
+        messages.findLast(({ role }) => role === "user")?.content,
+      );
+      prompt = JSON.parse(text.split("\n").at(-1)!);
+      return Promise.resolve({
+        content: "",
+        usage,
+        toolCalls: [
+          tool("sentinel_graph_facts", { id: fact.id }),
+          tool(findings, { receiptId: finding.id }),
+        ].map(({ name, args }, index) => ({
+          type: "function",
+          id: `mixed-connector-source-${index}`,
+          function: { name, arguments: JSON.stringify(args) },
+        })),
+      });
+    },
+  });
+  providers.setDefault("connector-mixed-assignment");
+  const planner = createSentinelModelPlanner(
+    path,
+    (_state, taskId, lease) =>
+      taskId === receipt.taskId
+        ? createSentinelSubagent({
+          snapshotPath: path,
+          assessmentRevision: current.revision,
+          assignedTaskId: taskId,
+          assignedTaskLeaseToken: lease,
+          providerRegistry: providers,
+          allowModelAccess: true,
+          sharedInventoryBaseDir: baseDir,
+          readRetainedWorkflow: reader,
+          hookRunner: {
+            evaluateHook(hook, { input }) {
+              return Promise.resolve({
+                allowed: policy(hook, input),
+                action: "ALLOW",
+                duration: 0,
+                ruleId: null,
+              });
+            },
+          },
+        })
+        : { execute: () => Promise.resolve(), clear() {} },
+  );
+  try {
+    assert((await credentials.deleteSecret("github-pat")).ok);
+    const beforeDenied = credentialsRequested;
+    planner.advance(current);
+    await waitForCondition(
+      () => credentialsRequested > beforeDenied && !planner.hasInFlightWork(),
+      () => {},
+    );
+    assertEquals(calls, 0);
+    assert((await credentials.setSecret("github-pat", credential)).ok);
+    const review = () =>
+      readAdaptiveSentinel(path, current)?.modelReviews
+        .find(({ taskId }) => taskId === receipt.taskId);
+    await waitForCondition(
+      () => review() !== undefined,
+      () => planner.advance(current),
+      20_000,
+    );
+    assertEquals(prompt?.sourceEvidence, receipt.sourceEvidence);
+    assertEquals(JSON.parse(responses[0]), fact);
+    assertEquals(JSON.parse(responses[1]).record, finding);
+    assertEquals(review()?.summary, "Reviewed retained connector evidence.");
+    const step = {
+      ...ref,
+      action: "worker_trace_result",
+      taskId: receipt.taskId,
+      stepIndices: [1],
+    };
+    await gateway(async (turn) => {
+      const opened = JSON.parse(await turn(step));
+      assertEquals(opened.result, JSON.parse(responses[1]));
+      const beforeDenial = credentialsRequested;
+      blockHook = "PRE_TOOL_CALL";
+      try {
+        assertStringIncludes(await turn(step), "unavailable");
+      } finally {
+        blockHook = undefined;
+      }
+      assertEquals(credentialsRequested, beforeDenial);
+      assert((await credentials.deleteSecret("github-pat")).ok);
+      assertStringIncludes(await turn(step), "unavailable");
+    });
+    assert(sourceHooks.includes("PRE_TOOL_CALL"));
+    assert(sourceHooks.includes("POST_TOOL_RESPONSE"));
+    assertEquals(resultFetches, 0);
+    assert(!JSON.stringify({ prompt, responses }).includes(credential));
+  } finally {
+    planner.stop();
+  }
+}
+
 async function verifyReceiptFamily(
   family:
     | "branch protection"
@@ -4943,7 +5256,8 @@ async function verifyReceiptFamily(
     | "no-result"
     | "stop-after-result"
     | "goal-pass"
-    | "goal-stop" = false,
+    | "goal-stop"
+    | "mixed-assignment" = false,
 ) {
   const baseDir = await Deno.makeTempDir();
   const caseId = manual ? "native-remediation" : "main";
@@ -5311,6 +5625,16 @@ async function verifyReceiptFamily(
     assertEquals(finding.evidenceId, node);
     assertEquals(finding.taskId, lease.assignedTaskId);
     assertEquals(JSON.parse(outcome.results[3][1]).record, finding);
+    if (manual === "mixed-assignment") {
+      await verifyConnectorMixedAssignment(
+        baseDir,
+        caseId,
+        path,
+        state,
+        finding,
+      );
+      return;
+    }
     if (
       visibility || attempt || (native && !manual) ||
       family === "branch protection" || family === "workflow result"
@@ -6067,6 +6391,9 @@ for (
     () => verifyReceiptFamily(family),
   );
 }
+
+Deno.test("Connector-backed mixed assignment reuses authorized saved results after restore", () =>
+  verifyReceiptFamily("native workflow result", "mixed-assignment"));
 
 Deno.test("Tidepool assembles oversized exact-version finding downloads without saving stale pages", async () => {
   const baseDir = await Deno.makeTempDir();

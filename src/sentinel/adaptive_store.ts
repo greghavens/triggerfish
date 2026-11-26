@@ -971,6 +971,7 @@ export interface AdaptiveReviewedAssignmentSource {
   readonly evidenceRevision: number;
   readonly digest: string;
   readonly sourceStepIndex?: number;
+  readonly executionEvidenceId?: string;
 }
 
 export interface AdaptivePlannerRound {
@@ -2425,7 +2426,14 @@ function normalizePlannerRound(round: AdaptivePlannerRound | undefined) {
         sourceEvidence.length ||
       sourceEvidence.some((entry) =>
         Object.keys(entry).some((key) =>
-          !["id", "taskId", "evidenceRevision", "digest", "sourceStepIndex"]
+          ![
+            "id",
+            "taskId",
+            "evidenceRevision",
+            "digest",
+            "sourceStepIndex",
+            "executionEvidenceId",
+          ]
             .includes(key)
         ) ||
         !/^worker-(?:graph-fact|finding):[a-f0-9]{64}$/.test(entry.id) ||
@@ -2433,6 +2441,10 @@ function normalizePlannerRound(round: AdaptivePlannerRound | undefined) {
           !entry.id.startsWith("worker-graph-fact:")) ||
         (entry.id.startsWith("worker-graph-fact:") !==
           (entry.sourceStepIndex !== undefined)) ||
+        (entry.executionEvidenceId !== undefined &&
+          (!entry.id.startsWith("worker-finding:") ||
+            !/^(?:execution-evidence|native-workflow-evidence):[a-f0-9]{64}$/
+              .test(entry.executionEvidenceId))) ||
         !/^adaptive:[a-f0-9]{64}$/.test(entry.taskId) ||
         !Number.isSafeInteger(entry.evidenceRevision) ||
         entry.evidenceRevision < 1 ||
@@ -10821,9 +10833,12 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
         "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'adaptive_note_steps'",
       ).get();
       return db.prepare(`
-        SELECT note.*, task.kind, task.nodeId, ${
-        traced ? "trace.steps" : "NULL AS steps"
-      }
+        SELECT note.*, task.kind, task.nodeId,
+          EXISTS (
+            SELECT 1 FROM json_each(task.plannerRound, '$.sourceEvidence') AS source
+            WHERE json_type(source.value, '$.executionEvidenceId') = 'text'
+          ) AS protectedReview,
+          ${traced ? "trace.steps" : "NULL AS steps"}
         FROM adaptive_notes AS note
         LEFT JOIN adaptive_tasks AS task ON task.id = note.taskId
         ${
@@ -10842,11 +10857,13 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
       ) => ({
         revision: String(row.revision),
         taskId: row.taskId === null ? null : String(row.taskId),
-        note: String(row.note),
+        note: row.protectedReview === 1
+          ? "Connector-backed assignment note."
+          : String(row.note),
         at: new Date(Number(row.at)).toISOString(),
         kind: typeof row.kind === "string" ? row.kind : undefined,
         nodeId: typeof row.nodeId === "string" ? row.nodeId : undefined,
-        ...(typeof row.steps === "string" &&
+        ...(row.protectedReview !== 1 && typeof row.steps === "string" &&
           {
             steps: (JSON.parse(row.steps) as SentinelReviewStep[]).map(
               (step) => projectSentinelTraceMetadata(step),
