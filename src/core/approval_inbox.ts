@@ -1,3 +1,8 @@
+import {
+  parseSentinelFindingReview,
+  type SentinelFindingReview,
+  sentinelPlannerFindingToolName,
+} from "./sentinel_finding_review_intent.ts";
 import { redactCredentialText } from "./logger/redactor.ts";
 /** Durable metadata-only approvals for one trusted tool dispatch. */
 /// <reference path="./sqlite_types.d.ts" />
@@ -40,6 +45,7 @@ export interface ApprovalInboxRequest {
   readonly chatGoal?: ChatGoalApprovalReview;
   readonly customTool?: CustomToolApprovalReview;
   readonly sentinelSteeringNote?: string;
+  readonly sentinelFindingReview?: SentinelFindingReview;
   /** Trusted context fingerprint. Never projected from the journal. */
   readonly binding: string;
   readonly expiresAt: number;
@@ -57,6 +63,7 @@ export interface ApprovalInboxRecord {
   readonly chatGoal?: ChatGoalApprovalReview;
   readonly customTool?: CustomToolApprovalReview;
   readonly sentinelSteeringNote?: string;
+  readonly sentinelFindingReview?: SentinelFindingReview;
   readonly status: ApprovalInboxStatus;
   readonly decision?: ApprovalInboxDecision;
   readonly dispatchOutcome?: ApprovalInboxDispatchOutcome;
@@ -151,8 +158,10 @@ export function decodeArchivedToolDecisions(
       Object.keys(itemRecord).some((key) => !fields.has(key)) ||
       typeof id !== "string" || requestId(id) !== id || identities.has(id) ||
       itemRecord.runId !== runId ||
-      ((requireAssignment || assignmentId !== undefined) &&
-        !exactReference(assignmentId)) ||
+      (tool === sentinelPlannerFindingToolName
+        ? assignmentId !== undefined
+        : ((requireAssignment || assignmentId !== undefined) &&
+          !exactReference(assignmentId))) ||
       typeof tool !== "string" || !toolPattern.test(tool) ||
       (status !== "completed" && status !== "denied" && status !== "stale") ||
       decision !== (status === "denied" ? "denied" : "approved") ||
@@ -243,6 +252,15 @@ export function parseSentinelSteeringNote(value: unknown): string | undefined {
   return value;
 }
 
+function projectFindingReview(value: unknown) {
+  if (typeof value !== "string") return;
+  try {
+    return parseSentinelFindingReview(JSON.parse(value));
+  } catch {
+    return;
+  }
+}
+
 function project(row: Row | undefined): ApprovalInboxRecord | undefined {
   if (!row) return undefined;
   const tool = String(row.tool);
@@ -256,6 +274,9 @@ function project(row: Row | undefined): ApprovalInboxRecord | undefined {
   const steering = tool === sentinelPlannerSteerToolName
     ? parseSentinelSteeringNote(row.sentinelSteeringNote)
     : undefined;
+  const finding = tool === sentinelPlannerFindingToolName
+    ? projectFindingReview(row.sentinelFindingReview)
+    : undefined;
   return {
     id: String(row.id),
     scope: String(row.scope),
@@ -264,7 +285,9 @@ function project(row: Row | undefined): ApprovalInboxRecord | undefined {
     ...(typeof row.assignmentId === "string" &&
       { assignmentId: row.assignmentId }),
     tool,
-    description: steering && typeof row.assignmentId === "string"
+    description: finding
+      ? `Approve recording Sentinel finding '${finding.title}' on '${finding.targetId}' from retained evidence '${finding.evidenceId}'. ${finding.summary}`
+      : steering && typeof row.assignmentId === "string"
       ? `Approve steering Sentinel assignment '${row.assignmentId}': ${steering}`
       : tool === "sentinel_request_worker_stop" &&
           typeof row.assignmentId === "string"
@@ -290,6 +313,7 @@ function project(row: Row | undefined): ApprovalInboxRecord | undefined {
     ...(chatGoal && { chatGoal }),
     ...(customTool && { customTool }),
     ...(steering && { sentinelSteeringNote: steering }),
+    ...(finding && { sentinelFindingReview: finding }),
     status: row.status as ApprovalInboxStatus,
     ...((row.decision === "approved" || row.decision === "denied") && {
       decision: row.decision,
@@ -316,11 +340,19 @@ export function openApprovalInbox(path: string, now = Date.now) {
     transaction(db, () => {
       const id = db.prepare("PRAGMA application_id").get()?.application_id;
       const version = db.prepare("PRAGMA user_version").get()?.user_version;
-      if (id === applicationId && version === 7) return;
+      if (id === applicationId && version === 8) return;
+      if (id === applicationId && version === 7) {
+        db.exec(`
+          ALTER TABLE approval_requests ADD COLUMN sentinelFindingReview TEXT;
+          PRAGMA user_version = 8;
+        `);
+        return;
+      }
       if (id === applicationId && version === 6) {
         db.exec(`
           ALTER TABLE approval_requests ADD COLUMN sentinelSteeringNote TEXT;
-          PRAGMA user_version = 7;
+          ALTER TABLE approval_requests ADD COLUMN sentinelFindingReview TEXT;
+          PRAGMA user_version = 8;
         `);
         return;
       }
@@ -328,7 +360,8 @@ export function openApprovalInbox(path: string, now = Date.now) {
         db.exec(`
           ALTER TABLE approval_requests ADD COLUMN customTool TEXT;
           ALTER TABLE approval_requests ADD COLUMN sentinelSteeringNote TEXT;
-          PRAGMA user_version = 7;
+          ALTER TABLE approval_requests ADD COLUMN sentinelFindingReview TEXT;
+          PRAGMA user_version = 8;
         `);
         return;
       }
@@ -337,7 +370,8 @@ export function openApprovalInbox(path: string, now = Date.now) {
           ALTER TABLE approval_requests ADD COLUMN chatGoal TEXT;
           ALTER TABLE approval_requests ADD COLUMN customTool TEXT;
           ALTER TABLE approval_requests ADD COLUMN sentinelSteeringNote TEXT;
-          PRAGMA user_version = 7;
+          ALTER TABLE approval_requests ADD COLUMN sentinelFindingReview TEXT;
+          PRAGMA user_version = 8;
         `);
         return;
       }
@@ -348,7 +382,8 @@ export function openApprovalInbox(path: string, now = Date.now) {
           ALTER TABLE approval_requests ADD COLUMN chatGoal TEXT;
           ALTER TABLE approval_requests ADD COLUMN customTool TEXT;
           ALTER TABLE approval_requests ADD COLUMN sentinelSteeringNote TEXT;
-          PRAGMA user_version = 7;
+          ALTER TABLE approval_requests ADD COLUMN sentinelFindingReview TEXT;
+          PRAGMA user_version = 8;
         `);
         return;
       }
@@ -360,7 +395,8 @@ export function openApprovalInbox(path: string, now = Date.now) {
           ALTER TABLE approval_requests ADD COLUMN chatGoal TEXT;
           ALTER TABLE approval_requests ADD COLUMN customTool TEXT;
           ALTER TABLE approval_requests ADD COLUMN sentinelSteeringNote TEXT;
-          PRAGMA user_version = 7;
+          ALTER TABLE approval_requests ADD COLUMN sentinelFindingReview TEXT;
+          PRAGMA user_version = 8;
         `);
         return;
       }
@@ -380,7 +416,8 @@ export function openApprovalInbox(path: string, now = Date.now) {
           ALTER TABLE approval_requests ADD COLUMN chatGoal TEXT;
           ALTER TABLE approval_requests ADD COLUMN customTool TEXT;
           ALTER TABLE approval_requests ADD COLUMN sentinelSteeringNote TEXT;
-          PRAGMA user_version = 7;
+          ALTER TABLE approval_requests ADD COLUMN sentinelFindingReview TEXT;
+          PRAGMA user_version = 8;
         `);
         return;
       }
@@ -404,6 +441,7 @@ export function openApprovalInbox(path: string, now = Date.now) {
           chatGoal TEXT,
           customTool TEXT,
           sentinelSteeringNote TEXT,
+          sentinelFindingReview TEXT,
           binding TEXT NOT NULL,
           status TEXT NOT NULL CHECK (status IN ('pending','approved','denied','claimed','completed','stale')),
           decision TEXT CHECK (decision IN ('approved','denied')),
@@ -416,7 +454,7 @@ export function openApprovalInbox(path: string, now = Date.now) {
         );
         CREATE INDEX approval_by_scope ON approval_requests(scope, sequence DESC);
         PRAGMA application_id = ${applicationId};
-        PRAGMA user_version = 7;
+        PRAGMA user_version = 8;
       `);
     });
   } catch (error) {
@@ -445,6 +483,7 @@ export function openApprovalInbox(path: string, now = Date.now) {
         chatGoal,
         customTool,
         sentinelSteeringNote,
+        sentinelFindingReview,
         binding,
         expiresAt,
       } = raw;
@@ -459,7 +498,12 @@ export function openApprovalInbox(path: string, now = Date.now) {
         ? JSON.stringify(approvedCustomTool)
         : null;
       const steering = parseSentinelSteeringNote(sentinelSteeringNote);
+      const finding = parseSentinelFindingReview(sentinelFindingReview);
+      const encodedFinding = finding ? JSON.stringify(finding) : null;
       if (
+        (tool === sentinelPlannerFindingToolName
+          ? !finding || assignmentId !== undefined || runId === undefined
+          : sentinelFindingReview !== undefined) ||
         (tool === sentinelPlannerSteerToolName
           ? !steering || assignmentId === undefined
           : sentinelSteeringNote !== undefined) ||
@@ -494,14 +538,15 @@ export function openApprovalInbox(path: string, now = Date.now) {
               previous.chatGoal === encodedGoalReview &&
               previous.customTool === encodedCustomTool &&
               previous.sentinelSteeringNote === (steering ?? null) &&
+              previous.sentinelFindingReview === encodedFinding &&
               previous.binding === binding && previous.expiresAt === expiresAt
             ? project(previous)
             : undefined;
         }
         if (expiresAt <= at) return undefined;
         const row = db.prepare(`
-          INSERT INTO approval_requests (id,scope,sessionId,runId,assignmentId,tool,mcpLifecycleAction,mcpConnectorId,chatGoal,customTool,sentinelSteeringNote,binding,status,createdAt,updatedAt,expiresAt)
-          VALUES (?,?,?,?,?,?,?,?,?,?,?,?,'pending',?,?,?)
+          INSERT INTO approval_requests (id,scope,sessionId,runId,assignmentId,tool,mcpLifecycleAction,mcpConnectorId,chatGoal,customTool,sentinelSteeringNote,sentinelFindingReview,binding,status,createdAt,updatedAt,expiresAt)
+          VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,'pending',?,?,?)
           ON CONFLICT(id) DO NOTHING RETURNING *
         `).get(
           id,
@@ -515,6 +560,7 @@ export function openApprovalInbox(path: string, now = Date.now) {
           encodedGoalReview,
           encodedCustomTool,
           steering ?? null,
+          encodedFinding,
           binding,
           at,
           at,
@@ -566,13 +612,14 @@ export function openApprovalInbox(path: string, now = Date.now) {
         SELECT id, runId, assignmentId, tool, status, decision, dispatchOutcome,
           handlerReturnedAt, createdAt, updatedAt
         FROM approval_requests WHERE scope = ? AND runId = ?
-          AND ((? IS NULL AND assignmentId IS NOT NULL) OR sessionId = ?)
+          AND ((? IS NULL AND (assignmentId IS NOT NULL OR tool = ?)) OR sessionId = ?)
           AND status IN ('denied','completed','stale') AND decision IS NOT NULL
         ORDER BY updatedAt DESC, id ASC LIMIT ?
       `).all(
         scope,
         runId,
         sessionId ?? null,
+        sentinelPlannerFindingToolName,
         sessionId ?? null,
         MAX_ARCHIVED_TOOL_DECISIONS + 1,
       );

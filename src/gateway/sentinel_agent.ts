@@ -1,3 +1,7 @@
+import {
+  parseSentinelFindingReview,
+  sentinelPlannerFindingToolName,
+} from "../core/sentinel_finding_review_intent.ts";
 import { maxClassification } from "../core/types/classification.ts";
 import { readSentinelWorkerEvidenceScope } from "./sentinel_worker_evidence_scope.ts";
 import { INCONCLUSIVE_RECHECK_TOOL } from "../sentinel/recheck_inconclusive.ts";
@@ -308,6 +312,8 @@ import {
   currentSentinelFindingReceipts,
   executeSentinelWorkerFindingTool,
   isSentinelWorkerFindingTool,
+  readSentinelPlannerFindingDraft,
+  recordOperatorSentinelFinding,
   sentinelFindingReadTools,
   sentinelFindingWriteTools,
 } from "./sentinel_worker_findings.ts";
@@ -438,6 +444,10 @@ export interface SentinelTurnCheckpointOptions {
   readonly onResumeAccepted?: () => void;
   readonly workerBoundary?: WorkerBoundary;
   readonly plannerRoundIsCurrent?: () => boolean;
+  readonly plannerRound?: {
+    readonly identity: string;
+    readonly attempt: number;
+  };
   readonly operatingConstraints?: {
     readonly version: number;
     readonly digest: string;
@@ -995,6 +1005,27 @@ const plannerSteerTool: ToolDefinition = {
   },
 };
 
+const plannerFindingReviewTool: ToolDefinition = {
+  name: sentinelPlannerFindingToolName,
+  description:
+    "Request mandatory owner review of a defensive finding supported by an exact retained failed local control verification. First reopen the exact evidence with sentinel_provenance_node.",
+  parameters: Object.fromEntries(
+    Object.entries({
+      requestId: "Unique request UUID",
+      targetId: "Exact affected asset",
+      graphFindingId: "Exact local finding node",
+      controlId: "Exact control node",
+      evidenceId: "Exact already opened evidence node",
+      title: "Bounded report title",
+      summary: "Bounded defensive conclusion based on the exact verification",
+    }).map(([key, description]) => [key, {
+      type: "string" as const,
+      required: true,
+      description,
+    }]),
+  ),
+};
+
 function isPlannerWorkerControl(name: unknown): boolean {
   return name === plannerStopTool.name || name === plannerSteerTool.name;
 }
@@ -1352,6 +1383,9 @@ interface ActiveTurn {
   readonly workerBoundary?: WorkerBoundary;
   readonly plannerRoundIsCurrent?: () => boolean;
   readonly plannerWorkerControlLeases: Map<string, string>;
+  readonly plannerRound?: SentinelTurnCheckpointOptions["plannerRound"];
+  readonly plannerFindingEvidence: Map<string, string>;
+  readonly plannerFindingDrafts: Map<string, string>;
   readonly operatingConstraints?: {
     readonly version: number;
     readonly digest: string;
@@ -4726,7 +4760,9 @@ function createAgent(
     ? [
       ...tools,
       ...plannerTodoTools,
-      ...(canRequestWorkerControl ? [plannerStopTool, plannerSteerTool] : []),
+      ...(canRequestWorkerControl
+        ? [plannerStopTool, plannerSteerTool, plannerFindingReviewTool]
+        : []),
       ...(options.readRetainedWorkflow
         ? [{
           ...intermediateWorkflowObservationTool,
@@ -5004,12 +5040,54 @@ function createAgent(
     return scope;
   }
 
+  function validatePlannerFindingReview(
+    turn: ActiveTurn,
+    args: Record<string, unknown>,
+  ) {
+    const selection = parseSentinelFindingReview(args);
+    const revision = options.assessmentRevision;
+    const runId = options.plannerExecutionEvidenceRunId;
+    const planner = turn.plannerRound;
+    const isCurrent = () =>
+      currentPlannerReceiptScope(turn) &&
+      turn.plannerRoundIsCurrent?.() === true;
+    if (
+      !canRequestWorkerControl || !selection || !planner || !runId ||
+      revision === undefined || !isCurrent()
+    ) return;
+    const node = `evidence:${selection.evidenceId}`;
+    const source = turn.plannerFindingEvidence.get(node);
+    if (!source) return;
+    const input = { ...selection, runId };
+    const draft = readSentinelPlannerFindingDraft(
+      options.snapshotPath,
+      revision,
+      input,
+      isCurrent,
+      planner,
+    );
+    if (!draft) return;
+    const digest = createHash("sha256").update(JSON.stringify(draft)).digest(
+      "hex",
+    );
+    const pending = turn.plannerFindingDrafts.get(selection.requestId);
+    if (pending && pending !== digest) return;
+    turn.plannerFindingDrafts.set(selection.requestId, digest);
+    return { revision, planner, input, node, source, isCurrent, digest };
+  }
+
   const plannerApprovalContext = canRequestWorkerControl
     ? {
       runId: options.plannerExecutionEvidenceRunId,
-      assignmentForCall(name: string, args: Record<string, unknown>) {
-        if (!active || !isPlannerWorkerControl(name)) return;
-        return validatePlannerWorkerControl(active, name, args)?.taskId;
+      scopeForCall(name: string, args: Record<string, unknown>) {
+        if (!active) return;
+        if (name === plannerFindingReviewTool.name) {
+          const draft = validatePlannerFindingReview(active, args);
+          return draft && { binding: draft.digest };
+        }
+        if (!isPlannerWorkerControl(name)) return;
+        const scope = validatePlannerWorkerControl(active, name, args);
+        return scope && { assignmentId: scope.taskId };
       },
       isCurrent() {
         return !!active && currentPlannerReceiptScope(active) &&
@@ -5044,6 +5122,7 @@ function createAgent(
             toolName === sentinelFindingTrafficListTool.name);
         const digestRead = typeof toolName === "string" &&
           isSentinelEvidenceDigestTool(toolName);
+        const plannerFinding = toolName === plannerFindingReviewTool.name;
         const plannerControl = isPlannerWorkerControl(toolName);
         const plannerTodo = plannerTodoTools.some(({ name }) =>
           name === toolName
@@ -5091,7 +5170,7 @@ function createAgent(
             toolName === SENTINEL_GOAL_STATE_READ ||
             toolName === SENTINEL_INCIDENT_ALERTS_READ ||
             toolName === SENTINEL_DEFENSE_READ || traffic || plannerTodo ||
-            digestRead || plannerControl);
+            digestRead || plannerControl || plannerFinding);
         const selectedDirectRead = (!!directTelemetryReader &&
           (toolName === SENTINEL_DEFENSE_READ ||
             toolName === SENTINEL_INCIDENT_ALERTS_READ)) ||
@@ -5132,15 +5211,16 @@ function createAgent(
                 ? call.args.taskId
                 : null),
             resource_classification: "INTERNAL",
-            operation_type: selectedCaseWrite || plannerControl ||
+            operation_type:
+              selectedCaseWrite || plannerControl || plannerFinding ||
                 toolName === "todo_write" ||
                 toolName === proposeWorkerGoalTool.name ||
                 toolName === proveWorkerGoalTool.name ||
                 toolName === sentinelFindingTrafficAttachTool.name ||
                 toolName === sentinelPublishGraphFact.name ||
                 sentinelFindingWriteTools.some(({ name }) => name === toolName)
-              ? "write"
-              : "read",
+                ? "write"
+                : "read",
           }
           : undefined;
         const turn = active;
@@ -5158,7 +5238,7 @@ function createAgent(
             ? {
               ...context,
               input: { ...context.input, ...metadata },
-              auditInput: plannerTodo || plannerControl ||
+              auditInput: plannerTodo || plannerControl || plannerFinding ||
                   selectedCaseAction === "add_case_membership"
                 ? metadata
                 : { ...context.auditInput, ...metadata },
@@ -5409,6 +5489,17 @@ function createAgent(
             context.input.tool_response,
           ))
         ) return { ...result, allowed: false, action: "BLOCK" };
+        if (name === "PRE_TOOL_CALL" && plannerFinding) {
+          const permits = result.action === "REQUIRE_APPROVAL" ||
+            (result.action === "ALLOW" && result.allowed);
+          if (
+            !permits || !turn || !call?.args ||
+            !validatePlannerFindingReview(turn, call.args)
+          ) {
+            return { ...result, allowed: false, action: "BLOCK" };
+          }
+          return { ...result, allowed: false, action: "REQUIRE_APPROVAL" };
+        }
         if (name === "PRE_TOOL_CALL" && plannerControl) {
           const permits = result.action === "REQUIRE_APPROVAL" ||
             (result.action === "ALLOW" && result.allowed);
@@ -5437,7 +5528,7 @@ function createAgent(
         if (
           result.allowed && name === "POST_TOOL_RESPONSE" &&
           (toolName === caseExecutionEvidenceTool.name || plannerTodo ||
-            plannerControl) &&
+            plannerControl || plannerFinding) &&
           (!turn || !currentPlannerReceiptScope(turn))
         ) return { ...result, allowed: false, action: "BLOCK" };
         if (
@@ -5488,7 +5579,7 @@ function createAgent(
         active?.send(event);
       }
     },
-    async toolExecutor(name, args) {
+    async toolExecutor(name, args, dispatch) {
       const turn = active;
       if (
         !turn || turn.signal.aborted || !toolNames.has(name) ||
@@ -5496,6 +5587,48 @@ function createAgent(
         (workerApprovalContext && !approvalIsCurrent(turn))
       ) {
         return "Error: This tool is unavailable in Sentinel.";
+      }
+      if (name === plannerFindingReviewTool.name) {
+        const reviewed = validatePlannerFindingReview(turn, args);
+        const approvalId = dispatch?.toolApprovalRequestId;
+        const reauthorize = dispatch?.reauthorizeOwnerApproval;
+        if (!reviewed || !approvalId || !reauthorize) {
+          return "Error: The reviewed Sentinel finding is unavailable.";
+        }
+        const { revision, planner, input, node, source, isCurrent } = reviewed;
+        const result = await recordOperatorSentinelFinding(
+          options.snapshotPath,
+          revision,
+          input,
+          () => Promise.resolve(true),
+          async () => {
+            if (
+              !isCurrent() || !await authorizeSavedToolCalls(
+                [{ name: SENTINEL_PROVENANCE_NODE_READ, args: { node } }],
+                config,
+                session,
+                undefined,
+                turn.signal,
+              )
+            ) return false;
+            const post = await enforcePostToolResponse(
+              SENTINEL_PROVENANCE_NODE_READ,
+              config,
+              session,
+              { resultText: source, blocked: false },
+            );
+            return !post.blocked && isCurrent() && await reauthorize() &&
+              isCurrent();
+          },
+          isCurrent,
+          { operatorScope: "owner", planner: { ...planner, approvalId } },
+        );
+        return result.startsWith("{")
+          ? boundResult({
+            _classification: "INTERNAL",
+            receipt: JSON.parse(result),
+          })
+          : result;
       }
       if (isPlannerWorkerControl(name)) {
         const scope = plannerWorkerControlScope(turn, name, args);
@@ -6889,12 +7022,12 @@ function createAgent(
   };
   const orchestrator = createOrchestrator({
     ...config,
-    async toolExecutor(name, args) {
+    async toolExecutor(name, args, dispatch) {
       const turn = active;
       if ((await turn?.workerBoundary?.("before_tool"))?.stop) {
         return "Error: The Sentinel assignment is no longer active.";
       }
-      const result = await config.toolExecutor!(name, args);
+      const result = await config.toolExecutor!(name, args, dispatch);
       if (
         turn?.requiresLiveAssignment &&
         (turn.signal.aborted || !readAssignedModelReview(options))
@@ -6909,6 +7042,18 @@ function createAgent(
           : undefined;
       if (turn?.requiresLiveAssignment && !assignedReview) return;
       const failed = result.startsWith("Error:");
+      if (
+        canRequestWorkerControl && turn && !failed &&
+        name === SENTINEL_PROVENANCE_NODE_READ &&
+        currentPlannerReceiptScope(turn) &&
+        result.startsWith("{")
+      ) {
+        const evidence = JSON.parse(result).node;
+        if (
+          evidence?.kind === "evidence" && typeof evidence.id === "string" &&
+          evidence.id === args.node
+        ) turn.plannerFindingEvidence.set(evidence.id, result);
+      }
       if (
         turn && !failed && name === SENTINEL_ASSIGNED_EXECUTION_EVIDENCE &&
         typeof args.node === "string"
@@ -8072,6 +8217,7 @@ function createAgent(
           onBatchReadReceipt,
           workerBoundary,
           plannerRoundIsCurrent,
+          plannerRound,
           operatingConstraints,
         } = checkpointOptions ?? {};
         const checkpointed = resume !== undefined ||
@@ -8120,7 +8266,10 @@ function createAgent(
             workerApprovalContext !== undefined,
           workerBoundary,
           plannerRoundIsCurrent,
+          plannerRound,
           plannerWorkerControlLeases: new Map(),
+          plannerFindingEvidence: new Map(),
+          plannerFindingDrafts: new Map(),
           operatingConstraints,
           reads: 0,
           workers: 0,

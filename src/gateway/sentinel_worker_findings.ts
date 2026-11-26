@@ -59,6 +59,7 @@ import {
   readSentinelWorkerFindingReport,
   readSentinelWorkerFindingWriteReceipt,
   readStagedTrafficLinks,
+  type SentinelAnalystFindingInput,
 } from "../sentinel/worker_finding_store.ts";
 import {
   readAssignedSentinelModelReview,
@@ -1205,18 +1206,13 @@ export function reopenSentinelPlannerFindings(
   });
 }
 
-/** Record a reviewed defensive finding without inventing a worker assignment. */
-export async function recordOperatorSentinelFinding(
+function sentinelLocalFindingAdmission(
   path: string,
   revision: number,
   args: Record<string, unknown>,
-  confirm: (prompt: string) => Promise<boolean>,
-  authorize: (
-    sources: readonly string[],
-    projection: string,
-  ) => Promise<boolean>,
   isCurrent: () => boolean,
-): Promise<string> {
+  analyst: SentinelAnalystFindingInput["analyst"],
+) {
   const {
     runId,
     targetId,
@@ -1239,7 +1235,7 @@ export async function recordOperatorSentinelFinding(
     !text(targetId, 4096) || !text(graphFindingId, 4096) ||
     !text(controlId, 4096) || !text(evidenceId, 4096) ||
     !text(title, 256) || !text(summary, 4096)
-  ) return unavailable;
+  ) return;
   const sources = [
     `asset:${targetId}`,
     `finding:${graphFindingId}`,
@@ -1290,9 +1286,51 @@ export async function recordOperatorSentinelFinding(
       observedAt: proof.observedAt,
       validUntil: proof.validUntil,
       evaluatedAt: proof.evaluatedAt,
-      analyst: { operatorScope: "owner" as const },
+      analyst,
     };
   };
+  return { sources, inspect, caseId, runId };
+}
+
+export function readSentinelPlannerFindingDraft(
+  path: string,
+  revision: number,
+  args: Record<string, unknown>,
+  isCurrent: () => boolean,
+  planner: NonNullable<SentinelAnalystFindingInput["analyst"]["planner"]>,
+) {
+  const admission = sentinelLocalFindingAdmission(
+    path,
+    revision,
+    args,
+    isCurrent,
+    { operatorScope: "owner", planner },
+  );
+  return admission?.inspect(readSentinelAssessment(path));
+}
+
+/** Record a reviewed defensive finding without inventing a worker assignment. */
+export async function recordOperatorSentinelFinding(
+  path: string,
+  revision: number,
+  args: Record<string, unknown>,
+  confirm: (prompt: string) => Promise<boolean>,
+  authorize: (
+    sources: readonly string[],
+    projection: string,
+  ) => Promise<boolean>,
+  isCurrent: () => boolean,
+  analyst: SentinelAnalystFindingInput["analyst"] = { operatorScope: "owner" },
+): Promise<string> {
+  const admission = sentinelLocalFindingAdmission(
+    path,
+    revision,
+    args,
+    isCurrent,
+    analyst,
+  );
+  if (!admission) return unavailable;
+  const { sources, inspect, caseId, runId } = admission;
   const draft = inspect(readSentinelAssessment(path));
   if (!draft || !await authorize(sources, projectResult(draft))) {
     return unavailable;

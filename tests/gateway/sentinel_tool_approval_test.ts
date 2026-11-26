@@ -1,3 +1,5 @@
+import { sentinelPlannerFindingToolName } from "../../src/core/sentinel_finding_review_intent.ts";
+import { readSentinelWorkerFindingHistory } from "../../src/sentinel/worker_finding_store.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { dirname, join } from "@std/path";
 import { createProviderRegistry } from "../../src/agent/llm.ts";
@@ -700,6 +702,250 @@ for (
       planner.stop();
       await reconnected?.close();
       await initialSocket?.close();
+      await gateway.stop();
+      await Deno.remove(baseDir, { recursive: true });
+    }
+  });
+}
+
+for (
+  const outcome of [
+    "approved",
+    "denied",
+    "stale",
+    "revoked-source",
+    "without-read",
+  ] as const
+) {
+  Deno.test(`Planner retained finding review enforces ${outcome} through the operator gateway`, async () => {
+    const baseDir = await Deno.makeTempDir();
+    const path = resolveSentinelCasePath(baseDir);
+    const inbox = createToolApprovalService(join(baseDir, "approvals.db"));
+    const token = crypto.randomUUID();
+    const selected = {
+      requestId: crypto.randomUUID(),
+      targetId: "app",
+      graphFindingId: "gap",
+      controlId: "control",
+      evidenceId: "check",
+      title: "Retained control gap",
+      summary: "The exact retained verification reports a failed control.",
+    };
+    const name = sentinelPlannerFindingToolName;
+    const sourceTool = "sentinel_provenance_node";
+    const done = Promise.withResolvers<string>();
+    let mayAsk = true;
+    let denySource = false;
+    let stopOutput = 0;
+    const findHooks: string[] = [];
+    const sourceHooks: string[] = [];
+    const hookRunner: HookRunner = {
+      toolApprovalInbox: inbox,
+      evaluateHook(hook, { input, auditInput }) {
+        const tool = input.tool_name ??
+          (input.tool_call as { name?: string } | undefined)?.name;
+        if (tool === name) {
+          findHooks.push(hook);
+          assertEquals(input.resource_classification, "INTERNAL");
+          assert(!JSON.stringify(auditInput).includes(selected.summary));
+        }
+        if (tool === sourceTool) sourceHooks.push(hook);
+        const blockedOutput = hook === "PRE_OUTPUT" &&
+          String(input.content).includes(selected.summary);
+        if (blockedOutput) stopOutput++;
+        const block = blockedOutput ||
+          (denySource && hook === "PRE_TOOL_CALL" && tool === sourceTool);
+        return Promise.resolve({
+          allowed: !block,
+          action: block ? "BLOCK" : "ALLOW",
+          ruleId: null,
+          duration: 0,
+        });
+      },
+    };
+    const providers = createProviderRegistry();
+    providers.register({
+      name: "planner-finding",
+      supportsStreaming: false,
+      complete(messages, tools) {
+        const last = messages.findLast(({ role }) => role === "tool");
+        const usage = { inputTokens: 1, outputTokens: 1 };
+        const call = (tool: string, args: Record<string, unknown>) =>
+          Promise.resolve({
+            content: "",
+            usage,
+            toolCalls: [{
+              id: crypto.randomUUID(),
+              type: "function" as const,
+              function: { name: tool, arguments: JSON.stringify(args) },
+            }],
+          });
+        if (last) {
+          const response = String(last.content);
+          if (
+            response.includes('"node"') && response.includes('"evidence:check"')
+          ) {
+            return call(name, selected);
+          }
+          mayAsk = false;
+          done.resolve(response);
+          return Promise.resolve({ content: "[]", usage, toolCalls: [] });
+        }
+        if (!mayAsk) {
+          return Promise.resolve({ content: "[]", usage, toolCalls: [] });
+        }
+        assert(
+          tools?.some((tool) =>
+            (tool as { function?: { name?: string } }).function?.name === name
+          ),
+        );
+        return outcome === "without-read"
+          ? call(name, selected)
+          : call(sourceTool, { node: "evidence:check" });
+      },
+    });
+    providers.setDefault("planner-finding");
+    const chatSession = createChatSession({
+      session: createSession({
+        userId: "owner" as UserId,
+        channelId: "planner-finding-test" as ChannelId,
+      }),
+      providerRegistry: providers,
+      hookRunner,
+      enableStreaming: false,
+    });
+    const gateway = createGatewayServer({ port: 0, token, chatSession });
+    const planner = createSentinelModelPlanner(
+      path,
+      (state, _, __, role) =>
+        role === "planner"
+          ? createSentinelSubagent({
+            snapshotPath: path,
+            assessmentRevision: state.revision,
+            plannerExecutionEvidenceRunId: state.plan.runId,
+            providerRegistry: providers,
+            hookRunner,
+            allowModelAccess: true,
+          })
+          : { execute: () => Promise.resolve(), clear() {} },
+    );
+    let first: Awaited<ReturnType<typeof connect>> | undefined;
+    let reconnect: Awaited<ReturnType<typeof connect>> | undefined;
+    const deadline = setTimeout(
+      () => done.reject(new Error("No planner finding response")),
+      4000,
+    );
+    try {
+      const now = Date.now();
+      await Deno.mkdir(dirname(path), { recursive: true });
+      await Deno.writeTextFile(
+        path,
+        JSON.stringify({
+          version: 1,
+          nodes: [
+            { id: "app", kind: "asset", label: "Application" },
+            { id: "gap", kind: "finding", label: "Gap", severity: "high" },
+            { id: "control", kind: "control", label: "Control" },
+            {
+              id: "check",
+              kind: "evidence",
+              label: "Retained local check",
+              controlVerification: {
+                outcome: "fail",
+                observedAt: new Date(now - 60_000).toISOString(),
+                validUntil: new Date(now + 3_600_000).toISOString(),
+              },
+            },
+          ],
+          edges: [
+            { from: "check", to: "app", relation: "observed_on" },
+            { from: "gap", to: "app", relation: "affects" },
+            { from: "control", to: "gap", relation: "mitigates" },
+            { from: "check", to: "control", relation: "verifies" },
+          ],
+        }),
+      );
+      const state = startSentinelAssessment(path);
+      const runId = state.plan.runId;
+      assert(runId);
+      advanceAdaptiveSentinel(path, state);
+      const { port } = await gateway.start();
+      first = await connect(port, token);
+      planner.advance(state);
+      if (outcome === "without-read") {
+        assertStringIncludes(await done.promise, "policy");
+        assertEquals(inbox.list().records, []);
+        return;
+      }
+      const pending = await pendingInbox(first);
+      assertEquals(pending.runId, runId);
+      assertEquals(pending.assignmentId, undefined);
+      assertEquals(pending.sentinelFindingReview, selected);
+      assertStringIncludes(pending.description, selected.evidenceId);
+      assertStringIncludes(pending.description, selected.summary);
+      assertEquals(readSentinelWorkerFindingHistory(path, state.revision), []);
+      await first.close();
+      reconnect = await connect(port, token);
+      assertEquals(await pendingInbox(reconnect), pending);
+      if (outcome === "stale") {
+        assert(recordSentinelOperatingConstraints(path, {
+          runId,
+          evidenceRevision: state.revision,
+          expectedVersion: 0,
+          operatorScope: "owner",
+          requestId: crypto.randomUUID(),
+          constraints: { deniedKinds: ["review_finding"] },
+        }));
+      }
+      denySource = outcome === "revoked-source";
+      const decision = {
+        type: "approval_inbox_decide",
+        approvalId: pending.id,
+        approved: outcome !== "denied",
+      };
+      assertEquals((await reconnect.request(decision)).ok, true);
+      const output = await done.promise;
+      const records = readSentinelWorkerFindingHistory(path, state.revision);
+      if (outcome !== "approved") {
+        assertStringIncludes(
+          output,
+          outcome === "revoked-source" ? "unavailable" : "approval",
+        );
+        assertEquals(records, []);
+        return;
+      }
+      assert(
+        output.startsWith("{"),
+        JSON.stringify({ output, findHooks, sourceHooks, records }),
+      );
+      const approved = JSON.parse(output).receipt;
+      assertEquals(approved.taskId, undefined);
+      assertEquals(approved.requestId, selected.requestId);
+      assertEquals(approved.analyst.operatorScope, "owner");
+      assertEquals(approved.analyst.planner.attempt, 1);
+      assertEquals(approved.analyst.planner.approvalId, pending.id);
+      assert(
+        approved.analyst.planner.identity.startsWith(adaptiveRevision(state)),
+      );
+      assertEquals(approved.evidenceId, selected.evidenceId);
+      assertEquals(records, [approved]);
+      assert(
+        findHooks.filter((hook) => hook === "PRE_TOOL_CALL").length >= 2,
+      );
+      assert(findHooks.includes("POST_TOOL_RESPONSE"));
+      assert(
+        sourceHooks.filter((hook) => hook === "PRE_TOOL_CALL").length >= 2,
+      );
+      assert(stopOutput > 0);
+      assertEquals((await reconnect.request(decision)).ok, true);
+      assertEquals(readSentinelWorkerFindingHistory(path, state.revision), [
+        approved,
+      ]);
+    } finally {
+      clearTimeout(deadline);
+      planner.stop();
+      await first?.close();
+      await reconnect?.close();
       await gateway.stop();
       await Deno.remove(baseDir, { recursive: true });
     }

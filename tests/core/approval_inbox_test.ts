@@ -1,3 +1,4 @@
+import { sentinelPlannerFindingToolName } from "../../src/core/sentinel_finding_review_intent.ts";
 import { createPolicyEngine } from "../../src/core/policy/engine.ts";
 import {
   createDefaultRules,
@@ -6,7 +7,10 @@ import {
 import { assertEquals, assertExists, assertThrows } from "@std/assert";
 import { join } from "@std/path";
 import { DatabaseSync } from "node:sqlite";
-import { openApprovalInbox } from "../../src/core/approval_inbox.ts";
+import {
+  decodeArchivedToolDecisions,
+  openApprovalInbox,
+} from "../../src/core/approval_inbox.ts";
 
 const scope = "owner:workspace";
 const binding = "a".repeat(64);
@@ -195,6 +199,7 @@ Deno.test("Approval inbox upgrades old decisions without guessing historical dis
         ALTER TABLE approval_requests DROP COLUMN chatGoal;
         ALTER TABLE approval_requests DROP COLUMN customTool;
         ALTER TABLE approval_requests DROP COLUMN sentinelSteeringNote;
+        ALTER TABLE approval_requests DROP COLUMN sentinelFindingReview;
         PRAGMA user_version = 1;
       `);
     } finally {
@@ -243,4 +248,95 @@ Deno.test("configured exact tool approval remains below mandatory classification
     }).action,
     "BLOCK",
   );
+});
+
+Deno.test("Approval inbox migrates existing reviewed descriptions before adding finding reviews", async () => {
+  const dir = await Deno.makeTempDir();
+  const path = join(dir, "inbox.db");
+  const old = request();
+  const first = openApprovalInbox(path, () => 4000);
+  try {
+    assertExists(first.submit(old));
+  } finally {
+    first.close();
+  }
+  const version7 = new DatabaseSync(path);
+  try {
+    version7.exec(`
+      ALTER TABLE approval_requests DROP COLUMN sentinelFindingReview;
+      PRAGMA user_version = 7;
+    `);
+  } finally {
+    version7.close();
+  }
+  const migrated = openApprovalInbox(path, () => 4000);
+  try {
+    assertEquals(
+      migrated.read(scope, old.id)?.description,
+      "Approval required for tool fixture_reader.",
+    );
+    const finding = {
+      ...request(),
+      assignmentId: undefined,
+      tool: sentinelPlannerFindingToolName,
+      sentinelFindingReview: {
+        requestId: crypto.randomUUID(),
+        targetId: "asset",
+        graphFindingId: "finding",
+        controlId: "control",
+        evidenceId: "evidence",
+        title: "Retained control gap",
+        summary: "The verification failed.",
+      },
+    };
+    const reviewed = migrated.submit(finding);
+    assertEquals(
+      reviewed?.sentinelFindingReview,
+      finding.sentinelFindingReview,
+    );
+    assertEquals(migrated.read(scope, finding.id), reviewed);
+    assertExists(migrated.decide(scope, finding.id, "approved"));
+    const claimed = migrated.claim(scope, finding.id, binding);
+    assertExists(claimed);
+    assertExists(
+      migrated.complete(scope, finding.id, claimed.token, "returned"),
+    );
+    const decisions = decodeArchivedToolDecisions(
+      migrated.archiveRunDecisions(scope, finding.runId),
+      finding.runId,
+      true,
+    );
+    assertEquals(
+      decisions.map(({ id, assignmentId, tool }) => ({
+        id,
+        assignmentId,
+        tool,
+      })),
+      [
+        {
+          id: finding.id,
+          assignmentId: undefined,
+          tool: sentinelPlannerFindingToolName,
+        },
+      ],
+    );
+
+    assertEquals(
+      migrated.submit({ ...finding, assignmentId: old.assignmentId }),
+      undefined,
+    );
+    assertEquals(
+      migrated.submit({
+        ...finding,
+        sentinelFindingReview: {
+          ...finding.sentinelFindingReview,
+          summary: "A different conclusion.",
+        },
+      }),
+      undefined,
+    );
+  } finally {
+    migrated.close();
+    await Deno.remove(dir, { recursive: true });
+  }
 });

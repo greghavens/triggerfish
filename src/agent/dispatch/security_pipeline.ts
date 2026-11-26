@@ -1,3 +1,4 @@
+import { sentinelPlannerFindingToolName } from "../../core/sentinel_finding_review_intent.ts";
 import { exactToolApprovalRun } from "../../core/tool_approval_service.ts";
 import {
   customToolManageName,
@@ -357,7 +358,9 @@ export async function dispatchApprovedToolCall(
       blocked: false,
     };
   }
-  const ownerAdministration = call.name === customToolManageName ||
+  const ownerAdministration = (call.name === sentinelPlannerFindingToolName &&
+    ownerApproval?.toolApprovalRequestId !== undefined) ||
+    call.name === customToolManageName ||
     call.name === "list_skills" ||
     chatGoalMutation(call.name, call.args) ||
     (call.name === "managed_goal_state" &&
@@ -467,11 +470,13 @@ export async function dispatchSecurityEnforcedToolCall(
       blocked: true,
     };
     const owner = config.toolApprovalContext;
-    const assignmentId = owner?.assignmentForCall?.(call.name, call.args) ??
-      owner?.assignmentId;
+    const scope = owner?.scopeForCall?.(call.name, call.args);
+    const assignmentId = scope?.assignmentId ??
+      owner?.assignmentForCall?.(call.name, call.args) ?? owner?.assignmentId;
     const activity = signal ?? new AbortController().signal;
     if (
-      activity.aborted || (owner?.assignmentForCall && !assignmentId) ||
+      activity.aborted || (owner?.scopeForCall && !scope) ||
+      (owner?.assignmentForCall && !assignmentId) ||
       (owner?.isCurrent && !await owner.isCurrent(session.id))
     ) {
       return blocked;
@@ -480,6 +485,7 @@ export async function dispatchSecurityEnforcedToolCall(
       sessionId: session.id,
       runId: owner?.runId ?? exactToolApprovalRun(session.id) ?? session.id,
       assignmentId,
+      ...(scope?.binding && { scopeBinding: scope.binding }),
       tool: call.name,
       args: call.args,
       ruleId: preToolResult.ruleId,
@@ -503,6 +509,10 @@ export async function dispatchSecurityEnforcedToolCall(
         !permits || activity.aborted ||
         assessBumpersForToolCall(currentContext, config, call) !== null ||
         config.planManager?.isToolBlocked(sessionKey, call.name, call.args) ||
+        (owner?.scopeForCall && !isDeepStrictEqual(
+          owner.scopeForCall(call.name, call.args),
+          scope,
+        )) ||
         (owner?.isCurrent && !await owner.isCurrent(session.id))
       ) return blocked;
       approval = release.claim(call.args);
@@ -575,7 +585,8 @@ export async function dispatchSecurityEnforcedToolCall(
           call.name === "create_skill" ||
           (call.name === "mcp_manage" &&
             call.args.action === "refresh_tools") ||
-          (approval && chatGoalMutation(call.name, call.args) === "confirm"))
+          (approval && (chatGoalMutation(call.name, call.args) === "confirm" ||
+            call.name === sentinelPlannerFindingToolName)))
         ? {
           ownerSessionId: session.id,
           ...(approval && { toolApprovalRequestId: approval.requestId }),

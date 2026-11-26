@@ -8453,6 +8453,7 @@ export function createSentinelModelPlanner(
           },
           true,
           {
+            plannerRound: { identity: roundIdentity, attempt: claim },
             plannerRoundIsCurrent: () => {
               const state = readSentinelAssessment(snapshotPath);
               return !signal.aborted && activePlan?.controller === controller &&

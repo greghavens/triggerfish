@@ -52,7 +52,14 @@ export interface SentinelWorkerFindingInput
 export interface SentinelAnalystFindingInput
   extends Omit<SentinelWorkerFindingInput, "taskId"> {
   readonly taskId?: never;
-  readonly analyst: { readonly operatorScope: "owner" };
+  readonly analyst: {
+    readonly operatorScope: "owner";
+    readonly planner?: {
+      readonly identity: string;
+      readonly attempt: number;
+      readonly approvalId?: string;
+    };
+  };
 }
 
 export interface SentinelFindingTrafficPublication {
@@ -411,16 +418,36 @@ function normalizeFinding(
     kind: "finding" as const,
   };
   if ("analyst" in raw) {
+    const planner = raw.analyst?.planner;
     if (
       raw.taskId !== undefined || raw.analyst?.operatorScope !== "owner" ||
-      Object.keys(raw.analyst).length !== 1
+      Object.keys(raw.analyst).length !== (planner === undefined ? 1 : 2) ||
+      (planner !== undefined && (!planner ||
+        typeof planner.identity !== "string" || planner.identity.length > 224 ||
+        !/^[a-f0-9]{64}(?::[A-Za-z0-9:-]+)?$/.test(planner.identity) ||
+        !Number.isSafeInteger(planner.attempt) || planner.attempt < 1 ||
+        typeof planner.approvalId !== "string" ||
+        !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(
+          planner.approvalId,
+        ) ||
+        Object.keys(planner).length !== 3))
     ) {
       throw new Error("Invalid Sentinel analyst finding attribution");
     }
     return {
       ...normalizeFindingScope(raw),
       ...report,
-      analyst: { operatorScope: "owner" },
+      analyst: {
+        operatorScope: "owner",
+        ...(planner &&
+          {
+            planner: {
+              identity: planner.identity,
+              attempt: planner.attempt,
+              approvalId: planner.approvalId,
+            },
+          }),
+      },
     };
   }
   return { ...normalizeScope(raw), ...report };

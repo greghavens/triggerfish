@@ -1,3 +1,7 @@
+import {
+  parseSentinelFindingReview,
+  sentinelPlannerFindingToolName,
+} from "./sentinel_finding_review_intent.ts";
 import { AsyncLocalStorage } from "node:async_hooks";
 /** Hold an exact live tool call while an operator reviews metadata in the inbox. */
 import { createHmac, randomBytes } from "node:crypto";
@@ -21,6 +25,12 @@ export interface ToolApprovalContext {
     name: string,
     args: Record<string, unknown>,
   ) => string | undefined;
+  readonly scopeForCall?: (
+    name: string,
+    args: Record<string, unknown>,
+  ) =>
+    | { readonly assignmentId?: string; readonly binding?: string }
+    | undefined;
   readonly isCurrent?: (sessionId: string) => boolean | Promise<boolean>;
 }
 
@@ -93,13 +103,22 @@ function buildToolApprovalService(path: string) {
       readonly sessionId: string;
       readonly runId?: string;
       readonly assignmentId?: string;
+      readonly scopeBinding?: string;
       readonly tool: string;
       readonly args: Record<string, unknown>;
       readonly ruleId: string | null;
       readonly signal: AbortSignal;
     }) {
-      const { sessionId, runId, assignmentId, tool, args, ruleId, signal } =
-        input;
+      const {
+        sessionId,
+        runId,
+        assignmentId,
+        scopeBinding,
+        tool,
+        args,
+        ruleId,
+        signal,
+      } = input;
       if (signal.aborted) return undefined;
       const id = crypto.randomUUID();
       const bind = (args: Record<string, unknown>) =>
@@ -112,6 +131,7 @@ function buildToolApprovalService(path: string) {
             tool,
             args,
             ruleId,
+            ...(scopeBinding ? [scopeBinding] : []),
           ]),
         ).digest("hex");
       const binding = bind(args);
@@ -134,6 +154,13 @@ function buildToolApprovalService(path: string) {
         ? parseSentinelSteeringNote(args.note)
         : undefined;
       if (tool === sentinelPlannerSteerToolName && !steering) return undefined;
+      const finding = tool === sentinelPlannerFindingToolName
+        ? parseSentinelFindingReview(args)
+        : undefined;
+      if (
+        tool === sentinelPlannerFindingToolName &&
+        (!finding || !scopeBinding || !/^[a-f0-9]{64}$/.test(scopeBinding))
+      ) return undefined;
       const request = use((db) =>
         db.submit({
           id,
@@ -144,6 +171,7 @@ function buildToolApprovalService(path: string) {
           tool,
           ...(chatGoal && { chatGoal }),
           ...(steering && { sentinelSteeringNote: steering }),
+          ...(finding && { sentinelFindingReview: finding }),
           ...(custom &&
             { customTool: { action: custom.action, name: custom.name } }),
           ...(lifecycle && {
