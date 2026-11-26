@@ -6007,17 +6007,21 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
         duringConfirmation = undefined;
         denied = undefined;
       }
-      using blockedBatch = new DatabaseSync(
+      const blockedBatch = new DatabaseSync(
         join(baseDir, "operator-run-links.db"),
       );
-      assertEquals(
-        blockedBatch.prepare(
-          "SELECT 1 FROM sqlite_master WHERE name = 'run_control_batches'",
-        ).get() && blockedBatch.prepare(
-          "SELECT 1 FROM run_control_batches WHERE requestId = ?",
-        ).get(pauseBatch.requestId),
-        undefined,
-      );
+      try {
+        assertEquals(
+          blockedBatch.prepare(
+            "SELECT 1 FROM sqlite_master WHERE name = 'run_control_batches'",
+          ).get() && blockedBatch.prepare(
+            "SELECT 1 FROM run_control_batches WHERE requestId = ?",
+          ).get(pauseBatch.requestId),
+          undefined,
+        );
+      } finally {
+        blockedBatch.close();
+      }
       assertEquals(readSentinelAssessment(batchPath)?.paused, false);
       assertEquals(restarted.inspect(batchWorkflow.id)?.status, "running");
       duringConfirmation = () => {
