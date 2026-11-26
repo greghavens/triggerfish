@@ -88,6 +88,10 @@ Deno.test("Authenticated Sentinel chat reads exact approved cross-case graph fin
             from: "finding",
             to: "asset-a",
             relation: "affects",
+          }, {
+            from: "coverage-evidence",
+            to: "finding",
+            relation: "supports",
           }]
           : [],
       }),
@@ -171,6 +175,7 @@ Deno.test("Authenticated Sentinel chat reads exact approved cross-case graph fin
   let changeMembershipVersionDuringReview = false;
   let revokeAssignmentDuringConfirmation = false;
   let constraintsAllowed = true;
+  let revokeLineageDuringResponse = false;
   let approveRestriction = false;
   let revokeDuringConfirmation = false;
   const operator = createOperatorRunToolExecutor({
@@ -368,6 +373,7 @@ Deno.test("Authenticated Sentinel chat reads exact approved cross-case graph fin
             "finding_report",
             "finding_report_history",
             "decision_history",
+            "finding_lineage",
             "incidents",
             "incident_alerts",
             "case_alert",
@@ -463,6 +469,16 @@ Deno.test("Authenticated Sentinel chat reads exact approved cross-case graph fin
           ) {
             assertEquals(input.case_id, "approved");
             assertEquals(input.evidence_revision, approved.revision);
+          }
+          if (
+            revokeLineageDuringResponse && hook === "POST_TOOL_RESPONSE" &&
+            input.tool_name === "operator_runs" &&
+            typeof input.tool_response === "string" &&
+            input.tool_response.includes('"lineageDigest"')
+          ) {
+            await Promise.resolve();
+            constraintsAllowed = false;
+            revokeLineageDuringResponse = false;
           }
           if (
             revokeAssessmentDuringResponse && hook === "POST_TOOL_RESPONSE" &&
@@ -688,7 +704,68 @@ Deno.test("Authenticated Sentinel chat reads exact approved cross-case graph fin
       ),
     );
 
+    const lineage = {
+      ...exact,
+      action: "finding_lineage",
+      node: "finding",
+      limit: 1,
+    };
+    await turn("Reject lineage outside the selected case", lineage);
+    assertStringIncludes(result, "unavailable");
     await turn("/sentinel case approved");
+    await turn("Open the exact selected finding lineage", lineage);
+    const firstLineage = JSON.parse(result).page;
+    assertEquals(firstLineage.findingId, "finding");
+    assertEquals(firstLineage.edges.length, 1);
+    assert(typeof firstLineage.nextCursor === "string");
+    assert(
+      hooks.includes("PRE_TOOL_CALL") && hooks.includes("POST_TOOL_RESPONSE") &&
+        hooks.includes("PRE_OUTPUT"),
+    );
+    const pages = [firstLineage];
+    while (pages.at(-1).nextCursor) {
+      assert(pages.length < 4);
+      await turn("Continue the exact selected finding lineage", {
+        ...lineage,
+        cursor: pages.at(-1).nextCursor,
+      });
+      pages.push(JSON.parse(result).page);
+    }
+    assertEquals(pages.map(({ edges }) => edges.length), [1, 1, 1]);
+    assertEquals(
+      new Set(
+        pages.flatMap(({ edges }) =>
+          edges.map(({ relation }: { relation: string }) => relation)
+        ),
+      ),
+      new Set(["affects", "supports", "observed_on"]),
+    );
+    await turn("Reject a copied cursor on another finding", {
+      ...lineage,
+      node: "coverage-evidence",
+      cursor: firstLineage.nextCursor,
+    });
+    assertStringIncludes(result, "unavailable");
+    reject = "PRE_TOOL_CALL";
+    await turn("Block finding lineage before dispatch", lineage);
+    assert(!result.includes(secretLabel));
+    reject = "PRE_OUTPUT";
+    const withheldLineage = await turn(
+      "Block authorized lineage at delivery",
+      lineage,
+    );
+    assertStringIncludes(result, secretLabel);
+    assert(withheldLineage.every((frame) => !frame.includes(secretLabel)));
+    reject = undefined;
+    revokeLineageDuringResponse = true;
+    const revokedLineage = await turn(
+      "Revoke case access during lineage classification",
+      lineage,
+    );
+    assert(!revokeLineageDuringResponse);
+    assert(!result.includes(secretLabel));
+    assert(revokedLineage.every((frame) => !frame.includes(secretLabel)));
+    constraintsAllowed = true;
     const topologyQuery = {
       asset: "asset-a",
       sourceCase: topologyCase,
@@ -1832,6 +1909,16 @@ Deno.test("Authenticated Sentinel chat reads exact approved cross-case graph fin
       staleDelivery.every((frame) => !frame.includes(visibleAlert.subject)),
     );
     await turn("Reject exact evidence after asset revocation", exactAlert);
+    assertStringIncludes(result, "unavailable");
+    await turn(
+      "Reject finding lineage after affected asset withdrawal",
+      lineage,
+    );
+    assertStringIncludes(result, "unavailable");
+    await turn("Reject the old lineage cursor after scope withdrawal", {
+      ...lineage,
+      cursor: firstLineage.nextCursor,
+    });
     assertStringIncludes(result, "unavailable");
     captureModelContext = true;
     await turn("Do not reuse the withdrawn worker observation.");

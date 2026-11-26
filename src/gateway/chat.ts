@@ -1000,7 +1000,8 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
         const goalConfirmation = action === "confirm_goal_completion";
         const selectedReport = action === "finding_report" ||
           action === "finding_report_history";
-        const decisionHistory = action === "decision_history";
+        const exactHistory = action === "decision_history" ||
+          action === "finding_lineage";
         const previewMembership = action === "preview_membership";
         const setMembership = action === "set_case_membership";
         const selectedControl = sentinelOperatorCaseControlActions.some((
@@ -1038,7 +1039,7 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
           const casePath = resolveCase();
           if (!selectedControl) {
             return directRead || linkedRead || selectedReport ||
-                decisionHistory || goalRead ||
+                exactHistory || goalRead ||
                 previewMembership
               ? casePath === selectedPath
               : !!casePath;
@@ -1060,7 +1061,7 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
         if (!current()) return unavailable;
         const scopedDecision = action === "review_incident";
         const amendReport = action === "amend_finding_report";
-        const scopedRead = scopedDecision || decisionHistory || amendReport ||
+        const scopedRead = scopedDecision || exactHistory || amendReport ||
           goalRead ||
           goalConfirmation ||
           sentinelScopedTelemetryReadActions.some(
@@ -1219,7 +1220,7 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
               }
               if (
                 linkedRead || selectedReport || scopedDecision ||
-                decisionHistory || goalRead ||
+                exactHistory || goalRead ||
                 goalConfirmation
               ) {
                 return await read(goalConfirmation) === text &&

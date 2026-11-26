@@ -1501,6 +1501,7 @@ export const sentinelOperatorCaseReadActions = [
   "finding_report",
   "finding_report_history",
   "decision_history",
+  "finding_lineage",
   ...sentinelScopedTelemetryReadActions,
   "list_digests",
   "expand_digest",
