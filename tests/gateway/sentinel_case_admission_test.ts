@@ -1,3 +1,4 @@
+import { readSentinelAdmissionSettings } from "../../src/gateway/sentinel_admission_settings.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { dirname } from "@std/path";
 import { createProviderRegistry } from "../../src/agent/llm.ts";
@@ -21,6 +22,7 @@ import { createGatewayServer } from "../../src/gateway/server/server.ts";
 import {
   needsSentinelAssessmentCoordinator,
   readSentinelAssessment,
+  readSentinelAssessmentAdmission,
 } from "../../src/sentinel/assessment_store.ts";
 import { resolveSentinelCasePath } from "../../src/sentinel/cases.ts";
 
@@ -38,8 +40,8 @@ Deno.test("An owner gateway's named Sentinel cases keep FIFO admission across re
       const last = messages.at(-1);
       const usage = { inputTokens: 1, outputTokens: 1 };
       return Promise.resolve(
-        last?.role === "tool"
-          ? { content: String(last.content), toolCalls: [], usage }
+        (last?.role === "tool" || !String(last?.content).startsWith("{"))
+          ? { content: "Fixture turn finished.", toolCalls: [], usage }
           : {
             content: "",
             toolCalls: [{
@@ -57,32 +59,43 @@ Deno.test("An owner gateway's named Sentinel cases keep FIFO admission across re
   });
   registry.setDefault("case-admission-fixture");
   const calls: string[] = [];
+  let allowControl = true;
   const hookRunner: HookRunner = {
-    evaluateHook(hook) {
+    evaluateHook(hook, { input }) {
       calls.push(hook);
+      const allowed = allowControl || hook !== "PRE_TOOL_CALL" ||
+        !input.tool_call;
       return Promise.resolve({
-        allowed: true,
-        action: "ALLOW",
+        allowed,
+        action: allowed ? "ALLOW" : "BLOCK",
         ruleId: null,
         duration: 0,
       });
     },
   };
   const admissions: string[] = [];
+  const awaitingYield = new Set<string>();
   const evaluations = new Set<string>();
   let managerClock = 0;
   function manager() {
     return startSentinelCaseManager(baseDir, (path, id) => {
       admissions.push(id);
-      return startSentinelAssessmentCoordinator({
+      const coordinator = startSentinelAssessmentCoordinator({
         snapshotPath: path,
         advanceAdaptive: (state) => {
           evaluations.add(id);
           advanceAdaptiveSentinel(path, state);
         },
       });
+      return {
+        stop: coordinator.stop,
+        canYield: () =>
+          !awaitingYield.has(id) && !coordinator.hasInFlightWork(),
+      };
     }, {
       concurrency: 1,
+      readConcurrency: () =>
+        readSentinelAdmissionSettings(baseDir, 1).effectiveLimit,
       intervalMs: 300_000,
       now: () => managerClock,
       isActiveCase: needsSentinelAssessmentCoordinator,
@@ -90,7 +103,11 @@ Deno.test("An owner gateway's named Sentinel cases keep FIFO admission across re
   }
   async function withGateway(
     test: (
-      turn: (action: string, id: string, revision?: number) => Promise<string>,
+      turn: (
+        action: string | Record<string, unknown>,
+        id?: string,
+        revision?: number,
+      ) => Promise<string>,
       caseManager: ReturnType<typeof manager>,
     ) => Promise<void>,
   ) {
@@ -110,6 +127,10 @@ Deno.test("An owner gateway's named Sentinel cases keep FIFO admission across re
         hookRunner,
         operatorRunExecutor: createOperatorRunToolExecutor({
           baseDir,
+          sentinelAdmission: {
+            configuredLimit: 1,
+            onChanged: caseManager.refresh,
+          },
           confirm: () => Promise.resolve(true),
         }),
       }),
@@ -137,12 +158,11 @@ Deno.test("An owner gateway's named Sentinel cases keep FIFO admission across re
         try {
           socket.send(JSON.stringify({
             type: "message",
-            content: JSON.stringify({
-              action,
-              kind: "sentinel",
-              id,
-              revision,
-            }),
+            content: JSON.stringify(
+              typeof action === "string"
+                ? { action, kind: "sentinel", id, revision }
+                : action,
+            ),
           }));
           return await done.promise;
         } finally {
@@ -242,6 +262,65 @@ Deno.test("An owner gateway's named Sentinel cases keep FIFO admission across re
       assertEquals(admissions.at(-1), "a-youngest");
       assertEquals(caseManager.coordinatorState("z-oldest"), "waiting");
       return Promise.resolve();
+    });
+    await withGateway(async (turn, caseManager) => {
+      const raise = {
+        action: "set_assessment_concurrency",
+        requestId: crypto.randomUUID(),
+        expectedVersion: 0,
+        limit: 2,
+      };
+      assert((await turn({ ...raise, limit: 13 })).startsWith("Error:"));
+      allowControl = false;
+      assert((await turn(raise)).includes("blocked"));
+      allowControl = true;
+      const initial = await turn({ action: "assessment_concurrency" });
+      assert(!initial.startsWith("Error:"), initial);
+      assertEquals(JSON.parse(initial).version, 0);
+      const increased = JSON.parse(await turn(raise));
+      assertEquals(increased.edit.override, 2);
+      assertEquals(caseManager.coordinatorState("z-oldest"), "scheduled");
+      assertEquals(JSON.parse(await turn(raise)), increased);
+      assert((await turn({ ...raise, limit: 3 })).startsWith("Error:"));
+    });
+    await withGateway(async (turn, caseManager) => {
+      assertEquals(caseManager.coordinatorState("a-youngest"), "scheduled");
+      assertEquals(caseManager.coordinatorState("z-oldest"), "scheduled");
+      const path = resolveSentinelCasePath(baseDir, "z-oldest");
+      const admitted = readSentinelAssessmentAdmission(path);
+      assert(admitted !== undefined);
+      awaitingYield.add("z-oldest");
+      const lower = {
+        action: "set_assessment_concurrency",
+        requestId: crypto.randomUUID(),
+        expectedVersion: 1,
+        limit: 1,
+      };
+      assertEquals(JSON.parse(await turn(lower)).edit.override, 1);
+      assert(caseManager.isAdmitted("z-oldest", admitted));
+      assert(!caseManager.mayStartWork("z-oldest"));
+      awaitingYield.delete("z-oldest");
+      caseManager.refresh();
+      assertEquals(caseManager.coordinatorState("z-oldest"), "waiting");
+      assertEquals(readSentinelAssessment(path)?.active, true);
+      assertEquals(readSentinelAssessmentAdmission(path), admitted);
+      const reset = {
+        action: "reset_assessment_concurrency",
+        requestId: crypto.randomUUID(),
+        expectedVersion: 2,
+      };
+      const cleared = JSON.parse(await turn(reset));
+      assertEquals(cleared.edit.override, null);
+      assertEquals(JSON.parse(await turn(reset)), cleared);
+    });
+    await withGateway(async (turn, caseManager) => {
+      assertEquals(
+        JSON.parse(await turn({ action: "assessment_concurrency" }))
+          .effectiveLimit,
+        1,
+      );
+      assertEquals(caseManager.coordinatorState("a-youngest"), "scheduled");
+      assertEquals(caseManager.coordinatorState("z-oldest"), "waiting");
     });
     for (const hook of ["PRE_TOOL_CALL", "POST_TOOL_RESPONSE", "PRE_OUTPUT"]) {
       assertEquals(calls.includes(hook), true);

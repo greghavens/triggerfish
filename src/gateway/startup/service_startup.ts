@@ -1,3 +1,4 @@
+import { readSentinelAdmissionSettings } from "../sentinel_admission_settings.ts";
 import { selectSentinelDelegatedObservationRead } from "../../core/config_types.ts";
 import { createWorkflowObservationVerifier } from "../scheduled_observation_tool.ts";
 import { listEffectiveModelProfiles } from "../../agent/llm.ts";
@@ -84,6 +85,7 @@ export function buildMainChatSession(
   toolInfra: ToolInfraResult,
   isTidepoolCallRef: { value: boolean },
   isOwnerTurnRef: { value: boolean },
+  onSentinelAdmissionChanged?: () => void,
 ) {
   const modelsConfig = bootstrap.config.models as
     | Record<string, unknown>
@@ -121,6 +123,13 @@ export function buildMainChatSession(
         bootstrap.config.sentinel?.allow_model_access === true,
       sentinelGatewayWorkerLimit:
         bootstrap.config.sentinel?.model_worker_limit ?? 2,
+      sentinelAdmission:
+        bootstrap.config.sentinel?.assessment_concurrency !== undefined
+          ? {
+            configuredLimit: bootstrap.config.sentinel.assessment_concurrency,
+            onChanged: onSentinelAdmissionChanged,
+          }
+          : undefined,
       authorizeExecutionTracePayload: authorizeExecutionEvidence,
       workflows,
       confirm: (request) => toolInfra.state.activeConfirmPrompt(request),
@@ -404,27 +413,29 @@ export async function startServicesAndChannels(
 ): Promise<ShutdownDeps> {
   const isTidepoolCallRef = { value: false };
   const isOwnerTurnRef = { value: true };
+  const caseManagerRef: {
+    current?: ReturnType<typeof startSentinelCaseManager>;
+  } = {};
   const chatSession = buildMainChatSession(
     bootstrap,
     coreInfra,
     toolInfra,
     isTidepoolCallRef,
     isOwnerTurnRef,
+    () => caseManagerRef.current?.refresh(),
   );
   bootstrap.log.info("Main session created");
   toolInfra.mcpBroadcastRefs.chatSession = chatSession;
 
-  const caseManagerRef: {
-    current?: ReturnType<typeof startSentinelCaseManager>;
-  } = {};
-  const releaseCaseAdmission =
-    bootstrap.config.sentinel?.assessment_concurrency !== undefined
-      ? bindSentinelCaseAdmission(
-        bootstrap.baseDir,
-        (id, generation) =>
-          caseManagerRef.current?.isAdmitted(id, generation) === true,
-      )
-      : undefined;
+  const configuredAdmissionLimit = bootstrap.config.sentinel
+    ?.assessment_concurrency;
+  const releaseCaseAdmission = configuredAdmissionLimit !== undefined
+    ? bindSentinelCaseAdmission(
+      bootstrap.baseDir,
+      (id, generation) =>
+        caseManagerRef.current?.isAdmitted(id, generation) === true,
+    )
+    : undefined;
   const { tidepoolHost, server } = await startNetworkServices(
     bootstrap,
     coreInfra,
@@ -671,7 +682,12 @@ export async function startServicesAndChannels(
   const caseManager = startSentinelCaseManager(
     bootstrap.baseDir,
     (casePath, caseId) => {
-      const reserveCaseWorker = () => reserveModelWorker(casePath);
+      const reserveCaseWorker = () => {
+        if (caseManagerRef.current?.mayStartWork(caseId) !== false) {
+          return reserveModelWorker(casePath);
+        }
+        reserveModelWorker.cancelWait(casePath);
+      };
       const createCaseWorker = workerFactory?.(casePath);
       const planner = createCaseWorker
         ? createSentinelModelPlanner(
@@ -712,7 +728,14 @@ export async function startServicesAndChannels(
       };
     },
     {
-      concurrency: bootstrap.config.sentinel?.assessment_concurrency,
+      concurrency: configuredAdmissionLimit,
+      readConcurrency: configuredAdmissionLimit !== undefined
+        ? () =>
+          readSentinelAdmissionSettings(
+            bootstrap.baseDir,
+            configuredAdmissionLimit,
+          ).effectiveLimit
+        : undefined,
       isActiveCase: needsSentinelAssessmentCoordinator,
     },
   );

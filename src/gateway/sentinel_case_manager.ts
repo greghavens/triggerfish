@@ -27,6 +27,7 @@ interface SentinelCaseManagerOptions {
   readonly intervalMs?: number;
   readonly now?: () => number;
   readonly concurrency?: number;
+  readonly readConcurrency?: () => number;
   /** Return false to release a coordinator slot for a paused or stopped assessment. */
   readonly isActiveCase?: (path: string) => boolean;
   readonly onError?: (error: unknown) => void;
@@ -40,6 +41,7 @@ export function startSentinelCaseManager(
 ): SentinelCaseHandle & {
   refresh(): void;
   isAdmitted(caseId: string, admissionAt: number): boolean;
+  mayStartWork(caseId: string): boolean;
   coordinatorState(caseId: string): SentinelCoordinatorState | undefined;
 } {
   const interval = options.intervalMs ?? 5000;
@@ -47,11 +49,11 @@ export function startSentinelCaseManager(
     throw new Error("Sentinel case polling interval must be 100–300000ms");
   }
   const ordered = options.concurrency !== undefined;
-  const concurrency = options.concurrency ??
+  const initialConcurrency = options.concurrency ??
     MAX_SENTINEL_ASSESSMENT_CONCURRENCY;
   if (
-    !Number.isSafeInteger(concurrency) || concurrency < 1 ||
-    concurrency > MAX_SENTINEL_ASSESSMENT_CONCURRENCY
+    !Number.isSafeInteger(initialConcurrency) || initialConcurrency < 1 ||
+    initialConcurrency > MAX_SENTINEL_ASSESSMENT_CONCURRENCY
   ) {
     throw new Error(
       "Sentinel assessment concurrency must be an integer from 1 to 12",
@@ -63,6 +65,8 @@ export function startSentinelCaseManager(
     { handle: SentinelCaseHandle; started: number; admission?: number }
   >();
   const waiting = new Set<string>();
+  const draining = new Set<string>();
+  let concurrency = initialConcurrency;
   let stopped = false;
 
   function report(error: unknown) {
@@ -86,6 +90,16 @@ export function startSentinelCaseManager(
     if (stopped) return;
     let candidates: string[];
     try {
+      const limit = ordered ? options.readConcurrency?.() : undefined;
+      if (limit !== undefined) {
+        if (
+          !Number.isSafeInteger(limit) || limit < 1 ||
+          limit > MAX_SENTINEL_ASSESSMENT_CONCURRENCY
+        ) {
+          throw new Error("Invalid live Sentinel admission limit");
+        }
+        concurrency = limit;
+      }
       candidates = listSentinelCaseIds(baseDir);
     } catch (error) {
       report(error);
@@ -129,6 +143,16 @@ export function startSentinelCaseManager(
       const candidate = paths.get(id);
       if (!candidate || (ordered && candidate.admission !== admission)) {
         stopCase(id, handle);
+      }
+    }
+    draining.clear();
+    if (ordered && coordinators.size > concurrency) {
+      const incumbents = [...coordinators].sort(([left, a], [right, b]) =>
+        a.admission! - b.admission! || left.localeCompare(right)
+      );
+      for (const [id, { handle }] of incumbents.slice(concurrency)) {
+        if (handle.canYield?.() === false) draining.add(id);
+        else stopCase(id, handle);
       }
     }
     for (const id of waiting) {
@@ -182,6 +206,9 @@ export function startSentinelCaseManager(
     isAdmitted(caseId, admissionAt) {
       return coordinators.get(caseId)?.admission === admissionAt;
     },
+    mayStartWork(caseId) {
+      return !draining.has(caseId);
+    },
     coordinatorState(caseId) {
       if (coordinators.has(caseId)) return "scheduled";
       if (waiting.has(caseId)) return "waiting";
@@ -193,6 +220,7 @@ export function startSentinelCaseManager(
       clearInterval(timer);
       for (const [id, { handle }] of coordinators) stopCase(id, handle);
       waiting.clear();
+      draining.clear();
     },
   };
 }

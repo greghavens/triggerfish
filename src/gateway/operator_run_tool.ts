@@ -31,6 +31,11 @@ import {
   isOwnerBoundExecutionTraceSource,
   parseTeamDeliveryTraceSource,
 } from "../core/team_delivery_trace_source.ts";
+import {
+  readSentinelAdmissionSettings,
+  replaceSentinelAdmissionLimit,
+  validSentinelAdmissionLimit,
+} from "./sentinel_admission_settings.ts";
 import type { SessionId } from "../core/types/session.ts";
 import { assignmentRecoveryKey } from "../core/durable_assignment.ts";
 import {
@@ -340,6 +345,9 @@ export const operatorRunTool: ToolDefinition = {
         "tasks",
         "worker_limit",
         "set_worker_limit",
+        "assessment_concurrency",
+        "set_assessment_concurrency",
+        "reset_assessment_concurrency",
         "reset_worker_limit",
         ...sentinelQueueActions.keys(),
         "apply_task_dependencies",
@@ -1947,6 +1955,10 @@ export function createOperatorRunToolExecutor(options: {
   readonly webContainmentConfigured?: boolean;
   readonly sentinelModelAccess?: boolean;
   readonly sentinelGatewayWorkerLimit?: number;
+  readonly sentinelAdmission?: {
+    readonly configuredLimit: number;
+    readonly onChanged?: () => void;
+  };
   readonly profiles?: (
     ceiling: ClassificationLevel,
   ) => readonly EffectiveModelProfile[];
@@ -2372,6 +2384,73 @@ export function createOperatorRunToolExecutor(options: {
         } finally {
           journal.close();
         }
+      } catch {
+        return unavailable;
+      }
+    }
+    if (
+      action === "assessment_concurrency" ||
+      action === "set_assessment_concurrency" ||
+      action === "reset_assessment_concurrency"
+    ) {
+      const admission = options.sentinelAdmission;
+      const reading = action === "assessment_concurrency";
+      const setting = action === "set_assessment_concurrency";
+      const { limit, requestId, expectedVersion } = args;
+      if (
+        !admission || !context?.authenticatedOwnerSessionId ||
+        !canFlowTo("INTERNAL", context.ceiling ?? "PUBLIC") ||
+        (setting ? !validSentinelAdmissionLimit(limit) : limit !== undefined) ||
+        Object.keys(args).some((key) =>
+          ![
+            "action",
+            ...(reading ? [] : ["requestId", "expectedVersion"]),
+            ...(setting ? ["limit"] : []),
+          ].includes(key)
+        )
+      ) return unavailable;
+      try {
+        const before = readSentinelAdmissionSettings(
+          options.baseDir,
+          admission.configuredLimit,
+        );
+        if (reading) return safeProjection(before);
+        if (
+          typeof requestId !== "string" || !digestPattern.test(requestId) ||
+          typeof expectedVersion !== "number" ||
+          !Number.isSafeInteger(expectedVersion) ||
+          expectedVersion < 0 || expectedVersion > before.version
+        ) return unavailable;
+        const override = setting ? limit as number : null;
+        const request = requestId.toLowerCase();
+        const write = () =>
+          replaceSentinelAdmissionLimit(options.baseDir, {
+            requestId: request,
+            expectedVersion,
+            override,
+          });
+        if (expectedVersion < before.version) {
+          const replay = write();
+          return replay ? safeProjection({ edit: replay }) : unavailable;
+        }
+        if (before.override === override) return unavailable;
+        if (
+          !await options.confirm(
+            `Approve the exact named Sentinel admission limit?
+${
+              JSON.stringify({
+                requestId: request,
+                expectedVersion,
+                previous: before.effectiveLimit,
+                next: override ?? admission.configuredLimit,
+              })
+            }`,
+          )
+        ) return "Error: The operator declined the run action.";
+        const edit = write();
+        if (!edit) return unavailable;
+        admission.onChanged?.();
+        return safeProjection({ edit });
       } catch {
         return unavailable;
       }
