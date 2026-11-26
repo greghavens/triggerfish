@@ -1,3 +1,19 @@
+import { assertRejects } from "@std/assert";
+import { DatabaseSync } from "node:sqlite";
+import {
+  withVerifiedRunArchive,
+  writeRunArchive,
+} from "../../src/core/run_archive.ts";
+import { captureStoppedSentinelCaseArtifacts } from "../../src/sentinel/case_archive_capture.ts";
+import {
+  permittedSentinelRestoreArtifacts,
+  requiredSentinelRestoreArtifacts,
+  restoreVerifiedSentinelCaseArchive,
+} from "../../src/sentinel/sentinel_archive_restore.ts";
+import { sentinelIncidentRecommendationToolName } from "../../src/core/sentinel_incident_review_intent.ts";
+import { startSentinelAssessmentCoordinator } from "../../src/gateway/sentinel_assessment_service.ts";
+import { readSavedSentinelIncidentCandidates } from "../../src/sentinel/incident_archive.ts";
+import { sentinelAlertsPath } from "../../src/sentinel/paths.ts";
 import { sentinelPlannerFindingToolName } from "../../src/core/sentinel_finding_review_intent.ts";
 import { readSentinelWorkerFindingHistory } from "../../src/sentinel/worker_finding_store.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
@@ -15,6 +31,7 @@ import { createChatSession } from "../../src/gateway/chat.ts";
 import {
   advanceAdaptiveSentinel,
   createSentinelModelPlanner,
+  readAdaptiveSentinel,
 } from "../../src/gateway/sentinel_adaptive_runtime.ts";
 import { createSentinelSubagent } from "../../src/gateway/sentinel_agent.ts";
 import { createGatewayServer } from "../../src/gateway/server/server.ts";
@@ -24,8 +41,12 @@ import {
 } from "../../src/sentinel/adaptive_planner.ts";
 import { openSentinelAdaptiveStore } from "../../src/sentinel/adaptive_store.ts";
 import {
+  readSentinelDecisionHistory,
+  readSentinelIncidentReviews,
+  readSentinelOperatorReviewRequest,
   recordSentinelOperatingConstraints,
   startSentinelAssessment,
+  stopSentinelAssessment,
 } from "../../src/sentinel/assessment_store.ts";
 import { resolveSentinelCasePath } from "../../src/sentinel/cases.ts";
 import { listSentinelPlannerGraphFacts } from "../../src/sentinel/worker_graph_facts.ts";
@@ -946,6 +967,412 @@ for (
       planner.stop();
       await first?.close();
       await reconnect?.close();
+      await gateway.stop();
+      await Deno.remove(baseDir, { recursive: true });
+    }
+  });
+}
+
+for (
+  const outcome of [
+    "approved",
+    "denied",
+    "revoked",
+    "stopped",
+    "source-denied",
+    "unread",
+  ] as const
+) {
+  Deno.test(`Incident worker disposition ${outcome} uses the exact owner approval inbox`, async () => {
+    const baseDir = await Deno.makeTempDir();
+    const caseId = "incident-disposition";
+    const path = resolveSentinelCasePath(baseDir, caseId);
+    const token = crypto.randomUUID();
+    const recommendation = sentinelIncidentRecommendationToolName;
+    const cohortRead = "sentinel_incident_alerts";
+    const inbox = createToolApprovalService(join(baseDir, "approvals.db"));
+    let sourceDenied = false;
+    let classified = 0;
+    let outputDenied = false;
+    const outputs: unknown[] = [];
+    const hooks: HookRunner = {
+      toolApprovalInbox: inbox,
+      evaluateHook(hook, { input }) {
+        const call = input.tool_call as { name?: string } | undefined;
+        const isReviewOutput = hook === "PRE_OUTPUT" &&
+          typeof input.content === "string" &&
+          input.content.includes("recommendationEvidence");
+        if (isReviewOutput) outputDenied = true;
+        const blocked = isReviewOutput ||
+          sourceDenied && hook === "PRE_TOOL_CALL" &&
+            call?.name === cohortRead;
+        if (
+          hook === "POST_TOOL_RESPONSE" && input.tool_name === recommendation
+        ) classified++;
+        return Promise.resolve({
+          allowed: !blocked,
+          action: blocked ? "BLOCK" : "ALLOW",
+          ruleId: blocked ? "fixture-incident-source-revoke" : null,
+          duration: 0,
+        });
+      },
+    };
+    const registry = createProviderRegistry();
+    let incidentId = "";
+    let result = "";
+    const note =
+      "Both retained alerts describe an authorized test. Keep investigating.";
+    const expected = () => ({ incidentId, disposition: "investigating", note });
+    let iterations = 0;
+    registry.register({
+      name: "leased-incident-recommendation",
+      supportsStreaming: false,
+      complete(messages) {
+        const count = iterations++;
+        const tools = outcome === "unread"
+          ? [recommendation]
+          : outcome === "approved"
+          ? [cohortRead, cohortRead, recommendation]
+          : [cohortRead, recommendation];
+        const name = tools[count];
+        if (!name) {
+          result = String(
+            messages.findLast(({ role }) => role === "tool")?.content,
+          );
+        }
+        return Promise.resolve({
+          usage: { inputTokens: 1, outputTokens: 1 },
+          content: name
+            ? ""
+            : '{"summary":"Reviewed the retained alerts.","followUps":[]}',
+          toolCalls: name
+            ? [{
+              id: `incident-${count}`,
+              type: "function",
+              function: {
+                name,
+                arguments: JSON.stringify(
+                  name === cohortRead
+                    ? {
+                      incidentId,
+                      ...(outcome === "approved" &&
+                        { offset: count, limit: 1 }),
+                    }
+                    : expected(),
+                ),
+              },
+            }]
+            : [],
+        });
+      },
+    });
+    registry.setDefault("leased-incident-recommendation");
+    const gateway = createGatewayServer({
+      port: 0,
+      token,
+      chatSession: createChatSession({
+        session: createSession({
+          userId: "owner" as UserId,
+          channelId: "test" as ChannelId,
+        }),
+        providerRegistry: registry,
+        hookRunner: hooks,
+        enableStreaming: false,
+      }),
+    });
+    let original: Awaited<ReturnType<typeof connect>> | undefined;
+    let reopened: Awaited<ReturnType<typeof connect>> | undefined;
+    let agent: ReturnType<typeof createSentinelSubagent> | undefined;
+    let job: Promise<void> | undefined;
+    let coordinator:
+      | ReturnType<typeof startSentinelAssessmentCoordinator>
+      | undefined;
+    try {
+      await Deno.mkdir(dirname(path), { recursive: true, mode: 0o700 });
+      await Deno.writeTextFile(
+        path,
+        JSON.stringify({
+          version: 1,
+          nodes: [{ id: "app", kind: "asset", label: "Approved App" }],
+          edges: [],
+        }),
+      );
+      await Deno.writeTextFile(
+        sentinelAlertsPath(path),
+        JSON.stringify([
+          {
+            type: "network_security_alert",
+            severity: "high",
+            evidenceIds: ["incident-network"],
+          },
+          {
+            type: "authentication_failure_burst",
+            severity: "medium",
+            evidenceIds: ["incident-auth"],
+          },
+        ].map((alert) => ({
+          ...alert,
+          asset: "app",
+          subject: "Local defensive fixture",
+          observedAt: "2026-01-01T00:00:00.000Z",
+        }))),
+      );
+      const state = startSentinelAssessment(path);
+      const { runId } = state.plan;
+      assert(runId);
+      incidentId = readSavedSentinelIncidentCandidates(path, state.revision)[0]
+        ?.id;
+      assert(incidentId);
+      const revision = adaptiveRevision(state);
+      advanceAdaptiveSentinel(path, state);
+      const store = openSentinelAdaptiveStore(
+        join(dirname(path), "sentinel-adaptive.db"),
+      );
+      try {
+        const lease = store.claimModelReview(
+          revision,
+          MODEL_ASSIGNMENT_REASON,
+          (task) =>
+            task.kind === "review_incident" && task.nodeId === incidentId,
+        );
+        assert(lease);
+        let rounds = 0;
+        let wakeOffset = 0;
+        const planner = createSentinelModelPlanner(
+          path,
+          (_current, taskId) => ({
+            execute(_prompt, send) {
+              if (!taskId) {
+                rounds++;
+                wakeOffset = 58_750;
+                send({ type: "response", text: "[]", taint: "INTERNAL" });
+              }
+              return Promise.resolve();
+            },
+            clear() {},
+          }),
+          () => () => {},
+          () => Date.now() + wakeOffset,
+        );
+        if (outcome === "approved") {
+          coordinator = startSentinelAssessmentCoordinator({
+            snapshotPath: path,
+            advanceAdaptive(current) {
+              advanceAdaptiveSentinel(path, current);
+              planner.advance(current);
+            },
+            stopAdaptive: () => planner.stop(),
+          });
+          const deadline = Date.now() + 3_500;
+          while (
+            !readAdaptiveSentinel(path, state, "revision")
+              ?.modelPlannerHistory[0]?.finished &&
+            Date.now() < deadline
+          ) {
+            await new Promise((resolve) => setTimeout(resolve, 10));
+          }
+          assertEquals(rounds, 1);
+        }
+        agent = createSentinelSubagent({
+          snapshotPath: path,
+          assessmentRevision: state.revision,
+          assignedTaskId: lease.task.id,
+          assignedTaskLeaseToken: lease.token,
+          providerRegistry: registry,
+          hookRunner: hooks,
+          allowModelAccess: true,
+        });
+        const { port } = await gateway.start();
+        original = await connect(port, token);
+        job = agent.execute(
+          "Review the exact incident and recommend a disposition.",
+          (event) => outputs.push(event),
+        );
+        const reviews = () =>
+          readSentinelIncidentReviews(path, state.revision, {
+            fullHistory: true,
+          });
+        if (outcome === "unread") {
+          await job;
+          assertEquals(inbox.list().records, []);
+          assertEquals(reviews(), []);
+          return;
+        }
+        const pending = await pendingInbox(original);
+        assertEquals(pending.sentinelIncidentRecommendation, expected());
+        assertEquals(pending.assignmentId, lease.task.id);
+        assertEquals(pending.runId, runId);
+        assert(!JSON.stringify(pending).includes("incident-network"));
+        assertEquals(reviews(), []);
+        await original.close();
+        reopened = await connect(port, token);
+        assertEquals(await pendingInbox(reopened), pending);
+        if (outcome === "revoked") {
+          assert(recordSentinelOperatingConstraints(path, {
+            runId,
+            evidenceRevision: state.revision,
+            expectedVersion: 0,
+            requestId: crypto.randomUUID(),
+            operatorScope: "fixture-owner",
+            constraints: { deniedKinds: ["review_incident"] },
+          }));
+        }
+        if (outcome === "stopped") {
+          assert(
+            store.requestModelReviewControl(
+              revision,
+              lease.task.id,
+              crypto.randomUUID(),
+              "stop",
+            ),
+          );
+        }
+        if (outcome === "source-denied") sourceDenied = true;
+        const invalid = outcome === "stopped" || outcome === "revoked";
+        if (invalid) {
+          const visible = await pendingInbox(reopened);
+          assertEquals(visible.id, pending.id);
+          assertEquals(visible.sentinelIncidentRecommendation, undefined);
+          assert(
+            !visible.description.includes(incidentId) &&
+              !visible.description.includes(note),
+          );
+        }
+        const decide = () =>
+          reopened!.request({
+            type: "approval_inbox_decide",
+            approvalId: pending.id,
+            approved: outcome !== "denied",
+          });
+        assertEquals((await decide()).ok, !invalid);
+        await job;
+        if (outcome === "approved") {
+          assert(result.startsWith("{"), result);
+          assertEquals(JSON.parse(result).review.id, reviews()[0]?.id);
+          assertEquals((await decide()).ok, true);
+          assertEquals(reviews().length, 1);
+          assertEquals(
+            readSentinelOperatorReviewRequest(path, "incident", pending.id)
+              ?.record.id,
+            reviews()[0]?.id,
+          );
+          assertEquals(classified, 1);
+          assert(outputDenied);
+          assert(!JSON.stringify(outputs).includes("recommendationEvidence"));
+          const deadline = Date.now() + 3_500;
+          while (rounds < 2 && Date.now() < deadline) {
+            await new Promise((resolve) => setTimeout(resolve, 10));
+          }
+          assertEquals(rounds, 2);
+          const exact = readSentinelOperatorReviewRequest(
+            path,
+            "incident",
+            pending.id,
+          );
+          assert(exact?.record.recommendationEvidence);
+          assertEquals(exact.record.approvalId, pending.id);
+          assertEquals(
+            exact.record.recommendationEvidence.assignmentId,
+            lease.task.id,
+          );
+          assertEquals(exact.record.recommendationEvidence.pages.length, 2);
+          const live = readSentinelDecisionHistory(
+            path,
+            state.revision,
+            "incident",
+            incidentId,
+          );
+          coordinator?.stop();
+          assert(stopSentinelAssessment(path));
+          const staging = await Deno.makeTempDir({ dir: baseDir });
+          const captured = captureStoppedSentinelCaseArtifacts(baseDir, {
+            caseId,
+            runId,
+            evidenceRevision: state.revision,
+          }, staging);
+          const archive = async (name: string, destination: string) => {
+            const filename = join(baseDir, name);
+            await Deno.mkdir(destination, { mode: 0o700 });
+            await writeRunArchive(
+              filename,
+              {
+                kind: "sentinel",
+                id: caseId,
+                runId,
+                revision: state.revision,
+              },
+              captured.artifacts.map(({ name, path }) => ({
+                name,
+                sourcePath: path,
+              })),
+              permittedSentinelRestoreArtifacts,
+            );
+            return withVerifiedRunArchive(
+              filename,
+              destination,
+              {
+                expectedKind: "sentinel",
+                permittedNames: permittedSentinelRestoreArtifacts,
+                requiredNames: requiredSentinelRestoreArtifacts,
+              },
+              (archive) =>
+                restoreVerifiedSentinelCaseArchive(destination, archive),
+            );
+          };
+          const destination = join(baseDir, "restored");
+          await archive("case-healthy.tar", destination);
+          const restored = resolveSentinelCasePath(destination, caseId);
+          assertEquals(
+            readSentinelDecisionHistory(
+              restored,
+              state.revision,
+              "incident",
+              incidentId,
+            ),
+            live,
+          );
+          const tampered = new DatabaseSync(
+            join(captured.directory, "sentinel-assessment.db"),
+          );
+          try {
+            const evidence = structuredClone(
+              exact.record.recommendationEvidence,
+            );
+            tampered.prepare(
+              "UPDATE assessment_incident_reviews SET recommendationEvidence = ?",
+            ).run(
+              JSON.stringify({
+                ...evidence,
+                pages: evidence.pages.map((page, i) =>
+                  i ? page : { ...page, sha256: "a".repeat(64) }
+                ),
+              }),
+            );
+          } finally {
+            tampered.close();
+          }
+          const corrupt = join(baseDir, "corrupt");
+          await assertRejects(
+            () => archive("case-corrupt.tar", corrupt),
+            Error,
+            "does not match its cohort",
+          );
+          await assertRejects(
+            () => Deno.stat(resolveSentinelCasePath(corrupt, caseId)),
+            Deno.errors.NotFound,
+          );
+        } else {
+          assertEquals(reviews(), []);
+        }
+      } finally {
+        store.close();
+      }
+    } finally {
+      agent?.clear();
+      await job;
+      coordinator?.stop();
+      await reopened?.close();
+      await original?.close();
       await gateway.stop();
       await Deno.remove(baseDir, { recursive: true });
     }

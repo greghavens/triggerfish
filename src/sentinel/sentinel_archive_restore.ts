@@ -1,3 +1,8 @@
+import { readSentinelIncidentRecommendationEvidence } from "../core/sentinel_incident_review_intent.ts";
+import {
+  projectSentinelIncidentAlertPage,
+  readSavedSentinelIncident,
+} from "./incident_archive.ts";
 import { resolveWorkerNarrativeAlert } from "./worker_narrative_alerts.ts";
 import {
   projectRepositoryVisibility,
@@ -2107,6 +2112,65 @@ function parseArchivedLinkGroups(
 }
 
 /** Install only a complete staged named case, paused without runnable archived authority. */
+function validateArchivedIncidentRecommendations(
+  assessment: string,
+  snapshot: string,
+) {
+  const db = new DatabaseSync(assessment, { readOnly: true });
+  try {
+    if (
+      !db.prepare("PRAGMA table_info(assessment_incident_reviews)")
+        .all().some(({ name }) => name === "recommendationEvidence")
+    ) return;
+    const rows = db.prepare(`
+      SELECT revision, incidentId, requestId, recommendationEvidence
+      FROM assessment_incident_reviews WHERE recommendationEvidence IS NOT NULL
+    `).all();
+    for (const row of rows) {
+      const evidence = readSentinelIncidentRecommendationEvidence(
+        row.recommendationEvidence,
+      );
+      if (
+        !evidence || typeof row.requestId !== "string" ||
+        !uuid.test(row.requestId) ||
+        typeof row.revision !== "number" ||
+        !Number.isSafeInteger(row.revision) ||
+        typeof row.incidentId !== "string"
+      ) throw new Error("Invalid archived incident recommendation evidence");
+      const { revision, incidentId } = row;
+      const incident = readSavedSentinelIncident(
+        snapshot,
+        revision,
+        incidentId,
+        true,
+      );
+      if (
+        "error" in incident || !incident.members.length ||
+        evidence.pages.some((page) => {
+          const retained = projectSentinelIncidentAlertPage(
+            incident.members,
+            revision,
+            incidentId,
+            page.offset,
+            page.limit,
+          );
+          if (!retained.startsWith("{")) return true;
+          const projection = JSON.parse(retained);
+          return !projection.alerts.length ||
+            projection.nextOffset !== page.nextOffset ||
+            createHash("sha256").update(retained).digest("hex") !== page.sha256;
+        })
+      ) {
+        throw new Error(
+          "Archived incident recommendation evidence does not match its cohort",
+        );
+      }
+    }
+  } finally {
+    db.close();
+  }
+}
+
 export async function restoreVerifiedSentinelCaseArchive(
   baseDir: string,
   archive: VerifiedRunArchive,
@@ -2142,6 +2206,7 @@ export async function restoreVerifiedSentinelCaseArchive(
     runId,
     digestSentinelSnapshot(graph),
   );
+  validateArchivedIncidentRecommendations(assessment, snapshot);
   const revisions = sentinelArchiveLinkRevisions(assessment, runId, revision);
   if (adaptive) {
     restoreAdaptive(adaptive, assessment, caseId, revision, runId, revisions);

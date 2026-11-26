@@ -1,3 +1,8 @@
+import { parseSentinelSteeringNote } from "../core/approval_inbox.ts";
+import {
+  parseSentinelIncidentRecommendation,
+  sentinelIncidentRecommendationToolName,
+} from "../core/sentinel_incident_review_intent.ts";
 import { parseSentinelFindingReview } from "../core/sentinel_finding_review_intent.ts";
 /** Owner-only inbox controls shared by authenticated chat transports. */
 import type { ApprovalInboxRecord } from "../core/approval_inbox.ts";
@@ -82,6 +87,12 @@ function project(record: ApprovalInboxRecord): ApprovalInboxRecord {
   } = record;
   const chatGoal = parseChatGoalApprovalReview(record.chatGoal, tool);
   const finding = parseSentinelFindingReview(record.sentinelFindingReview);
+  const incident = tool === sentinelIncidentRecommendationToolName &&
+    record.sentinelIncidentRecommendation &&
+    parseSentinelIncidentRecommendation(
+      record.sentinelIncidentRecommendation,
+      parseSentinelSteeringNote,
+    );
   return {
     id,
     scope,
@@ -91,6 +102,7 @@ function project(record: ApprovalInboxRecord): ApprovalInboxRecord {
     ...(mcpLifecycle && { mcpLifecycle }),
     ...(chatGoal && { chatGoal }),
     ...(finding && { sentinelFindingReview: finding }),
+    ...(incident && { sentinelIncidentRecommendation: incident }),
     status,
     ...(decision !== undefined && { decision }),
     ...(dispatchOutcome !== undefined && { dispatchOutcome }),

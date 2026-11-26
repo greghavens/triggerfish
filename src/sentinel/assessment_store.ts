@@ -1,4 +1,9 @@
 import {
+  readSentinelIncidentRecommendationEvidence,
+  sentinelIncidentDispositions,
+  type SentinelIncidentRecommendationEvidence,
+} from "../core/sentinel_incident_review_intent.ts";
+import {
   assignAdmissionRunCategory,
   type OperatorRunCategory,
   type OperatorRunCategorySelection,
@@ -4377,12 +4382,7 @@ export function readSentinelSourceSnapshotReferences(path: string) {
   }
 }
 
-export const sentinelIncidentDispositions = [
-  "investigating",
-  "resolved",
-  "dismissed",
-  "requires_review",
-] as const;
+export { sentinelIncidentDispositions };
 type IncidentDisposition = typeof sentinelIncidentDispositions[number];
 
 export function recordSentinelIncidentReview(
@@ -4393,8 +4393,13 @@ export function recordSentinelIncidentReview(
   note: string,
   requestId?: string,
   authorizeScope?: () => boolean,
+  recommendationEvidence?: SentinelIncidentRecommendationEvidence,
 ): boolean {
+  const evidence = recommendationEvidence &&
+    readSentinelIncidentRecommendationEvidence(recommendationEvidence);
   if (
+    (recommendationEvidence !== undefined &&
+      (!evidence || !requestId || !authorizeScope)) ||
     !Number.isSafeInteger(revision) || revision < 1 ||
     !/^incident:[0-9a-f]{64}$/.test(incidentId) ||
     !sentinelIncidentDispositions.includes(disposition) ||
@@ -4411,7 +4416,9 @@ export function recordSentinelIncidentReview(
         operatorReviewRequest(db, "incident", requestId);
       if (prior) {
         return prior.revision === revision && prior.subjectId === incidentId &&
-          prior.disposition === disposition && prior.note === note.trim();
+          prior.disposition === disposition && prior.note === note.trim() &&
+          JSON.stringify(prior.recommendationEvidence) ===
+            JSON.stringify(evidence);
       }
       const row = getRow(db);
       if (
@@ -4442,6 +4449,17 @@ export function recordSentinelIncidentReview(
         note,
         requestId,
       );
+      if (evidence) {
+        if (!hasIncidentRecommendationEvidenceColumn(db)) {
+          db.exec(
+            "ALTER TABLE assessment_incident_reviews ADD COLUMN recommendationEvidence TEXT",
+          );
+        }
+        db.prepare(
+          "UPDATE assessment_incident_reviews SET recommendationEvidence = ? WHERE requestId = ?",
+        )
+          .run(JSON.stringify(evidence), requestId!);
+      }
       return true;
     });
   } finally {
@@ -4461,6 +4479,32 @@ export interface SentinelIncidentReview {
 function hasReviewRequestColumn(db: DatabaseSync, kind: ReviewKind): boolean {
   return db.prepare(`PRAGMA table_info(assessment_${kind}_reviews)`)
     .all().some(({ name }) => name === "requestId");
+}
+
+function hasIncidentRecommendationEvidenceColumn(db: DatabaseSync) {
+  return db.prepare("PRAGMA table_info(assessment_incident_reviews)")
+    .all().some(({ name }) => name === "recommendationEvidence");
+}
+
+function incidentRecommendationEvidenceColumn(
+  db: DatabaseSync,
+  kind: ReviewKind,
+) {
+  return kind === "incident" && hasIncidentRecommendationEvidenceColumn(db)
+    ? ", recommendationEvidence, requestId"
+    : "";
+}
+
+function projectIncidentRecommendationEvidence(
+  row: Readonly<Record<string, unknown>>,
+) {
+  const evidence = readSentinelIncidentRecommendationEvidence(
+    row.recommendationEvidence,
+  );
+  return evidence && typeof row.requestId === "string" &&
+      /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(row.requestId)
+    ? { recommendationEvidence: evidence, approvalId: row.requestId }
+    : {};
 }
 
 function insertOperatorReview(
@@ -4499,7 +4543,9 @@ function operatorReviewRequest(
 ) {
   if (!hasReviewRequestColumn(db, kind)) return;
   const row = db.prepare(
-    `SELECT id, revision, ${kind}Id AS subjectId, disposition, note, at
+    `SELECT id, revision, ${kind}Id AS subjectId, disposition, note, at${
+      incidentRecommendationEvidenceColumn(db, kind)
+    }
     FROM assessment_${kind}_reviews WHERE requestId = ?`,
   ).get(requestId);
   if (!row) return;
@@ -4510,6 +4556,7 @@ function operatorReviewRequest(
     disposition: String(row.disposition),
     note: String(row.note),
     at: String(row.at),
+    ...projectIncidentRecommendationEvidence(row),
   };
 }
 
@@ -4903,7 +4950,9 @@ export function readSentinelDecisionHistory(
     ).all(subjectId, firstRevision, revision)
       .map((row) => Number(row.revision)).filter(allowsOriginRevision);
     const rows = db.prepare(`
-      SELECT id, revision, disposition, note, at FROM ${table}
+      SELECT id, revision, disposition, note, at${
+      incidentRecommendationEvidenceColumn(db, kind)
+    } FROM ${table}
       WHERE ${subject} = ? AND revision BETWEEN ? AND ? AND id < ?
         AND (? IS NULL OR revision IN (SELECT value FROM json_each(?)))
       ORDER BY id DESC LIMIT ?
@@ -4922,6 +4971,7 @@ export function readSentinelDecisionHistory(
       disposition: String(row.disposition),
       note: String(row.note),
       at: String(row.at),
+      ...projectIncidentRecommendationEvidence(row),
     }));
     return {
       decisions,

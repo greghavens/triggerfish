@@ -200,6 +200,7 @@ Deno.test("Approval inbox upgrades old decisions without guessing historical dis
         ALTER TABLE approval_requests DROP COLUMN customTool;
         ALTER TABLE approval_requests DROP COLUMN sentinelSteeringNote;
         ALTER TABLE approval_requests DROP COLUMN sentinelFindingReview;
+        ALTER TABLE approval_requests DROP COLUMN sentinelIncidentRecommendation;
         PRAGMA user_version = 1;
       `);
     } finally {
@@ -264,6 +265,7 @@ Deno.test("Approval inbox migrates existing reviewed descriptions before adding 
   try {
     version7.exec(`
       ALTER TABLE approval_requests DROP COLUMN sentinelFindingReview;
+        ALTER TABLE approval_requests DROP COLUMN sentinelIncidentRecommendation;
       PRAGMA user_version = 7;
     `);
   } finally {

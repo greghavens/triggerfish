@@ -1,4 +1,9 @@
 import {
+  parseSentinelIncidentRecommendation,
+  sentinelIncidentDispositions,
+  sentinelIncidentRecommendationToolName,
+} from "../core/sentinel_incident_review_intent.ts";
+import {
   currentWorkerNarrative,
   currentWorkerNarrativeEvidence,
   currentWorkerNarrativeScope,
@@ -213,9 +218,12 @@ import {
   readSentinelAssessmentAlerts,
   readSentinelAssessmentRevision,
   readSentinelGitHubWorkflowReadReceipt,
+  readSentinelIncidentReviews,
   readSentinelLinkedSourcesForRevision,
   readSentinelOperatingConstraints,
+  readSentinelOperatorReviewRequest,
   readSentinelRunIdForRevision,
+  recordSentinelIncidentReview,
   recordSentinelWorkerGoalProposal,
   type SentinelGitHubWorkflowReadReceipt,
   type SentinelReviewStep,
@@ -223,9 +231,11 @@ import {
 } from "../sentinel/assessment_store.ts";
 import { executionFindingAsset } from "../sentinel/worker_finding_evidence.ts";
 import {
+  projectSentinelIncidentAlertPage,
   readSavedSentinelIncident,
   readSavedSentinelIncidentAssetScopes,
   readSavedSentinelIncidentCandidates,
+  readSentinelIncidentReviewScope,
 } from "../sentinel/incident_archive.ts";
 import { compareSentinelIncidentPriority } from "../sentinel/incident_correlation.ts";
 import { sentinelAlertsPath } from "../sentinel/paths.ts";
@@ -1076,6 +1086,30 @@ const plannerSteerTool: ToolDefinition = {
   },
 };
 
+const workerIncidentRecommendationTool: ToolDefinition = {
+  name: sentinelIncidentRecommendationToolName,
+  description:
+    "Recommend a disposition for the assigned incident. Read every page of the exact incident first. The owner must review the recommendation.",
+  parameters: {
+    incidentId: {
+      type: "string",
+      required: true,
+      description: "Exact assigned incident ID.",
+    },
+    disposition: {
+      type: "string",
+      required: true,
+      enum: [...sentinelIncidentDispositions],
+      description: "Proposed disposition.",
+    },
+    note: {
+      type: "string",
+      required: true,
+      description: "Concise evidence-backed rationale without secrets.",
+    },
+  },
+};
+
 const plannerFindingReviewTool: ToolDefinition = {
   name: sentinelPlannerFindingToolName,
   description:
@@ -1543,7 +1577,14 @@ export async function readDefenseCoverage(
 type Graph = ReturnType<typeof loadSentinelGraph>;
 type ReadGraph = () => Promise<Graph>;
 
+interface IncidentRecommendationPage {
+  readonly args: NonNullable<ReturnType<typeof sentinelIncidentAlertsArgs>>;
+  readonly digest: string;
+  readonly next: number | null;
+}
+
 interface ActiveTurn {
+  readonly incidentRecommendationPages: Map<number, IncidentRecommendationPage>;
   readonly controller: AbortController;
   readonly signal: AbortSignal;
   readonly readGraph: ReadGraph;
@@ -4351,19 +4392,12 @@ export function queryIncidentAlerts(
         return "Error: The requested Sentinel incident evidence is unavailable.";
       }
     }
-    return pageProvenance(
+    return projectSentinelIncidentAlertPage(
       members,
+      selected,
+      incidentId,
       offset,
       limit,
-      (item) => item,
-      (alerts, nextOffset) => ({
-        revision: selected,
-        incidentId,
-        offset,
-        total: members.length,
-        nextOffset,
-        alerts,
-      }),
     );
   } catch {
     return "Error: The requested Sentinel incident evidence is unavailable.";
@@ -5214,6 +5248,10 @@ function createAgent(
     ? [
       ...tools,
       assignedTargetTool,
+      ...(options.hookRunner.toolApprovalInbox &&
+          readAssignedModelReview(options)?.kind === "review_incident"
+        ? [workerIncidentRecommendationTool]
+        : []),
       ...(options.authorizeExecutionTracePayload &&
           options.sharedInventoryBaseDir
         ? [assignedExecutionEvidenceTool]
@@ -5342,6 +5380,7 @@ function createAgent(
     )
     : availableTools;
   const mutationTools = new Set([
+    sentinelIncidentRecommendationToolName,
     sentinelPublishGraphFact.name,
     workerNarrativeCommit.name,
     ...sentinelFindingWriteTools.map(({ name }) => name),
@@ -5474,6 +5513,11 @@ function createAgent(
       ? {
         runId: approvalRunId,
         assignmentId: options.assignedTaskId,
+        scopeForCall(name: string, args: Record<string, unknown>) {
+          if (name !== sentinelIncidentRecommendationToolName) return {};
+          const draft = active && incidentRecommendationDraft(active, args);
+          return draft ? { binding: draft.binding } : undefined;
+        },
         async isCurrent() {
           const turn = active;
           if (!turn || !approvalIsCurrent(turn)) return false;
@@ -5482,6 +5526,59 @@ function createAgent(
         },
       }
       : undefined;
+
+  function incidentRecommendationDraft(
+    turn: ActiveTurn,
+    args: Record<string, unknown>,
+  ) {
+    const choice = parseSentinelIncidentRecommendation(
+      args,
+      parseSentinelSteeringNote,
+    );
+    const assignment = readAssignedModelReview(options);
+    const revision = options.assessmentRevision;
+    if (
+      !choice || !assignment || assignment.kind !== "review_incident" ||
+      assignment.nodeId !== choice.incidentId || revision === undefined ||
+      !caseId || !approvalIsCurrent(turn)
+    ) return;
+    const path = options.snapshotPath;
+    const scope = readSentinelIncidentReviewScope(
+      path,
+      revision,
+      choice.incidentId,
+    );
+    if (!scope || scope.runId !== approvalRunId) return;
+    const pages: IncidentRecommendationPage[] = [];
+    let offset: number | null = 0;
+    while (offset !== null) {
+      const page = turn.incidentRecommendationPages.get(offset);
+      if (
+        !page || page.args.incidentId !== choice.incidentId ||
+        page.next !== null && page.next <= offset
+      ) return;
+      const result = queryIncidentAlerts(options, page.args, true, {
+        assignment,
+      });
+      if (createHash("sha256").update(result).digest("hex") !== page.digest) {
+        return;
+      }
+      pages.push(page);
+      offset = page.next;
+    }
+    const previousReview = readSentinelIncidentReviews(path, revision)
+      .find(({ incidentId }) => incidentId === choice.incidentId)?.id;
+    const binding = createHash("sha256").update(JSON.stringify({
+      caseId,
+      revision,
+      scope,
+      assignment: assignment.id,
+      attempt: assignment.attempts,
+      previousReview,
+      pages,
+    })).digest("hex");
+    return { binding, revision, scope, choice, assignment, pages, caseId };
+  }
 
   function currentPlannerReceiptScope(
     turn: ActiveTurn,
@@ -5642,6 +5739,8 @@ function createAgent(
         const digestRead = typeof toolName === "string" &&
           isSentinelEvidenceDigestTool(toolName);
         const plannerFinding = toolName === plannerFindingReviewTool.name;
+        const incidentRecommendation =
+          toolName === sentinelIncidentRecommendationToolName;
         const plannerControl = isPlannerWorkerControl(toolName);
         const plannerTodo = plannerTodoTools.some(({ name }) =>
           name === toolName
@@ -5693,6 +5792,7 @@ function createAgent(
             toolName === SENTINEL_INCIDENT_ALERTS_READ ||
             toolName === SENTINEL_DEFENSE_READ || traffic || plannerTodo ||
             digestRead || plannerControl || plannerFinding ||
+            incidentRecommendation ||
             toolName === sharedWorkerReviewTool.name);
         const selectedDirectRead = (!!directTelemetryReader &&
           (toolName === SENTINEL_DEFENSE_READ ||
@@ -5736,6 +5836,7 @@ function createAgent(
             resource_classification: "INTERNAL",
             operation_type:
               selectedCaseWrite || plannerControl || plannerFinding ||
+                incidentRecommendation ||
                 toolName === "todo_write" ||
                 toolName === proposeWorkerGoalTool.name ||
                 toolName === proveWorkerGoalTool.name ||
@@ -5762,6 +5863,7 @@ function createAgent(
               ...context,
               input: { ...context.input, ...metadata },
               auditInput: plannerTodo || plannerControl || plannerFinding ||
+                  incidentRecommendation ||
                   selectedCaseAction === "preview_membership" ||
                   selectedCaseAction === "set_case_membership" ||
                   selectedCaseAction === "amend_finding_report" ||
@@ -6015,6 +6117,15 @@ function createAgent(
             context.input.tool_response,
           ))
         ) return { ...result, allowed: false, action: "BLOCK" };
+        if (name === "PRE_TOOL_CALL" && incidentRecommendation) {
+          const permits = result.action === "REQUIRE_APPROVAL" ||
+            (result.action === "ALLOW" && result.allowed);
+          if (
+            !permits || !toolApprovalContext || !turn || !call?.args ||
+            !incidentRecommendationDraft(turn, call.args)
+          ) return { ...result, allowed: false, action: "BLOCK" };
+          return { ...result, allowed: false, action: "REQUIRE_APPROVAL" };
+        }
         if (name === "PRE_TOOL_CALL" && plannerFinding) {
           const permits = result.action === "REQUIRE_APPROVAL" ||
             (result.action === "ALLOW" && result.allowed);
@@ -6228,6 +6339,83 @@ function createAgent(
         (workerApprovalContext && !approvalIsCurrent(turn))
       ) {
         return "Error: This tool is unavailable in Sentinel.";
+      }
+      if (name === sentinelIncidentRecommendationToolName) {
+        const draft = incidentRecommendationDraft(turn, args);
+        const approvalId = dispatch?.toolApprovalRequestId;
+        const reauthorize = dispatch?.reauthorizeOwnerApproval;
+        const unavailable = boundResult({
+          _classification: "INTERNAL",
+          committed: false,
+          reason: "The reviewed Sentinel incident disposition is unavailable.",
+        });
+        if (!draft || !approvalId || !reauthorize) return unavailable;
+        const current = () =>
+          incidentRecommendationDraft(turn, args)?.binding === draft.binding;
+        for (const page of draft.pages) {
+          if (
+            !await authorizeSavedToolCalls(
+              [{ name: SENTINEL_INCIDENT_ALERTS_READ, args: page.args }],
+              config,
+              session,
+              undefined,
+              turn.signal,
+            ) || !current()
+          ) return unavailable;
+          const resultText = queryIncidentAlerts(options, page.args, true, {
+            assignment: draft.assignment,
+          });
+          if (
+            (await enforcePostToolResponse(
+              SENTINEL_INCIDENT_ALERTS_READ,
+              config,
+              session,
+              {
+                resultText,
+                blocked: false,
+              },
+            )).blocked || !current()
+          ) return unavailable;
+        }
+        const { incidentId, disposition, note } = draft.choice;
+        if (
+          !await reauthorize() || !current() ||
+          !recordSentinelIncidentReview(
+            options.snapshotPath,
+            draft.revision,
+            incidentId,
+            disposition,
+            note,
+            approvalId,
+            current,
+            {
+              assignmentId: draft.assignment.id,
+              attempt: draft.assignment.attempts,
+              pages: draft.pages.map((page) => ({
+                offset: page.args.offset ?? 0,
+                limit: page.args.limit ?? 10,
+                nextOffset: page.next,
+                sha256: page.digest,
+              })),
+            },
+          )
+        ) return unavailable;
+        const committed = readSentinelOperatorReviewRequest(
+          options.snapshotPath,
+          "incident",
+          approvalId,
+        );
+        if (!committed) return unavailable;
+        notifyCommittedEvidence({
+          case: draft.caseId,
+          run_id: draft.scope.runId,
+          revision: draft.revision,
+          observation_id: `incident-review:${committed.record.id}`,
+        });
+        return boundResult({
+          _classification: "INTERNAL",
+          review: committed.record,
+        });
       }
       if (name === plannerFindingReviewTool.name) {
         const reviewed = validatePlannerFindingReview(turn, args);
@@ -8157,6 +8345,26 @@ function createAgent(
         ? args.finding
         : undefined;
       if (turn && !turn.signal.aborted && toolNames.has(name)) {
+        if (
+          !failed && name === SENTINEL_INCIDENT_ALERTS_READ &&
+          readAssignedModelReview(options)?.kind === "review_incident"
+        ) {
+          const page = sentinelIncidentAlertsArgs(args);
+          if (page && result.startsWith("{")) {
+            const { offset, nextOffset, alerts } = JSON.parse(result);
+            if (
+              Array.isArray(alerts) && alerts.length > 0 &&
+              offset === (page.offset ?? 0) &&
+              (nextOffset === null || nextOffset === offset + alerts.length)
+            ) {
+              turn.incidentRecommendationPages.set(offset, {
+                args: page,
+                digest: createHash("sha256").update(result).digest("hex"),
+                next: nextOffset,
+              });
+            }
+          }
+        }
         if (githubWorkflowRead && turn.traceStepCount < 16) {
           turn.stagedWorkflow = {
             stepIndex: turn.traceStepCount,
@@ -9822,6 +10030,7 @@ function createAgent(
           plannerWorkerControlLeases: new Map(),
           plannerFindingEvidence: new Map(),
           plannerFindingDrafts: new Map(),
+          incidentRecommendationPages: new Map(),
           operatingConstraints,
           reads: 0,
           workers: 0,

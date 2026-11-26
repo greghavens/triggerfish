@@ -1,4 +1,8 @@
 import {
+  parseSentinelIncidentRecommendation,
+  sentinelIncidentRecommendationToolName,
+} from "./sentinel_incident_review_intent.ts";
+import {
   parseSentinelFindingReview,
   sentinelPlannerFindingToolName,
 } from "./sentinel_finding_review_intent.ts";
@@ -13,6 +17,7 @@ import {
 } from "./chat_goal_intent.ts";
 import { parseCustomToolMutation } from "./custom_tool_intent.ts";
 import {
+  type ApprovalInboxRecord,
   openApprovalInbox,
   parseSentinelSteeringNote,
   sentinelPlannerSteerToolName,
@@ -68,6 +73,8 @@ function buildToolApprovalService(path: string) {
   const waits = new Map<string, {
     signal: AbortSignal;
     wake: () => void;
+    canProject?: () => boolean;
+    stale: () => unknown;
   }>();
   const use = <T>(
     operation: (db: ReturnType<typeof openApprovalInbox>) => T,
@@ -79,9 +86,24 @@ function buildToolApprovalService(path: string) {
       db.close();
     }
   };
+  function project(record: ApprovalInboxRecord) {
+    if (
+      !record.sentinelIncidentRecommendation ||
+      waits.get(record.id)?.canProject?.()
+    ) {
+      return record;
+    }
+    const { sentinelIncidentRecommendation: _recommendation, ...metadata } =
+      record;
+    return {
+      ...metadata,
+      description: "Sentinel incident disposition approval.",
+    };
+  }
   return {
     list(limit?: number, before?: number) {
-      return use((db) => db.list(toolApprovalOwnerScope, limit, before));
+      const page = use((db) => db.list(toolApprovalOwnerScope, limit, before));
+      return { ...page, records: page.records.map(project) };
     },
     decide(id: string, decision: "approved" | "denied") {
       return use((db) => {
@@ -89,11 +111,16 @@ function buildToolApprovalService(path: string) {
         if (!existing) return undefined;
         const waiting = waits.get(existing.id);
         if (!waiting || waiting.signal.aborted) {
-          return existing.decision === decision ? existing : undefined;
+          return existing.decision === decision ? project(existing) : undefined;
+        }
+        if (waiting.canProject && !waiting.canProject()) {
+          waiting.stale();
+          waiting.wake();
+          return undefined;
         }
         const record = db.decide(toolApprovalOwnerScope, id, decision);
         if (record) waiting.wake();
-        return record;
+        return record && project(record);
       });
     },
     isWaiting(signal: AbortSignal) {
@@ -104,6 +131,7 @@ function buildToolApprovalService(path: string) {
       readonly runId?: string;
       readonly assignmentId?: string;
       readonly scopeBinding?: string;
+      readonly canProject?: () => boolean;
       readonly tool: string;
       readonly args: Record<string, unknown>;
       readonly ruleId: string | null;
@@ -161,6 +189,14 @@ function buildToolApprovalService(path: string) {
         tool === sentinelPlannerFindingToolName &&
         (!finding || !scopeBinding || !/^[a-f0-9]{64}$/.test(scopeBinding))
       ) return undefined;
+      const incident = tool === sentinelIncidentRecommendationToolName
+        ? parseSentinelIncidentRecommendation(args, parseSentinelSteeringNote)
+        : undefined;
+      if (
+        tool === sentinelIncidentRecommendationToolName &&
+        (!incident || !input.canProject || !scopeBinding ||
+          !/^[a-f0-9]{64}$/.test(scopeBinding))
+      ) return undefined;
       const request = use((db) =>
         db.submit({
           id,
@@ -172,6 +208,7 @@ function buildToolApprovalService(path: string) {
           ...(chatGoal && { chatGoal }),
           ...(steering && { sentinelSteeringNote: steering }),
           ...(finding && { sentinelFindingReview: finding }),
+          ...(incident && { sentinelIncidentRecommendation: incident }),
           ...(custom &&
             { customTool: { action: custom.action, name: custom.name } }),
           ...(lifecycle && {
@@ -204,7 +241,12 @@ function buildToolApprovalService(path: string) {
         abandon,
         Math.max(0, request.expiresAt - Date.now()),
       );
-      waits.set(id, { signal, wake });
+      waits.set(id, {
+        signal,
+        wake,
+        stale,
+        canProject: incident && input.canProject,
+      });
       signal.addEventListener("abort", abandon, { once: true });
       let released = false;
       try {

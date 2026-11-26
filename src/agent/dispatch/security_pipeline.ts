@@ -1,3 +1,4 @@
+import { sentinelIncidentRecommendationToolName } from "../../core/sentinel_incident_review_intent.ts";
 import { sentinelPlannerFindingToolName } from "../../core/sentinel_finding_review_intent.ts";
 import { exactToolApprovalRun } from "../../core/tool_approval_service.ts";
 import {
@@ -358,7 +359,8 @@ export async function dispatchApprovedToolCall(
       blocked: false,
     };
   }
-  const ownerAdministration = (call.name === sentinelPlannerFindingToolName &&
+  const ownerAdministration = ((call.name === sentinelPlannerFindingToolName ||
+    call.name === sentinelIncidentRecommendationToolName) &&
     ownerApproval?.toolApprovalRequestId !== undefined) ||
     call.name === customToolManageName ||
     call.name === "list_skills" ||
@@ -486,6 +488,11 @@ export async function dispatchSecurityEnforcedToolCall(
       runId: owner?.runId ?? exactToolApprovalRun(session.id) ?? session.id,
       assignmentId,
       ...(scope?.binding && { scopeBinding: scope.binding }),
+      ...(call.name === sentinelIncidentRecommendationToolName && {
+        canProject: () =>
+          !activity.aborted && !!scope &&
+          isDeepStrictEqual(owner?.scopeForCall?.(call.name, call.args), scope),
+      }),
       tool: call.name,
       args: call.args,
       ruleId: preToolResult.ruleId,
@@ -586,7 +593,8 @@ export async function dispatchSecurityEnforcedToolCall(
           (call.name === "mcp_manage" &&
             call.args.action === "refresh_tools") ||
           (approval && (chatGoalMutation(call.name, call.args) === "confirm" ||
-            call.name === sentinelPlannerFindingToolName)))
+            call.name === sentinelPlannerFindingToolName ||
+            call.name === sentinelIncidentRecommendationToolName)))
         ? {
           ownerSessionId: session.id,
           ...(approval && { toolApprovalRequestId: approval.requestId }),

@@ -120,6 +120,31 @@ export function readSavedSentinelIncidentAssetScopes(
 }
 
 /** Validate every member against the saved and current scope of the original run. */
+/** Canonical exact-cohort page used by both root reads and retained review receipts. */
+export function projectSentinelIncidentAlertPage(
+  members: readonly TelemetryAlert[],
+  revision: number,
+  incidentId: string,
+  offset: number,
+  limit: number,
+): string {
+  const alerts = members.slice(offset, offset + limit);
+  do {
+    const next = offset + alerts.length;
+    const result = JSON.stringify({
+      revision,
+      incidentId,
+      offset,
+      total: members.length,
+      nextOffset: next < members.length ? next : null,
+      alerts,
+    });
+    if (result.length <= 7_000) return result;
+    alerts.pop();
+  } while (alerts.length);
+  return "Error: A provenance record exceeds the tool output limit.";
+}
+
 export function readSentinelIncidentReviewScope(
   path: string,
   revision: number,
