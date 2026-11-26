@@ -1,15 +1,16 @@
+import type { ArchiveDependency } from "../sentinel/archive_dependencies.ts";
 /** Reviewed purge of exact, non-current Sentinel archive packages. */
 
 import { createHash } from "node:crypto";
 import { join } from "@std/path";
 import { withVerifiedRunArchive } from "../core/run_archive.ts";
 import {
-  type ArchiveDependency,
   orderedArchiveTargets,
   readArchivedRunDependencies,
 } from "./operator_run_archive_batch.ts";
 import {
   lockRunArchiveAction,
+  lockSentinelArchiveCatalog,
   openRunArchiveActions,
   type RunArchivePurgeReceipt,
 } from "../core/run_archive_actions.ts";
@@ -69,6 +70,39 @@ function exists(path: string) {
     return Deno.lstatSync(path);
   } catch (error) {
     if (!(error instanceof Deno.errors.NotFound)) throw error;
+  }
+}
+
+async function hasRetainedDependent(
+  journal: ReturnType<typeof openRunArchiveActions>,
+  directory: string,
+  target: Target,
+): Promise<boolean> {
+  let before = Number.MAX_SAFE_INTEGER;
+  while (true) {
+    const page = journal.sentinelDependencyCatalog(before);
+    if (!page.length) return false;
+    for (const { sequence, record } of page) {
+      before = sequence;
+      if (record.archiveId === target.archiveId) continue;
+      const { kind, id, revision, runId } = record.identity;
+      if (kind !== "sentinel" || revision === undefined) return true;
+      const staged = join(directory, `.purge-${record.archiveId}`);
+      const dependencies = await readArchivedRunDependencies(
+        directory,
+        { kind, id, revision, runId, archiveId: record.archiveId },
+        record,
+        exists(staged) ? staged : undefined,
+      );
+      if (
+        !dependencies ||
+        dependencies.some((source) =>
+          source.kind === target.kind && source.id === target.id &&
+          source.revision === target.revision &&
+          (source.runId === undefined || source.runId === target.runId)
+        )
+      ) return true;
+    }
   }
 }
 
@@ -242,6 +276,12 @@ export async function executeOperatorArchivePurge(
         ) return { declined: true as const };
         if (!await authorized(target)) continue;
         try {
+          using catalogLock = lockSentinelArchiveCatalog(directory);
+          if (
+            !catalogLock ||
+            await hasRetainedDependent(journal, directory, target)
+          ) continue;
+          if (!await authorized(target)) continue;
           const completed = await withVerifiedRunArchive(
             hasStaged ? staged : path,
             directory,
@@ -250,7 +290,7 @@ export async function executeOperatorArchivePurge(
               permittedNames: permittedSentinelRestoreArtifacts,
               requiredNames: requiredSentinelRestoreArtifacts,
             },
-            ({ manifest }) => {
+            async ({ manifest }) => {
               const { identity } = manifest;
               if (
                 identity.kind !== target.kind || identity.id !== target.id ||
@@ -261,6 +301,7 @@ export async function executeOperatorArchivePurge(
                   ) !==
                   source.archiveDigest
               ) return;
+              if (!await authorized(target)) return;
               return withSentinelAssessmentWriteLock(
                 resolveSentinelCasePath(baseDir, target.id),
                 (state) => {

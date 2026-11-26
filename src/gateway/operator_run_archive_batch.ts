@@ -1,15 +1,17 @@
+import type { OperatorRunRef } from "../core/operator_runs.ts";
+import {
+  type ArchiveDependency,
+  readRunArchivePlanDependencies,
+} from "../sentinel/archive_dependencies.ts";
 /** Reviewed admission of exact Sentinel run archival and restoration. */
 
 import { createHash } from "node:crypto";
 import { dirname, join } from "@std/path";
-import { DatabaseSync } from "node:sqlite";
 import { withVerifiedRunArchive } from "../core/run_archive.ts";
 import {
   permittedSentinelRestoreArtifacts,
   requiredSentinelRestoreArtifacts,
 } from "../sentinel/sentinel_archive_restore.ts";
-import { parseSentinelLinkedCaseSources } from "../sentinel/linked_case_sources.ts";
-import type { OperatorRunRef } from "../core/operator_runs.ts";
 import {
   lockRunArchiveAction,
   openRunArchiveActions,
@@ -76,13 +78,6 @@ function archiveRequestId(group: string, target: ArchiveTarget): string {
   ].join("-");
 }
 
-export interface ArchiveDependency {
-  readonly kind: string;
-  readonly id: string;
-  readonly revision?: number;
-  readonly runId?: string;
-}
-
 export function orderedArchiveTargets<T extends ArchiveTarget>(
   chosen: readonly T[],
   sources: ReadonlyMap<string, readonly ArchiveDependency[]>,
@@ -115,11 +110,12 @@ export async function readArchivedRunDependencies(
   directory: string,
   target: ArchiveTarget,
   receipt: RunArchiveActionRecord | undefined,
+  packagePath?: string,
 ): Promise<ArchiveDependency[] | undefined> {
   if (!target.archiveId || !receipt?.archiveDigest) return;
   try {
     return await withVerifiedRunArchive(
-      join(directory, target.archiveId),
+      packagePath ?? join(directory, target.archiveId),
       directory,
       {
         expectedKind: "sentinel",
@@ -138,27 +134,7 @@ export async function readArchivedRunDependencies(
         ) return;
         const path = artifactPath("sentinel-assessment.db");
         if (!path) return;
-        const db = new DatabaseSync(path, { readOnly: true });
-        try {
-          db.exec("PRAGMA trusted_schema = OFF");
-          const row = db.prepare("SELECT plan FROM assessment WHERE id = 1")
-            .get();
-          if (typeof row?.plan !== "string") return;
-          const plan = JSON.parse(row.plan);
-          const linked = parseSentinelLinkedCaseSources(plan.linkedCaseSources);
-          if (plan.linkedCaseSources !== undefined && !linked) return;
-          return [
-            ...(plan.spawnParent ? [plan.spawnParent as OperatorRunRef] : []),
-            ...(linked ?? []).map(({ caseId, revision, runId }) => ({
-              kind: "sentinel",
-              id: caseId,
-              revision,
-              runId,
-            })),
-          ];
-        } finally {
-          db.close();
-        }
+        return readRunArchivePlanDependencies(path);
       },
     );
   } catch {

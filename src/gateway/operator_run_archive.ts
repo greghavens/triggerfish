@@ -1,3 +1,4 @@
+import { readRunArchivePlanDependencies } from "../sentinel/archive_dependencies.ts";
 import {
   decodeArchivedToolDecisions,
   openApprovalInbox,
@@ -39,6 +40,7 @@ import {
 } from "../core/types/classification.ts";
 import {
   lockRunArchiveAction,
+  lockSentinelArchiveCatalog,
   openRunArchiveActions,
   type RunArchiveActionRecord,
 } from "../core/run_archive_actions.ts";
@@ -380,6 +382,10 @@ export async function executeOperatorRunArchive(
     ) {
       return "Error: The operator declined the run action.";
     }
+    using catalogLock = action === "archive" && sentinel
+      ? lockSentinelArchiveCatalog(directory)
+      : undefined;
+    if (action === "archive" && sentinel && !catalogLock) return unavailable;
     const admission = recovering
       ? journal.recoverPending(input)
       : journal.admit(input);
@@ -425,7 +431,17 @@ export async function executeOperatorRunArchive(
           evidenceRevision: ref.revision!,
         }, directory);
         try {
-          const journal = openOperatorRunLinkStore(linkPath);
+          const dependencies = readRunArchivePlanDependencies(
+            join(staged.directory, "sentinel-assessment.db"),
+          );
+          if (
+            !dependencies ||
+            dependencies.some((ref) =>
+              ref.kind === "sentinel" && ref.revision !== undefined &&
+              journal.hasRemovedSentinelSource(ref.id, ref.revision, ref.runId)
+            )
+          ) throw new Error("Sentinel archive dependency is unavailable");
+          const journalLinks = openOperatorRunLinkStore(linkPath);
           const links = (() => {
             try {
               const assessment = staged.artifacts.find(({ name }) =>
@@ -443,7 +459,7 @@ export async function executeOperatorRunArchive(
                 )
                   .map((revision) => ({
                     revision,
-                    links: journal.archive("workspace-operator", {
+                    links: journalLinks.archive("workspace-operator", {
                       ...ref,
                       revision,
                     }),
@@ -451,7 +467,7 @@ export async function executeOperatorRunArchive(
                   .filter(({ links }) => links.length > 0),
               };
             } finally {
-              journal.close();
+              journalLinks.close();
             }
           })();
           const sourcePath = join(staged.directory, sentinelArchivedLinksFile);

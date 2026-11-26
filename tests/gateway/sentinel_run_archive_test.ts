@@ -173,6 +173,7 @@ async function withGateway(
     approvals: string[],
     policy: {
       denyArchive: boolean;
+      denyPurgeMember?: string;
       denyReportAmendment: boolean;
       denyDispositionReview: boolean;
       afterConfirmation?: () => void;
@@ -198,6 +199,7 @@ async function withGateway(
   const approvals: string[] = [];
   const policy = {
     denyArchive: false,
+    denyPurgeMember: undefined as string | undefined,
     denyReportAmendment: false,
     denyDispositionReview: false,
     afterConfirmation: undefined as (() => void) | undefined,
@@ -219,7 +221,7 @@ async function withGateway(
     ),
     evaluateHook(hook, { input }) {
       const call = input.tool_call as
-        | { args?: { action?: string } }
+        | { args?: { action?: string; id?: string } }
         | undefined;
       const workerSource = input.tool_name === "sentinel_shared_asset" ||
         input.tool_name === "sentinel_shared_asset_links" ||
@@ -262,6 +264,9 @@ async function withGateway(
           ["archive", "purge_archive", "purge_archives"].includes(
             String(call?.args?.action),
           )) &&
+        !(policy.denyPurgeMember && hook === "PRE_TOOL_CALL" &&
+          call?.args?.action === "purge_archive" &&
+          call.args.id === policy.denyPurgeMember) &&
         !(policy.denyReportAmendment && hook === "PRE_TOOL_CALL" &&
           call?.args?.action === "amend_finding_report") &&
         !(policy.denyDispositionReview && hook === "PRE_TOOL_CALL" &&
@@ -6513,6 +6518,7 @@ Deno.test("Owner gateway reviews exact single and batch archive purge and resume
     });
     const [one, two, recovering, current] = targets;
     let child: typeof two | undefined;
+    let unarchivedChild: typeof two | undefined;
     await withGateway(baseDir, async (turn) => {
       const archived = JSON.parse(
         await turn({
@@ -6551,8 +6557,37 @@ Deno.test("Owner gateway reviews exact single and batch archive purge and resume
       const replacement = startSentinelAssessment(path);
       assert(replacement.plan.runId !== childRef.runId);
       child = { ...childRef, archiveId };
+      const lateId = "purge-late-dependent";
+      assertEquals(
+        JSON.parse(
+          await turn({
+            action: "spawn",
+            kind: "sentinel",
+            id: two.id,
+            revision: two.revision,
+            targetKind: "sentinel",
+            targetId: lateId,
+            initialGraph: "empty",
+            requestId: crypto.randomUUID(),
+          }),
+        ).run.status,
+        "running",
+      );
+      const latePath = resolveSentinelCasePath(baseDir, lateId);
+      const late = readSentinelAssessment(latePath);
+      assert(late?.plan.runId);
+      assert(stopSentinelAssessment(latePath));
+      unarchivedChild = {
+        kind: "sentinel",
+        id: lateId,
+        revision: late.revision,
+        runId: late.plan.runId,
+        archiveId: crypto.randomUUID(),
+      };
     });
     assert(child);
+    assert(unarchivedChild);
+    const { archiveId: lateArchiveId, ...lateChild } = unarchivedChild;
     const childTarget = child;
     for (const target of [one, two, recovering]) {
       const state = startSentinelAssessment(
@@ -6592,11 +6627,36 @@ Deno.test("Owner gateway reviews exact single and batch archive purge and resume
         () => Deno.lstat(join(directory, one.archiveId)),
         Deno.errors.NotFound,
       );
+      const sourceOnly = {
+        action: "purge_archive",
+        ...two,
+        requestId: crypto.randomUUID(),
+      };
+      assert(!(await turn(sourceOnly)).includes("succeeded"));
+      assert((await Deno.lstat(join(directory, two.archiveId))).isDirectory);
       const batch = {
         action: "purge_archives",
         requestId: crypto.randomUUID(),
         runTargets: [two, current, childTarget],
       };
+      policy.afterConfirmation = () => {
+        policy.denyPurgeMember = childTarget.id;
+      };
+      const revoked = JSON.parse(
+        await turn({ ...batch, requestId: crypto.randomUUID() }),
+      );
+      assertEquals(
+        revoked.outcomes.map((outcome: { receipt?: { status: string } }) =>
+          outcome.receipt?.status
+        ),
+        [undefined, undefined, undefined],
+      );
+      assert(
+        (await Deno.lstat(join(directory, childTarget.archiveId))).isDirectory,
+      );
+      assert((await Deno.lstat(join(directory, two.archiveId))).isDirectory);
+      policy.afterConfirmation = undefined;
+      policy.denyPurgeMember = undefined;
       const result = JSON.parse(await turn(batch));
       assertEquals(
         result.outcomes.map((outcome: {
@@ -6613,6 +6673,20 @@ Deno.test("Owner gateway reviews exact single and batch archive purge and resume
       assertEquals(JSON.parse(await turn(batch)), result);
       assert(
         (await Deno.lstat(join(directory, current.archiveId))).isDirectory,
+      );
+      assertEquals(
+        JSON.parse(
+          await turn({
+            action: "archive",
+            ...lateChild,
+            requestId: lateArchiveId,
+          }),
+        ).receipt.status,
+        "failed",
+      );
+      await assertRejects(
+        () => Deno.lstat(join(directory, lateArchiveId)),
+        Deno.errors.NotFound,
       );
     });
     const resume = {
@@ -6641,7 +6715,7 @@ Deno.test("Owner gateway reviews exact single and batch archive purge and resume
       const result = JSON.parse(await turn({ action: "archive_catalog" }));
       assertEquals(
         result.archives.map((item: { archiveId: string }) => item.archiveId),
-        [current.archiveId],
+        [lateArchiveId, current.archiveId],
       );
     });
   } finally {

@@ -124,13 +124,22 @@ export function restoreRunArchiveOnce(
 /** Hold sole execution authority across confirmation and execution. */
 export function lockRunArchiveAction(directory: string, requestId: string) {
   if (!uuid.test(requestId)) return;
+  return lockArchiveFile(directory, requestId.toLowerCase());
+}
+
+/** Serialize Sentinel package publication with dependency-aware deletion. */
+export function lockSentinelArchiveCatalog(directory: string) {
+  return lockArchiveFile(directory, "sentinel-dependency-catalog");
+}
+
+function lockArchiveFile(directory: string, name: string) {
   const root = join(directory, "restore-locks");
   Deno.mkdirSync(root, { recursive: true, mode: 0o700 });
   const info = Deno.lstatSync(root);
   if (!info.isDirectory || info.isSymlink || ((info.mode ?? 0) & 0o077) !== 0) {
     return;
   }
-  const path = join(root, requestId.toLowerCase());
+  const path = join(root, name);
   try {
     Deno.openSync(path, { createNew: true, write: true, mode: 0o600 }).close();
   } catch (error) {
@@ -498,6 +507,40 @@ export function openRunArchiveActions(path: string, now = Date.now) {
         ORDER BY sequence DESC LIMIT 1
       `).get(kind, id, runId, revision ?? null, archive.archiveId);
       return row && project(row);
+    },
+
+    /** Pending publications and quarantines still count as retained. */
+    sentinelDependencyCatalog(before: number) {
+      return db.prepare(`
+        SELECT * FROM run_archive_actions AS a
+        WHERE kind = 'sentinel' AND action = 'archive' AND sequence < ?
+          AND status IN ('succeeded','pending') AND archiveDigest IS NOT NULL
+          AND NOT EXISTS (
+            SELECT 1 FROM run_archive_purges AS p
+            WHERE p.archiveId = a.archiveId AND p.status = 'succeeded'
+          )
+        ORDER BY sequence DESC LIMIT 32
+      `).all(before).map((row) => ({
+        sequence: Number(row.sequence),
+        record: project(row),
+      }));
+    },
+
+    /** Check whether an already quarantined identity lost its last usable package. */
+    hasRemovedSentinelSource(id: string, revision: number, runId?: string) {
+      return !!db.prepare(`
+        SELECT 1 FROM run_archive_actions AS a JOIN run_archive_purges AS p USING(archiveId)
+        WHERE a.kind = 'sentinel' AND a.action = 'archive'
+          AND a.identityId = ? AND a.revision = ? AND (? IS NULL OR a.runId = ?)
+          AND NOT EXISTS (
+            SELECT 1 FROM run_archive_actions AS source
+            WHERE source.kind = 'sentinel' AND source.action = 'archive'
+              AND source.status = 'succeeded' AND source.identityId = a.identityId
+              AND source.runId = a.runId AND source.revision = a.revision
+              AND NOT EXISTS (SELECT 1 FROM run_archive_purges AS removed WHERE removed.archiveId = source.archiveId)
+          )
+        LIMIT 1
+      `).get(id, revision, runId ?? null, runId ?? null);
     },
 
     listSentinelArchiveCatalog(
