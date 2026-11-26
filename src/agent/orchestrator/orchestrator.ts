@@ -27,6 +27,7 @@ import type {
   ProcessMessageOptions,
 } from "./orchestrator_types.ts";
 import { canFlowTo } from "../../core/types/classification.ts";
+import type { SessionId } from "../../core/types/session.ts";
 import { createLogger } from "../../core/logger/mod.ts";
 import type { LlmProvider } from "../llm.ts";
 import { createCompactor } from "../compactor/compactor.ts";
@@ -192,6 +193,16 @@ export function createOrchestrator(config: OrchestratorConfig) {
   };
   return {
     ...orchestrator,
+    /** Retain the verified prefix, or clear if later compaction replaced it. */
+    retainHistoryPrefix(sessionId: SessionId, prefix: readonly HistoryEntry[]) {
+      const key = sessionId as string;
+      const history = histories.get(key);
+      if (history && prefix.every((entry, index) => history[index] === entry)) {
+        histories.set(key, history.slice(0, prefix.length));
+      } else {
+        histories.delete(key);
+      }
+    },
     async executeOperatorTool(
       call: ParsedToolCall,
       { session, targetClassification, signal, suppressToolEvents }:

@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import {
   checkpointOwnerCompaction,
   compactOwnerContext,
@@ -876,7 +877,13 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
       async execute(
         args: Record<string, unknown>,
         signal: AbortSignal,
-        retainTelemetryFence?: (isCurrent: () => boolean) => void,
+        retainTelemetryFence?: (
+          fence: {
+            key: string;
+            isCurrent: () => boolean;
+            authorize: () => Promise<boolean>;
+          },
+        ) => void,
       ) {
         const { action, kind, id, revision, runId } = args;
         const selectedControl = sentinelOperatorCaseControlActions.some((
@@ -967,7 +974,31 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
         if (!current()) return unavailable;
         if (scopedTelemetry && result.startsWith("{")) {
           if (!telemetryIsCurrent()) return unavailable;
-          retainTelemetryFence?.(telemetryIsCurrent);
+          retainTelemetryFence?.({
+            key: createHash("sha256").update(JSON.stringify([
+              id,
+              revision,
+              telemetryRun,
+              telemetryPolicy?.version,
+              args,
+              result,
+            ])).digest("hex"),
+            isCurrent: telemetryIsCurrent,
+            async authorize() {
+              if (
+                !telemetryIsCurrent() ||
+                !await authority.authorizeOwnerRunCall?.(args) ||
+                !telemetryIsCurrent()
+              ) return false;
+              const approved = await enforcePostToolResponse(
+                operatorRunTool.name,
+                { ...orchestratorConfig, getSessionTaint: () => "INTERNAL" },
+                owner,
+                { resultText: result, blocked: false },
+              );
+              return !approved.blocked && telemetryIsCurrent();
+            },
+          });
         }
         return result;
       },

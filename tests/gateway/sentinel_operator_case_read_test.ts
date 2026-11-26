@@ -196,12 +196,24 @@ Deno.test("Authenticated Sentinel chat reads exact approved cross-case graph fin
   let reject: "PRE_TOOL_CALL" | "POST_TOOL_RESPONSE" | "PRE_OUTPUT" | undefined;
   let revokeTelemetry: "POST_TOOL_RESPONSE" | "PRE_OUTPUT" | undefined;
   let telemetryRevocations = 0;
+  const independentContext = "Retain this unrelated Sentinel context.";
+  const revokeContextRequest =
+    "Withdraw peer context before the next model call.";
+  let revokeBeforeContext = false;
+  let captureModelContext = false;
+  let modelContext = "";
   const hooks: string[] = [];
   const constraintLabels: Record<string, unknown>[] = [];
   registry.register({
     name: "sentinel-cross-case-reader",
     supportsStreaming: false,
     complete(messages, tools) {
+      if (captureModelContext) {
+        modelContext = messages.map(({ content }) => String(content)).join(
+          "\n",
+        );
+        captureModelContext = false;
+      }
       const next = request;
       request = undefined;
       const definitions = tools as {
@@ -331,6 +343,14 @@ Deno.test("Authenticated Sentinel chat reads exact approved cross-case graph fin
                   visibleAlert.subject,
                 ]
                   .some((label) => String(input.content).includes(label)));
+          if (
+            revokeBeforeContext && hook === "PRE_CONTEXT_INJECTION" &&
+            input.content === revokeContextRequest
+          ) {
+            await Promise.resolve();
+            constraintsAllowed = false;
+            revokeBeforeContext = false;
+          }
           if (hook === revokeTelemetry) {
             const content = hook === "POST_TOOL_RESPONSE"
               ? input.tool_response
@@ -1165,6 +1185,38 @@ Deno.test("Authenticated Sentinel chat reads exact approved cross-case graph fin
       staleResponse.every((frame) => !frame.includes(visibleAlert.subject)),
     );
     constraintsAllowed = true;
+
+    await turn("/sentinel off");
+    await turn("/sentinel on");
+    await turn(independentContext);
+    await turn("Read a retained alert for this investigation", exactAlert);
+    assertStringIncludes(result, visibleAlert.subject);
+    captureModelContext = true;
+    await turn("Keep using the allowed context.");
+    assertStringIncludes(modelContext, independentContext);
+    assertStringIncludes(modelContext, visibleAlert.subject);
+
+    captureModelContext = true;
+    reject = "POST_TOOL_RESPONSE";
+    await turn("Refresh authorization on the exact saved telemetry response.");
+    assert(hooks.includes("POST_TOOL_RESPONSE"));
+    assertStringIncludes(modelContext, independentContext);
+    assert(!modelContext.includes(visibleAlert.subject));
+    reject = undefined;
+    await turn("Read the authorized alert again", exactAlert);
+    assertStringIncludes(result, visibleAlert.subject);
+
+    captureModelContext = true;
+    revokeBeforeContext = true;
+    await turn(revokeContextRequest);
+    assert(!revokeBeforeContext);
+    assertStringIncludes(modelContext, independentContext);
+    assert(!modelContext.includes(visibleAlert.subject));
+    constraintsAllowed = true;
+    captureModelContext = true;
+    await turn("Continue with the unaffected context.");
+    assertStringIncludes(modelContext, independentContext);
+    assert(!modelContext.includes(visibleAlert.subject));
 
     revokeTelemetry = "PRE_OUTPUT";
     const staleDelivery = await turn(

@@ -212,6 +212,7 @@ import {
 import type { SentinelOutputLanguage } from "../core/config_types.ts";
 import type { HookRunner } from "../core/policy/hooks/hooks.ts";
 import type { LlmProviderRegistry, LlmUsage } from "../core/types/llm.ts";
+import type { HistoryEntry } from "../core/types/orchestrator.ts";
 import type {
   AgentTurnCheckpoint,
   WorkerBoundary,
@@ -305,13 +306,19 @@ import {
   sentinelEvidenceDigestTools,
 } from "./operator_evidence_digests.ts";
 
+interface SentinelTelemetryFence {
+  readonly key: string;
+  readonly isCurrent: () => boolean;
+  readonly authorize: () => Promise<boolean>;
+}
+
 export interface SentinelAgentOptions {
   readonly operatorRunReader?: {
     readonly definition: ToolDefinition;
     readonly execute: (
       args: Record<string, unknown>,
       signal: AbortSignal,
-      retainTelemetryFence?: (isCurrent: () => boolean) => void,
+      retainTelemetryFence?: (fence: SentinelTelemetryFence) => void,
     ) => Promise<string>;
   };
   readonly plannerExecutionEvidenceRunId?: string;
@@ -476,6 +483,7 @@ const traceSnapshotTools = new Set([
 const MAX_TRACE_SNAPSHOT_CHARS = 512;
 const MAX_TOOL_CHARS = 7000;
 const MAX_READS_PER_TURN = 12;
+const MAX_RETAINED_TELEMETRY_SCOPES = 64;
 const MAX_WORKERS_PER_TURN = 2;
 const MAX_TRACE_DEPTH = 10;
 const MAX_FINDING_PAGE = 30;
@@ -1251,8 +1259,8 @@ interface ActiveTurn {
   readonly controller: AbortController;
   readonly signal: AbortSignal;
   readonly readGraph: ReadGraph;
-  pendingTelemetryFence?: () => boolean;
-  readonly telemetryDeliveryFences: Set<() => boolean>;
+  pendingTelemetryFence?: SentinelTelemetryFence;
+  telemetryHistoryPrefix?: readonly HistoryEntry[];
   readonly outputLanguage: SentinelOutputLanguage;
   readonly send: ChatEventSender;
   readonly sharedFindings: Map<
@@ -3862,6 +3870,10 @@ function createAgent(
 ): SentinelAgent {
   let session = sentinelSession(options.identity);
   let active: ActiveTurn | undefined;
+  let retainedTelemetry: {
+    readonly prefix: readonly HistoryEntry[];
+    readonly fences: Map<string, SentinelTelemetryFence>;
+  } | undefined;
   let mutex = Promise.resolve();
   const caseTools = options.snapshotOverride === undefined ||
       options.assessmentRevision !== undefined
@@ -4345,19 +4357,56 @@ function createAgent(
             : context,
         );
         if (
+          result.allowed && name === "PRE_CONTEXT_INJECTION" && turn &&
+          operatorRunReader
+        ) {
+          const retained = retainedTelemetry;
+          if (retained) {
+            const fences = [...retained.fences.values()];
+            let allowed = fences.length <= MAX_RETAINED_TELEMETRY_SCOPES;
+            for (const fence of fences) {
+              if (!allowed || !await fence.authorize()) {
+                allowed = false;
+                break;
+              }
+            }
+            if (turn.signal.aborted || context.session.id !== session.id) {
+              return { ...result, allowed: false, action: "BLOCK" };
+            }
+            if (!allowed || fences.some((fence) => !fence.isCurrent())) {
+              orchestrator.retainHistoryPrefix(
+                context.session.id,
+                retained.prefix,
+              );
+              retainedTelemetry = undefined;
+            }
+          }
+          turn.telemetryHistoryPrefix = retainedTelemetry?.prefix ??
+            orchestrator.getHistory(context.session.id).slice();
+        }
+        if (
           name === "POST_TOOL_RESPONSE" && turn?.pendingTelemetryFence &&
           toolName === operatorRunReader?.definition.name
         ) {
           const fence = turn.pendingTelemetryFence;
           turn.pendingTelemetryFence = undefined;
           if (result.allowed) {
-            if (!fence()) return { ...result, allowed: false, action: "BLOCK" };
-            turn.telemetryDeliveryFences.add(fence);
+            if (!fence.isCurrent() || !turn.telemetryHistoryPrefix) {
+              return { ...result, allowed: false, action: "BLOCK" };
+            }
+            retainedTelemetry ??= {
+              prefix: turn.telemetryHistoryPrefix,
+              fences: new Map(),
+            };
+            retainedTelemetry.fences.set(fence.key, fence);
           }
         }
         if (
           result.allowed && name === "PRE_OUTPUT" && turn &&
-          [...turn.telemetryDeliveryFences].some((fence) => !fence())
+          retainedTelemetry &&
+          [...retainedTelemetry.fences.values()].some((fence) =>
+            !fence.isCurrent()
+          )
         ) return { ...result, allowed: false, action: "BLOCK" };
         if (
           result.allowed && name === "POST_TOOL_RESPONSE" &&
@@ -6718,7 +6767,6 @@ function createAgent(
           }),
           approvedTraffic: new Set(),
           approvedReporterTraffic: new Map(),
-          telemetryDeliveryFences: new Set(),
           stagedGraphFacts: [],
           trace,
           onBatchReadReceipt,
@@ -7578,6 +7626,7 @@ function createAgent(
     clear() {
       active?.controller.abort();
       orchestrator.clearHistory(session.id);
+      retainedTelemetry = undefined;
       session = sentinelSession(options.identity);
     },
   };
