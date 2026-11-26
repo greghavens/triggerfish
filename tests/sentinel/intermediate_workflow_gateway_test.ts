@@ -268,6 +268,10 @@ Deno.test("Gateway workers cite an intermediate observation while its source rev
   const releaseSource = Promise.withResolvers<void>();
   let transportCalls = 0;
   let metadataAllowed = true;
+  let revokePeerResponse = false;
+  let peerMetadataAllowed = true;
+  let peerRevocations = 0;
+  let peerSawDenial = false;
   let metadataChecks = 0;
   let received = "";
   let peerProgress: unknown;
@@ -297,34 +301,48 @@ Deno.test("Gateway workers cite an intermediate observation while its source rev
   let blockedSettlement = 0;
   let blockedClassification = 0;
   let settlementPolicy: "pre" | "post" | "allow" = "pre";
-  const reader = createSentinelLiveWorkflowReader({
-    scopes,
-    resolveToken: () => Promise.resolve("fixture-token"),
-    ssrfChecker: () => Promise.resolve({ ok: true, value: "192.0.2.1" }),
-    verifyAccess: () => {
-      metadataChecks++;
-      return Promise.resolve(metadataAllowed);
-    },
-    readRuns: () => {
-      transportCalls++;
-      return Promise.resolve([{
-        id: 51,
-        repositoryId: 420,
-        status: "completed",
-        conclusion: "failure",
-        createdAt: "2026-01-01T00:00:00.000Z",
-        updatedAt: "2026-01-01T00:01:00Z",
-      }]);
-    },
-  });
-  const hookRunner: HookRunner = {
+  const makeReader = (allowMetadata: () => boolean) =>
+    createSentinelLiveWorkflowReader({
+      scopes,
+      resolveToken: () => Promise.resolve("fixture-token"),
+      ssrfChecker: () => Promise.resolve({ ok: true, value: "192.0.2.1" }),
+      verifyAccess: () => {
+        metadataChecks++;
+        return Promise.resolve(allowMetadata());
+      },
+      readRuns: () => {
+        transportCalls++;
+        return Promise.resolve([{
+          id: 51,
+          repositoryId: 420,
+          status: "completed",
+          conclusion: "failure",
+          createdAt: "2026-01-01T00:00:00.000Z",
+          updatedAt: "2026-01-01T00:01:00Z",
+        }]);
+      },
+    });
+  const reader = makeReader(() => metadataAllowed);
+  const peerReader = makeReader(() => peerMetadataAllowed);
+  const hooks = (applySettlementPolicy: boolean): HookRunner => ({
     evaluateHook: (hook, { input }) => {
+      if (
+        revokePeerResponse && hook === "POST_TOOL_RESPONSE" &&
+        typeof input.assignment_id === "string" &&
+        input.tool_name === "sentinel_intermediate_workflow_observation"
+      ) {
+        revokePeerResponse = false;
+        peerMetadataAllowed = false;
+        peerRevocations++;
+      }
       const url = input.url;
       const reopensStatus = hook === "PRE_TOOL_CALL" &&
         input.tool_name === "sentinel_live_workflow_status" &&
         typeof url === "string" && url.endsWith("/workflows/17");
-      const blocksDestination = reopensStatus && settlementPolicy === "pre";
-      const blocksResponse = hook === "POST_TOOL_RESPONSE" &&
+      const blocksDestination = applySettlementPolicy && reopensStatus &&
+        settlementPolicy === "pre";
+      const blocksResponse = applySettlementPolicy &&
+        hook === "POST_TOOL_RESPONSE" &&
         input.tool_name === "sentinel_live_workflow_status" &&
         settlementPolicy === "post";
       if (blocksDestination) blockedSettlement++;
@@ -337,7 +355,9 @@ Deno.test("Gateway workers cite an intermediate observation while its source rev
         duration: 0,
       });
     },
-  };
+  });
+  const hookRunner = hooks(true);
+  const workerHookRunner = hooks(false);
   const registry = createProviderRegistry();
   const usage = { inputTokens: 1, outputTokens: 1 };
   function call(name: string, args: object = {}) {
@@ -410,26 +430,45 @@ Deno.test("Gateway workers cite an intermediate observation while its source rev
           "taskId",
           "tool",
         ]);
-        return call("sentinel_worker_trace_search", {
+        const trace = call("sentinel_worker_trace_search", {
           liveProgress: true,
           task: step.taskId,
           stepIndices: [step.index],
         });
-      }
-      if (results.length === 2) {
-        const earlier = JSON.parse(String(results[0].content)).steps;
-        assertEquals(JSON.parse(String(results[1].content)).steps, earlier);
-        return call("sentinel_intermediate_workflow_observation");
+        return {
+          ...trace,
+          toolCalls: [
+            ...trace.toolCalls,
+            ...call("sentinel_intermediate_workflow_observation").toolCalls,
+          ],
+        };
       }
       if (results.length === 3) {
+        const earlier = JSON.parse(String(results[0].content)).steps;
+        assertEquals(JSON.parse(String(results[1].content)).steps, earlier);
         const id = String(results[2].content).match(
           /workflow-observation:[a-f0-9]{64}/,
         )?.[0];
         assert(id);
         received = id;
+        revokePeerResponse = peerRevocations === 0;
         return call("sentinel_intermediate_workflow_observation", { id });
       }
-      const receipt = String(results[3].content);
+      const initialReceipt = String(results[3].content);
+      if (results.length === 4 && initialReceipt.includes("withheld")) {
+        assertEquals(peerRevocations, 1);
+        peerSawDenial = true;
+        peerMetadataAllowed = true;
+        const retry = call("sentinel_intermediate_workflow_observation", {
+          id: received,
+        });
+        retry.toolCalls[0] = {
+          ...retry.toolCalls[0],
+          id: "retry-peer-receipt",
+        };
+        return retry;
+      }
+      const receipt = results[4] ? String(results[4].content) : initialReceipt;
       assert(
         receipt.includes(received) && receipt.includes('"id":51') &&
           receipt.includes('"failure"'),
@@ -615,9 +654,10 @@ Deno.test("Gateway workers cite an intermediate observation while its source rev
         assessmentRevision: state.revision,
         assignedTaskId: taskId,
         assignedTaskLeaseToken: token,
-        hookRunner,
+        hookRunner: workerHookRunner,
         providerRegistry: registry,
         allowModelAccess: true,
+        readRetainedWorkflow: peerReader,
         readLiveWorkflowStatus: (
           { task, evidenceRevision, signal, authorize, resumeOnly },
         ) =>
@@ -836,6 +876,8 @@ Deno.test("Gateway workers cite an intermediate observation while its source rev
         summary === "Peer cited the exact failed run."
       )
     );
+    assertEquals(peerRevocations, 1);
+    assert(peerSawDenial);
     const view = readAdaptiveSentinel(path, state)!;
     const [observation] = view.workflowObservations;
     const source = view.tasks.find(({ kind, depth }) =>
@@ -1403,13 +1445,18 @@ Deno.test("Gateway workers cite an intermediate observation while its source rev
       taskId: source.id,
       stepIndices: [1],
     };
-    const peerStep = view.modelReviews.find(({ taskId }) => taskId === peer.id)
-      ?.steps.findIndex(({ intermediateWorkflowObservation }) =>
-        intermediateWorkflowObservation?.observationId === observation.id
-      );
+    const peerSteps = view.modelReviews.find(({ taskId }) => taskId === peer.id)
+      ?.steps;
+    const peerStep = peerSteps?.findIndex((
+      { intermediateWorkflowObservation },
+    ) => intermediateWorkflowObservation?.observationId === observation.id);
+    const pageStep = peerSteps?.findIndex(({ intermediateWorkflowPage }) =>
+      intermediateWorkflowPage !== undefined
+    );
     assert(peerStep !== undefined && peerStep > 0);
+    assert(pageStep !== undefined && pageStep > 0);
     const peerTrace = { ...trace, taskId: peer.id, stepIndices: [peerStep] };
-    const peerPage = { ...peerTrace, stepIndices: [peerStep - 1] };
+    const peerPage = { ...peerTrace, stepIndices: [pageStep] };
     const exactPeerProgress = { ...peerTrace, stepIndices: [0] };
     const expectedPeerPage = {
       evidenceRevision: state.revision,

@@ -2161,7 +2161,7 @@ const createWorker: Parameters<typeof createSentinelModelPlanner>[1] = (
   return createSentinelSubagent({
     ...((pinnedSources || executionEvidence) &&
       { sharedInventoryBaseDir: baseDir }),
-    readRetainedWorkflow: nativeReceiptNode || savedWorkflow
+    readRetainedWorkflow: nativeReceiptNode || savedWorkflow || peerWorkflow
       ? reader
       : undefined,
     authorizeExecutionTracePayload: executionEvidence

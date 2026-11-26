@@ -2137,7 +2137,7 @@ async function readSavedWorkflowReceipt(
         ) === proof;
     if (
       !proof || !retained || !source ||
-      !await authorizeRetainedWorkflowObservation(
+      !await authorizeRetainedWorkflowResponse(
         options,
         turn,
         session,
@@ -2148,35 +2148,52 @@ async function readSavedWorkflowReceipt(
         isCurrent,
       )
     ) return unavailable;
-    const taint = maxClassification(session.taint, "INTERNAL");
-    const metadata = {
-      tool_name: liveWorkflowStatusTool.name,
-      session_taint: taint,
-      case_id: locateSentinelCase(options.snapshotPath)?.caseId,
-      assignment_id: source.sourceTaskId,
-      evidence_revision: revision,
-    };
-    const response = await options.hookRunner.evaluateHook(
-      "POST_TOOL_RESPONSE",
-      {
-        session: {
-          ...session,
-          taint,
-        },
-        input: {
-          ...metadata,
-          tool_response: JSON.stringify({ targetId: task.nodeId, ...retained }),
-        },
-        auditInput: metadata,
-      },
-    );
-    return response.allowed && response.action === "ALLOW" &&
-        !turn.signal.aborted && isCurrent()
-      ? proof
-      : unavailable;
+    return proof;
   } catch {
     return unavailable;
   }
+}
+
+async function authorizeRetainedWorkflowResponse(
+  options: SentinelAgentOptions,
+  turn: Pick<ActiveTurn, "signal">,
+  session: SessionState,
+  assetId: string,
+  taskId: string,
+  revision: number,
+  retained: SentinelGitHubWorkflowReadReceipt,
+  current: () => boolean,
+) {
+  if (
+    !await authorizeRetainedWorkflowObservation(
+      options,
+      turn,
+      session,
+      assetId,
+      taskId,
+      revision,
+      retained,
+      current,
+    )
+  ) return false;
+  const taint = maxClassification(session.taint, "INTERNAL");
+  const metadata = {
+    tool_name: liveWorkflowStatusTool.name,
+    session_taint: taint,
+    case_id: locateSentinelCase(options.snapshotPath)?.caseId,
+    assignment_id: taskId,
+    evidence_revision: revision,
+  };
+  const response = await options.hookRunner.evaluateHook("POST_TOOL_RESPONSE", {
+    session: { ...session, taint },
+    input: {
+      ...metadata,
+      tool_response: JSON.stringify({ targetId: assetId, ...retained }),
+    },
+    auditInput: metadata,
+  });
+  return response.allowed && response.action === "ALLOW" &&
+    !turn.signal.aborted && current();
 }
 
 async function workflowObservation(
@@ -2184,6 +2201,7 @@ async function workflowObservation(
   turn: ActiveTurn,
   args: Record<string, unknown>,
   publish: boolean,
+  session: SessionState,
 ): Promise<string> {
   if (publish && Object.keys(args).length) {
     return "Error: The workflow observation publish tool takes no arguments.";
@@ -2278,6 +2296,42 @@ async function workflowObservation(
               citation.sourceStepIndex !== exact.stepIndex ||
               citation.targetId !== exact.targetId ||
               citation.resultSha256 !== exact.receipt.resultSha256))
+        ) return unavailable;
+        const snapshot = graph.snapshot();
+        const runId = readSentinelRunIdForRevision(
+          options.snapshotPath,
+          evidenceRevision,
+        );
+        if (!runId) return unavailable;
+        const current = () =>
+          !!readAssignedModelReview(options) &&
+          sentinelOperatingConstraintsAllow(
+            readSentinelOperatingConstraints(options.snapshotPath, runId)
+              ?.constraints,
+            { kind: "review_evidence", nodeId: exact.targetId },
+            snapshot,
+          ) &&
+          isDeepStrictEqual(
+            store.readLeasedWorkflowObservation(
+              task.revision,
+              task.id,
+              token,
+              evidenceRevision,
+              id,
+            ),
+            exact,
+          );
+        if (
+          !await authorizeRetainedWorkflowResponse(
+            options,
+            turn,
+            session,
+            exact.targetId,
+            exact.taskId,
+            evidenceRevision,
+            exact.receipt,
+            current,
+          )
         ) return unavailable;
         const output = JSON.stringify(exact);
         return output.length <= MAX_TOOL_CHARS ? output : unavailable;
@@ -5229,6 +5283,20 @@ function createAgent(
         }
         if (
           result.allowed && name === "POST_TOOL_RESPONSE" &&
+          toolName === SENTINEL_INTERMEDIATE_WORKFLOW_READ &&
+          turn?.requiresLiveAssignment &&
+          typeof context.input.tool_response === "string" &&
+          context.input.tool_response.startsWith("{")
+        ) {
+          const { id } = JSON.parse(context.input.tool_response);
+          if (
+            typeof id === "string" &&
+            await workflowObservation(options, turn, { id }, false, session) !==
+              context.input.tool_response
+          ) return { ...result, allowed: false, action: "BLOCK" };
+        }
+        if (
+          result.allowed && name === "POST_TOOL_RESPONSE" &&
           toolName === SENTINEL_SAVED_WORKFLOW_READ &&
           typeof context.input.tool_response === "string" &&
           context.input.tool_response.startsWith("{") &&
@@ -6163,6 +6231,7 @@ function createAgent(
           turn,
           args,
           name === publishWorkflowObservationTool.name,
+          session,
         );
       }
       if (name === SENTINEL_SHARED_DISCOVERY_READ && canReadPlannerCase) {
@@ -8288,7 +8357,17 @@ function createAgent(
                     call.name,
                     call.args,
                   );
-                  if (!opened || opened.result !== saved) return false;
+                  if (
+                    !opened || opened.result !== saved ||
+                    (call.name === SENTINEL_INTERMEDIATE_WORKFLOW_READ &&
+                      await workflowObservation(
+                          options,
+                          turn,
+                          call.args,
+                          false,
+                          session,
+                        ) !== saved)
+                  ) return false;
                   if (opened.observationSha256) {
                     turn.readGoalTaskResults.set(
                       opened.id,

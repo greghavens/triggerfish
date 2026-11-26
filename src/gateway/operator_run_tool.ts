@@ -8771,7 +8771,14 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
               const result = JSON.stringify(observation);
               if (
                 createHash("sha256").update(result).digest("hex") !== digest ||
-                !await authorize(scope, step.tool, call, result)
+                !await authorize(scope, step.tool, call, result) ||
+                !await authorizeSentinelWorkflowObservation(
+                  options.readLiveWorkflow,
+                  context,
+                  { caseId: ref.id, path, runId },
+                  observation,
+                  isCurrent,
+                )
               ) return unavailable;
               const current = readHistoricalAdaptiveSentinel(
                 path,
