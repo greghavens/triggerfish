@@ -85,6 +85,7 @@ import { resolveSentinelCasePath } from "../../src/sentinel/cases.ts";
 import { importSentinelHar } from "../../src/sentinel/har.ts";
 import {
   listSentinelFindingTrafficLinks,
+  openSentinelFindingTrafficLinks,
   sentinelFindingTrafficEvidenceVersion,
   type SentinelFindingTrafficLink,
 } from "../../src/sentinel/finding_traffic_links.ts";
@@ -2373,10 +2374,37 @@ async function verifyOperatorNativeRecheck(options: {
   assertEquals(recoveredReceipt, originalReceipt);
   assertEquals(writes, 1);
 
+  let currentAttachmentDigest = assigned.recheckBaseline.evidenceVersion;
   if (options.alternate) {
     await amend(2, "Updated after recheck admission");
     assertEquals(JSON.parse(await run(queue)).receipt, assigned);
     currentConstraints = recordPolicy(1, []);
+    const journal = openSentinelFindingTrafficLinks(path);
+    try {
+      // Seed a retained receipt without requiring any target connection.
+      assert(journal.record({
+        caseId,
+        evidenceRevision: options.state.revision,
+        assetId: "app",
+        findingId: options.findingId,
+        reportVersion: 3,
+        trafficId: `har:evidence:${"2".repeat(64)}`,
+        trafficSource: "har",
+        trafficDigest: "3".repeat(64),
+        authority: { kind: "operator" },
+        requestId: crypto.randomUUID(),
+      }, () => true));
+    } finally {
+      journal.close();
+    }
+    currentAttachmentDigest = sentinelFindingTrafficEvidenceVersion(
+      path,
+      options.state.revision,
+      options.findingId,
+    ).digest;
+    assert(
+      currentAttachmentDigest !== assigned.recheckBaseline.evidenceVersion,
+    );
   }
   const readLifecycle = async () => {
     let lifecycle: {
@@ -2762,6 +2790,11 @@ async function verifyOperatorNativeRecheck(options: {
           recheckNote,
         );
         const reviewedBaseline = JSON.parse(reviewed.results[1][0]);
+        assertEquals(reviewedBaseline.attachmentReview, {
+          approvedDigest: assigned.recheckBaseline.evidenceVersion,
+          currentDigest: currentAttachmentDigest,
+          status: options.alternate ? "changed" : "unchanged",
+        });
         assertEquals(reviewedBaseline.reviewedConstraints, reviewedConstraints);
         assertEquals(reviewedBaseline.currentConstraints, currentConstraints);
         assert(
@@ -3166,6 +3199,14 @@ async function verifyOperatorNativeRecheck(options: {
   );
   assertEquals(readSentinelAssessment(path)?.paused, true);
   assertEquals(await readLifecycle(), finishedLifecycle);
+  assertEquals(
+    sentinelFindingTrafficEvidenceVersion(
+      path,
+      options.state.revision,
+      options.findingId,
+    ).digest,
+    currentAttachmentDigest,
+  );
   if (reviewedConstraints) {
     const reviewed = readSentinelOperatingConstraintDigest(
       path,

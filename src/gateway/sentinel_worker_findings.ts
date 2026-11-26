@@ -569,6 +569,13 @@ export function executeSentinelWorkerFindingTool(
                 finding.runId,
               )
               : undefined;
+            const currentAttachmentDigest = baseline &&
+              sentinelFindingTrafficEvidenceVersion(
+                scope.snapshotPath,
+                state.revision,
+                finding.id,
+                finding.targetId,
+              ).digest;
             return {
               _classification: "INTERNAL",
               finding,
@@ -580,6 +587,13 @@ export function executeSentinelWorkerFindingTool(
                 ? {
                   reportVersion: baseline.reportVersion,
                   recheckBaseline: baseline,
+                  attachmentReview: {
+                    approvedDigest: baseline.evidenceVersion,
+                    currentDigest: currentAttachmentDigest,
+                    status: currentAttachmentDigest === baseline.evidenceVersion
+                      ? "unchanged"
+                      : "changed",
+                  },
                   reviewedConstraints: recheckConstraintProjection(
                     reviewedPolicy,
                     finding.targetId,
