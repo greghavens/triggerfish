@@ -4120,10 +4120,31 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
         (await turn({ ...narrow, allowedAssetIds: ["unknown-asset"] })).result,
         "unavailable",
       );
+      duringConfirmation = () => {
+        denied = "PRE_TOOL_CALL";
+      };
+      try {
+        assertStringIncludes((await turn(narrow)).result, "unavailable");
+      } finally {
+        duringConfirmation = undefined;
+        denied = undefined;
+      }
+      assertEquals(readSentinelOperatingConstraints(path, runId), undefined);
       const accepted = JSON.parse((await turn(narrow)).result).record;
       assertEquals(accepted.version, 1);
       assertEquals(accepted.constraints, { deniedKinds: ["impact"] });
-      assertEquals(JSON.parse((await turn(narrow)).result).record, accepted);
+      const reviewsAfterConstraints = confirmations.length;
+      await withGateway(async (reopened) => {
+        assertEquals(
+          JSON.parse((await reopened(narrow)).result).record,
+          accepted,
+        );
+        assertStringIncludes(
+          (await reopened({ ...narrow, note: "Changed retry" })).result,
+          "unavailable",
+        );
+      }, restarted);
+      assertEquals(confirmations.length, reviewsAfterConstraints);
       assertEquals(
         JSON.parse((await turn({ ...read, version: 1 })).result).history,
         [accepted],

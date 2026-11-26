@@ -6870,6 +6870,8 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
         }
         const { expectedVersion, requestId } = args;
         if (
+          !context?.authenticatedOwnerSessionId ||
+          !context.authorizeOwnerRunCall ||
           Object.keys(args).some((key) =>
             ![
               "action",
@@ -6952,13 +6954,11 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
           if (
             replay?.requestId !== update.requestId ||
             replay.evidenceRevision !== revision ||
-            JSON.stringify(replay.constraints) !== JSON.stringify(constraints)
+            replay.operatorScope !== update.operatorScope ||
+            !isDeepStrictEqual(replay.constraints, constraints) ||
+            !isDeepStrictEqual(replay.membership, membership)
           ) return unavailable;
-          if (selectedCaseOnly) {
-            return replay.operatorScope === update.operatorScope
-              ? safeProjection({ run: ref, record: replay })
-              : unavailable;
-          }
+          return safeProjection({ run: ref, record: replay });
         }
         if (
           selectedCaseOnly &&
@@ -6974,8 +6974,9 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
           )
         ) return "Error: The operator declined the run action.";
         if (
-          selectedCaseOnly &&
-          (!await context.authorizeOwnerRunCall?.(args) || !selectedCaseOnly())
+          !await context.authorizeOwnerRunCall(args) ||
+          !await controller.inspect(ref) ||
+          (selectedCaseOnly && !selectedCaseOnly())
         ) {
           return unavailable;
         }
