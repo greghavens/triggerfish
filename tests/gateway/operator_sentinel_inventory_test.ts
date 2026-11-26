@@ -110,6 +110,9 @@ Deno.test("operator inventory binds exact historical graph, organization and rev
       label: "Operations",
       assetCount: 1,
     }]);
+    const oldText = view({ assetText: " ORIGINAL ", limit: 1 });
+    assert(oldText?.view === "assets");
+    assertEquals(oldText.assets[0].id, "asset-a");
     const exactBatch = { assetIds: ["asset-b", "asset-a"], limit: 1 };
     const before = view(exactBatch);
     assert(before?.view === "assets" && before.nextCursor);
@@ -127,6 +130,14 @@ Deno.test("operator inventory binds exact historical graph, organization and rev
     );
     const current = refreshSentinelAssessment(path);
     assert(current && current.revision > old.revision);
+    assertEquals(view({ assetText: "original", limit: 1 }), oldText);
+    const newText = readOperatorSentinelInventory(base, {
+      ...scoped,
+      revision: current.revision,
+    }, { assetText: "original", limit: 1 });
+    assert(newText?.view === "assets");
+    assertEquals(newText.assets, []);
+
     assertEquals(
       view({ ...exactBatch, assetIds: ["asset-a", "asset-b"] }),
       before,

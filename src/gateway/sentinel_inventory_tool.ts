@@ -12,6 +12,7 @@ import { readSentinelChatSnapshot } from "../sentinel/chat_mode.ts";
 import { loadSentinelGraph } from "../sentinel/graph.ts";
 import {
   parseSentinelInventoryAssetIds,
+  parseSentinelInventoryText,
   querySentinelAssetInventory,
   querySentinelAssetReviewCoverage,
   querySentinelOrganizations,
@@ -56,6 +57,11 @@ export const sentinelInventoryTool: ToolDefinition = {
       required: true,
     },
     assetId: { type: "string", description: "Exact asset ID" },
+    assetText: {
+      type: "string",
+      description:
+        "Case-insensitive literal text in published asset labels or aliases, for the assets view. Omit exact asset IDs.",
+    },
     assetIds: {
       type: "array",
       items: { type: "string" },
@@ -141,6 +147,9 @@ function queryOptions(
   const batch = args.assetIds !== undefined
     ? parseSentinelInventoryAssetIds(args.assetIds)
     : undefined;
+  const text = args.assetText === undefined
+    ? undefined
+    : parseSentinelInventoryText(args.assetText);
   if (
     Object.keys(args).some((key) =>
       ![
@@ -150,6 +159,7 @@ function queryOptions(
         "coverageGap",
         "asOf",
         "assetIds",
+        "assetText",
         ...filters,
       ].includes(
         key,
@@ -162,6 +172,9 @@ function queryOptions(
       args[key] !== undefined && (typeof args[key] !== "string" ||
         args[key].length === 0 || args[key].length > 800)
     ) ||
+    (args.assetText !== undefined &&
+      (!text || args.view !== "assets" ||
+        args.assetId !== undefined || args.assetIds !== undefined)) ||
     (args.assetIds !== undefined &&
       (!batch || args.view !== "assets" ||
         filters.some((key) => args[key] !== undefined) ||
@@ -172,6 +185,7 @@ function queryOptions(
   ) throw new Error("Invalid or out-of-scope inventory query.");
   return {
     onlyAsset: batch ? undefined : assignedAsset ?? args.assetId,
+    ...(text !== undefined && { assetText: text }),
     ...(batch && { exactAssetIds: batch }),
     organizationId: args.organizationId,
     assetType: args.assetType,

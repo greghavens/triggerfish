@@ -4,6 +4,7 @@ import {
 } from "./traffic_recovery.ts";
 import {
   parseSentinelInventoryAssetIds,
+  parseSentinelInventoryText,
   sentinelAssetCoverageGaps,
   validSentinelCoverageTime,
 } from "./inventory_queries.ts";
@@ -290,6 +291,9 @@ export function sentinelCheckpointInventoryArgs(args: Record<string, unknown>) {
   const batch = args.assetIds !== undefined
     ? parseSentinelInventoryAssetIds(args.assetIds)
     : undefined;
+  const text = args.assetText === undefined
+    ? undefined
+    : parseSentinelInventoryText(args.assetText);
   const gap = sentinelAssetCoverageGaps.find((entry) => entry === coverageGap);
   const selectors = [
     "assetId",
@@ -301,6 +305,9 @@ export function sentinelCheckpointInventoryArgs(args: Record<string, unknown>) {
   ] as const;
   if (
     (view !== "assets" && view !== "organizations" && view !== "coverage") ||
+    (args.assetText !== undefined &&
+      (!text || view !== "assets" ||
+        args.assetId !== undefined || args.assetIds !== undefined)) ||
     (args.assetIds !== undefined &&
       (!batch || view !== "assets" ||
         selectors.some((key) =>
@@ -315,7 +322,7 @@ export function sentinelCheckpointInventoryArgs(args: Record<string, unknown>) {
       !Number.isSafeInteger(limit) || limit < 1 || limit > 10)) ||
     Object.keys(args).some((key) =>
       key !== "view" && key !== "limit" && key !== "coverageGap" &&
-      key !== "asOf" && key !== "assetIds" &&
+      key !== "asOf" && key !== "assetIds" && key !== "assetText" &&
       !selectors.some((selector) => selector === key)
     )
   ) return;
@@ -334,6 +341,7 @@ export function sentinelCheckpointInventoryArgs(args: Record<string, unknown>) {
     view,
     ...retained,
     ...(batch && { assetIds: batch }),
+    ...(text !== undefined && { assetText: text }),
     ...(limit !== undefined && { limit }),
     ...(gap && { coverageGap: gap }),
     ...(typeof asOf === "string" && { asOf }),
@@ -692,6 +700,7 @@ type GoalReceiptReadArguments =
     asOf?: string;
     assetId?: string;
     assetIds?: readonly string[];
+    assetText?: string;
     organizationId?: string;
     assetType?: string;
     parentId?: string;

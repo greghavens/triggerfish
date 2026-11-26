@@ -1035,6 +1035,11 @@ export const operatorRunTool: ToolDefinition = {
       description:
         "Exact retained traffic evidenceId and digest to anchor a planner hint. Requires one assetIds entry.",
     },
+    assetText: {
+      type: "string",
+      description:
+        "Literal case-insensitive label or alias text for an authorized asset inventory search.",
+    },
     assetIds: {
       type: "array",
       items: { type: "string" },
@@ -1212,6 +1217,7 @@ export const sentinelOperatorCaseReadParameters = [
   "scope",
   "assetId",
   "assetIds",
+  "assetText",
   "organizationId",
   "assetType",
   "parentId",
@@ -2374,6 +2380,9 @@ export function createOperatorRunToolExecutor(options: {
           canFlowTo(classification, context?.ceiling ?? "PUBLIC"));
     }
     const action = args.action;
+    if (args.assetText !== undefined && action !== "inventory") {
+      return unavailable;
+    }
     if (
       args.assetIds !== undefined && action !== "inventory" && action !== "hint"
     ) {

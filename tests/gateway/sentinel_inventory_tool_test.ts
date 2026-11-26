@@ -3,6 +3,7 @@ import { dirname, join } from "@std/path";
 import { createProviderRegistry } from "../../src/agent/llm.ts";
 import type { HookRunner } from "../../src/core/policy/hooks/hooks.ts";
 import type { ChatEvent } from "../../src/core/types/chat_event.ts";
+import { reopenSentinelAssignedInventory } from "../../src/gateway/sentinel_inventory_tool.ts";
 import { advanceAdaptiveSentinel } from "../../src/gateway/sentinel_adaptive_runtime.ts";
 import {
   createSentinelAgent,
@@ -417,6 +418,8 @@ Deno.test("Sentinel inventory enforces the real leased asset and stops flow on h
           { view: "assets", assetIds: ["alpha"] },
           { view: "assets", assetIds: ["alpha", "beta"] },
           { view: "assets", assetIds: ["alpha", "private-asset"] },
+          { view: "assets", assetText: " ALPHA " },
+          { view: "assets", assetText: "beta" },
         ],
         undefined,
         lease,
@@ -445,6 +448,22 @@ Deno.test("Sentinel inventory enforces the real leased asset and stops flow on h
         worker.trace.some((step) =>
           step.goalReceiptRead?.args.assetIds?.join(",") === "alpha"
         ),
+      );
+      assertEquals(JSON.parse(worker.resultFrames[7]).assets[0].id, "alpha");
+      assertEquals(JSON.parse(worker.resultFrames[8]).assets, []);
+      const retained = worker.trace.find((step) =>
+        step.goalReceiptRead?.args.assetText === "alpha"
+      )?.goalReceiptRead;
+      assert(retained);
+      assertEquals(
+        reopenSentinelAssignedInventory(
+          main,
+          state.revision,
+          assigned.task.id,
+          "alpha",
+          retained.args,
+        ),
+        worker.resultFrames[7],
       );
       assertEquals(
         JSON.parse(worker.resultFrames[2]).assets[0].reviewed,
@@ -535,6 +554,8 @@ Deno.test("Sentinel planner coverage gaps enforce the current allowed assets bef
         { view: "coverage", coverageGap: "either", limit: 1 },
         { view: "assets", assetIds: ["beta"] },
         { view: "assets", assetIds: ["alpha", "beta"] },
+        { view: "assets", assetText: "application" },
+        { view: "assets", assetText: "alpha" },
       ],
       undefined,
       {
@@ -556,5 +577,12 @@ Deno.test("Sentinel planner coverage gaps enforce the current allowed assets bef
     assertEquals(page.nextCursor, null);
     assertEquals(JSON.parse(result.resultFrames[1]).assets[0].id, "beta");
     assertStringIncludes(result.resultFrames[2], "unavailable");
+    assertEquals(
+      JSON.parse(result.resultFrames[3]).assets.map(({ id }: { id: string }) =>
+        id
+      ),
+      ["beta"],
+    );
+    assertEquals(JSON.parse(result.resultFrames[4]).assets, []);
   });
 });

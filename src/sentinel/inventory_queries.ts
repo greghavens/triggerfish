@@ -32,6 +32,7 @@ export interface SentinelAssetInventoryOptions extends PageOptions {
   /** Trusted exact member IDs supplied by an authorized caller. */
   readonly allowedAssetIds?: readonly string[];
   readonly exactAssetIds?: readonly string[];
+  readonly assetText?: string;
   readonly organizationId?: string;
   readonly assetType?: SentinelAssetType;
   readonly parentId?: string;
@@ -96,6 +97,16 @@ export function parseSentinelInventoryAssetIds(
   return [...value].sort();
 }
 
+/** Normalize bounded literal text for matching already visible inventory. */
+export function parseSentinelInventoryText(value: unknown): string | undefined {
+  if (
+    typeof value !== "string" || !value.trim() || value.length > 96 ||
+    /[\p{Cc}\p{Cf}]/u.test(value) || redactCredentialText(value) !== value
+  ) return;
+  const normalized = value.trim().normalize("NFC").toLowerCase();
+  return normalized.length <= 96 ? normalized : undefined;
+}
+
 function compareIds(a: string, b: string): number {
   return a < b ? -1 : a > b ? 1 : 0;
 }
@@ -146,6 +157,7 @@ function filterAssets(
   const {
     onlyAsset,
     exactAssetIds,
+    assetText,
     organizationId,
     assetType,
     parentId,
@@ -177,6 +189,12 @@ function filterAssets(
     (!batch || onlyAsset !== undefined || organizationId !== undefined ||
       assetType !== undefined || parentId !== undefined || alias !== undefined)
   ) throw new Error("Invalid Sentinel inventory selector");
+  const text = assetText === undefined
+    ? undefined
+    : parseSentinelInventoryText(assetText);
+  if (assetText !== undefined && (!text || batch)) {
+    throw new Error("Invalid Sentinel inventory text selector");
+  }
   const requested = batch && new Set(batch);
   const assets = snapshot.nodes.filter((node): node is Asset =>
     node.kind === "asset" &&
@@ -187,7 +205,11 @@ function filterAssets(
       node.organization?.id === organizationId) &&
     (assetType === undefined || node.assetType === assetType) &&
     (parentId === undefined || node.parentId === parentId) &&
-    (alias === undefined || node.aliases?.includes(alias) === true)
+    (alias === undefined || node.aliases?.includes(alias) === true) &&
+    (text === undefined ||
+      [node.label, ...(node.aliases ?? [])].some((value) =>
+        value.normalize("NFC").toLowerCase().includes(text)
+      ))
   );
   if (batch && assets.length !== batch.length) {
     throw new Error("Requested Sentinel inventory is unavailable");
@@ -202,6 +224,7 @@ function filterAssets(
       alias,
       ...(allowed ? [[...allowed].sort()] : []),
       ...(batch ? [{ exactAssetIds: batch }] : []),
+      ...(text ? [{ assetText: text }] : []),
     ],
   };
 }

@@ -43,7 +43,10 @@ Deno.test("Authenticated Sentinel chat reads exact approved cross-case graph fin
             id: `asset-${name}`,
             label: name === "a" ? inventoryLabel : `Asset ${name}`,
             assetType: "service",
-            aliases: [`${name}.example`],
+            aliases: [
+              `${name}.example`,
+              ...(id === "unregistered" ? ["hidden-only.example"] : []),
+            ],
             organization: { id: "ops", label: "Operations" },
           })),
         ],
@@ -415,6 +418,39 @@ Deno.test("Authenticated Sentinel chat reads exact approved cross-case graph fin
       );
       assertStringIncludes(result, "unavailable");
     }
+
+    const textSearch = { ...inventory, assetText: " EXAMPLE ", limit: 1 };
+    await turn("Find visible assets by a partial label or alias", textSearch);
+    const textPage = JSON.parse(result).page;
+    assertEquals(textPage.assets[0].id, "asset-a");
+    assert(textPage.nextCursor);
+    await turn("Continue with the same normalized text", {
+      ...textSearch,
+      assetText: "example",
+      cursor: textPage.nextCursor,
+    });
+    assertEquals(JSON.parse(result).page.assets[0].id, "asset-b");
+    for (
+      const invalid of [
+        { ...textSearch, assetText: "ample", cursor: textPage.nextCursor },
+        { ...textSearch, id: "unregistered" },
+        { ...textSearch, view: "coverage" },
+        { ...textSearch, assetIds: ["asset-a"] },
+      ]
+    ) {
+      await turn("Reject a different query or unauthorized scope", invalid);
+      assertStringIncludes(result, "unavailable");
+    }
+    await turn("Search for peer-only material inside this case", {
+      ...textSearch,
+      assetText: "hidden-only",
+    });
+    assertEquals(JSON.parse(result).page.assets, []);
+    await turn("Treat punctuation literally", {
+      ...textSearch,
+      assetText: "%",
+    });
+    assertEquals(JSON.parse(result).page.assets, []);
 
     await turn("List member organizations", {
       ...inventory,
@@ -823,6 +859,11 @@ Deno.test("Authenticated Sentinel chat reads exact approved cross-case graph fin
         cursor: batchPage.nextCursor,
       },
     );
+    assertStringIncludes(result, "unavailable");
+    await turn("Reject text continuation after membership changed", {
+      ...textSearch,
+      cursor: textPage.nextCursor,
+    });
     assertStringIncludes(result, "unavailable");
     await turn(
       "Read the newly enrolled asset through the same scoped inventory",
