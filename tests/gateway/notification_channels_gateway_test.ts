@@ -79,13 +79,15 @@ Deno.test("gateway reviews notification subscriptions and durably deduplicates s
         : [],
     ]),
   );
-  let providerRejected = false;
+  let providerCode = 0;
+  let providerHttpStatus = 200;
   const providerRequests: { url: URL; body: Record<string, unknown> }[] = [];
   let preDenied = false;
   let outputDenied = false;
   let denyIncident = true;
   let responseLost = false;
   let rotateDuringReview = false;
+  let allowReview = true;
   let classified = 0;
   let calls = 0;
   const payloads: Record<string, unknown>[] = [];
@@ -193,13 +195,16 @@ Deno.test("gateway reviews notification subscriptions and durably deduplicates s
           const body = JSON.parse(String(options?.body));
           if (url.origin !== origin) {
             providerRequests.push({ url, body });
-            const code = providerRejected ? 1234 : 0;
+            const code = providerCode;
             return Promise.resolve(
-              new Response(JSON.stringify(
-                url.hostname === "open.feishu.cn"
-                  ? { StatusCode: code }
-                  : { errcode: code },
-              )),
+              new Response(
+                JSON.stringify(
+                  url.hostname === "open.feishu.cn"
+                    ? { StatusCode: code }
+                    : { errcode: code },
+                ),
+                { status: providerHttpStatus },
+              ),
             );
           }
           assertEquals(target.url, origin + privatePath);
@@ -225,7 +230,7 @@ Deno.test("gateway reviews notification subscriptions and durably deduplicates s
             if (rotateDuringReview) {
               endpoint = origin + "/changed-during-review";
             }
-            return Promise.resolve(true);
+            return Promise.resolve(allowReview);
           },
           notificationChannels: channels,
         }),
@@ -761,7 +766,7 @@ Deno.test("gateway reviews notification subscriptions and durably deduplicates s
       const result = await turn(probeProvider);
       assertEquals(JSON.parse(result).delivery.state, "delivered");
       assertEquals(await turn(probeProvider), result);
-      providerRejected = true;
+      providerCode = 1234;
       assertEquals(
         JSON.parse(
           await turn({
@@ -771,7 +776,7 @@ Deno.test("gateway reviews notification subscriptions and durably deduplicates s
         ).delivery.state,
         "rejected",
       );
-      providerRejected = false;
+      providerCode = 0;
     }
     assertEquals(providerRequests.length, 6);
     const dingtalk = providerRequests[0];
@@ -797,6 +802,81 @@ Deno.test("gateway reviews notification subscriptions and durably deduplicates s
     assertEquals(wecom.url.href, providerFixtures[2].url);
     assertEquals(wecom.body.msgtype, "markdown");
     assert(!("sign" in wecom.body));
+    const feishuProbe = {
+      action: "test_notification_channel",
+      notificationChannelId: "feishu",
+      expectedVersion: 1,
+    };
+    const retryRateLimit = {
+      action: "retry_notification_delivery",
+      notificationChannelId: "feishu",
+      expectedVersion: 1,
+      notificationDeliveryId: "feishu-rate-limited",
+      requestId: "review-feishu-rate-limit",
+    };
+    providerCode = 11232;
+    providerHttpStatus = 429;
+    assertEquals(
+      JSON.parse(
+        await turn({
+          ...feishuProbe,
+          requestId: "feishu-http-429",
+        }),
+      ).delivery.state,
+      "uncertain",
+    );
+    for (const notificationDeliveryId of ["feishu-http-429", "reject-feishu"]) {
+      assertStringIncludes(
+        await turn({
+          ...retryRateLimit,
+          notificationDeliveryId,
+        }),
+        "unavailable",
+      );
+    }
+    providerHttpStatus = 200;
+    assertEquals(
+      JSON.parse(
+        await turn({
+          ...feishuProbe,
+          requestId: retryRateLimit.notificationDeliveryId,
+        }),
+      ).delivery.state,
+      "rate_limited",
+    );
+    const requestsBeforeRetry = providerRequests.length;
+    await disconnect();
+    await connect();
+    const deliveries = JSON.parse(
+      await turn({
+        action: "notification_deliveries",
+        notificationChannelId: "feishu",
+        notificationDeliveryState: "rate_limited",
+      }),
+    ).deliveries;
+    assertEquals(deliveries.map(({ id }: { id: string }) => id), [
+      retryRateLimit.notificationDeliveryId,
+    ]);
+    preDenied = true;
+    assertStringIncludes(await turn(retryRateLimit), "blocked by policy");
+    preDenied = false;
+    assertEquals(providerRequests.length, requestsBeforeRetry);
+
+    allowReview = false;
+    assertStringIncludes(await turn(retryRateLimit), "unavailable");
+    allowReview = true;
+    assertEquals(providerRequests.length, requestsBeforeRetry);
+
+    providerCode = 0;
+    const retried = await turn(retryRateLimit);
+    assertEquals(JSON.parse(retried).delivery.state, "delivered");
+    assertEquals(
+      JSON.parse(retried).delivery.retries[0].requestId,
+      retryRateLimit.requestId,
+    );
+    assertEquals(providerRequests.length, requestsBeforeRetry + 1);
+    assertEquals(await turn(retryRateLimit), retried);
+    assertEquals(providerRequests.length, requestsBeforeRetry + 1);
     for (const key of await storage.list()) {
       const value = await storage.get(key);
       assert(!value?.includes("synthetic-dingtalk-token"));

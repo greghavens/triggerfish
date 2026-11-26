@@ -1,5 +1,6 @@
 import { isDeepStrictEqual } from "node:util";
 import {
+  canRetryManagedNotificationDelivery,
   managedFindingEvents,
   type ManagedNotificationChannel,
   type ManagedNotificationChannels,
@@ -67,6 +68,7 @@ export const managedDeliveryStates = [
   "delivered",
   "blocked",
   "rejected",
+  "rate_limited",
   "uncertain",
 ] as const;
 export const managedEventKinds = [
@@ -350,7 +352,7 @@ export async function executeOperatorNotificationChannel(
       return { delivery: existing };
     }
     if (
-      retrying && (existing?.state !== "blocked" ||
+      retrying && (!canRetryManagedNotificationDelivery(existing?.state) ||
         attempts.length >= maxManagedNotificationRetries)
     ) return;
 

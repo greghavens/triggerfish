@@ -68,8 +68,13 @@ type DeliveryState =
   | "delivered"
   | "blocked"
   | "rejected"
+  | "rate_limited"
   | "uncertain";
 export type ManagedNotificationOutcome = Exclude<DeliveryState, "in_flight">;
+
+export function canRetryManagedNotificationDelivery(state?: DeliveryState) {
+  return state === "blocked" || state === "rate_limited";
+}
 
 interface ManagedNotificationAttempt {
   readonly requestId: string;
@@ -185,7 +190,7 @@ export function createManagedNotificationChannels(storage: StorageProvider) {
           return existing;
         }
         if (
-          existing.state !== "blocked" ||
+          !canRetryManagedNotificationDelivery(existing.state) ||
           attempts.length !== retry.expectedRetries ||
           attempts.length >= maxManagedNotificationRetries
         ) return;

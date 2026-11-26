@@ -88,7 +88,7 @@ export function notificationProviderRequest(
 export async function notificationProviderOutcome(
   provider: ManagedNotificationProvider,
   response: Response,
-): Promise<"delivered" | "rejected" | "uncertain"> {
+): Promise<"delivered" | "rejected" | "rate_limited" | "uncertain"> {
   if (!response.ok || provider === "webhook") {
     await response.body?.cancel().catch(() => {});
     return response.ok ? "delivered" : "uncertain";
@@ -106,6 +106,12 @@ export async function notificationProviderOutcome(
       ? [ack.code, ack.StatusCode]
       : [ack.errcode];
     const reported = fields.filter((value) => value !== undefined);
+    // Feishu's custom-bot contract documents 11232 as a send that failed
+    // due to rate limiting. Conflicting acknowledgements grant no retry.
+    if (
+      provider === "feishu" && reported.length &&
+      reported.every((value) => value === 11232)
+    ) return "rate_limited";
     return reported.length &&
         reported.every((value) => typeof value === "number")
       ? reported.every((value) => value === 0) ? "delivered" : "rejected"
