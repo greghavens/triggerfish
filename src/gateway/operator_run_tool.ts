@@ -949,6 +949,12 @@ export const operatorRunTool: ToolDefinition = {
       items: { type: "string" },
       description: "Complete set of defensive task kinds to disable in the run",
     },
+    scopeRules: {
+      type: "array",
+      items: { type: "object" },
+      description:
+        "Reviewed membership rules for preview_membership or set_case_membership. Entries use {kind,value} with domain, url, ip, cidr, registrationId, or keyword. Optional organizationId selects company rules; provide note.",
+    },
     allowedAssetIds: {
       type: "array",
       items: { type: "string" },
@@ -1579,7 +1585,8 @@ export function sentinelOperatorCaseReadParameterAllowed(
     return action === "decision_history";
   }
   return sentinelOperatorCaseReadParameters.some((key) => key === parameter) ||
-    (action === "preview_membership" && parameter === "allowedAssetIds") ||
+    (action === "preview_membership" &&
+      ["allowedAssetIds", "scopeRules", "note"].includes(parameter)) ||
     (action === "goals" && ["goalId", "includeProof"].includes(parameter));
 }
 
@@ -1600,6 +1607,7 @@ export const sentinelOperatorCaseControlActions = [
 ] as const;
 
 export const sentinelOperatorCaseControlParameters = [
+  "scopeRules",
   "adaptiveRevision",
   "allowedAssetIds",
   "assignments",
@@ -7642,21 +7650,29 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
           runId,
           allowedAssetIds,
           organizationId,
+          scopeRules,
+          note,
           expectedVersion,
           requestId,
         } = args;
         const update = action === "set_case_membership";
+        const reviewedRules = scopeRules !== undefined;
         const authorize = context?.authorizeOwnerRunCall;
         const selected = context?.authorizeSelectedSentinelCase;
         if (
           (update && (!authorize || !context?.authenticatedOwnerSessionId)) ||
           ref.kind !== "sentinel" || ref.revision === undefined ||
           typeof runId !== "string" || !digestPattern.test(runId) ||
-          (organizationId === undefined
-            ? !Array.isArray(allowedAssetIds) ||
-              allowedAssetIds.some((id) => typeof id !== "string")
-            : typeof organizationId !== "string" ||
-              allowedAssetIds !== undefined) ||
+          (reviewedRules
+            ? allowedAssetIds !== undefined || typeof note !== "string" ||
+              (organizationId !== undefined &&
+                typeof organizationId !== "string")
+            : note !== undefined ||
+              (organizationId === undefined
+                ? !Array.isArray(allowedAssetIds) ||
+                  allowedAssetIds.some((id) => typeof id !== "string")
+                : typeof organizationId !== "string" ||
+                  allowedAssetIds !== undefined)) ||
           Object.keys(args).some((key) =>
             ![
               "action",
@@ -7666,6 +7682,7 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
               "runId",
               "allowedAssetIds",
               "organizationId",
+              ...(reviewedRules ? ["scopeRules", "note"] : []),
               ...(update ? ["expectedVersion", "requestId"] : []),
             ].includes(key)
           ) ||
@@ -7679,22 +7696,35 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
           current.plan.runId !== activeRunId ||
           !current.result?.sharedGraph.snapshot || (selected && !selected())
         ) return unavailable;
+        if (
+          reviewedRules && typeof organizationId === "string" &&
+          !current.result.sharedGraph.snapshot.nodes.some((node) =>
+            node.kind === "asset" && node.organization?.id === organizationId
+          )
+        ) return unavailable;
         const membership = resolveSentinelCaseMembership(
           current.result.sharedGraph.snapshot,
           {
             caseId: ref.id,
             evidenceRevision: ref.revision,
-            selector: typeof organizationId === "string"
+            selector: reviewedRules
+              ? {
+                kind: "rules",
+                ...(organizationId !== undefined && { organizationId }),
+                rules: scopeRules,
+                reason: note,
+              }
+              : typeof organizationId === "string"
               ? { kind: "organization", organizationId }
               : { kind: "assets", assetIds: allowedAssetIds as string[] },
           },
         );
-        if (!membership) return unavailable;
+        if (!membership || membership.overflow) return unavailable;
         const prior = readSentinelOperatingConstraints(path, activeRunId);
         const version = prior?.version ?? 0;
         const existingScope = prior?.constraints.allowedAssetIds;
         if (
-          selected && existingScope &&
+          selected && existingScope && !reviewedRules &&
           membership.assetIds.some((id) => !existingScope.includes(id))
         ) {
           return unavailable;
@@ -7738,7 +7768,7 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
         }
         // Selected mode initializes membership. Changes to an established
         // selection use its own reviewed additive or narrowing controls.
-        if (selected && prior?.membership) {
+        if (selected && prior?.membership && !reviewedRules) {
           return unavailable;
         }
         if (

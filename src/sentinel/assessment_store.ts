@@ -1357,6 +1357,48 @@ export function previewSentinelLinkedOrganization(
   });
 }
 
+function applyReviewedMembershipRules(
+  db: DatabaseSync,
+  path: string,
+  runId: string | undefined,
+  evidenceRevision: number,
+  snapshot: Result["sharedGraph"]["snapshot"],
+  recordedAt: string,
+) {
+  if (!runId || !hasTable(db, "sentinel_operating_constraints")) return;
+  const latest = db.prepare(
+    "SELECT record FROM sentinel_operating_constraints WHERE runId = ? ORDER BY version DESC LIMIT 1",
+  ).get(runId);
+  const prior = latest && decodeOperatingConstraint({ record: latest.record });
+  const selector = prior?.membership?.selector;
+  if (!prior || selector?.kind !== "rules") return;
+  const caseId = locateSentinelCase(path)?.caseId;
+  const membership = caseId && resolveSentinelCaseMembership(snapshot, {
+    caseId,
+    evidenceRevision,
+    selector,
+  });
+  if (!membership) {
+    throw new Error("The reviewed Sentinel scope is unavailable");
+  }
+  const constraints = normalizeSentinelOperatingConstraints({
+    ...prior.constraints,
+    allowedAssetIds: membership.assetIds,
+  });
+  insertOperatingConstraintRecord(db, {
+    runId,
+    evidenceRevision,
+    expectedVersion: prior.version,
+    version: prior.version + 1,
+    requestId: crypto.randomUUID(),
+    operatorScope: prior.operatorScope,
+    membership,
+    constraints,
+    digest: digestSentinelOperatingConstraints(constraints),
+    recordedAt,
+  });
+}
+
 function refresh(
   db: DatabaseSync,
   row: AssessmentRow,
@@ -1429,6 +1471,14 @@ function refresh(
   );
   saveAssessmentRunRevision(db, revision, plan);
   saveFormalGoalHistory(db, revision, plan);
+  applyReviewedMembershipRules(
+    db,
+    snapshotPath,
+    plan.runId,
+    revision,
+    assessment.sharedGraph.snapshot,
+    updatedAt,
+  );
   if (
     prior && incidentCandidateCount(assessment) > incidentCandidateCount(prior)
   ) {

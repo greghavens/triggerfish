@@ -1,3 +1,7 @@
+import {
+  parseSentinelScopeRuleIntent,
+  sentinelScopeRuleToolName,
+} from "../core/sentinel_scope_rule_intent.ts";
 import { parseSentinelSteeringNote } from "../core/approval_inbox.ts";
 import {
   parseSentinelIncidentRecommendation,
@@ -87,6 +91,9 @@ function project(record: ApprovalInboxRecord): ApprovalInboxRecord {
   } = record;
   const chatGoal = parseChatGoalApprovalReview(record.chatGoal, tool);
   const finding = parseSentinelFindingReview(record.sentinelFindingReview);
+  const scopeRules = tool === sentinelScopeRuleToolName
+    ? parseSentinelScopeRuleIntent(record.sentinelScopeRuleReview)
+    : undefined;
   const incident = tool === sentinelIncidentRecommendationToolName &&
     record.sentinelIncidentRecommendation &&
     parseSentinelIncidentRecommendation(
@@ -102,6 +109,7 @@ function project(record: ApprovalInboxRecord): ApprovalInboxRecord {
     ...(mcpLifecycle && { mcpLifecycle }),
     ...(chatGoal && { chatGoal }),
     ...(finding && { sentinelFindingReview: finding }),
+    ...(scopeRules && { sentinelScopeRuleReview: scopeRules }),
     ...(incident && { sentinelIncidentRecommendation: incident }),
     status,
     ...(decision !== undefined && { decision }),

@@ -70,7 +70,7 @@ export function canonicalAssetUrl(value: string): string | undefined {
     const url = new URL(value);
     if (
       (url.protocol === "http:" || url.protocol === "https:") &&
-      !url.username && !url.password && !url.hash
+      !url.username && !url.password && !url.search && !url.hash
     ) return url.href;
   } catch {
     return;

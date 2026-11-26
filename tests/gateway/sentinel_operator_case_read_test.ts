@@ -187,10 +187,16 @@ Deno.test("Authenticated Sentinel chat reads exact approved cross-case graph fin
   let constraintsAllowed = true;
   let revokeLineageDuringResponse = false;
   let approveRestriction = false;
+  let approveScopeRules = false;
+  const scopeRuleReviews: string[] = [];
   let revokeDuringConfirmation = false;
   const operator = createOperatorRunToolExecutor({
     baseDir,
     confirm(message) {
+      if (message.startsWith("Approve this exact Sentinel case membership?")) {
+        scopeRuleReviews.push(message);
+        return Promise.resolve(approveScopeRules);
+      }
       if (message.startsWith("Approve adding these exact assets")) {
         membershipConfirmations.push(message);
         if (changeMembershipVersionDuringReview) {
@@ -2033,6 +2039,60 @@ Deno.test("Authenticated Sentinel chat reads exact approved cross-case graph fin
       assertEquals(JSON.parse(result).task, allowedObservation.id);
       assertStringIncludes(result, allowedObservation.summary);
     }
+    localGraph = undefined;
+    unleasedTelemetry = false;
+    const scopeRuleBefore = readSentinelOperatingConstraints(approved.path);
+    assert(scopeRuleBefore);
+    const reviewRules = {
+      ...exact,
+      runId: scopeRuleBefore.runId,
+      scopeRules: [{ kind: "keyword", value: "asset c" }],
+      note: "Authorize retained assets with the designated fixture title.",
+    };
+    await turn("Preview keyword rules in the selected case", {
+      ...reviewRules,
+      action: "preview_membership",
+    });
+    assertEquals(JSON.parse(result).membership.assetIds, ["asset-c"]);
+    await turn("Reject a scope URL containing query values", {
+      ...reviewRules,
+      action: "preview_membership",
+      scopeRules: [{
+        kind: "url",
+        value: "https://example.test/status?token=fixture",
+      }],
+    });
+    assertStringIncludes(result, "unavailable");
+    const setRules = {
+      ...reviewRules,
+      action: "set_case_membership",
+      expectedVersion: scopeRuleBefore.version,
+      requestId: crypto.randomUUID(),
+    };
+    reject = "PRE_TOOL_CALL";
+    await turn("Withhold a scope change blocked before dispatch", setRules);
+    reject = undefined;
+    assertEquals(scopeRuleReviews.length, 0);
+    await turn("Decline case scope rules", setRules);
+    assertStringIncludes(result, "operator declined");
+    assertEquals(
+      readSentinelOperatingConstraints(approved.path),
+      scopeRuleBefore,
+    );
+    approveScopeRules = true;
+    await turn("Approve case scope rules for this revision", setRules);
+    assertEquals(JSON.parse(result).version, scopeRuleBefore.version + 1);
+    assertEquals(
+      readSentinelOperatingConstraints(approved.path)?.constraints
+        .allowedAssetIds,
+      ["asset-c"],
+    );
+    await turn("Reject a stale distinct scope proposal", {
+      ...setRules,
+      requestId: crypto.randomUUID(),
+    });
+    assertStringIncludes(result, "unavailable");
+    assertEquals(scopeRuleReviews.length, 2);
   } finally {
     socket.close();
     await gateway.stop();

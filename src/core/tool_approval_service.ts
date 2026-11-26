@@ -1,4 +1,8 @@
 import {
+  parseSentinelScopeRuleIntent,
+  sentinelScopeRuleToolName,
+} from "./sentinel_scope_rule_intent.ts";
+import {
   parseSentinelIncidentRecommendation,
   sentinelIncidentRecommendationToolName,
 } from "./sentinel_incident_review_intent.ts";
@@ -88,16 +92,22 @@ function buildToolApprovalService(path: string) {
   };
   function project(record: ApprovalInboxRecord) {
     if (
-      !record.sentinelIncidentRecommendation ||
+      (!record.sentinelIncidentRecommendation &&
+        !record.sentinelScopeRuleReview) ||
       waits.get(record.id)?.canProject?.()
     ) {
       return record;
     }
-    const { sentinelIncidentRecommendation: _recommendation, ...metadata } =
-      record;
+    const {
+      sentinelIncidentRecommendation: _recommendation,
+      sentinelScopeRuleReview: _scope,
+      ...metadata
+    } = record;
     return {
       ...metadata,
-      description: "Sentinel incident disposition approval.",
+      description: record.sentinelScopeRuleReview
+        ? "Sentinel membership rules approval."
+        : "Sentinel incident disposition approval.",
     };
   }
   return {
@@ -189,6 +199,14 @@ function buildToolApprovalService(path: string) {
         tool === sentinelPlannerFindingToolName &&
         (!finding || !scopeBinding || !/^[a-f0-9]{64}$/.test(scopeBinding))
       ) return undefined;
+      const scopeRule = tool === sentinelScopeRuleToolName
+        ? parseSentinelScopeRuleIntent(args)
+        : undefined;
+      if (
+        tool === sentinelScopeRuleToolName &&
+        (!scopeRule || !input.canProject || !scopeBinding ||
+          !/^[a-f0-9]{64}$/.test(scopeBinding))
+      ) return undefined;
       const incident = tool === sentinelIncidentRecommendationToolName
         ? parseSentinelIncidentRecommendation(args, parseSentinelSteeringNote)
         : undefined;
@@ -208,6 +226,7 @@ function buildToolApprovalService(path: string) {
           ...(chatGoal && { chatGoal }),
           ...(steering && { sentinelSteeringNote: steering }),
           ...(finding && { sentinelFindingReview: finding }),
+          ...(scopeRule && { sentinelScopeRuleReview: scopeRule }),
           ...(incident && { sentinelIncidentRecommendation: incident }),
           ...(custom &&
             { customTool: { action: custom.action, name: custom.name } }),
@@ -245,7 +264,7 @@ function buildToolApprovalService(path: string) {
         signal,
         wake,
         stale,
-        canProject: incident && input.canProject,
+        canProject: (incident || scopeRule) && input.canProject,
       });
       signal.addEventListener("abort", abandon, { once: true });
       let released = false;

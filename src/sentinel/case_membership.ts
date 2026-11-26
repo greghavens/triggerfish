@@ -5,6 +5,13 @@ import { isSentinelCaseId } from "./cases.ts";
 import { loadSentinelGraph } from "./graph.ts";
 import { digestSentinelSnapshot } from "./shared_inventory.ts";
 
+import { assetText } from "./asset_properties.ts";
+import {
+  parseSentinelScopeRules,
+  sentinelScopeMatcher,
+  type SentinelScopeRule,
+} from "./scope_rules.ts";
+
 const maxMembers = 128;
 
 type ExactSentinelCaseMembershipSelector =
@@ -13,6 +20,12 @@ type ExactSentinelCaseMembershipSelector =
 
 export type SentinelCaseMembershipSelector =
   | ExactSentinelCaseMembershipSelector
+  | {
+    readonly kind: "rules";
+    readonly organizationId?: string;
+    readonly rules: readonly SentinelScopeRule[];
+    readonly reason: string;
+  }
   | {
     readonly kind: "addition";
     readonly baselineAssetIds: readonly string[];
@@ -30,6 +43,7 @@ export interface SentinelCaseMembershipProof
   readonly snapshotDigest: string;
   readonly selector: SentinelCaseMembershipSelector;
   readonly assetIds: readonly string[];
+  readonly overflow?: true;
   readonly sources: readonly {
     readonly assetId: string;
     readonly organization?: { readonly id: string; readonly label: string };
@@ -70,6 +84,27 @@ function normalizeSelector(
 ): SentinelCaseMembershipSelector | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) return;
   const selector = value as Record<string, unknown>;
+  if (selector.kind === "rules") {
+    const rules = parseSentinelScopeRules(selector.rules);
+    const reason = assetText(selector.reason);
+    if (
+      !rules || !reason || Object.keys(selector).some((key) =>
+        !["kind", "organizationId", "rules", "reason"].includes(key)
+      ) ||
+      (selector.organizationId !== undefined &&
+        !assetText(selector.organizationId, 256))
+    ) {
+      return;
+    }
+    return {
+      kind: "rules",
+      ...(typeof selector.organizationId === "string" && {
+        organizationId: selector.organizationId,
+      }),
+      rules,
+      reason,
+    };
+  }
   if (selector.kind !== "addition") return normalizeExactSelector(value);
   const addition = normalizeExactSelector(selector.addition);
   const baseline = normalizeExactSelector({
@@ -116,7 +151,26 @@ export function resolveSentinelCaseMembership(
     const requestedIds = new Set(
       requested.kind === "assets" ? requested.assetIds : [],
     );
-    const additions = requested.kind === "organization"
+    const company = requested.kind === "rules" && requested.organizationId;
+    const declaredCompany = company
+      ? assets.find((asset) => asset.organization?.id === company)?.organization
+      : undefined;
+    const companyIsCurrent = !company || !!declaredCompany &&
+        !assets.some((asset) =>
+          asset.organization?.id === company &&
+          asset.organization.label !== declaredCompany.label
+        );
+    const matches = requested.kind === "rules"
+      ? sentinelScopeMatcher(requested.rules, !!company)
+      : undefined;
+    const additions = requested.kind === "rules"
+      ? assets.filter((asset) =>
+        companyIsCurrent &&
+        (!company || !asset.organization ||
+          asset.organization.id === company) &&
+        matches?.(asset) === true
+      )
+      : requested.kind === "organization"
       ? assets.filter((asset) =>
         asset.organization?.id === requested.organizationId
       )
@@ -124,21 +178,28 @@ export function resolveSentinelCaseMembership(
     if (
       requested.kind === "assets"
         ? additions.length !== requestedIds.size
-        : !additions.length
+        : requested.kind === "organization" && !additions.length
     ) return;
     const selectedIds = new Set([...baseIds, ...additions.map(({ id }) => id)]);
     const selected = assets.filter(({ id }) => selectedIds.has(id));
+    const overflow = selector.kind === "rules" && selected.length > maxMembers;
     if (
-      selected.length !== selectedIds.size || selected.length > maxMembers ||
+      selected.length !== selectedIds.size ||
+      (!overflow && selected.length > maxMembers) ||
       (selector.kind === "addition" && selected.length === baseIds.length) ||
       selected.some(({ id }) => !exactId(id, 512))
     ) return;
-    const sources = selected.map(({ id, organization }) => ({
-      assetId: id,
-      ...(organization && {
-        organization: { id: organization.id, label: organization.label },
-      }),
-    })).sort((a, b) =>
+    const sources = (overflow ? [] : selected).map(
+      ({ id, organization: declared }) => {
+        const organization = declared ?? declaredCompany;
+        return {
+          assetId: id,
+          ...(organization && {
+            organization: { id: organization.id, label: organization.label },
+          }),
+        };
+      },
+    ).sort((a, b) =>
       a.assetId < b.assetId ? -1 : a.assetId > b.assetId ? 1 : 0
     );
     return {
@@ -147,6 +208,7 @@ export function resolveSentinelCaseMembership(
       snapshotDigest: digestSentinelSnapshot(graph),
       selector,
       assetIds: sources.map(({ assetId }) => assetId),
+      ...(overflow && { overflow: true as const }),
       sources,
     };
   } catch {

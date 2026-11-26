@@ -1,4 +1,10 @@
 import {
+  parseSentinelScopeRuleIntent,
+  sentinelScopeRuleToolName,
+} from "../core/sentinel_scope_rule_intent.ts";
+import { resolveSentinelCaseMembership } from "../sentinel/case_membership.ts";
+import { recordSentinelOperatingConstraints } from "../sentinel/assessment_store.ts";
+import {
   MAX_PLANNER_CHECKPOINT_READS,
   plannerCheckpointReadSelector,
 } from "../sentinel/planner_read_checkpoint.ts";
@@ -1124,6 +1130,46 @@ const workerIncidentRecommendationTool: ToolDefinition = {
       type: "string",
       required: true,
       description: "Concise evidence-backed rationale without secrets.",
+    },
+  },
+};
+
+const plannerScopeRuleTool: ToolDefinition = {
+  name: sentinelScopeRuleToolName,
+  description:
+    "Request mandatory owner review to replace membership with bounded rules for this exact case. Rules apply to locally retained assets and only after operator approval. They grant no connector or network permission.",
+  parameters: {
+    caseId: {
+      type: "string",
+      description: "Exact current case",
+      required: true,
+    },
+    evidenceRevision: {
+      type: "integer",
+      description: "Exact current revision",
+      required: true,
+    },
+    requestId: {
+      type: "string",
+      description: "Unique request UUID",
+      required: true,
+    },
+    organizationId: {
+      type: "string",
+      description:
+        "Optional declared company on this case. Company keywords are contextual only.",
+    },
+    rules: {
+      type: "array",
+      items: { type: "object" },
+      description:
+        "Up to 32 {kind,value} rules. Supported kinds are domain, url, ip, cidr, registrationId, and keyword.",
+      required: true,
+    },
+    reason: {
+      type: "string",
+      description: "Evidence-based membership rationale",
+      required: true,
     },
   },
 };
@@ -5658,7 +5704,12 @@ function createAgent(
         ? [sharedWorkerReviewTool]
         : []),
       ...(canRequestWorkerControl
-        ? [plannerStopTool, plannerSteerTool, plannerFindingReviewTool]
+        ? [
+          plannerStopTool,
+          plannerSteerTool,
+          plannerFindingReviewTool,
+          plannerScopeRuleTool,
+        ]
         : []),
       ...(options.readRetainedWorkflow
         ? [{
@@ -6113,11 +6164,60 @@ function createAgent(
     return { revision, planner, input, node, source, isCurrent, digest };
   }
 
+  function plannerScopeRuleDraft(
+    turn: ActiveTurn,
+    args: Record<string, unknown>,
+  ) {
+    const intent = parseSentinelScopeRuleIntent(args);
+    const runId = options.plannerExecutionEvidenceRunId;
+    const location = locateSentinelCase(options.snapshotPath);
+    const state = readSentinelAssessment(options.snapshotPath);
+    const snapshot = state?.result?.sharedGraph.snapshot;
+    if (
+      !canRequestWorkerControl || !intent || !runId || !snapshot ||
+      location?.caseId !== intent.caseId ||
+      options.assessmentRevision !== intent.evidenceRevision ||
+      state?.revision !== intent.evidenceRevision ||
+      !currentPlannerReceiptScope(turn) ||
+      turn.plannerRoundIsCurrent?.() !== true ||
+      (intent.organizationId &&
+        !snapshot.nodes.some((node) =>
+          node.kind === "asset" &&
+          node.organization?.id === intent.organizationId
+        ))
+    ) return;
+    const prior = readSentinelOperatingConstraints(options.snapshotPath, runId);
+    const membership = resolveSentinelCaseMembership(snapshot, {
+      caseId: intent.caseId,
+      evidenceRevision: intent.evidenceRevision,
+      selector: {
+        kind: "rules",
+        ...(intent.organizationId && { organizationId: intent.organizationId }),
+        reason: intent.reason,
+        rules: intent.rules,
+      },
+    });
+    if (!membership || membership.overflow) return;
+    const expectedVersion = prior?.version ?? 0;
+    const binding = createHash("sha256").update(JSON.stringify([
+      intent.requestId,
+      runId,
+      turn.plannerRound,
+      expectedVersion,
+      membership,
+    ])).digest("hex");
+    return { intent, runId, membership, expectedVersion, binding, prior };
+  }
+
   const plannerApprovalContext = canRequestWorkerControl
     ? {
       runId: options.plannerExecutionEvidenceRunId,
       scopeForCall(name: string, args: Record<string, unknown>) {
         if (!active) return;
+        if (name === plannerScopeRuleTool.name) {
+          const draft = plannerScopeRuleDraft(active, args);
+          return draft && { binding: draft.binding };
+        }
         if (name === plannerFindingReviewTool.name) {
           const draft = validatePlannerFindingReview(active, args);
           return draft && { binding: draft.digest };
@@ -6160,6 +6260,7 @@ function createAgent(
         const digestRead = typeof toolName === "string" &&
           isSentinelEvidenceDigestTool(toolName);
         const plannerFinding = toolName === plannerFindingReviewTool.name;
+        const plannerScopeRules = toolName === plannerScopeRuleTool.name;
         const incidentRecommendation =
           toolName === sentinelIncidentRecommendationToolName;
         const plannerControl = isPlannerWorkerControl(toolName);
@@ -6217,6 +6318,7 @@ function createAgent(
             toolName === SENTINEL_INCIDENT_ALERTS_READ ||
             toolName === SENTINEL_DEFENSE_READ || traffic || plannerTodo ||
             digestRead || plannerControl || plannerFinding ||
+            plannerScopeRules ||
             incidentRecommendation ||
             toolName === sharedWorkerReviewTool.name);
         const selectedDirectRead = (!!directTelemetryReader &&
@@ -6261,6 +6363,7 @@ function createAgent(
             resource_classification: "INTERNAL",
             operation_type:
               selectedCaseWrite || plannerControl || plannerFinding ||
+                plannerScopeRules ||
                 incidentRecommendation ||
                 toolName === "todo_write" ||
                 toolName === proposeWorkerGoalTool.name ||
@@ -6289,6 +6392,7 @@ function createAgent(
               ...context,
               input: { ...context.input, ...metadata },
               auditInput: plannerTodo || plannerControl || plannerFinding ||
+                  plannerScopeRules ||
                   incidentRecommendation ||
                   selectedCaseAction === "preview_membership" ||
                   selectedCaseAction === "set_case_membership" ||
@@ -6551,6 +6655,17 @@ function createAgent(
             !permits || !toolApprovalContext || !turn || !call?.args ||
             !incidentRecommendationDraft(turn, call.args)
           ) return { ...result, allowed: false, action: "BLOCK" };
+          return { ...result, allowed: false, action: "REQUIRE_APPROVAL" };
+        }
+        if (name === "PRE_TOOL_CALL" && plannerScopeRules) {
+          const permits = result.action === "REQUIRE_APPROVAL" ||
+            (result.action === "ALLOW" && result.allowed);
+          if (
+            !permits || !turn || !call?.args ||
+            !plannerScopeRuleDraft(turn, call.args)
+          ) {
+            return { ...result, allowed: false, action: "BLOCK" };
+          }
           return { ...result, allowed: false, action: "REQUIRE_APPROVAL" };
         }
         if (name === "PRE_TOOL_CALL" && plannerFinding) {
@@ -6898,6 +7013,44 @@ function createAgent(
         return boundResult({
           _classification: "INTERNAL",
           review: committed.record,
+        });
+      }
+      if (name === plannerScopeRuleTool.name) {
+        const unavailable =
+          "Error: The reviewed Sentinel membership rules are unavailable.";
+        const draft = plannerScopeRuleDraft(turn, args);
+        if (
+          !draft || !dispatch?.toolApprovalRequestId ||
+          !await dispatch.reauthorizeOwnerApproval?.() ||
+          plannerScopeRuleDraft(turn, args)?.binding !== draft.binding
+        ) return unavailable;
+        const { intent, runId, membership, expectedVersion, prior } = draft;
+        const committed = recordSentinelOperatingConstraints(
+          options.snapshotPath,
+          {
+            runId,
+            evidenceRevision: intent.evidenceRevision,
+            expectedVersion,
+            requestId: dispatch.toolApprovalRequestId,
+            operatorScope: "workspace-owner",
+            constraints: {
+              ...(prior?.constraints ?? { deniedKinds: [] }),
+              allowedAssetIds: membership.assetIds,
+            },
+            membership,
+          },
+        );
+        if (!committed) return unavailable;
+        notifyCommittedEvidence({
+          case: intent.caseId,
+          run_id: runId,
+          revision: intent.evidenceRevision,
+          observation_id: `scope-rules:${committed.requestId}`,
+        });
+        return boundResult({
+          _classification: "INTERNAL",
+          version: committed.version,
+          digest: committed.digest,
         });
       }
       if (name === plannerFindingReviewTool.name) {

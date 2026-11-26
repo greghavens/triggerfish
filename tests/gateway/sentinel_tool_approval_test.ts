@@ -1,3 +1,4 @@
+import { sentinelScopeRuleToolName } from "../../src/core/sentinel_scope_rule_intent.ts";
 import { assertRejects } from "@std/assert";
 import { DatabaseSync } from "node:sqlite";
 import {
@@ -43,8 +44,10 @@ import { openSentinelAdaptiveStore } from "../../src/sentinel/adaptive_store.ts"
 import {
   readSentinelDecisionHistory,
   readSentinelIncidentReviews,
+  readSentinelOperatingConstraints,
   readSentinelOperatorReviewRequest,
   recordSentinelOperatingConstraints,
+  refreshSentinelAssessment,
   startSentinelAssessment,
   stopSentinelAssessment,
 } from "../../src/sentinel/assessment_store.ts";
@@ -1387,6 +1390,250 @@ for (
       coordinator?.stop();
       await reopened?.close();
       await original?.close();
+      await gateway.stop();
+      await Deno.remove(baseDir, { recursive: true });
+    }
+  });
+}
+
+for (const outcome of ["approved", "denied", "revoked", "stale"] as const) {
+  Deno.test(`Planner membership rules enforce ${outcome} through the approval gateway`, async () => {
+    const baseDir = await Deno.makeTempDir();
+    const path = resolveSentinelCasePath(baseDir);
+    const inbox = createToolApprovalService(join(baseDir, "approval.db"));
+    const token = crypto.randomUUID();
+    const organization = { id: "company", label: "Example company" };
+    const nodes = [
+      {
+        id: "domain",
+        label: "Domain",
+        organization,
+        aliases: ["first.example.test"],
+      },
+      { id: "ip", label: "Fixed address", properties: { ip: ["192.0.2.8"] } },
+      {
+        id: "cidr",
+        label: "Subnet address",
+        properties: { ip: ["198.51.100.12"] },
+      },
+      {
+        id: "registration",
+        label: "Registered host",
+        properties: { registrationId: ["ref-24"] },
+      },
+      {
+        id: "url",
+        label: "Health route",
+        properties: { url: ["https://far.example/health"] },
+      },
+      { id: "keyword", label: "Keyword hint only" },
+      { id: "excluded", label: "Unrelated", aliases: ["notexample.test"] },
+      {
+        id: "other-company",
+        label: "Declared elsewhere",
+        aliases: ["other.example.test"],
+        organization: { id: "other", label: "Another company" },
+      },
+    ];
+    const write = (
+      extra: { id: string; label: string; aliases: string[] }[] = [],
+    ) =>
+      Deno.writeTextFile(
+        path,
+        JSON.stringify({
+          version: 1,
+          nodes: [...nodes, ...extra].map((node) => ({
+            kind: "asset",
+            ...node,
+          })),
+          edges: [],
+        }),
+      );
+    const proposal = {
+      caseId: "main",
+      evidenceRevision: 1,
+      requestId: crypto.randomUUID(),
+      organizationId: organization.id,
+      rules: [
+        { kind: "domain", value: "example.test" },
+        { kind: "ip", value: "192.0.2.8" },
+        { kind: "cidr", value: "198.51.100.0/24" },
+        { kind: "registrationId", value: "ref-24" },
+        { kind: "url", value: "https://far.example/health" },
+        { kind: "keyword", value: "keyword hint" },
+      ],
+      reason: "Reviewed inventory and registration details.",
+    };
+    let policyRevoked = false;
+    let issued = false;
+    let called = 0;
+    const hooks: HookRunner = {
+      toolApprovalInbox: inbox,
+      evaluateHook(hook, { input, auditInput }) {
+        const tool = input.tool_name ??
+          (input.tool_call as { name?: string } | undefined)?.name;
+        if (tool === sentinelScopeRuleToolName) {
+          assertEquals(input.operation_type, "write");
+          assertEquals(input.case_id, "main");
+          assertEquals(input.evidence_revision, 1);
+          assert(!JSON.stringify(auditInput).includes(proposal.reason));
+          if (hook === "PRE_TOOL_CALL") called++;
+        }
+        const denied = policyRevoked && hook === "PRE_TOOL_CALL" &&
+          tool === sentinelScopeRuleToolName;
+        return Promise.resolve({
+          allowed: !denied,
+          action: denied ? "BLOCK" : "ALLOW",
+          ruleId: null,
+          duration: 0,
+        });
+      },
+    };
+    const registry = createProviderRegistry();
+    registry.register({
+      name: "scope-rules",
+      supportsStreaming: false,
+      complete(_messages, tools) {
+        const first = !issued;
+        issued = true;
+        if (first) {
+          assert(
+            tools?.some((tool) =>
+              (tool as { function?: { name?: string } }).function?.name ===
+                sentinelScopeRuleToolName
+            ),
+          );
+        }
+        return Promise.resolve({
+          content: first ? "" : "[]",
+          usage: { inputTokens: 1, outputTokens: 1 },
+          toolCalls: first
+            ? [{
+              id: crypto.randomUUID(),
+              type: "function",
+              function: {
+                name: sentinelScopeRuleToolName,
+                arguments: JSON.stringify(proposal),
+              },
+            }]
+            : [],
+        });
+      },
+    });
+    registry.setDefault("scope-rules");
+    const gateway = createGatewayServer({
+      port: 0,
+      token,
+      chatSession: createChatSession({
+        session: createSession({
+          userId: "owner" as UserId,
+          channelId: "scope-test" as ChannelId,
+        }),
+        providerRegistry: registry,
+        hookRunner: hooks,
+      }),
+    });
+    const planner = createSentinelModelPlanner(
+      path,
+      (state, _, __, role) =>
+        role === "planner"
+          ? createSentinelSubagent({
+            snapshotPath: path,
+            assessmentRevision: state.revision,
+            plannerExecutionEvidenceRunId: state.plan.runId,
+            providerRegistry: registry,
+            hookRunner: hooks,
+            allowModelAccess: true,
+          })
+          : { execute: () => Promise.resolve(), clear() {} },
+    );
+    let operator: Awaited<ReturnType<typeof connect>> | undefined;
+    try {
+      await Deno.mkdir(dirname(path), { recursive: true });
+      await write();
+      const state = startSentinelAssessment(path);
+      assert(state.plan.runId);
+      const { port } = await gateway.start();
+      operator = await connect(port, token);
+      planner.advance(state);
+      const pending = await pendingInbox(operator);
+      assertEquals(pending.runId, state.plan.runId);
+      assertEquals(pending.assignmentId, undefined);
+      assertEquals(
+        pending.sentinelScopeRuleReview?.organizationId,
+        organization.id,
+      );
+      assertEquals(pending.sentinelScopeRuleReview?.rules.length, 6);
+      assertStringIncludes(pending.description, proposal.reason);
+      assertEquals(readSentinelOperatingConstraints(path), undefined);
+      if (outcome === "stale") {
+        await write([{
+          id: "new",
+          label: "Newly observed",
+          aliases: ["new.example.test"],
+        }]);
+        assert(refreshSentinelAssessment(path)!.revision > state.revision);
+      }
+      policyRevoked = outcome === "revoked";
+      const decision = await operator.request({
+        type: "approval_inbox_decide",
+        approvalId: pending.id,
+        approved: outcome !== "denied",
+      });
+      assertEquals(decision.ok, outcome !== "stale");
+      const deadline = Date.now() + 4000;
+      while (planner.hasInFlightWork() && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      assert(!planner.hasInFlightWork());
+      if (outcome !== "approved") {
+        assertEquals(readSentinelOperatingConstraints(path), undefined);
+        return;
+      }
+      const initial = readSentinelOperatingConstraints(path);
+      assert(initial);
+      assertEquals(initial.requestId, pending.id);
+      assertEquals(initial.constraints.allowedAssetIds, [
+        "cidr",
+        "domain",
+        "ip",
+        "registration",
+        "url",
+      ]);
+      assert(called >= 2);
+      await write([{
+        id: "new",
+        label: "Newly observed",
+        aliases: ["new.example.test"],
+      }]);
+      const updated = refreshSentinelAssessment(path);
+      assert(updated && updated.revision > state.revision);
+      const latest = readSentinelOperatingConstraints(path);
+      assertEquals(latest?.constraints.allowedAssetIds, [
+        "cidr",
+        "domain",
+        "ip",
+        "new",
+        "registration",
+        "url",
+      ]);
+      assertEquals(latest?.membership?.selector, initial.membership?.selector);
+      assertEquals(
+        latest?.membership?.sources.find(({ assetId }) => assetId === "new")
+          ?.organization,
+        organization,
+      );
+      assertEquals(
+        readSentinelOperatingConstraints(
+          path,
+          state.plan.runId,
+          state.revision,
+        ),
+        initial,
+      );
+    } finally {
+      planner.stop();
+      await operator?.close();
       await gateway.stop();
       await Deno.remove(baseDir, { recursive: true });
     }
