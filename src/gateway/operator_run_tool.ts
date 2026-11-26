@@ -11,7 +11,10 @@ import {
 } from "../sentinel/recheck_inconclusive.ts";
 import { normalizeSentinelRecheckNote } from "../sentinel/worker_finding_recovery.ts";
 import { createSentinelFindingRemediationReader } from "../sentinel/finding_remediation.ts";
-import { reopenSentinelPeerCoverage } from "./sentinel_peer_coverage.ts";
+import {
+  reopenSentinelPeerCoverage,
+  reopenSentinelSelectedFinding,
+} from "./sentinel_peer_coverage.ts";
 import { discoverSentinelFindingNodeTraffic } from "./sentinel_finding_traffic_tool.ts";
 import {
   isSentinelHintTrafficSelection,
@@ -220,6 +223,7 @@ import {
   readSentinelGitHubWorkflowReadReceipt,
   readSentinelGoalSupersessionSource,
   readSentinelIncidentReviews,
+  readSentinelLinkedSourcesForRevision,
   readSentinelModelRoute,
   readSentinelOperatingConstraintHistory,
   readSentinelOperatingConstraints,
@@ -511,6 +515,7 @@ export const operatorRunTool: ToolDefinition = {
         "withdraw_published_finding",
         "finding_report_history",
         "finding_lineage",
+        "linked_finding",
         "amend_finding_report",
         "traffic_search",
         "traffic_get",
@@ -1322,6 +1327,11 @@ export const operatorRunTool: ToolDefinition = {
       description:
         "One to sixteen exact selected finding IDs for finding_asset_tree.",
       items: { type: "string" },
+    },
+    linkedFinding: {
+      type: "object",
+      description:
+        "Exact selected finding selector: asset, sourceCase, sourceAsset, finding, snapshotDigest.",
     },
     findingOrder: {
       type: "string",
@@ -10645,6 +10655,72 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
           )
         ) return unavailable;
         return safeProjection({ run: ref, taskId, stepIndex: index, source });
+      }
+      if (action === "linked_finding") {
+        const raw = args.linkedFinding;
+        const selector = raw && typeof raw === "object" && !Array.isArray(raw)
+          ? parseSentinelPinnedFindingRead(raw as Record<string, unknown>)
+          : undefined;
+        if (
+          ref.kind !== "sentinel" || ref.revision === undefined || !selector ||
+          !context?.authenticatedOwnerSessionId ||
+          !context.authorizeOwnerRunCall ||
+          !canFlowTo("INTERNAL", context.ceiling ?? "PUBLIC") ||
+          Object.keys(args).some((key) =>
+            !["action", "kind", "id", "revision", "linkedFinding"].includes(key)
+          ) || !await controller.inspect(ref)
+        ) return unavailable;
+        const path = resolveSentinelCasePath(options.baseDir, ref.id);
+        const revision = ref.revision;
+        const exact = () =>
+          reopenSentinelSelectedFinding(path, revision, selector);
+        const allowed = (sourceRevision: number) =>
+          context.authorizeSentinelCaseRead?.(ref.id, revision) !== false &&
+          context.authorizeSentinelCaseRead?.(
+              selector.sourceCase,
+              sourceRevision,
+            ) !== false;
+        const selected = readSentinelLinkedSourcesForRevision(path, revision)
+          ?.find(({ caseId }) => caseId === selector.sourceCase);
+        if (!selected || !allowed(selected.revision)) return unavailable;
+        const sourceArgs = {
+          action: "finding_report",
+          kind: "sentinel",
+          id: selected.caseId,
+          revision: selected.revision,
+          receiptId: selector.finding,
+        };
+        if (!await context.authorizeOwnerRunCall(sourceArgs)) {
+          return unavailable;
+        }
+        const finding = await exact();
+        if (
+          !finding || finding.source.revision !== selected.revision ||
+          finding.source.runId !== selected.runId ||
+          finding.source.receiptId !== selector.finding ||
+          !allowed(selected.revision)
+        ) return unavailable;
+        const projection = projectSentinelSharedFindingSource(
+          finding.graph,
+          revision,
+          selector,
+        );
+        if (
+          projection.startsWith("Error:") ||
+          !await context.authorizeSavedResponse(
+            operatorRunTool.name,
+            projection,
+            "INTERNAL",
+          ) ||
+          !allowed(finding.source.revision) ||
+          !isDeepStrictEqual(await exact(), finding)
+        ) return unavailable;
+        return safeProjection({
+          run: ref,
+          inherited: true,
+          source: finding.source,
+          detail: JSON.parse(projection),
+        });
       }
       if (action === "finding_lineage") {
         const { node, cursor, limit = 4 } = args;

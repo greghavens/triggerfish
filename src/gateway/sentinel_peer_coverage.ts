@@ -20,11 +20,10 @@ import {
 } from "../sentinel/shared_inventory.ts";
 import { readLinkedFindingProof } from "./sentinel_linked_findings.ts";
 
-export async function reopenSentinelPeerCoverage(
+export async function reopenSentinelSelectedFinding(
   path: string,
   revision: number,
   selector: SentinelPeerCoverageReceipt["selector"],
-  expected?: SentinelPeerCoverageReceipt,
 ) {
   const location = locateSentinelCase(path);
   const runId = readSentinelRunIdForRevision(path, revision);
@@ -74,31 +73,41 @@ export async function reopenSentinelPeerCoverage(
     );
   if (!origin || !sourceAllows()) return;
   try {
+    const retained = await readPinnedSentinelSharedFindingSource(
+      location.baseDir,
+      graph,
+      {
+        caseId,
+        assetId,
+        findingId,
+        snapshotDigest,
+        localAssetId: selector.asset,
+      },
+      location.caseId,
+      path,
+    );
     if (
-      !await readPinnedSentinelSharedFindingSource(
-        location.baseDir,
-        graph,
-        {
-          caseId,
-          assetId,
-          findingId,
-          snapshotDigest,
-          localAssetId: selector.asset,
-        },
-        location.caseId,
-        path,
-      )
-    ) return;
-    const receipt = readSentinelPeerCoverageReceipt({
-      selector,
-      source,
-    });
-    if (
-      receipt && localAllows() && sourceAllows() &&
-      isDeepStrictEqual(currentProof(), proof) &&
-      (!expected || isDeepStrictEqual(expected, receipt))
-    ) return receipt;
+      retained && localAllows() && sourceAllows() &&
+      isDeepStrictEqual(currentProof(), proof)
+    ) return { graph: retained, source };
   } catch {
     return;
+  }
+}
+
+export async function reopenSentinelPeerCoverage(
+  path: string,
+  revision: number,
+  selector: SentinelPeerCoverageReceipt["selector"],
+  expected?: SentinelPeerCoverageReceipt,
+) {
+  const exact = await reopenSentinelSelectedFinding(path, revision, selector);
+  if (!exact) return;
+  const receipt = readSentinelPeerCoverageReceipt({
+    selector,
+    source: exact.source,
+  });
+  if (receipt && (!expected || isDeepStrictEqual(expected, receipt))) {
+    return receipt;
   }
 }

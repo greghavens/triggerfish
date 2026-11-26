@@ -140,7 +140,8 @@ async function withArchivedPlannerRead(
       hookRunner: {
         async evaluateHook(hook, { input }) {
           if (beforeHook) await beforeHook(hook, input);
-          const blockedPublication = selection.action === "publish_finding" &&
+          const blockedPublication = (selection.action === "publish_finding" ||
+            selection.action === "linked_finding") &&
             publicationPolicy && !publicationPolicy(hook, input);
           const allowed = !blockedPublication &&
             !(deny && hook === "POST_TOOL_RESPONSE" &&
@@ -2810,6 +2811,43 @@ Deno.test("Sentinel plans from an exact published case finding and keeps its evi
         exactCoveragePage,
       );
     });
+    const ownerLinkedFinding = {
+      ...selectedRef,
+      action: "linked_finding",
+      linkedFinding: exactSelected,
+    };
+    let ownerFinding: unknown;
+    let denySource = false;
+    await withArchivedPlannerRead(
+      directory,
+      async (read) => {
+        ownerFinding = JSON.parse(await read(ownerLinkedFinding));
+        assertEquals(ownerFinding, {
+          run: selectedRef,
+          inherited: true,
+          source: publication.finding.workerFindingSource,
+          detail: selectedOriginal,
+          _classification: "INTERNAL",
+        });
+        assertStringIncludes(
+          await read({ ...ownerLinkedFinding, ...ref }),
+          "unavailable",
+        );
+        assertStringIncludes(
+          await read({
+            ...ownerLinkedFinding,
+            linkedFinding: { ...exactSelected, asset: "app" },
+          }),
+          "unavailable",
+        );
+        denySource = true;
+        assertStringIncludes(await read(ownerLinkedFinding), "unavailable");
+      },
+      undefined,
+      (hook, input) =>
+        !(denySource && hook === "PRE_TOOL_CALL" &&
+          JSON.stringify(input).includes('"finding_report"')),
+    );
     readSelectedAgain = true;
     const readSelected = async () => {
       const agent = createSelectedAgent();
@@ -2886,6 +2924,9 @@ Deno.test("Sentinel plans from an exact published case finding and keeps its evi
     assert(sourcePolicy(0, true));
     assertEquals(await readSelected(), []);
     await withArchivedPlannerRead(directory, async (read) => {
+      assertStringIncludes(await read(ownerLinkedFinding), "unavailable");
+    });
+    await withArchivedPlannerRead(directory, async (read) => {
       const response = await read({
         ...selectedRef,
         action: "hint",
@@ -2924,6 +2965,7 @@ Deno.test("Sentinel plans from an exact published case finding and keeps its evi
         exactCoveragePage,
       );
       assertStringIncludes(await read(peerCoverageRead, true), "unavailable");
+      assertEquals(JSON.parse(await read(ownerLinkedFinding)), ownerFinding);
     });
     const resumed = resumeSentinelAssessment(
       selectedPath,
@@ -2968,6 +3010,7 @@ Deno.test("Sentinel plans from an exact published case finding and keeps its evi
       );
       assertEquals(reopened.result, selectedOriginal);
       assertStringIncludes(await read(peerCoverageRead), "unavailable");
+      assertStringIncludes(await read(ownerLinkedFinding), "unavailable");
     });
     await archiveAndRestoreDigestFixture(
       directory,
