@@ -33,6 +33,7 @@ import {
   readSentinelEmptyCreationDigest,
   readSentinelFallbackModelsForRevision,
   readSentinelFormalGoalApproval,
+  readSentinelInventoryCoverageForRevision,
   readSentinelLinkedSourcesForRevision,
   readSentinelLinkedStartModelRoute,
   readSentinelLinkedStartSeed,
@@ -78,6 +79,7 @@ export function createOperatorSentinelRuns(
     ref: OperatorRunRef,
   ): readonly SelectedModelProfile[] | undefined;
   startModelRoute(ref: OperatorRunRef): SentinelModelRoute | undefined;
+  inventoryCoverage(ref: OperatorRunRef): boolean | undefined;
   plannerHeartbeat(ref: OperatorRunRef): number | undefined;
   linkedCaseSources(
     ref: OperatorRunRef,
@@ -106,6 +108,7 @@ export function createOperatorSentinelRuns(
       modelProfile?: SelectedModelProfile;
       modelFallbackProfiles?: readonly SelectedModelProfile[];
       plannerHeartbeatSeconds?: number;
+      inventoryCoverageEnabled?: boolean;
       linkedCaseSources?: readonly SentinelLinkedCaseSource[];
     },
   ): OperatorRunSummary | undefined;
@@ -215,6 +218,10 @@ export function createOperatorSentinelRuns(
       details: {
         ...(plannerHeartbeatSeconds !== undefined &&
           { plannerHeartbeatSeconds }),
+        inventoryCoverageEnabled: readSentinelInventoryCoverageForRevision(
+          path,
+          publicRef.revision,
+        ) !== false,
         runId: state.plan?.runId ?? null,
         ...(linkedCaseSources && { linkedCaseSources }),
         adaptiveRevision: adaptive?.revision ?? null,
@@ -370,6 +377,12 @@ export function createOperatorSentinelRuns(
           policy.evidenceRevision === ref.revision &&
           policy.membership?.selector.kind === "organization"
         ? policy.membership.selector.organizationId
+        : undefined;
+    },
+    inventoryCoverage(ref) {
+      const path = pathFor(ref);
+      return path && ref.revision !== undefined
+        ? readSentinelInventoryCoverageForRevision(path, ref.revision)
         : undefined;
     },
     plannerHeartbeat(ref) {

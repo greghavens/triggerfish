@@ -119,6 +119,7 @@ export type AssessmentPlan =
     readonly modelRouteHistory?: readonly SentinelModelRouteEdit[];
     readonly modelRoleProfiles?: SentinelRoleModels;
     readonly plannerHeartbeatSeconds?: number;
+    readonly inventoryCoverageEnabled?: boolean;
     readonly linkedCaseSources?: readonly SentinelLinkedCaseSource[];
     readonly childDescription?: string;
     readonly formalGoals?: readonly SentinelFormalGoal[];
@@ -747,6 +748,7 @@ function saveAssessmentRunRevision(
     modelProfile,
     modelFallbackProfiles,
     plannerHeartbeatSeconds,
+    inventoryCoverageEnabled,
     linkedCaseSources,
     childDescription,
   }: Pick<
@@ -756,6 +758,7 @@ function saveAssessmentRunRevision(
     | "modelProfile"
     | "modelFallbackProfiles"
     | "plannerHeartbeatSeconds"
+    | "inventoryCoverageEnabled"
     | "linkedCaseSources"
     | "childDescription"
   >,
@@ -764,7 +767,7 @@ function saveAssessmentRunRevision(
   db.exec(`CREATE TABLE IF NOT EXISTS assessment_run_revisions (
     revision INTEGER PRIMARY KEY, runId TEXT NOT NULL, timeoutSeconds INTEGER,
     modelProfile TEXT, plannerHeartbeatSeconds INTEGER, linkedCaseSources TEXT,
-    childDescription TEXT, modelFallbackProfiles TEXT
+    childDescription TEXT, modelFallbackProfiles TEXT, inventoryCoverageEnabled INTEGER
   )`);
   const columns = db.prepare("PRAGMA table_info(assessment_run_revisions)")
     .all().map(({ name }) => name);
@@ -798,10 +801,15 @@ function saveAssessmentRunRevision(
       "ALTER TABLE assessment_run_revisions ADD COLUMN modelFallbackProfiles TEXT",
     );
   }
+  if (!columns.includes("inventoryCoverageEnabled")) {
+    db.exec(
+      "ALTER TABLE assessment_run_revisions ADD COLUMN inventoryCoverageEnabled INTEGER",
+    );
+  }
   db.prepare(
     `INSERT OR IGNORE INTO assessment_run_revisions
-      (revision, runId, timeoutSeconds, modelProfile, plannerHeartbeatSeconds, linkedCaseSources, childDescription, modelFallbackProfiles)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      (revision, runId, timeoutSeconds, modelProfile, plannerHeartbeatSeconds, linkedCaseSources, childDescription, modelFallbackProfiles, inventoryCoverageEnabled)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     revision,
     runId,
@@ -811,6 +819,9 @@ function saveAssessmentRunRevision(
     linkedCaseSources ? JSON.stringify(linkedCaseSources) : null,
     childDescription ?? null,
     modelFallbackProfiles ? JSON.stringify(modelFallbackProfiles) : null,
+    inventoryCoverageEnabled === undefined
+      ? null
+      : Number(inventoryCoverageEnabled),
   );
 }
 
@@ -1434,6 +1445,7 @@ export function startSentinelAssessment(
     modelProfile?: SelectedModelProfile;
     modelFallbackProfiles?: readonly SelectedModelProfile[];
     plannerHeartbeatSeconds?: number;
+    inventoryCoverageEnabled?: boolean;
     linkedCaseSources?: readonly SentinelLinkedCaseSource[];
   },
 ): StoredAssessment {
@@ -1490,6 +1502,14 @@ export function startSentinelAssessment(
     (!Number.isSafeInteger(timeoutSeconds) || timeoutSeconds < 1 ||
       timeoutSeconds > MAX_SENTINEL_RUN_TIMEOUT_SECONDS)
   ) throw new Error("Invalid Sentinel assessment timeout");
+  const inventoryCoverageEnabled = linkedStart?.inventoryCoverageEnabled ??
+    plan.inventoryCoverageEnabled;
+  if (
+    inventoryCoverageEnabled !== undefined &&
+    typeof inventoryCoverageEnabled !== "boolean"
+  ) {
+    throw new Error("Invalid Sentinel inventory coverage setting");
+  }
   const approval = linkedStart?.goalApproval;
   const formal = approval && formalGoalApprovalBinding(approval);
   if (
@@ -1551,6 +1571,8 @@ export function startSentinelAssessment(
               activeFormalGoalIds: formal.goals.map(({ id }) => id),
               completedFormalGoalIds: [],
             }),
+            ...(inventoryCoverageEnabled !== undefined &&
+              { inventoryCoverageEnabled }),
             ...(plannerHeartbeatSeconds !== undefined &&
               { plannerHeartbeatSeconds }),
             ...(timeoutSeconds !== undefined && {
@@ -2703,6 +2725,38 @@ export function readSentinelLinkedSourcesForRevision(
     const sources = parseSentinelLinkedCaseSources(raw);
     if (!sources) throw new Error("Invalid saved linked Sentinel case sources");
     return sources;
+  } finally {
+    db.close();
+  }
+}
+
+/** Reopen the optional inventory coverage policy for one evidence revision. */
+export function readSentinelInventoryCoverageForRevision(
+  path: string,
+  revision?: number,
+): boolean | undefined {
+  const db = openStore(path, false);
+  if (!db) return;
+  try {
+    const current = getRow(db);
+    if (current && (revision === undefined || current.revision === revision)) {
+      return (JSON.parse(current.plan) as AssessmentPlan)
+        .inventoryCoverageEnabled;
+    }
+    if (
+      revision === undefined ||
+      !hasTable(db, "assessment_run_revisions") ||
+      !db.prepare("PRAGMA table_info(assessment_run_revisions)").all()
+        .some(({ name }) => name === "inventoryCoverageEnabled")
+    ) return;
+    const value = db.prepare(
+      "SELECT inventoryCoverageEnabled FROM assessment_run_revisions WHERE revision = ?",
+    ).get(revision)?.inventoryCoverageEnabled;
+    if (value == null) return;
+    if (value !== 0 && value !== 1) {
+      throw new Error("Invalid saved Sentinel inventory coverage setting");
+    }
+    return value === 1;
   } finally {
     db.close();
   }

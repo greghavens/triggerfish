@@ -5,6 +5,7 @@ import {
   readSentinelAssessmentRevision,
   readSentinelDecisions,
   readSentinelFindingReviews,
+  readSentinelInventoryCoverageForRevision,
   sentinelFindingDispositions,
 } from "../sentinel/assessment_store.ts";
 import { readSentinelChatSnapshot } from "../sentinel/chat_mode.ts";
@@ -74,6 +75,31 @@ export const sentinelInventoryTool: ToolDefinition = {
     limit: { type: "integer", description: "Page size from 1 to 10" },
   },
 };
+
+export function sentinelInventoryToolForScope(
+  options: InventoryScope,
+): ToolDefinition {
+  if (
+    readSentinelInventoryCoverageForRevision(
+      options.snapshotPath,
+      options.assessmentRevision,
+    ) !== false
+  ) return sentinelInventoryTool;
+  const { coverageGap: _gap, asOf: _asOf, ...parameters } =
+    sentinelInventoryTool.parameters;
+  return {
+    ...sentinelInventoryTool,
+    description:
+      "Page through the selected case's assets or declared organizations. Leased workers can query only their assigned asset.",
+    parameters: {
+      ...parameters,
+      view: {
+        ...sentinelInventoryTool.parameters.view,
+        enum: ["assets", "organizations"],
+      },
+    },
+  };
+}
 
 const filters = [
   "assetId",
@@ -195,7 +221,10 @@ export function validateSavedAssignedCoverage(
   saved: string,
 ) {
   const selector = sentinelCheckpointInventoryArgs(args);
-  if (selector?.view !== "coverage") return false;
+  if (
+    selector?.view !== "coverage" ||
+    readSentinelInventoryCoverageForRevision(path, revision) === false
+  ) return false;
   const snapshot = readSentinelAssessmentRevision(path, revision)?.result
     .sharedGraph.snapshot;
   const caseId = locateSentinelCase(path)?.caseId;
@@ -323,8 +352,12 @@ export async function executeSentinelInventoryTool(
     ) {
       return "Error: This inventory query requires a directly assigned asset.";
     }
+    const query = queryOptions(args, assetId);
+    if (view === "coverage" && state?.plan.inventoryCoverageEnabled === false) {
+      return "Error: Inventory coverage is disabled for this Sentinel assessment.";
+    }
     const page = {
-      ...queryOptions(args, assetId),
+      ...query,
       allowedAssetIds,
       scopeBinding: JSON.stringify([
         path,

@@ -18,7 +18,11 @@ Deno.test("Authenticated Sentinel chat reads exact approved cross-case graph fin
   const secretLabel = "Exact authorized cross-case finding";
   const hiddenLabel = "Unregistered case finding";
   const inventoryLabel = "Approved asset in exact peer inventory";
-  async function setupCase(id: string, label: string) {
+  async function setupCase(
+    id: string,
+    label: string,
+    inventoryCoverageEnabled?: boolean,
+  ) {
     const path = resolveSentinelCasePath(baseDir, id);
     await Deno.mkdir(dirname(path), { recursive: true, mode: 0o700 });
     await Deno.writeTextFile(
@@ -40,11 +44,11 @@ Deno.test("Authenticated Sentinel chat reads exact approved cross-case graph fin
       }),
       { mode: 0o600 },
     );
-    const state = startSentinelAssessment(path);
+    const state = startSentinelAssessment(path, { inventoryCoverageEnabled });
     return { path, revision: state.revision, state };
   }
 
-  const main = await setupCase("main", "Selected case finding");
+  const main = await setupCase("main", "Selected case finding", false);
   const approved = await setupCase("approved", secretLabel);
   const hidden = await setupCase("unregistered", hiddenLabel);
   const membership = resolveSentinelCaseMembership(
@@ -80,6 +84,7 @@ Deno.test("Authenticated Sentinel chat reads exact approved cross-case graph fin
   let request: Record<string, unknown> | undefined;
   let result = "";
   let verifyWorkerBinding = false;
+  let localInventory = false;
   let rejectExecutorCeiling = false;
   let dispatched = 0;
   let reject: "PRE_TOOL_CALL" | "POST_TOOL_RESPONSE" | "PRE_OUTPUT" | undefined;
@@ -93,12 +98,25 @@ Deno.test("Authenticated Sentinel chat reads exact approved cross-case graph fin
       const definitions = tools as {
         function?: {
           name?: string;
-          parameters?: { properties?: { action?: { enum?: string[] } } };
+          parameters?: { properties?: Record<string, { enum?: string[] }> };
         };
       }[] | undefined;
       const definition = definitions?.find((tool) =>
         tool.function?.name === "operator_runs"
       );
+      if (verifyWorkerBinding || localInventory) {
+        const binding = definitions?.find((tool) =>
+          tool.function?.name === "sentinel_case_inventory"
+        );
+        assertEquals(binding?.function?.parameters?.properties?.view?.enum, [
+          "assets",
+          "organizations",
+        ]);
+        assertEquals(
+          binding?.function?.parameters?.properties?.coverageGap,
+          undefined,
+        );
+      }
       if (verifyWorkerBinding) {
         assertEquals(definition, undefined);
         verifyWorkerBinding = false;
@@ -108,7 +126,7 @@ Deno.test("Authenticated Sentinel chat reads exact approved cross-case graph fin
           toolCalls: [],
         });
       }
-      if (next) {
+      if (next && !localInventory) {
         assert(definition);
         assertEquals(
           definition.function?.parameters?.properties?.action?.enum,
@@ -130,7 +148,7 @@ Deno.test("Authenticated Sentinel chat reads exact approved cross-case graph fin
             "worker_trace_result",
           ],
         );
-      } else {
+      } else if (!next) {
         result = String(
           messages.findLast(({ role }) => role === "tool")?.content,
         );
@@ -142,7 +160,9 @@ Deno.test("Authenticated Sentinel chat reads exact approved cross-case graph fin
             type: "function",
             id: crypto.randomUUID(),
             function: {
-              name: "operator_runs",
+              name: localInventory
+                ? "sentinel_case_inventory"
+                : "operator_runs",
               arguments: JSON.stringify(next),
             },
           }]
@@ -383,6 +403,15 @@ Deno.test("Authenticated Sentinel chat reads exact approved cross-case graph fin
     );
     assert(worker.some((frame) => frame.includes("Worker bindings verified.")));
     assertEquals(dispatched, beforeMutation + 2);
+    localInventory = true;
+    await turn("Read optional local coverage", { view: "coverage" });
+    assertStringIncludes(result, "Inventory coverage is disabled");
+    await turn("Read the selected asset", {
+      view: "assets",
+      assetId: "asset-a",
+    });
+    assertStringIncludes(result, inventoryLabel);
+    localInventory = false;
     await turn("Read the exact peer model route.", {
       action: "model_route",
       ...exact,

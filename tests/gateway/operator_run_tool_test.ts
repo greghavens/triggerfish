@@ -4219,6 +4219,7 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
         targetId: emptyCase,
         initialGraph: "empty",
         childGoal: "Review evidence once it is published.",
+        inventoryCoverageEnabled: false,
         requestId: crypto.randomUUID(),
       };
       const beforeEmptyApproval = confirmations.length;
@@ -4254,6 +4255,15 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
       );
       approved = true;
       const emptyRun = JSON.parse((await turn(emptySpawn)).result);
+      assertEquals(emptyRun.run.details.inventoryCoverageEnabled, false);
+      assertEquals(
+        readSentinelAssessment(emptyPath)?.plan.inventoryCoverageEnabled,
+        false,
+      );
+      assertStringIncludes(
+        confirmations.at(-1) ?? "",
+        '"inventoryCoverageEnabled":false',
+      );
       assertEquals(emptyRun.run.ref, {
         kind: "sentinel",
         id: emptyCase,
@@ -4296,6 +4306,21 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
         await assertRejects(() => Deno.lstat(stage), Deno.errors.NotFound);
         assertEquals(retry.link, emptyRun.link);
         assertEquals(retry.run.details.runId, emptyRun.run.details.runId);
+        assertEquals(retry.run.details.inventoryCoverageEnabled, false);
+        const result = JSON.parse(
+          (await restartTurn({
+            ...emptyRun.run.ref,
+            action: "inventory",
+            view: "coverage",
+          })).result,
+        );
+        assertEquals(result.page.enabled, false);
+        assertEquals(result.page.assets, undefined);
+        assertStringIncludes(
+          (await restartTurn({ ...emptySpawn, inventoryCoverageEnabled: true }))
+            .result,
+          "unavailable",
+        );
         assertStringIncludes(
           (await restartTurn({ ...emptySpawn, initialGraph: undefined }))
             .result,

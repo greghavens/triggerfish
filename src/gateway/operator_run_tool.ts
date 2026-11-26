@@ -786,6 +786,11 @@ export const operatorRunTool: ToolDefinition = {
       description:
         "Up to four distinct {caseId, revision} source cases for the linked Sentinel child. Sources select only already-approved shared discoveries.",
     },
+    inventoryCoverageEnabled: {
+      type: "boolean",
+      description:
+        "When spawning a Sentinel assessment, enable optional inventory coverage (default true)",
+    },
     plannerHeartbeatSeconds: {
       type: "integer",
       description:
@@ -9186,6 +9191,7 @@ ${
           modelProfile: namedProfile,
           fallbackModelProfiles: namedFallbacks,
           plannerHeartbeatSeconds,
+          inventoryCoverageEnabled,
           sourceCases,
         } = args;
         const seedTask = parseSentinelLinkedSeedTask(rawSeedTask);
@@ -9215,6 +9221,7 @@ ${
               "modelProfile",
               "fallbackModelProfiles",
               "plannerHeartbeatSeconds",
+              "inventoryCoverageEnabled",
               "sourceCases",
             ].includes(key)
           ) ||
@@ -9236,6 +9243,9 @@ ${
           (childGoal !== undefined &&
             (targetKind !== "sentinel" || typeof childGoal !== "string" ||
               !childGoal.trim() || childGoal.length > 500)) ||
+          (inventoryCoverageEnabled !== undefined &&
+            (targetKind !== "sentinel" ||
+              typeof inventoryCoverageEnabled !== "boolean")) ||
           (plannerHeartbeatSeconds !== undefined &&
             (targetKind !== "sentinel" ||
               !validPlannerHeartbeatSeconds(plannerHeartbeatSeconds))) ||
@@ -9380,6 +9390,9 @@ ${
             modelFallbackProfiles,
             linkedCaseSources,
             plannerHeartbeatSeconds,
+            ...(inventoryCoverageEnabled === undefined
+              ? []
+              : [inventoryCoverageEnabled]),
           ])).digest("hex")
           : undefined;
         const readLinkedChild = async () => {
@@ -9434,6 +9447,8 @@ ${
               ) ||
               providers.sentinel.plannerHeartbeat(other) !==
                 plannerHeartbeatSeconds ||
+              providers.sentinel.inventoryCoverage(other) !==
+                inventoryCoverageEnabled ||
               !isDeepStrictEqual(
                 originalRoute?.primary,
                 modelProfile,
@@ -9491,6 +9506,8 @@ ${
                 ...(linkedCaseSources && { linkedCaseSources }),
                 ...(plannerHeartbeatSeconds !== undefined &&
                   { plannerHeartbeatSeconds }),
+                ...(inventoryCoverageEnabled !== undefined &&
+                  { inventoryCoverageEnabled }),
               })
             }`,
           )
@@ -9531,6 +9548,7 @@ ${
                 modelProfile,
                 modelFallbackProfiles,
                 plannerHeartbeatSeconds,
+                inventoryCoverageEnabled,
                 linkedCaseSources,
               });
             if (emptyCreationDigest) {

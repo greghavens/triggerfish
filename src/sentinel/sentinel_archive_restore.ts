@@ -348,6 +348,7 @@ function restoreAssessment(
       deadlineAt,
       modelProfile,
       plannerHeartbeatSeconds,
+      inventoryCoverageEnabled,
     } = object(
       JSON.parse(row.plan),
     );
@@ -367,6 +368,12 @@ function restoreAssessment(
       !parseSentinelLinkedCaseSources(linkedCaseSources)
     ) {
       throw new Error("Invalid archived linked Sentinel case sources");
+    }
+    if (
+      inventoryCoverageEnabled !== undefined &&
+      typeof inventoryCoverageEnabled !== "boolean"
+    ) {
+      throw new Error("Invalid archived Sentinel inventory coverage setting");
     }
     if (
       plannerHeartbeatSeconds !== undefined &&

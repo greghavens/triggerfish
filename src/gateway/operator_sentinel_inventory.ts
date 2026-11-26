@@ -8,6 +8,7 @@ import { sentinelAssetTypes } from "../sentinel/asset_hierarchy.ts";
 import {
   readSentinelAssessmentRevision,
   readSentinelFindingReviews,
+  readSentinelInventoryCoverageForRevision,
   readSentinelOperatingConstraintsForRevision,
 } from "../sentinel/assessment_store.ts";
 import { verifySentinelCaseMembership } from "../sentinel/case_membership.ts";
@@ -167,6 +168,9 @@ export function readOperatorSentinelInventory(
         view: "organizations" as const,
         ...querySentinelOrganizations(snapshot, options),
       };
+    }
+    if (readSentinelInventoryCoverageForRevision(path, revision) === false) {
+      return { ...scope, view: "coverage" as const, enabled: false as const };
     }
     const adaptive = readHistoricalAdaptiveSentinel(path, revision);
     const completed = new Set(

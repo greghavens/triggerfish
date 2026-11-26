@@ -411,12 +411,21 @@ export function createTidepoolSentinelHandler(
           return;
         }
         case "start": {
-          const goal = message.goal;
+          const { goal, inventoryCoverageEnabled } = message;
+          if (
+            inventoryCoverageEnabled !== undefined &&
+            typeof inventoryCoverageEnabled !== "boolean"
+          ) {
+            throw new Error(
+              "Choose whether optional inventory coverage is enabled.",
+            );
+          }
           if (goal !== undefined && typeof goal !== "string") {
             throw new Error("Enter a defensive assessment goal.");
           }
           const state = startSentinelAssessment(path, {
             goal: goal?.trim() || undefined,
+            inventoryCoverageEnabled,
           }, webContainment);
           advanceAdaptiveSentinel(path, state);
           break;

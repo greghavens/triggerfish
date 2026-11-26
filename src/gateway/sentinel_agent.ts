@@ -238,6 +238,7 @@ import {
 import {
   executeSentinelInventoryTool,
   sentinelInventoryTool,
+  sentinelInventoryToolForScope,
   validateSavedAssignedCoverage,
 } from "./sentinel_inventory_tool.ts";
 import {
@@ -3793,7 +3794,12 @@ function createAgent(
       },
     },
     tools: toolDefs,
-    filterTools: (tools) => tools.filter(({ name }) => toolNames.has(name)),
+    filterTools: (tools) =>
+      tools.filter(({ name }) => toolNames.has(name)).map((tool) =>
+        tool.name === sentinelInventoryTool.name
+          ? sentinelInventoryToolForScope(options)
+          : tool
+      ),
     maxIterations: canDelegate ? 8 : reporter ? 6 : 4,
     maxToolResponseChars: MAX_TOOL_CHARS,
     enableStreaming: false,
