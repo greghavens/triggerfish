@@ -356,6 +356,41 @@ Deno.test("Authenticated Tidepool hides revoked retained alert records and mixed
       "error",
     );
 
+    async function download(format: "alerts" | "incidents" | "inventory") {
+      const response = await request("export", { format });
+      assertEquals(response.type, "export");
+      assertEquals(response.revision, saved.revision);
+      assert(typeof response.content === "string");
+      assert(!response.content.includes('"private"'));
+      assert(!response.content.includes("private-auth"));
+      return JSON.parse(response.content);
+    }
+    const alertsExport = await download("alerts");
+    assertEquals(
+      alertsExport.alerts.map(({ asset }: { asset: string }) => asset),
+      [
+        "app",
+        "app",
+        "proxy",
+      ],
+    );
+    const incidentExport = await download("incidents");
+    assertEquals(incidentExport.scopeRestricted, true);
+    assertEquals(incidentExport.summary, {
+      candidates: 1,
+      correlatedAlerts: 2,
+    });
+    assertEquals(incidentExport.incidents.map(({ id }: { id: string }) => id), [
+      allowed.sourceId,
+    ]);
+    assert(!JSON.stringify(incidentExport).includes(mixed.sourceId));
+    const inventoryExport = await download("inventory");
+    assertEquals(inventoryExport.nodes.map(({ id }: { id: string }) => id), [
+      "app",
+      "proxy",
+    ]);
+    assertEquals(inventoryExport.edges, []);
+
     const scoped = await request("revision_alerts");
     assertEquals(
       (scoped.alerts as { asset: string }[]).map(({ asset }) => asset),

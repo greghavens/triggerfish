@@ -1753,11 +1753,18 @@ export function createTidepoolSentinelHandler(
             });
             return;
           }
+          const telemetryScope = retainedTelemetryScope(path, state.revision);
           if (format === "incidents") {
+            const allowed = tidepoolDecisionScope(path);
             const content = renderSavedSentinelIncidentJson(
               path,
               caseId,
               state.revision,
+              telemetryScope && {
+                ...telemetryScope,
+                allowReview: ({ incidentId, revision }) =>
+                  allowed("incident", incidentId, revision),
+              },
             );
             if (content === undefined) {
               throw new SentinelAssignmentError(
@@ -1799,15 +1806,26 @@ export function createTidepoolSentinelHandler(
               "Select a supported Markdown report language.",
             );
           }
-          const inventory = state.result?.sharedGraph.snapshot ?? null;
+          const savedInventory = state.result?.sharedGraph.snapshot ?? null;
+          const inventory =
+            format === "inventory" && savedInventory && telemetryScope
+              ? scopedSentinelInventoryGraph(
+                path,
+                state.revision,
+                loadSentinelGraph(savedInventory),
+              ).snapshot()
+              : savedInventory;
           if (format === "inventory" && !inventory) {
             throw new SentinelAssignmentError(
               "This revision has no evidence inventory to export.",
             );
           }
-          const alerts = format === "alerts"
+          const savedAlerts = format === "alerts"
             ? readSentinelAssessmentAlerts(path, state.revision)
             : undefined;
+          const alerts = telemetryScope
+            ? savedAlerts?.filter(telemetryScope.allowAlert)
+            : savedAlerts;
           if (format === "alerts" && !alerts) {
             throw new SentinelAssignmentError(
               "No full alert feed was saved for this evidence revision.",

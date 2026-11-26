@@ -3,6 +3,7 @@ import {
   readSentinelAssessmentAlerts,
   readSentinelAssessmentRevision,
   readSentinelIncidentReviews,
+  type SentinelIncidentReview,
 } from "./assessment_store.ts";
 import type { TelemetryAlert } from "./telemetry.ts";
 import { loadSentinelGraph } from "./graph.ts";
@@ -131,17 +132,28 @@ export function readSavedSentinelPlanningEvidence(
   };
 }
 
+interface SentinelIncidentReadScope {
+  allowAlert: (alert: TelemetryAlert) => boolean;
+  allowFinding: (id: string) => boolean;
+}
+
 export function renderSavedSentinelIncidentJson(
   path: string,
   caseId: string,
   revision: number,
+  scope?: SentinelIncidentReadScope & {
+    readonly allowReview: (review: SentinelIncidentReview) => boolean;
+  },
 ) {
   const report = readSavedIncidentCorrelation(path, revision);
   if (!report) return undefined;
+  const candidates = scope
+    ? report.candidates.filter(({ alerts }) => alerts.every(scope.allowAlert))
+    : report.candidates;
   const latest = new Map(
-    readSentinelIncidentReviews(path, revision).toReversed().map((
-      review,
-    ) => [review.incidentId, review]),
+    readSentinelIncidentReviews(path, revision)
+      .filter((review) => !scope || scope.allowReview(review))
+      .toReversed().map((review) => [review.incidentId, review]),
   );
   return JSON.stringify(
     {
@@ -149,14 +161,29 @@ export function renderSavedSentinelIncidentJson(
       caseId,
       revision,
       windowSeconds: report.windowSeconds,
-      summary: report.summary,
-      incidents: report.candidates.toSorted(compareSentinelIncidentPriority)
-        .map((candidate) => ({
-          ...summarizeSentinelIncident(candidate),
-          findingCount: candidate.findingIds.length,
-          evidenceCount: candidate.evidenceIds.length,
-          latestReview: latest.get(candidate.id) ?? null,
-        })),
+      ...(scope && { scopeRestricted: true }),
+      summary: scope
+        ? {
+          candidates: candidates.length,
+          correlatedAlerts: candidates.reduce(
+            (total, { alerts }) => total + alerts.length,
+            0,
+          ),
+        }
+        : report.summary,
+      incidents: candidates.toSorted(compareSentinelIncidentPriority)
+        .map((candidate) => {
+          const findingIds = scope
+            ? candidate.findingIds.filter(scope.allowFinding)
+            : candidate.findingIds;
+          const projected = scope ? { ...candidate, findingIds } : candidate;
+          return {
+            ...summarizeSentinelIncident(projected),
+            findingCount: findingIds.length,
+            evidenceCount: candidate.evidenceIds.length,
+            latestReview: latest.get(candidate.id) ?? null,
+          };
+        }),
     },
     null,
     2,
@@ -168,10 +195,7 @@ export function readSavedSentinelIncidentPage(
   path: string,
   revision: number,
   offset: number,
-  scope?: {
-    allowAlert: (alert: TelemetryAlert) => boolean;
-    allowFinding: (id: string) => boolean;
-  },
+  scope?: SentinelIncidentReadScope,
 ) {
   const report = readSavedIncidentCorrelation(path, revision);
   if (!report) return undefined;
