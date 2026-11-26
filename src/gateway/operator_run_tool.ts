@@ -103,6 +103,7 @@ import { readSentinelPlannerInventoryResult } from "../sentinel/inventory_querie
 import { readSentinelPlannerDigestResult } from "../sentinel/evidence_digests.ts";
 import {
   amendOperatorSentinelFindingReport,
+  readSentinelFindingReceiptScope,
   readSentinelFindingReportAttachmentReview,
   reopenSentinelPlannerFindings,
 } from "./sentinel_worker_findings.ts";
@@ -10939,8 +10940,7 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
           (includeReportEvidence !== undefined && (
             includeReportEvidence !== true || !readingReport ||
             !context?.authenticatedOwnerSessionId ||
-            !canFlowTo("INTERNAL", context.ceiling ?? "PUBLIC") ||
-            context.authorizeSentinelCaseRead?.(ref.id, ref.revision) === false
+            !canFlowTo("INTERNAL", context.ceiling ?? "PUBLIC")
           )) ||
           reportVersion !== undefined &&
             (typeof reportVersion !== "number" ||
@@ -10963,11 +10963,23 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
               ...(listingReport ? ["cursor", "limit"] : []),
             ].includes(key)
           ) ||
+          context?.authorizeSentinelCaseRead?.(ref.id, ref.revision) ===
+            false ||
           !await controller.inspect(ref)
         ) return unavailable;
         const path = resolveSentinelCasePath(options.baseDir, ref.id);
-        const runId = readSentinelRunIdForRevision(path, ref.revision);
-        if (!runId) return unavailable;
+        const revision = ref.revision;
+        const scope = readSentinelFindingReceiptScope(path, revision);
+        if (!scope) return unavailable;
+        const { runId } = scope;
+        const allows = (record: {
+          caseId: string;
+          runId: string;
+          evidenceRevision: number;
+          targetId: string;
+        }) =>
+          record.caseId === ref.id && record.runId === runId &&
+          record.evidenceRevision <= revision && scope.allows(record.targetId);
         if (!hasSentinelWorkerFindingJournal(path)) {
           return listing && cursor === undefined
             ? safeProjection({
@@ -10978,10 +10990,26 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
         }
         const journal = openSentinelWorkerFindingStore(path);
         try {
+          const originalFinding = (id: string) => {
+            const finding = journal.read(id);
+            return finding?.kind === "finding" && allows(finding)
+              ? finding
+              : undefined;
+          };
+          const allowsReceipt = (record: {
+            caseId: string;
+            runId: string;
+            evidenceRevision: number;
+            targetId: string;
+            findingId?: string;
+          }) =>
+            allows(record) &&
+            (record.findingId === undefined ||
+              originalFinding(record.findingId)?.targetId === record.targetId);
           if (listingReport) {
             if (
               !canFlowTo("INTERNAL", context?.ceiling ?? "INTERNAL") ||
-              !(receiptId as string).startsWith("worker-finding:")
+              !originalFinding(receiptId as string)
             ) return unavailable;
             const page = journal.listFindingReportVersions(
               {
@@ -10996,7 +11024,7 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
             return page ? safeProjection({ run: ref, page }) : unavailable;
           }
           if (readingReport) {
-            if (!(receiptId as string).startsWith("worker-finding:")) {
+            if (!originalFinding(receiptId as string)) {
               return unavailable;
             }
             const report = journal.readFindingReport(
@@ -11026,10 +11054,13 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
             );
             let remediation = checked.value;
             if (checked.sources?.length) {
-              const revalidateScope = () =>
-                readSentinelRunIdForRevision(path, ref.revision!) === runId &&
-                context?.authorizeSentinelCaseRead?.(ref.id, ref.revision!) !==
-                  false;
+              const revalidateScope = () => {
+                const current = readSentinelFindingReceiptScope(path, revision);
+                return current?.runId === runId &&
+                  current.allows(report.finding.targetId) &&
+                  context?.authorizeSentinelCaseRead?.(ref.id, revision) !==
+                    false;
+              };
               let approved = !!context;
               if (context) {
                 for (const source of checked.sources) {
@@ -11116,7 +11147,7 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
           }
           if (listing) {
             const matching = journal.list(ref.revision).filter(
-              (record) => record.caseId === ref.id && record.runId === runId,
+              allowsReceipt,
             );
             const cursorIndex = cursor === undefined
               ? -1
@@ -11149,23 +11180,14 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
             const record = journal.readInconclusive(receiptId as string);
             const snapshot = readSentinelAssessmentRevision(path, ref.revision)
               ?.result.sharedGraph.snapshot;
-            const constraints = readSentinelOperatingConstraints(
-              path,
-              runId,
-              ref.revision,
-            )?.constraints;
-            return record?.caseId === ref.id && record.runId === runId &&
-                record.evidenceRevision === ref.revision && snapshot &&
-                digestSentinelSnapshot(snapshot) === record.snapshotDigest &&
-                sentinelOperatingConstraintsAllow(constraints, {
-                  kind: "review_evidence",
-                  nodeId: record.targetId,
-                }, snapshot)
+            return record && allowsReceipt(record) &&
+                record.evidenceRevision === revision && snapshot &&
+                digestSentinelSnapshot(snapshot) === record.snapshotDigest
               ? safeProjection({ run: ref, record })
               : unavailable;
           }
           const record = journal.read(receiptId as string);
-          return record?.caseId === ref.id && record.runId === runId &&
+          return record && allowsReceipt(record) &&
               record.evidenceRevision === ref.revision
             ? safeProjection({ run: ref, record })
             : unavailable;

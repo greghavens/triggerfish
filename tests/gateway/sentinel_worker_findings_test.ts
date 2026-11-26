@@ -6905,6 +6905,33 @@ async function verifyInitialTrafficPublication(
   assertEquals(liveTidepoolLinks.toSorted(byId), attached.toSorted(byId));
   await restoreArchive();
   await readInitialClassification();
+  const listReceipts = {
+    kind: ref.kind,
+    id: ref.id,
+    revision: ref.revision,
+    action: "finding_receipts",
+  };
+  const readReceipt = { ...reportRef, action: "finding_receipt" };
+  const reportHistory = { ...reportRef, action: "finding_report_history" };
+  await withFindingAssignmentGateway(
+    baseDir,
+    () => Promise.resolve(false),
+    async (turn) => {
+      assertEquals(
+        JSON.parse(await turn(readReceipt)).record,
+        recovered.record,
+      );
+      assertEquals(
+        JSON.parse(await turn(reportHistory)).page.versions.at(-1)
+          .sourceReceiptId,
+        recovered.record.id,
+      );
+      assertEquals(
+        JSON.parse(await turn(listReceipts)).page.records[0].id,
+        recovered.record.id,
+      );
+    },
+  );
   const traceQuery = {
     action: "worker_trace_result",
     kind: ref.kind,
@@ -6949,6 +6976,26 @@ async function verifyInitialTrafficPublication(
     attached[0],
   );
   assertEquals(await readTidepoolLinks(), undefined);
+  await withFindingAssignmentGateway(
+    baseDir,
+    () => Promise.resolve(false),
+    async (turn) => {
+      for (
+        const request of [
+          readReceipt,
+          reportHistory,
+          { ...reportRef, action: "finding_report", reportVersion: 1 },
+          { ...listReceipts, cursor: recovered.record.id },
+        ]
+      ) {
+        assertStringIncludes(await turn(request), "unavailable");
+      }
+      assertEquals(JSON.parse(await turn(listReceipts)).page, {
+        records: [],
+        nextCursor: null,
+      });
+    },
+  );
 }
 
 async function verifyTidepoolTrafficDownload(

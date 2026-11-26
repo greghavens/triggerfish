@@ -3567,9 +3567,19 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
       assert(nextPeer);
       assertStringIncludes((await turn(trafficHint)).result, "unavailable");
 
+      for (
+        const blocked of [
+          receiptAction,
+          continuation,
+          { ...receiptAction, action: "finding_report" },
+          { ...receiptAction, action: "finding_report_history" },
+        ]
+      ) {
+        assertStringIncludes((await turn(blocked)).result, "unavailable");
+      }
       assertEquals(
-        JSON.parse((await turn(receiptAction)).result).record,
-        original,
+        JSON.parse((await turn(listReceipts)).result).page,
+        { records: [], nextCursor: null },
       );
       assertStringIncludes(
         (await turn({ ...receiptAction, revision: nextPeer.revision })).result,
@@ -3597,16 +3607,12 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
           observedAt: "2026-01-02T00:00:00.000Z",
           requestId: crypto.randomUUID(),
         });
-        assertEquals(
-          JSON.parse(
-            (await turn({
-              ...receiptAction,
-              revision: nextPeer.revision,
-              receiptId: recheck.id,
-            })).result,
-          ).record,
-          recheck,
-        );
+        const readRecheck = {
+          ...receiptAction,
+          revision: nextPeer.revision,
+          receiptId: recheck.id,
+        };
+        assertStringIncludes((await turn(readRecheck)).result, "unavailable");
         const amendReport = () =>
           rechecks.updateFindingReport({
             caseId: original.caseId,
@@ -3651,6 +3657,10 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
           })).result,
         );
         assertEquals(membershipWithTraffic.version, 2);
+        assertEquals(
+          JSON.parse((await turn(readRecheck)).result).record,
+          recheck,
+        );
         duringConfirmation = () => {
           edited.amendment = amendReport();
         };
@@ -3695,10 +3705,7 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
         assertEquals(prior.sourceReceiptId, original.id);
         assertEquals(prior.summary, original.summary);
         const archived = { ...reportAction, revision: peer.revision };
-        assertEquals(
-          JSON.parse((await turn(archived)).result).report.version,
-          1,
-        );
+        assertStringIncludes((await turn(archived)).result, "unavailable");
         assertStringIncludes(
           (await turn({ ...archived, reportVersion: 2 })).result,
           "unavailable",
