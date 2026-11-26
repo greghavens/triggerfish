@@ -73,10 +73,15 @@ import {
   parseSentinelAssessmentTemplateBinding,
   parseSentinelGoalSupersession,
   readSentinelAssessmentRevision,
+  readSentinelRunIdForRevision,
   SENTINEL_ASSESSMENT_TIMED_OUT,
   validSentinelChildDescription,
 } from "./assessment_store.ts";
 import { readNativeWorkflowCitation } from "./native_workflow_evidence.ts";
+import {
+  isWorkerNarrativeId,
+  readWorkerNarrativeReceipt,
+} from "./worker_narratives.ts";
 import { validateArchivedSourceSnapshots } from "./archive_source_snapshots.ts";
 import {
   digestSentinelSnapshot,
@@ -562,8 +567,151 @@ function restoreAssessment(
   });
 }
 
+function validateArchivedWorkerNarratives(
+  db: DatabaseSync,
+  assessment: string,
+  latestRevision: number,
+) {
+  const invalid = () =>
+    new Error("Invalid archived Sentinel worker observation");
+  const schema = db.prepare("PRAGMA table_xinfo(adaptive_worker_narratives)")
+    .all();
+  const columns: Record<string, string> = {
+    id: "TEXT",
+    revision: "TEXT",
+    taskId: "TEXT",
+    targetId: "TEXT",
+    evidenceRevision: "INTEGER",
+    stepIndex: "INTEGER",
+    receipt: "TEXT",
+  };
+  if (schema.some(({ name }) => name === "publicationStepIndex")) {
+    columns.publicationStepIndex = "INTEGER";
+  }
+  if (
+    schema.length !== Object.keys(columns).length ||
+    schema.some(({ name, type, pk, hidden }) =>
+      typeof name !== "string" || !Object.hasOwn(columns, name) ||
+      columns[name] !== type || hidden !== 0 || pk !== (name === "id" ? 1 : 0)
+    )
+  ) throw invalid();
+  const unique = db.prepare("PRAGMA index_list(adaptive_worker_narratives)")
+    .all().filter((index) => index.unique === 1 && index.origin !== "pk");
+  const key = unique.length === 1 && unique[0].origin === "u" &&
+      unique[0].partial === 0 && typeof unique[0].name === "string"
+    ? db.prepare("SELECT name FROM pragma_index_info(?) ORDER BY seqno")
+      .all(unique[0].name).map(({ name }) => name)
+    : undefined;
+  const legacyKey = ["revision", "taskId", "evidenceRevision"];
+  if (
+    !isDeepStrictEqual(key, legacyKey) &&
+    !isDeepStrictEqual(key, [...legacyKey, "stepIndex"])
+  ) throw invalid();
+
+  type Node = ReturnType<
+    ReturnType<typeof loadSentinelGraph>["snapshot"]
+  >["nodes"][number];
+  let exact: {
+    revision: number;
+    nodes: Map<string, Node>;
+    edges: Set<string>;
+    runId: string;
+  } | undefined;
+  const assignment = db.prepare(`
+    SELECT task.nodeId, mapping.goalId
+    FROM adaptive_tasks AS task
+    JOIN adaptive_evidence_revisions AS mapping ON mapping.revision = task.revision
+    WHERE task.id = ? AND task.revision = ? AND mapping.evidenceNumber = ?
+  `);
+  const rows = db.prepare(
+    "SELECT rowid AS position, * FROM adaptive_worker_narratives WHERE ? IS NULL OR rowid > ? ORDER BY rowid LIMIT 256",
+  );
+  let after: number | null = null;
+  for (;;) {
+    const page: ReturnType<typeof rows.all> = rows.all(after, after);
+    if (!page.length) return;
+    for (const row of page) {
+      if (
+        typeof row.position !== "number" || !Number.isSafeInteger(row.position)
+      ) throw invalid();
+      after = row.position;
+      const { id, revision, taskId, targetId, evidenceRevision, stepIndex } =
+        row;
+      if (
+        !isWorkerNarrativeId(id) ||
+        typeof revision !== "string" ||
+        !/^[A-Za-z\d._:-]{1,224}$/.test(revision) ||
+        typeof taskId !== "string" || !/^adaptive:[a-f0-9]{64}$/.test(taskId) ||
+        typeof targetId !== "string" || !targetId ||
+        typeof evidenceRevision !== "number" ||
+        !Number.isSafeInteger(evidenceRevision) ||
+        evidenceRevision < 1 || evidenceRevision > latestRevision ||
+        typeof stepIndex !== "number" || !Number.isSafeInteger(stepIndex) ||
+        stepIndex < 0 || stepIndex >= 16 || typeof row.receipt !== "string"
+      ) throw invalid();
+      let receipt;
+      try {
+        receipt = readWorkerNarrativeReceipt(JSON.parse(row.receipt));
+      } catch {
+        throw invalid();
+      }
+      if (
+        !receipt || JSON.stringify(receipt) !== row.receipt ||
+        id !== `worker-narrative:${
+            createHash("sha256").update(JSON.stringify([
+              revision,
+              taskId,
+              targetId,
+              evidenceRevision,
+              stepIndex,
+              receipt,
+            ])).digest("hex")
+          }`
+      ) throw invalid();
+      if (
+        row.publicationStepIndex != null &&
+        (typeof row.publicationStepIndex !== "number" ||
+          !Number.isSafeInteger(row.publicationStepIndex) ||
+          row.publicationStepIndex <= stepIndex ||
+          row.publicationStepIndex >= 16)
+      ) throw invalid();
+      if (exact?.revision !== evidenceRevision) {
+        const snapshot = readSentinelAssessmentRevision(
+          assessment,
+          evidenceRevision,
+        )
+          ?.result.sharedGraph.snapshot;
+        const runId = readSentinelRunIdForRevision(
+          assessment,
+          evidenceRevision,
+        );
+        if (!snapshot || !runId) throw invalid();
+        exact = {
+          revision: evidenceRevision,
+          runId,
+          nodes: new Map(snapshot.nodes.map((node) => [node.id, node])),
+          edges: new Set(
+            snapshot.edges.map(({ from, to }) => JSON.stringify([from, to])),
+          ),
+        };
+      }
+      const source = assignment.get(taskId, revision, evidenceRevision);
+      const record = exact.nodes.get(receipt.evidenceId);
+      if (
+        source?.goalId !== exact.runId || source.nodeId !== targetId ||
+        record?.kind !== "evidence" || record.executionSource ||
+        record.nativeWorkflowSource ||
+        exact.nodes.get(targetId)?.kind !== "asset" ||
+        (!exact.edges.has(JSON.stringify([targetId, record.id])) &&
+          !exact.edges.has(JSON.stringify([record.id, targetId])))
+      ) throw invalid();
+    }
+  }
+}
+
 function restoreAdaptive(
   path: string,
+  assessment: string,
   caseId: string,
   revision: number,
   runId: string,
@@ -609,6 +757,12 @@ function restoreAdaptive(
       throw new Error(
         "Sentinel archive adaptive state does not match the retained case run",
       );
+    }
+    if (tables.has("adaptive_worker_narratives")) {
+      if (!hasMapping) {
+        throw new Error("Invalid archived Sentinel worker revision");
+      }
+      validateArchivedWorkerNarratives(db, assessment, revision);
     }
     const predecessor = mapping && mapping.evidenceNumber !== revision
       ? mapping.revision
@@ -1374,7 +1528,9 @@ export async function restoreVerifiedSentinelCaseArchive(
     digestSentinelSnapshot(graph),
   );
   const revisions = sentinelArchiveLinkRevisions(assessment, runId, revision);
-  if (adaptive) restoreAdaptive(adaptive, caseId, revision, runId, revisions);
+  if (adaptive) {
+    restoreAdaptive(adaptive, assessment, caseId, revision, runId, revisions);
+  }
   validateNativeWorkflowCitations(
     adaptive,
     assessment,

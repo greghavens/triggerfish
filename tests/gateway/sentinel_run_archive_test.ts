@@ -553,6 +553,199 @@ Deno.test("A restored Sentinel case exposes terminal tool decisions without recr
   }
 });
 
+Deno.test("Sentinel archive verifies exact legacy and multi-step worker observations before restore", async () => {
+  const baseDir = await Deno.makeTempDir();
+  const caseId = "narrative-archive-proof";
+  const path = resolveSentinelCasePath(baseDir, caseId);
+  const journal = "sentinel-adaptive.db";
+  try {
+    await Deno.mkdir(dirname(path), { mode: 0o700, recursive: true });
+    await Deno.writeTextFile(
+      path,
+      JSON.stringify({
+        version: 1,
+        nodes: [
+          { id: "app", kind: "asset", label: "Application" },
+          { id: "other", kind: "asset", label: "Other application" },
+          { id: "check", kind: "evidence", label: "Saved check" },
+        ],
+        edges: [{ from: "check", to: "app", relation: "observed_on" }],
+      }),
+    );
+    const started = startSentinelAssessment(path);
+    const runId = started.plan.runId;
+    assert(runId);
+    advanceAdaptiveSentinel(path, started);
+    const revision = adaptiveRevision(started);
+    const store = openSentinelAdaptiveStore(join(dirname(path), journal));
+    let taskId: string;
+    try {
+      const reason = "Reviewed local trace for archive";
+      const assignment = store.sync(revision, [{
+        kind: "trace",
+        nodeId: "app",
+        depth: 4,
+        reason,
+      }], revision).find((task) => task.reason === reason);
+      assert(assignment);
+      taskId = assignment.id;
+    } finally {
+      store.close();
+    }
+    assert(stopSentinelAssessment(path));
+    const ref = {
+      kind: "sentinel",
+      id: caseId,
+      runId,
+      revision: started.revision,
+    };
+    const packages = [];
+    for (
+      const variant of [
+        "incomplete",
+        "invalid-digest",
+        "wrong-assignment",
+        "wrong-revision",
+        "legacy",
+        "multi-step",
+      ] as const
+    ) {
+      const archiveId = crypto.randomUUID();
+      const db = new DatabaseSync(join(dirname(path), journal));
+      const observations: Array<{
+        id: string;
+        taskId: string;
+        targetId: string;
+        evidenceRevision: number;
+        stepIndex: number;
+        receipt: {
+          summary: string;
+          confidence: string;
+          sourceSha256: string;
+          evidenceId: string;
+        };
+      }> = [];
+      try {
+        db.exec("DROP TABLE IF EXISTS adaptive_worker_narratives");
+        if (variant === "incomplete") {
+          db.exec(
+            "CREATE TABLE adaptive_worker_narratives (id TEXT PRIMARY KEY)",
+          );
+        } else {
+          db.exec(`CREATE TABLE adaptive_worker_narratives (
+            id TEXT PRIMARY KEY,
+            revision TEXT NOT NULL,
+            taskId TEXT NOT NULL REFERENCES adaptive_tasks(id),
+            targetId TEXT NOT NULL,
+            evidenceRevision INTEGER NOT NULL,
+            stepIndex INTEGER NOT NULL,
+            receipt TEXT NOT NULL,
+            UNIQUE (revision, taskId, evidenceRevision${
+            variant === "multi-step" ? ", stepIndex" : ""
+          })
+          )`);
+          for (const stepIndex of variant === "multi-step" ? [0, 3] : [0]) {
+            const targetId = variant === "wrong-assignment" ? "other" : "app";
+            const evidenceRevision = variant === "wrong-revision"
+              ? started.revision + 1
+              : started.revision;
+            const receipt = {
+              summary: `Verified fixture observation for step ${stepIndex}.`,
+              confidence: "observed",
+              sourceSha256: createHash("sha256").update(`source-${stepIndex}`)
+                .digest("hex"),
+              evidenceId: "check",
+            };
+            const digest = createHash("sha256").update(JSON.stringify([
+              revision,
+              taskId,
+              targetId,
+              evidenceRevision,
+              stepIndex,
+              receipt,
+            ])).digest("hex");
+            const id = `worker-narrative:${
+              variant === "invalid-digest" ? "f".repeat(64) : digest
+            }`;
+            db.prepare(
+              "INSERT INTO adaptive_worker_narratives VALUES (?, ?, ?, ?, ?, ?, ?)",
+            )
+              .run(
+                id,
+                revision,
+                taskId,
+                targetId,
+                evidenceRevision,
+                stepIndex,
+                JSON.stringify(receipt),
+              );
+            observations.push({
+              id,
+              taskId,
+              targetId,
+              evidenceRevision,
+              stepIndex,
+              receipt,
+            });
+          }
+        }
+      } finally {
+        db.close();
+      }
+      await withGateway(baseDir, async (turn) => {
+        const request = { ...ref, action: "archive", requestId: archiveId };
+        assertEquals(
+          JSON.parse(await turn(request)).receipt.status,
+          "succeeded",
+        );
+      });
+      packages.push({ variant, archiveId, observations });
+    }
+    await Deno.rename(dirname(path), join(baseDir, "original-case"));
+
+    for (const { variant, archiveId, observations } of packages) {
+      const intact = variant === "legacy" || variant === "multi-step";
+      await withGateway(baseDir, async (turn) => {
+        const restored = JSON.parse(
+          await turn({
+            ...ref,
+            action: "restore",
+            archiveId,
+            requestId: crypto.randomUUID(),
+          }),
+        );
+        assertEquals(
+          restored.receipt.status,
+          intact ? "succeeded" : "failed",
+          variant,
+        );
+        if (!intact) return;
+        for (const observation of observations) {
+          const result = JSON.parse(
+            await turn({
+              ...ref,
+              action: "node",
+              node: `observation:adaptive:${observation.id}`,
+            }),
+          );
+          assertEquals(result.page.node.workerNarrative, observation);
+        }
+      });
+      if (intact) {
+        assert(readSentinelAssessment(path)?.paused);
+        await Deno.rename(dirname(path), join(baseDir, `restored-${variant}`));
+      } else {
+        await assertRejects(
+          () => Deno.lstat(dirname(path)),
+          Deno.errors.NotFound,
+        );
+      }
+    }
+  } finally {
+    await Deno.remove(baseDir, { recursive: true });
+  }
+});
+
 Deno.test("authenticated Sentinel archive survives restart, restores paused, and preserves evidence and dependencies", async () => {
   const baseDir = await Deno.makeTempDir();
   const path = resolveSentinelCasePath(baseDir, "restorable");
