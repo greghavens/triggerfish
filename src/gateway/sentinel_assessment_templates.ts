@@ -99,25 +99,35 @@ export function readAssessmentTemplate(baseDir: string, selection: Selector) {
   }
 }
 
-/** Fence template edits against the synchronous exact linked-start transaction. */
-export function withCurrentAssessmentTemplate<T>(
+/** Fence template edits while the caller validates or admits the exact selection. */
+export function withAssessmentTemplateVersion<T>(
   baseDir: string,
   selection: Selector,
-  action: () => T,
+  action: (current: boolean) => T,
 ) {
   const db = open(baseDir);
   try {
     db.exec("BEGIN IMMEDIATE");
     try {
-      return latest(db, selection.id)?.version === selection.version
-        ? action()
-        : undefined;
+      return action(latest(db, selection.id)?.version === selection.version);
     } finally {
       db.exec("ROLLBACK");
     }
   } finally {
     db.close();
   }
+}
+
+export function withCurrentAssessmentTemplate<T>(
+  baseDir: string,
+  selection: Selector,
+  action: () => T,
+) {
+  return withAssessmentTemplateVersion(
+    baseDir,
+    selection,
+    (current) => current ? action() : undefined,
+  );
 }
 
 export async function executeAssessmentTemplates(

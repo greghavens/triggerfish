@@ -14,6 +14,7 @@ import {
 } from "../../src/core/types/session.ts";
 import { createChatSession } from "../../src/gateway/chat.ts";
 import { subscribeCommittedEvidence } from "../../src/core/evidence_task_progression.ts";
+import { executeAssessmentTemplates } from "../../src/gateway/sentinel_assessment_templates.ts";
 import { createOperatorRunToolExecutor } from "../../src/gateway/operator_run_tool.ts";
 import { createSentinelSubagent } from "../../src/gateway/sentinel_agent.ts";
 import { readSentinelGoalCompletion } from "../../src/gateway/sentinel_goal_completion.ts";
@@ -871,8 +872,10 @@ Deno.test("authenticated Sentinel chat drafts, approves and extends independentl
 async function withSentinelGoalSocket(
   path: string,
   check: (turn: (content: string) => Promise<string>) => Promise<void>,
+  configure?: (registry: ReturnType<typeof createProviderRegistry>) => void,
 ) {
   const registry = createProviderRegistry();
+  configure?.(registry);
   const token = crypto.randomUUID();
   const gateway = createGatewayServer({
     port: 0,
@@ -1122,5 +1125,130 @@ Deno.test("Sentinel formal goal proof accepts overflow criteria only after an au
       planner.stop();
       await Deno.remove(dir, { recursive: true });
     }
+  }
+});
+
+Deno.test("standalone Sentinel start binds the reviewed template version and exact goal criteria", async () => {
+  const directory = await Deno.makeTempDir();
+  const path = resolveSentinelCasePath(directory);
+  const templateId = crypto.randomUUID();
+  const objective = "Verify the published service configuration.";
+  const description = "Approved configuration review";
+  const templateRequest = {
+    action: "set_assessment_template",
+    templateId,
+    templateVersion: 0,
+    requestId: crypto.randomUUID(),
+    title: "Service review template",
+    childDescription: description,
+    childGoal: objective,
+  };
+  const selected = { id: templateId, version: 1 };
+  const criteria = [goal("configure", "future-configuration")];
+  const start = (changes: Record<string, unknown> = {}) =>
+    `assessment goals start ${
+      JSON.stringify({
+        requestId: "reviewed-template",
+        template: selected,
+        goals: criteria,
+        inventoryCoverageEnabled: false,
+        ...changes,
+      })
+    }`;
+
+  try {
+    await Deno.mkdir(dirname(path), { recursive: true });
+    await Deno.writeTextFile(
+      path,
+      JSON.stringify({ version: 1, nodes: [], edges: [] }),
+    );
+    assert(
+      await executeAssessmentTemplates(
+        directory,
+        templateRequest,
+        async () => true,
+        async () => true,
+      ),
+    );
+    let approved: Record<string, unknown> | undefined;
+    await withSentinelGoalSocket(path, async (turn) => {
+      const draft = JSON.parse(
+        await turn(
+          `assessment goals propose ${JSON.stringify({ template: selected })}`,
+        ),
+      );
+      assertEquals(draft.goals, criteria);
+      assertEquals(draft.template.objective, objective);
+      assertEquals(draft.template.description, description);
+      await assertRejects(
+        () => turn(start({ objective })),
+        Error,
+        "instead of objective or description",
+      );
+      assertEquals(readSentinelAssessment(path), undefined);
+      approved = JSON.parse(await turn(start()));
+      assertEquals(approved?.duplicate, false);
+      assertEquals(approved?.formalGoals, criteria);
+      const state = readSentinelAssessment(path);
+      assertEquals(state?.plan.goal, objective);
+      assertEquals(state?.plan.childDescription, description);
+      assertEquals(
+        state?.plan.assessmentTemplate,
+        approved?.assessmentTemplate,
+      );
+      assertEquals(state?.plan.inventoryCoverageEnabled, false);
+    }, (registry) => {
+      registry.register({
+        name: "template-goal-draft",
+        supportsStreaming: false,
+        complete(messages) {
+          const prompt = JSON.stringify(messages);
+          assertMatch(prompt, /Verify the published service configuration\./);
+          assertMatch(prompt, /Approved configuration review/);
+          return Promise.resolve({
+            content: JSON.stringify({ goals: criteria }),
+            toolCalls: [],
+            usage: { inputTokens: 1, outputTokens: 1 },
+          });
+        },
+      });
+      registry.setDefault("template-goal-draft");
+    });
+    assert(
+      await executeAssessmentTemplates(
+        directory,
+        {
+          ...templateRequest,
+          requestId: crypto.randomUUID(),
+          templateVersion: 1,
+          childGoal: "Review configuration drift.",
+        },
+        async () => true,
+        async () => true,
+      ),
+    );
+    await withSentinelGoalSocket(path, async (turn) => {
+      const replay = JSON.parse(await turn(start()));
+      assertEquals(replay.duplicate, true);
+      assertEquals(replay.appliedRevision, approved?.appliedRevision);
+      assertEquals(replay.assessmentTemplate, approved?.assessmentTemplate);
+      const readback = JSON.parse(await turn("assessment goals status"));
+      assertEquals(readback.assessmentTemplate, approved?.assessmentTemplate);
+      await assertRejects(
+        () => turn(start({ template: { id: templateId, version: 2 } })),
+        Error,
+        "already used",
+      );
+      await assertRejects(
+        () => turn(start({ requestId: "fresh-stale-template" })),
+        Error,
+        "no longer current",
+      );
+      const unchanged = readSentinelAssessment(path);
+      assertEquals(unchanged?.revision, approved?.appliedRevision);
+      assertEquals(unchanged?.plan.goal, objective);
+    });
+  } finally {
+    await Deno.remove(directory, { recursive: true });
   }
 });

@@ -1,4 +1,11 @@
 /** Operator-reviewed goal decomposition and formal amendments in Sentinel chat. */
+import { createHash } from "node:crypto";
+import { locateSentinelCase } from "../sentinel/cases.ts";
+import {
+  parseAssessmentTemplateSelector,
+  readAssessmentTemplate,
+  withAssessmentTemplateVersion,
+} from "./sentinel_assessment_templates.ts";
 import { readSentinelChatSnapshot } from "../sentinel/chat_mode.ts";
 import { loadSentinelGraph } from "../sentinel/graph.ts";
 import {
@@ -41,6 +48,25 @@ function parseObject(text: string): Record<string, unknown> {
     throw new Error("Expected a JSON goal request.");
   }
   return parsed as Record<string, unknown>;
+}
+
+function templateInput(path: string, input: Record<string, unknown>) {
+  if (input.template === undefined) return;
+  const selection = parseAssessmentTemplateSelector(input.template);
+  const location = locateSentinelCase(path);
+  if (
+    !selection || !location || input.objective !== undefined ||
+    input.description !== undefined
+  ) {
+    throw new Error(
+      "Select an exact assessment template instead of objective or description.",
+    );
+  }
+  const template = readAssessmentTemplate(location.baseDir, selection);
+  if (!template) {
+    throw new Error("The assessment template version is unavailable");
+  }
+  return { selection, template, baseDir: location.baseDir };
 }
 
 async function proposeGoals(
@@ -142,6 +168,9 @@ export async function handleSentinelFormalGoalChat(
         {
           inventoryCoverageEnabled:
             state.plan.inventoryCoverageEnabled !== false,
+          ...(state.plan.assessmentTemplate && {
+            assessmentTemplate: state.plan.assessmentTemplate,
+          }),
         }),
       paused: state?.paused ?? false,
       completion: readSentinelGoalCompletion(path) ?? null,
@@ -174,7 +203,28 @@ export async function handleSentinelFormalGoalChat(
         objective,
         description: context.join("\n").trim() || undefined,
       };
-    return await proposeGoals(path, input, createAgent?.(), signal);
+    const selected = templateInput(path, input);
+    if (!selected) {
+      return await proposeGoals(path, input, createAgent?.(), signal);
+    }
+    const { template, selection, baseDir } = selected;
+    if (
+      !withAssessmentTemplateVersion(baseDir, selection, (current) => current)
+    ) {
+      throw new Error("This assessment template version is no longer current");
+    }
+    const draft = JSON.parse(
+      await proposeGoals(
+        path,
+        {
+          objective: template.objective,
+          description: template.description,
+        },
+        createAgent?.(),
+        signal,
+      ),
+    );
+    return JSON.stringify({ ...draft, template });
   }
 
   const input = parseObject(parsed[2]);
@@ -196,10 +246,23 @@ export async function handleSentinelFormalGoalChat(
       "Choose whether inventory coverage is enabled when starting an assessment.",
     );
   }
+  const selected = templateInput(path, input);
+  if (selected && mode !== "start") {
+    throw new Error("Assessment templates require a new assessment");
+  }
   const plan = mode === "start"
     ? {
-      goal: operatorText(input.objective, 500, "an objective"),
+      goal: selected?.template.objective ??
+        operatorText(input.objective, 500, "an objective"),
       inventoryCoverageEnabled,
+      ...(selected && {
+        childDescription: selected.template.description,
+        assessmentTemplate: {
+          ...selected.selection,
+          digest: createHash("sha256").update(JSON.stringify(selected.template))
+            .digest("hex"),
+        },
+      }),
     }
     : undefined;
   if (signal.aborted) throw new Error("Goal approval was cancelled.");
@@ -214,7 +277,7 @@ export async function handleSentinelFormalGoalChat(
   const initialConstraints = input.initialConstraints === undefined
     ? undefined
     : normalizeSentinelOperatingConstraints(input.initialConstraints);
-  const applied = applySentinelFormalGoals(path, {
+  const approval = {
     mode,
     requestId,
     proposalDigest: digestSentinelGoalProposal(goals),
@@ -223,7 +286,20 @@ export async function handleSentinelFormalGoalChat(
     ...(initialConstraints && { initialConstraints }),
     expectedRevision: input.expectedRevision,
     expectedRunId: input.expectedRunId,
-  }, webContainmentConfigured);
+  } as const;
+  const applied = selected
+    ? withAssessmentTemplateVersion(
+      selected.baseDir,
+      selected.selection,
+      (current) =>
+        applySentinelFormalGoals(
+          path,
+          approval,
+          webContainmentConfigured,
+          !current,
+        ),
+    )
+    : applySentinelFormalGoals(path, approval, webContainmentConfigured);
   if (!applied.duplicate) {
     ensureSentinelFormalGoalContract(path, applied.state);
     advanceAdaptiveSentinel(path, applied.state);
@@ -235,6 +311,9 @@ export async function handleSentinelFormalGoalChat(
     paused: applied.state.paused,
     ...(mode === "start" && {
       inventoryCoverageEnabled: inventoryCoverageEnabled !== false,
+      ...(plan?.assessmentTemplate && {
+        assessmentTemplate: plan.assessmentTemplate,
+      }),
     }),
     formalGoals: applied.state.plan.formalGoals,
     activeFormalGoalIds: applied.state.plan.activeFormalGoalIds,

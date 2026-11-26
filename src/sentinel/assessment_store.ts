@@ -126,11 +126,36 @@ export type AssessmentPlan =
     readonly inventoryCoverageEnabled?: boolean;
     readonly linkedCaseSources?: readonly SentinelLinkedCaseSource[];
     readonly childDescription?: string;
+    readonly assessmentTemplate?: SentinelAssessmentTemplateBinding;
     readonly formalGoals?: readonly SentinelFormalGoal[];
     readonly activeFormalGoalIds?: readonly string[];
     readonly completedFormalGoalIds?: readonly string[];
     readonly withdrawnFormalGoalIds?: readonly string[];
   };
+
+interface SentinelAssessmentTemplateBinding {
+  readonly id: string;
+  readonly version: number;
+  readonly digest: string;
+}
+
+export function parseSentinelAssessmentTemplateBinding(
+  raw: unknown,
+): SentinelAssessmentTemplateBinding | undefined {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return;
+  const { id, version, digest } = raw as Partial<
+    SentinelAssessmentTemplateBinding
+  >;
+  if (
+    typeof id !== "string" ||
+    !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(id) ||
+    typeof version !== "number" || !Number.isSafeInteger(version) ||
+    version < 1 ||
+    typeof digest !== "string" || !/^[a-f0-9]{64}$/.test(digest) ||
+    Object.keys(raw).length !== 3
+  ) return;
+  return { id, version, digest };
+}
 
 type FormalGoalPlan = Pick<
   AssessmentPlan,
@@ -140,6 +165,8 @@ type FormalGoalPlan = Pick<
   | "evidenceNode"
   | "depth"
   | "inventoryCoverageEnabled"
+  | "childDescription"
+  | "assessmentTemplate"
 >;
 
 export interface SentinelFormalGoalApproval {
@@ -1768,6 +1795,8 @@ function normalizeFormalGoalPlan(
         "evidenceNode",
         "depth",
         "inventoryCoverageEnabled",
+        "childDescription",
+        "assessmentTemplate",
       ].includes(key)
     )
   ) {
@@ -1780,7 +1809,17 @@ function normalizeFormalGoalPlan(
     evidenceNode,
     depth,
     inventoryCoverageEnabled,
+    childDescription,
+    assessmentTemplate: rawTemplate,
   } = raw;
+  const assessmentTemplate = parseSentinelAssessmentTemplateBinding(
+    rawTemplate,
+  );
+  if (
+    (rawTemplate === undefined) !== (childDescription === undefined) ||
+    (rawTemplate !== undefined &&
+      (!assessmentTemplate || !validSentinelChildDescription(childDescription)))
+  ) throw new Error("Invalid approved Sentinel assessment template");
   if (
     inventoryCoverageEnabled !== undefined &&
     typeof inventoryCoverageEnabled !== "boolean"
@@ -1812,6 +1851,7 @@ function normalizeFormalGoalPlan(
     evidenceNode,
     depth,
     inventoryCoverageEnabled,
+    ...(assessmentTemplate && { assessmentTemplate, childDescription }),
   };
 }
 
@@ -2014,6 +2054,9 @@ function formalGoalApprovalBinding(approval: SentinelFormalGoalApproval) {
   if (mode !== "start" && patch.inventoryCoverageEnabled !== undefined) {
     throw new Error("Inventory coverage settings require a new assessment");
   }
+  if (mode !== "start" && patch.assessmentTemplate) {
+    throw new Error("Assessment templates require a new assessment");
+  }
   const planChanges = JSON.parse(JSON.stringify(patch)) as FormalGoalPlan;
   const binding = createHash("sha256").update(JSON.stringify([
     mode,
@@ -2190,6 +2233,7 @@ export function applySentinelFormalGoals(
   path: string,
   approval: SentinelFormalGoalApproval,
   webContainmentConfigured?: boolean,
+  replayOnly = false,
 ): {
   readonly state: StoredAssessment;
   readonly appliedRevision: number;
@@ -2212,6 +2256,11 @@ export function applySentinelFormalGoals(
           throw new Error("The approved Sentinel assessment is unavailable");
         }
         return { state: readState(db, row), ...prior };
+      }
+      if (replayOnly) {
+        throw new Error(
+          "This assessment template version is no longer current",
+        );
       }
       const previousPlan = row ? JSON.parse(row.plan) as AssessmentPlan : {};
       if (

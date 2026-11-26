@@ -57,6 +57,7 @@ import { loadSentinelGraph } from "./graph.ts";
 import { openSentinelAdaptiveStore } from "./adaptive_store.ts";
 import {
   MAX_SENTINEL_RUN_TIMEOUT_SECONDS,
+  parseSentinelAssessmentTemplateBinding,
   readSentinelAssessmentRevision,
   SENTINEL_ASSESSMENT_TIMED_OUT,
   validSentinelChildDescription,
@@ -355,6 +356,7 @@ function restoreAssessment(
     }
     const {
       childDescription,
+      assessmentTemplate,
       timeoutSeconds,
       deadlineAt,
       modelProfile,
@@ -370,6 +372,11 @@ function restoreAssessment(
       childDescription !== undefined &&
       !validSentinelChildDescription(childDescription)
     ) throw new Error("Invalid archived linked Sentinel description");
+    if (
+      assessmentTemplate !== undefined &&
+      (!parseSentinelAssessmentTemplateBinding(assessmentTemplate) ||
+        childDescription === undefined)
+    ) throw new Error("Invalid archived Sentinel assessment template binding");
     const {
       linkedCaseSources,
       modelFallbackProfiles,
