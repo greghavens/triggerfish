@@ -3210,6 +3210,11 @@ Deno.test("Planner input and commit honor mid-flight source asset revocation", a
     "allowed",
     ...Array.from({ length: 4 }, (_, i) => `denied-${i}`),
   ];
+  const extraAssets = Array.from(
+    { length: 34 },
+    (_, i) => `extra-approved-${i}`,
+  );
+  const permittedAssets = ["allowed", ...extraAssets].sort();
   const allowedMarker = "Approved evidence from the allowed asset.";
   const privateMarker = "Evidence outside the later approved asset scope.";
   const firstInput = Promise.withResolvers<string>();
@@ -3226,20 +3231,16 @@ Deno.test("Planner input and commit honor mid-flight source asset revocation", a
     supportsStreaming: false,
     async complete(messages) {
       const lastTool = messages.findLast(({ role }) => role === "tool");
-      if (lastTool) {
-        assertStringIncludes(String(lastTool.content), allowedMarker);
-        return completion(JSON.stringify([{
-          kind: "trace",
-          nodeId: "allowed",
-          depth: 2,
-          sourceTaskId: allowedTaskId,
-          sourceKind: "worker_result",
-        }]));
-      }
       const prompt = String(
-        messages.findLast(({ role }) => role === "user")?.content,
+        messages.find(({ role }) => role === "user")?.content,
       );
       if (!narrower) {
+        if (!lastTool) {
+          return completion("", "sentinel_worker_observation", {
+            task: deniedTaskId,
+          });
+        }
+        assertStringIncludes(String(lastTool.content), privateMarker);
         firstInput.resolve(prompt);
         await held.promise;
         return completion(JSON.stringify([{
@@ -3247,6 +3248,16 @@ Deno.test("Planner input and commit honor mid-flight source asset revocation", a
           nodeId: "allowed",
           depth: 1,
           sourceTaskId: deniedTaskId,
+          sourceKind: "worker_result",
+        }]));
+      }
+      if (lastTool) {
+        assertStringIncludes(String(lastTool.content), allowedMarker);
+        return completion(JSON.stringify([{
+          kind: "trace",
+          nodeId: "allowed",
+          depth: 2,
+          sourceTaskId: allowedTaskId,
           sourceKind: "worker_result",
         }]));
       }
@@ -3286,7 +3297,11 @@ Deno.test("Planner input and commit honor mid-flight source asset revocation", a
       path,
       JSON.stringify({
         version: 1,
-        nodes: assets.map((id) => ({ id, kind: "asset", label: id })),
+        nodes: [...assets, ...extraAssets].map((id) => ({
+          id,
+          kind: "asset",
+          label: id,
+        })),
         edges: [],
       }),
       { mode: 0o600 },
@@ -3338,7 +3353,7 @@ Deno.test("Planner input and commit honor mid-flight source asset revocation", a
       firstInput.promise,
       new Promise<string>((resolve) => setTimeout(() => resolve(""), 2000)),
     ]);
-    assertStringIncludes(initial, privateMarker);
+    assertStringIncludes(initial, deniedTaskId);
     await withArchivedPlannerRead(directory, async (read) => {
       const narrowed = JSON.parse(
         await read({
@@ -3350,10 +3365,13 @@ Deno.test("Planner input and commit honor mid-flight source asset revocation", a
           expectedVersion: 0,
           requestId: crypto.randomUUID(),
           deniedKinds: [],
-          allowedAssetIds: ["allowed"],
+          allowedAssetIds: permittedAssets,
         }),
       );
-      assertEquals(narrowed.record.constraints.allowedAssetIds, ["allowed"]);
+      assertEquals(
+        narrowed.record.constraints.allowedAssetIds,
+        permittedAssets,
+      );
     });
     narrower = true;
     held.resolve();
@@ -3375,11 +3393,17 @@ Deno.test("Planner input and commit honor mid-flight source asset revocation", a
     ]);
     const input = JSON.parse(prompt.slice(prompt.lastIndexOf("\n") + 1));
     assert(!prompt.includes(privateMarker));
+    assert(input.inventory.length > 0);
+    assert(
+      input.inventory.every(({ id }: { id: string }) =>
+        permittedAssets.includes(id)
+      ),
+    );
+    assert(input.coldDigests?.length);
     assertEquals(
       input.workerObservations.map(({ taskId }: { taskId: string }) => taskId),
       [allowedTaskId],
     );
-    assertStringIncludes(prompt, allowedMarker);
     const digests = openSentinelEvidenceDigests(directory);
     try {
       for (const { id } of input.coldHistoryDigests ?? []) {
@@ -3398,6 +3422,25 @@ Deno.test("Planner input and commit honor mid-flight source asset revocation", a
     } finally {
       digests.close();
     }
+
+    await withArchivedPlannerRead(directory, async (read) => {
+      const retained = JSON.parse(
+        await read({
+          action: "expand_digest",
+          kind: "sentinel",
+          id: caseId,
+          revision: state.revision,
+          digestId: input.coldDigests[0].id,
+          limit: 10,
+        }),
+      ).page;
+      assert(retained.members.length > 0);
+      assert(
+        retained.members.every(({ id }: { id: string }) =>
+          permittedAssets.includes(id.slice("asset:".length))
+        ),
+      );
+    });
 
     const followup = () =>
       readAdaptiveSentinel(path, state)?.tasks.find(({ kind, depth, nodeId }) =>
@@ -3478,6 +3521,11 @@ Deno.test("Retained digest pages reauthorize every assignment before and after a
       const scope = { caseId, runId, evidenceRevision: state.revision };
       ids = [
         [publicMember],
+        [publicMember, {
+          id: "asset:restricted",
+          kind: "asset" as const,
+          label: "Restricted inventory asset",
+        }],
         ...[
           ["task:adaptive:", "task"],
           ["observation:adaptive:", "observation"],

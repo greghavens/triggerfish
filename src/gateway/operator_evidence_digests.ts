@@ -74,12 +74,29 @@ export function allowSentinelDigestObservations(
       ? [reference]
       : [];
   });
-  if (!observations.length) return true;
+  const constraints = readSentinelOperatingConstraints(path, runId)
+    ?.constraints;
+  const inventory = constraints && members.flatMap(({ id }) => {
+    const match = /^(asset|control|evidence|finding):(.+)$/.exec(id);
+    return match ? [{ kind: match[1], id: match[2] }] : [];
+  });
+  if (!observations.length && !inventory?.length) return true;
   const snapshot = readSentinelAssessmentRevision(path, revision)?.result
     .sharedGraph.snapshot;
   if (!snapshot) return false;
-  const constraints = readSentinelOperatingConstraints(path, runId)
-    ?.constraints;
+  if (inventory?.length) {
+    const kinds = new Map(snapshot.nodes.map(({ id, kind }) => [id, kind]));
+    if (
+      inventory.some(({ kind, id }) =>
+        kinds.get(id) !== kind ||
+        !sentinelOperatingConstraintsAllow(constraints, {
+          kind: "review_evidence",
+          nodeId: id,
+        }, snapshot)
+      )
+    ) return false;
+  }
+  if (!observations.length) return true;
   const caseId = locateSentinelCase(path)?.caseId;
   if (!caseId) return false;
   const allowsTarget = (nodeId: string) =>

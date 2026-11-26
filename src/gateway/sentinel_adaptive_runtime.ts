@@ -6676,17 +6676,20 @@ export function createSentinelModelPlanner(
         }).upstreamChecks.flatMap(({ id, records }) =>
           records.length ? [{ id, count: records.length }] : []
         );
-        const inventory = snapshot.nodes.filter(({ id }) => id.length <= 100)
+        const visibleInventory = snapshot.nodes.filter(({ id }) =>
+          sentinelOperatingConstraintsAllow(
+            constraints?.constraints,
+            { kind: "review_evidence", nodeId: id },
+            snapshot,
+          )
+        );
+        const inventory = visibleInventory.filter(({ id }) => id.length <= 100)
           .slice(0, 30).map((node) => ({
             id: node.id,
             kind: node.kind,
             ...(node.kind === "evidence" &&
               (node.executionSource || node.nativeWorkflowSource) &&
-              sentinelOperatingConstraintsAllow(
-                constraints?.constraints,
-                { kind: "review_evidence", nodeId: node.id },
-                snapshot,
-              ) && { executionReceipt: true }),
+              { executionReceipt: true }),
           }));
         const location = locateSentinelCase(snapshotPath);
         const runId = state.plan.runId;
@@ -6700,7 +6703,7 @@ export function createSentinelModelPlanner(
                   runId,
                   evidenceRevision: state.revision,
                 },
-                snapshot.nodes,
+                visibleInventory,
                 new Set(inventory.map(({ id }) => id)),
               );
             } catch {
