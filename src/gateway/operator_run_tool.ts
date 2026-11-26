@@ -2839,7 +2839,8 @@ export function createOperatorRunToolExecutor(options: {
         journal.close();
       }
     }
-    if (backgroundRole && action === "list") {
+    const listingTeam = args.kind === "team_delivery" && action === "list";
+    if ((backgroundRole || listingTeam) && action === "list") {
       const { limit = 15, cursor } = args;
       if (
         Object.keys(args).some((key) =>
@@ -2848,6 +2849,7 @@ export function createOperatorRunToolExecutor(options: {
         typeof limit !== "number" || !Number.isSafeInteger(limit) ||
         limit < 1 || limit > 15 ||
         (cursor !== undefined && typeof cursor !== "string") ||
+        (listingTeam && !backgroundOwner) ||
         !canFlowTo("INTERNAL", context?.ceiling ?? "INTERNAL")
       ) return unavailable;
       try {
@@ -2856,22 +2858,42 @@ export function createOperatorRunToolExecutor(options: {
         );
         try {
           const page = journal.listRuns({
-            role: backgroundRole,
+            role: listingTeam ? "delegated" : backgroundRole,
             ceiling: "INTERNAL",
             limit,
             cursor,
             backgroundOwner,
+            teamDeliveries: listingTeam,
           });
-          return page
-            ? safeProjection({
-              runs: page.runs.map((run) =>
-                projectBackgroundRun(
-                  backgroundRunSummary(run, inspectBackgroundRecovery(run)),
-                )
-              ),
-              nextCursor: page.nextCursor,
-            })
-            : unavailable;
+          if (!page) return unavailable;
+          const runs = [];
+          for (const run of page.runs) {
+            const summary = projectBackgroundRun(
+              backgroundRunSummary(run, inspectBackgroundRecovery(run)),
+            );
+            if (!listingTeam) {
+              runs.push(summary);
+              continue;
+            }
+            const source = parseTeamDeliveryTraceSource(run.scope.sourceId);
+            if (!source) continue;
+            const selector = [
+              source.teamId,
+              run.scope.sessionId,
+              source.delivery,
+            ];
+            if (
+              !await exactTeamTraceAdmission(run, backgroundOwner, selector)
+                ?.read()
+            ) {
+              continue;
+            }
+            runs.push({
+              ...summary,
+              ref: { kind: "team_delivery", id: selector.join(":") },
+            });
+          }
+          return safeProjection({ runs, nextCursor: page.nextCursor });
         } finally {
           journal.close();
         }

@@ -22,7 +22,10 @@ import {
   restoreOperatorRunLinks,
   withOperatorRunLinks,
 } from "./operator_runs.ts";
-import { executionTraceSourceVisible } from "./team_delivery_trace_source.ts";
+import {
+  executionTraceSourceVisible,
+  parseTeamDeliveryTraceSource,
+} from "./team_delivery_trace_source.ts";
 import { redactCredentialText } from "./logger/redactor.ts";
 import {
   AgentRecoveryStore,
@@ -284,6 +287,7 @@ const referencePattern = /^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,255}$/;
 const toolPattern = /^[A-Za-z_][A-Za-z0-9_.:-]{0,127}$/;
 const receiptPattern = /^execution-trace:[a-f0-9]{64}$/;
 const runCursorPattern = /^execution-trace-run:[a-f0-9]{64}$/;
+const teamRunCursorPrefix = "team:";
 const maxPage = 50;
 const maxArchivedSteps = 1000;
 const repoPattern = /^[A-Za-z0-9][A-Za-z0-9-]{0,38}\/[A-Za-z0-9_.-]{1,100}$/;
@@ -845,6 +849,11 @@ export function openExecutionTraces(path: string, now = Date.now) {
     { deterministic: true },
     (role, source, owner) =>
       executionTraceSourceVisible(role, source, owner) ? 1 : 0,
+  );
+  db.function(
+    "execution_trace_team_owner",
+    { deterministic: true },
+    (source) => parseTeamDeliveryTraceSource(source)?.sender ?? null,
   );
   const controls = createAssignmentControlJournal(
     db,
@@ -1593,6 +1602,7 @@ export function openExecutionTraces(path: string, now = Date.now) {
       cursor,
       ownerSessionId,
       backgroundOwner,
+      teamDeliveries = false,
     }: {
       readonly role?: ExecutionTraceRole;
       readonly ceiling: ClassificationLevel;
@@ -1602,22 +1612,31 @@ export function openExecutionTraces(path: string, now = Date.now) {
       readonly ownerSessionId?: string;
       /** Trusted owner of background executions; null excludes owner-bound runs. */
       readonly backgroundOwner?: string | null;
+      /** Limit discovery to canonical team deliveries owned by backgroundOwner. */
+      readonly teamDeliveries?: boolean;
     }) {
       if (
         (role !== undefined && !roleOf(role)) || !levelOf(ceiling) ||
         !pageSize(limit) ||
+        (teamDeliveries &&
+          (role !== "delegated" || !reference(backgroundOwner))) ||
         (role === "owner_chat"
           ? !reference(ownerSessionId)
           : ownerSessionId !== undefined)
       ) return undefined;
       let before = Number.MAX_SAFE_INTEGER;
       if (cursor !== undefined) {
-        if (typeof cursor !== "string" || !runCursorPattern.test(cursor)) {
-          return undefined;
-        }
+        if (
+          typeof cursor !== "string" ||
+          (teamDeliveries && !cursor.startsWith(teamRunCursorPrefix))
+        ) return;
+        const rawCursor = teamDeliveries
+          ? cursor.slice(teamRunCursorPrefix.length)
+          : cursor;
+        if (!runCursorPattern.test(rawCursor)) return;
         const found = db.prepare(
           "SELECT * FROM execution_trace_runs WHERE cursor = ?",
-        ).get(cursor);
+        ).get(rawCursor);
         if (
           !found || (role === undefined
             ? found.role === "owner_chat"
@@ -1629,6 +1648,10 @@ export function openExecutionTraces(path: string, now = Date.now) {
               runFor(found).scope.sourceId,
               backgroundOwner,
             )) ||
+          (teamDeliveries &&
+            parseTeamDeliveryTraceSource(runFor(found).scope.sourceId)
+                ?.sender !==
+              backgroundOwner) ||
           (ownerSessionId !== undefined &&
             runFor(found).scope.sessionId !== ownerSessionId)
         ) {
@@ -1641,6 +1664,7 @@ export function openExecutionTraces(path: string, now = Date.now) {
         WHERE (? IS NULL OR role = ?) AND (? IS NOT NULL OR role != 'owner_chat')
           AND (? IS NULL OR json_extract(scope, '$.sessionId') = ?)
           AND (? = 0 OR execution_trace_source_visible(role, json_extract(scope, '$.sourceId'), ?))
+          AND (? = 0 OR execution_trace_team_owner(json_extract(scope, '$.sourceId')) = ?)
           AND maxLevel <= ? AND sequence < ?
         ORDER BY sequence DESC LIMIT ?
       `).all(
@@ -1651,6 +1675,8 @@ export function openExecutionTraces(path: string, now = Date.now) {
         ownerSessionId ?? null,
         backgroundOwner === undefined ? 0 : 1,
         backgroundOwner ?? null,
+        teamDeliveries ? 1 : 0,
+        backgroundOwner ?? null,
         CLASSIFICATION_ORDER[ceiling],
         before,
         limit + 1,
@@ -1658,7 +1684,10 @@ export function openExecutionTraces(path: string, now = Date.now) {
       const page = rows.slice(0, limit);
       return {
         runs: page.map(runFor),
-        nextCursor: rows.length > limit ? String(page.at(-1)!.cursor) : null,
+        nextCursor: rows.length > limit
+          ? (teamDeliveries ? teamRunCursorPrefix : "") +
+            String(page.at(-1)!.cursor)
+          : null,
       };
     },
 

@@ -208,7 +208,9 @@ Deno.test("Owner gateway steers and stops exact admitted team deliveries", async
         }
         const last = messages.at(-1);
         return Promise.resolve({
-          content: last?.role === "tool" ? String(last.content) : "",
+          content: last?.role === "tool"
+            ? "Fixture result: " + last.content
+            : "",
           usage,
           toolCalls: last?.role === "tool" ? [] : [{
             id: crypto.randomUUID(),
@@ -276,7 +278,7 @@ Deno.test("Owner gateway steers and stops exact admitted team deliveries", async
         socket.addEventListener("message", receive);
         try {
           socket.send(JSON.stringify({ type: "message", content }));
-          return await complete.promise;
+          return (await complete.promise).replace(/^Fixture result: /, "");
         } finally {
           socket.removeEventListener("message", receive);
           clearTimeout(timer);
@@ -486,6 +488,61 @@ Deno.test("Owner gateway steers and stops exact admitted team deliveries", async
     manager = makeManager();
     const restarted = await start(owner, true);
     serving.push(restarted);
+    const list = { action: "list", kind: "team_delivery", limit: 1 };
+    const listed = JSON.parse(await restarted.turn(JSON.stringify(list)));
+    assertEquals(
+      listed.runs.map(({ ref, status }: { ref: unknown; status: string }) => ({
+        ref,
+        status,
+      })),
+      [{ ref: stopped.ref, status: "cancelled" }],
+    );
+    assert(listed.nextCursor);
+    const next = { ...list, cursor: listed.nextCursor };
+    const older = JSON.parse(await restarted.turn(JSON.stringify(next)));
+    assertEquals(older.runs[0].ref, acceptedSteering.run);
+    assertEquals(older.runs[0].status, "completed");
+    assertEquals(older.nextCursor, null);
+    const foreignDiscovery = await start(updateTaint(
+      createSession({ userId, channelId: "foreign-discovery" as ChannelId }),
+      "INTERNAL",
+      "Fixture discovery scope",
+    ));
+    serving.push(foreignDiscovery);
+    assertEquals(
+      JSON.parse(await foreignDiscovery.turn(JSON.stringify(list))).runs,
+      [],
+    );
+    for (
+      const [gateway, args] of [[foreignDiscovery, next], [restarted, {
+        ...next,
+        kind: "delegated",
+      }]] as const
+    ) {
+      assertStringIncludes(
+        await gateway.turn(JSON.stringify(args)),
+        "unavailable",
+      );
+    }
+    const discovered = older.runs[0].ref;
+    assertEquals(
+      JSON.parse(
+        await restarted.turn(JSON.stringify({
+          action: "inspect",
+          ...discovered,
+        })),
+      ).run,
+      older.runs[0],
+    );
+    const found = JSON.parse(
+      await restarted.turn(JSON.stringify({
+        action: "execution_traces",
+        traceRole: discovered.kind,
+        id: discovered.id,
+        ordinal: 1,
+      })),
+    );
+    assertEquals(found.step.tool, "todo_read");
     const retained = JSON.parse(
       await restarted.turn(JSON.stringify({
         action: "execution_traces",
