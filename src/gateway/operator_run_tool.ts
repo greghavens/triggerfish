@@ -1,3 +1,4 @@
+import { executeAgentEventAction } from "./operator_agent_events.ts";
 import {
   executeAgentProfileAction,
   isAgentProfileAction,
@@ -573,6 +574,8 @@ export const operatorRunTool: ToolDefinition = {
         "hint",
         "profiles",
         "model_route",
+        "agent_event_subscriptions",
+        "set_agent_event_subscription",
         "agent_profiles",
         "agent_profile",
         "agent_profile_history",
@@ -1300,6 +1303,11 @@ export const operatorRunTool: ToolDefinition = {
       type: "object",
       description:
         "Typed Boolean assets filter. Use {and:[...]}, {or:[...]}, {not:...}, or {field,op,value}. Text fields service, technology, url, title, ip, domain and registrationId accept contains/eq/ne. Numeric port and status accept eq/ne/gt/gte/lt/lte. Omit exact assetIds.",
+    },
+    subscriptionSettings: {
+      type: "object",
+      description:
+        "Exact reviewed event subscription with id, agent, kinds, optional caseId/tool/intervalMs, merge, maxConcurrent and enabled.",
     },
     profileSettings: {
       type: "object",
@@ -3198,6 +3206,17 @@ export function createOperatorRunToolExecutor(options: {
           canFlowTo(classification, context?.ceiling ?? "PUBLIC"));
     }
     const action = args.action;
+    if (
+      action === "agent_event_subscriptions" ||
+      action === "set_agent_event_subscription"
+    ) {
+      return await executeAgentEventAction(
+        options.baseDir,
+        args,
+        context,
+        options.confirm,
+      );
+    }
     if (isAgentProfileAction(action)) {
       return await executeAgentProfileAction(
         options.baseDir,

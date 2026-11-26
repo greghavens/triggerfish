@@ -1,3 +1,4 @@
+import { sentinelAgentEventSources } from "../../sentinel_agent_event_sources.ts";
 import { configuredSentinelWorkflowReader } from "../factory/sentinel_workflow_source.ts";
 import { buildManagedScheduledObservationGrant } from "../factory/managed_scheduled_observation_grant.ts";
 import { buildExecutionTracePayloadAuthorizer } from "../factory/agent_recovery.ts";
@@ -166,6 +167,7 @@ export function buildSchedulerInfrastructure(
   const deferredMemoryCheck = createDeferredMemoryCheck();
   const schedulerService = createSchedulerService({
     ...schedulerConfig,
+    agentEvents: sentinelAgentEventSources(baseDir),
     goalCompletion: schedulerGoals,
     ...(config.agent_recovery?.scheduler === true &&
       buildSchedulerRecoveryBindings(config, baseDir, createKeychain())),

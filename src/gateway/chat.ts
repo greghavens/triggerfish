@@ -366,6 +366,7 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
                       "agent_profile",
                       "agent_profile_history",
                       "preview_agent_prompt",
+                      "agent_event_subscriptions",
                       "sentinel_tool_configuration",
                       "inspect",
                       "graph",
@@ -463,7 +464,8 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
               return config.hookRunner.evaluateHook(hook, {
                 ...context,
                 input: { ...context.input, ...meta },
-                auditInput: isAgentProfileAction(action) ||
+                auditInput: action === "set_agent_event_subscription" ||
+                    isAgentProfileAction(action) ||
                     action === "set_sentinel_tool_configuration" ||
                     action === "reset_sentinel_tool_configuration" ||
                     action === "set_company_scope" ||

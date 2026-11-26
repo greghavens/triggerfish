@@ -45,6 +45,11 @@ export interface SchedulerExecutionIdentity {
 
 /** Options passed to OrchestratorFactory.create() to configure the session type. */
 export interface OrchestratorCreateOptions {
+  /** Trusted scheduled agent binding. The role remains read-only. */
+  readonly eventRecipient?: {
+    readonly tools: readonly string[];
+    readonly isCurrent: () => boolean;
+  };
   /** Trusted source for in-turn reports in an ordinary scheduled session. */
   readonly scheduledGoalSource?: SchedulerGoalSource;
   readonly scheduledGoalRecovery?: SchedulerExecutionIdentity;
@@ -170,6 +175,8 @@ export interface WebhookSourceConfig {
 
 /** Configuration for the scheduler service. */
 export interface SchedulerServiceConfig {
+  readonly agentEvents?:
+    import("./service_agent_events.ts").AgentEventSchedulerConfig;
   /** Factory for creating orchestrators per execution. */
   readonly orchestratorFactory: OrchestratorFactory;
   /** Trusted runtime bindings to persisted evidence for shared goals. */

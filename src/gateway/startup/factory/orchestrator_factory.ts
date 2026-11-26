@@ -147,6 +147,16 @@ export function createOrchestratorFactory(
       }
 
       const isTrigger = options?.isTrigger ?? false;
+      const eventRecipient = options?.eventRecipient;
+      const eventTools = new Set([
+        "read_file",
+        "list_directory",
+        "glob_files",
+        "search_files",
+      ]);
+      if (eventRecipient && (!isTrigger || options?.ceiling !== "INTERNAL")) {
+        throw new Error("Invalid event agent runtime");
+      }
       const ceiling = options?.ceiling ?? null;
       const recoverySessionId = options?.recoverySessionId;
       const recoveryTaint = options?.recoverySessionTaint;
@@ -351,7 +361,10 @@ export function createOrchestratorFactory(
         ...(configureScheduledGoal || recoveredScheduledGoal
           ? [scheduledGoalReportTool]
           : []),
-      ];
+      ].filter(({ name }) =>
+        !eventRecipient ||
+        (eventTools.has(name) && eventRecipient.tools.includes(name))
+      );
       const delegatedDiagnostic = options?.delegatedKind === "subagent" &&
           recoverySessionId
         ? options.delegatedObservationSource
@@ -429,6 +442,15 @@ export function createOrchestratorFactory(
         input,
         context,
       ) => {
+        if (
+          eventRecipient &&
+          (!eventRecipient.isCurrent() ||
+            !tools.some((tool) => tool.name === name))
+        ) {
+          return Promise.resolve(
+            "Error: The event agent binding is unavailable.",
+          );
+        }
         if (
           isCustomToolName(name) && !tools.some((tool) => tool.name === name)
         ) {
@@ -512,7 +534,20 @@ export function createOrchestratorFactory(
             }),
           },
         }),
-        hookRunner: diagnosticRecipient
+        hookRunner: eventRecipient
+          ? {
+            ...infra.hookRunner,
+            async evaluateHook(hook, context) {
+              const decision = await infra.hookRunner.evaluateHook(
+                hook,
+                context,
+              );
+              return eventRecipient.isCurrent()
+                ? decision
+                : { ...decision, allowed: false, action: "BLOCK" };
+            },
+          }
+          : diagnosticRecipient
           ? {
             ...infra.hookRunner,
             async evaluateHook(hook, context) {
@@ -550,7 +585,7 @@ export function createOrchestratorFactory(
         systemPromptSections: [
           TOOL_BEHAVIOR_PROMPT,
           ...resolvePromptsForProfile(toolProfile),
-          skillState.prompt,
+          ...(!eventRecipient && skillState.prompt ? [skillState.prompt] : []),
           ...(options?.systemPromptSections ?? []),
           ...(isTrigger ? [TRIGGER_SESSION_SYSTEM_PROMPT] : []),
         ],

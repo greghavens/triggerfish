@@ -1,3 +1,4 @@
+import { createAgentEventScheduler } from "./service_agent_events.ts";
 /**
  * Scheduler service — ties together cron jobs, triggers, and webhooks.
  *
@@ -187,6 +188,7 @@ async function processWebhookRequest(
 export function createSchedulerService(
   config: SchedulerServiceConfig,
 ): SchedulerService {
+  const eventScheduler = createAgentEventScheduler(config);
   const cronManager = config.cronManager ?? createCronManager();
   const webhookHandler = createWebhookHandler();
   const state: SchedulerState = { cronTickId: undefined, trigger: undefined };
@@ -226,10 +228,12 @@ export function createSchedulerService(
     cronManager,
     webhookHandler,
     start: () => {
+      eventScheduler?.start();
       startCronLoop(infra);
       startTriggerLoop(infra);
     },
     stop: () => {
+      eventScheduler?.stop();
       stopSchedulerTimers(state);
       for (const id of recoveryBodies.keys()) clearRecoveryBody(id);
     },
