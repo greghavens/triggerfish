@@ -58,6 +58,8 @@ import type {
   ChatSessionConfig,
 } from "./chat_types.ts";
 import type { ChatHistoryEntry } from "./chat_session_interface.ts";
+import { readSentinelAssessment } from "../sentinel/assessment_store.ts";
+import { isSentinelCaseId } from "../sentinel/cases.ts";
 import { loadChatHistoryEntries } from "./chat_history.ts";
 import {
   createSideQuestionService,
@@ -67,6 +69,8 @@ import {
 import {
   operatorRunTool,
   type OperatorRunToolContext,
+  sentinelOperatorCaseConstraintActions,
+  sentinelOperatorCaseConstraintParameters,
   sentinelOperatorCaseReadActions,
   sentinelOperatorCaseReadParameters,
 } from "./operator_run_tool.ts";
@@ -385,6 +389,18 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
                       .includes(action)
                   ? "read"
                   : "write",
+                ...((action === "narrow_constraints" ||
+                  action === "constraints") && {
+                  case_id: typeof call.args?.id === "string" &&
+                      isSentinelCaseId(call.args.id)
+                    ? call.args.id
+                    : null,
+                  evidence_revision: typeof call.args?.revision === "number" &&
+                      Number.isSafeInteger(call.args.revision) &&
+                      call.args.revision > 0
+                    ? call.args.revision
+                    : null,
+                }),
               };
               return config.hookRunner.evaluateHook(hook, {
                 ...context,
@@ -435,10 +451,9 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
             session: getSession(),
             targetClassification: ownerTargetClassification,
             suppressToolEvents: true,
-          }).then((result) =>
-            result.ok
-              ? result.value
-              : "Error: The underlying operation is blocked."
+          }).then((result) => result.ok
+            ? result.value
+            : "Error: The underlying operation is blocked."
           );
         }
         if (name === operatorRunTool.name && config.operatorRunExecutor) {
@@ -774,23 +789,34 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
 
   const snapshotPath = config.sentinelSnapshotPath;
   const runCaseRead = config.operatorRunExecutor;
-  const operatorRunReader = runCaseRead && snapshotPath &&
-      canFlowTo("INTERNAL", ownerTargetClassification)
-    ? {
+  function operatorRunReaderForCase(selectedPath: string) {
+    if (
+      !runCaseRead || !snapshotPath ||
+      !canFlowTo("INTERNAL", ownerTargetClassification)
+    ) return;
+    const execute = runCaseRead;
+    return {
       definition: {
         ...operatorRunTool,
         description:
-          "Read graph, typed facts, finding receipts, saved evidence digests, exact worker history, or inventory and coverage in an explicitly selected owner-authorized Sentinel case and saved evidence revision.",
+          "Read saved Sentinel evidence. In the selected active case, inspect restrictions or propose additional task-kind restrictions for operator review.",
         parameters: {
           ...Object.fromEntries(
-            sentinelOperatorCaseReadParameters.map((key) => [
-              key,
-              operatorRunTool.parameters[key],
-            ]),
+            [
+              ...sentinelOperatorCaseReadParameters,
+              ...sentinelOperatorCaseConstraintParameters,
+            ]
+              .map((key) => [
+                key,
+                operatorRunTool.parameters[key],
+              ]),
           ),
           action: {
             ...operatorRunTool.parameters.action,
-            enum: [...sentinelOperatorCaseReadActions],
+            enum: [
+              ...sentinelOperatorCaseReadActions,
+              ...sentinelOperatorCaseConstraintActions,
+            ],
           },
           kind: {
             ...operatorRunTool.parameters.kind,
@@ -798,42 +824,76 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
             required: true,
           },
           id: { ...operatorRunTool.parameters.id, required: true },
-          revision: { ...operatorRunTool.parameters.revision, required: true },
+          revision: {
+            ...operatorRunTool.parameters.revision,
+            required: true,
+          },
         },
       },
       async execute(args: Record<string, unknown>, signal: AbortSignal) {
-        const { action, kind, id, revision } = args;
+        const { action, kind, id, revision, runId } = args;
+        const constraintAction = sentinelOperatorCaseConstraintActions.some((
+          allowed,
+        ) => allowed === action);
         const unavailable =
           "Error: The selected Sentinel case revision is unavailable.";
         if (
           kind !== "sentinel" || typeof action !== "string" ||
-          !sentinelOperatorCaseReadActions.some((allowed) =>
-            allowed === action
-          ) || typeof id !== "string" ||
+          (!constraintAction &&
+            !sentinelOperatorCaseReadActions.some((allowed) =>
+              allowed === action
+            )) ||
+          typeof id !== "string" ||
           typeof revision !== "number" || !Number.isSafeInteger(revision) ||
           revision < 1 ||
           Object.keys(args).some((key) =>
             !sentinelOperatorCaseReadParameters.some((allowed) =>
               allowed === key
-            )
+            ) &&
+            (!constraintAction ||
+              !sentinelOperatorCaseConstraintParameters.some((allowed) =>
+                allowed === key
+              ))
           )
         ) return unavailable;
         const owner = state.sessionStates.get(state.ownerSessionId);
         if (!owner) return unavailable;
-        const current = () =>
-          !signal.aborted && state.activeSessionId === state.ownerSessionId &&
-          state.sessionStates.get(state.ownerSessionId) === owner &&
-          (id === "main" || !!config.resolveSentinelChatCase?.(id));
+        const current = () => {
+          if (
+            signal.aborted ||
+            state.activeSessionId !== state.ownerSessionId ||
+            state.sessionStates.get(state.ownerSessionId) !== owner
+          ) return false;
+          const casePath = id === "main"
+            ? snapshotPath
+            : config.resolveSentinelChatCase?.(id);
+          if (!constraintAction) return !!casePath;
+          if (casePath !== selectedPath) return false;
+          const assessment = readSentinelAssessment(selectedPath);
+          return assessment?.active === true &&
+            assessment.revision === revision &&
+            assessment.plan.runId === runId;
+        };
         if (!current()) return unavailable;
-        const result = await runCaseRead(args, {
-          ...savedToolAuthorization(owner, () => "INTERNAL", current),
+        const authority = savedToolAuthorization(
+          owner,
+          () => "INTERNAL",
+          current,
+        );
+        if (
+          constraintAction && !await authority.authorizeOwnerRunCall?.(args)
+        ) return unavailable;
+        const result = await execute(args, {
+          ...authority,
+          ...(constraintAction &&
+            { authorizeSentinelConstraintNarrowing: current }),
           authorizeSentinelCaseRead: (caseId, evidenceRevision) =>
             caseId === id && evidenceRevision === revision && current(),
         });
         return current() ? result : unavailable;
       },
-    }
-    : undefined;
+    };
+  }
   const session: ChatSession = {
     approvalInbox: config.hookRunner.toolApprovalInbox,
     async readSentinelDiscoverySource(request) {
@@ -1041,7 +1101,8 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
             worker ? "worker" : "interactive",
           ),
           hookRunner: config.hookRunner,
-          ...(!worker && { operatorRunReader }),
+          ...(!worker &&
+            { operatorRunReader: operatorRunReaderForCase(caseSnapshotPath) }),
           outputLanguage: config.sentinelOutputLanguage,
           readOutputLanguage: () =>
             readSentinelModelSettings(caseSnapshotPath)?.outputLanguage,

@@ -1188,8 +1188,22 @@ export const sentinelOperatorCaseReadParameters = [
   "workflowRunNumber",
 ] as const;
 
+export const sentinelOperatorCaseConstraintActions = [
+  "constraints",
+  "narrow_constraints",
+] as const;
+
+export const sentinelOperatorCaseConstraintParameters = [
+  "version",
+  "expectedVersion",
+  "requestId",
+  "deniedKinds",
+  "note",
+] as const;
+
 /** Runtime policy for reopening an approved original tool response. */
 export interface OperatorRunToolContext {
+  readonly authorizeSentinelConstraintNarrowing?: () => boolean;
   readonly authorizeSentinelCaseRead?: (
     caseId: string,
     revision: number,
@@ -2235,15 +2249,27 @@ export function createOperatorRunToolExecutor(options: {
     const authorizeCaseRead = context?.authorizeSentinelCaseRead;
     if (authorizeCaseRead) {
       const { action, id, kind, revision } = args;
+      const selectedRestriction =
+        context.authorizeSentinelConstraintNarrowing !== undefined &&
+        sentinelOperatorCaseConstraintActions.some((allowed) =>
+          allowed === action
+        );
       if (
         kind !== "sentinel" ||
         !canFlowTo("INTERNAL", context.ceiling ?? "PUBLIC") ||
         Object.keys(args).some((key) =>
-          !sentinelOperatorCaseReadParameters.some((allowed) => allowed === key)
+          !sentinelOperatorCaseReadParameters.some((allowed) =>
+            allowed === key
+          ) &&
+          (!selectedRestriction ||
+            !sentinelOperatorCaseConstraintParameters.some((allowed) =>
+              allowed === key
+            ))
         ) ||
-        !sentinelOperatorCaseReadActions.some((allowed) =>
-          allowed === action
-        ) ||
+        (!selectedRestriction &&
+          !sentinelOperatorCaseReadActions.some((allowed) =>
+            allowed === action
+          )) ||
         typeof id !== "string" || typeof revision !== "number" ||
         !Number.isSafeInteger(revision) || revision < 1 ||
         !authorizeCaseRead(id, revision)
@@ -5216,6 +5242,7 @@ ${
           : unavailable;
       }
       if (action === "constraints" || action === "narrow_constraints") {
+        const selectedCaseOnly = context?.authorizeSentinelConstraintNarrowing;
         if (
           ref.kind !== "sentinel" || ref.revision === undefined ||
           typeof args.runId !== "string" || !digestPattern.test(args.runId) ||
@@ -5225,6 +5252,7 @@ ${
         const current = readSentinelAssessment(path);
         const runId = args.runId.toLowerCase();
         const revision = ref.revision;
+        if (selectedCaseOnly && !selectedCaseOnly()) return unavailable;
         if (action === "constraints") {
           if (
             Object.keys(args).some((key) =>
@@ -5292,10 +5320,20 @@ ${
           typeof requestId !== "string" ||
           !digestPattern.test(requestId)
         ) return unavailable;
+        const existing = readSentinelOperatingConstraints(path, runId);
+        if (
+          selectedCaseOnly && (args.allowedAssetIds !== undefined ||
+            typeof args.note === "string" &&
+              redactCredentialText(args.note) !== args.note)
+        ) {
+          return unavailable;
+        }
+        const allowedAssetIds = selectedCaseOnly
+          ? existing?.constraints.allowedAssetIds
+          : args.allowedAssetIds;
         const constraints = normalizeSentinelOperatingConstraints({
           deniedKinds: args.deniedKinds,
-          ...(args.allowedAssetIds !== undefined &&
-            { allowedAssetIds: args.allowedAssetIds }),
+          ...(allowedAssetIds !== undefined && { allowedAssetIds }),
           ...(args.note !== undefined && { note: args.note }),
         });
         if (
@@ -5304,15 +5342,35 @@ ${
             current.result?.sharedGraph.snapshot,
           )
         ) return unavailable;
+        const membership = selectedCaseOnly && existing?.membership
+          ? existing.membership.evidenceRevision === revision
+            ? existing.membership
+            : resolveSentinelCaseMembership(
+              current.result?.sharedGraph.snapshot,
+              {
+                caseId: ref.id,
+                evidenceRevision: revision,
+                selector: {
+                  kind: "assets",
+                  assetIds: existing.membership.assetIds,
+                },
+              },
+            )
+          : undefined;
+        if (selectedCaseOnly && existing?.membership && !membership) {
+          return unavailable;
+        }
         const update = {
           runId,
           evidenceRevision: ref.revision,
           expectedVersion,
           requestId: requestId.toLowerCase(),
-          operatorScope: "workspace-operator",
+          operatorScope: selectedCaseOnly
+            ? "sentinel-interactive-owner"
+            : "workspace-operator",
           constraints,
+          ...(membership && { membership }),
         };
-        const existing = readSentinelOperatingConstraints(path, runId);
         if ((existing?.version ?? 0) !== expectedVersion) {
           const replay = readSentinelOperatingConstraintVersion(
             path,
@@ -5324,7 +5382,18 @@ ${
             replay.evidenceRevision !== revision ||
             JSON.stringify(replay.constraints) !== JSON.stringify(constraints)
           ) return unavailable;
+          if (selectedCaseOnly) {
+            return replay.operatorScope === update.operatorScope
+              ? safeProjection({ run: ref, record: replay })
+              : unavailable;
+          }
         }
+        if (
+          selectedCaseOnly &&
+          existing?.constraints.deniedKinds.some((kind) =>
+            !constraints.deniedKinds.includes(kind)
+          )
+        ) return unavailable;
         if (
           !await options.confirm(
             `Approve these exact Sentinel task restrictions?\n${
@@ -5332,6 +5401,12 @@ ${
             }`,
           )
         ) return "Error: The operator declined the run action.";
+        if (
+          selectedCaseOnly &&
+          (!await context.authorizeOwnerRunCall?.(args) || !selectedCaseOnly())
+        ) {
+          return unavailable;
+        }
         const recorded = recordSentinelOperatingConstraints(path, update);
         return recorded
           ? safeProjection({ run: ref, record: recorded })

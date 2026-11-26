@@ -3846,6 +3846,12 @@ function createAgent(
         const plannerTodo = plannerTodoTools.some(({ name }) =>
           name === toolName
         );
+        const restrictionAction =
+          operatorRunReader && toolName === operatorRunReader.definition.name
+            ? call?.args?.action
+            : undefined;
+        const restrictionCall = restrictionAction === "constraints" ||
+          restrictionAction === "narrow_constraints";
         const scoped = typeof toolName === "string" &&
           (toolName === sentinelInventoryTool.name ||
             toolName === graphOverviewTool.name ||
@@ -3862,7 +3868,7 @@ function createAgent(
             toolName === SENTINEL_DEFENSE_READ || traffic || plannerTodo ||
             digestRead);
         let evidenceRevision = options.assessmentRevision ??
-          (traffic || digestRead
+          (traffic || digestRead || restrictionCall
             ? sentinelTrafficPolicyRevision(call?.args?.revision)
             : undefined);
         if (
@@ -3875,14 +3881,15 @@ function createAgent(
             JSON.parse(context.input.tool_response).evidenceRevision,
           );
         }
-        const policyInput = scoped
+        const policyInput = scoped || restrictionCall
           ? {
             tool_name: toolName,
             case_id: locateSentinelCase(options.snapshotPath)?.caseId ?? null,
             evidence_revision: evidenceRevision ?? null,
             assignment_id: options.assignedTaskId ?? null,
             resource_classification: "INTERNAL",
-            operation_type: toolName === "todo_write" ||
+            operation_type: restrictionAction === "narrow_constraints" ||
+                toolName === "todo_write" ||
                 toolName === proposeWorkerGoalTool.name ||
                 toolName === proveWorkerGoalTool.name ||
                 toolName === sentinelFindingTrafficAttachTool.name ||

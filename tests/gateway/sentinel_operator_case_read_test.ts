@@ -7,6 +7,7 @@ import { createChatSession } from "../../src/gateway/chat.ts";
 import { createOperatorRunToolExecutor } from "../../src/gateway/operator_run_tool.ts";
 import { createGatewayServer } from "../../src/gateway/server/server.ts";
 import {
+  readSentinelOperatingConstraints,
   recordSentinelOperatingConstraints,
   startSentinelAssessment,
 } from "../../src/sentinel/assessment_store.ts";
@@ -70,10 +71,22 @@ Deno.test("Authenticated Sentinel chat reads exact approved cross-case graph fin
     membership,
   });
   assert(approvedScope);
+  const restrictionNote = "Reviewed additional task-kind restriction";
+  const constraintConfirmations: string[] = [];
+  let constraintsAllowed = true;
+  let approveRestriction = false;
+  let revokeDuringConfirmation = false;
   const operator = createOperatorRunToolExecutor({
     baseDir,
-    confirm() {
-      throw new Error("A Sentinel graph read cannot request a mutation.");
+    confirm(message) {
+      assertStringIncludes(
+        message,
+        "Approve these exact Sentinel task restrictions?",
+      );
+      assertEquals(readSentinelOperatingConstraints(approved.path)?.version, 1);
+      constraintConfirmations.push(message);
+      if (revokeDuringConfirmation) constraintsAllowed = false;
+      return Promise.resolve(approveRestriction);
     },
   });
   const ordinaryOwner = createSession({
@@ -89,6 +102,7 @@ Deno.test("Authenticated Sentinel chat reads exact approved cross-case graph fin
   let dispatched = 0;
   let reject: "PRE_TOOL_CALL" | "POST_TOOL_RESPONSE" | "PRE_OUTPUT" | undefined;
   const hooks: string[] = [];
+  const constraintLabels: Record<string, unknown>[] = [];
   registry.register({
     name: "sentinel-cross-case-reader",
     supportsStreaming: false,
@@ -146,6 +160,8 @@ Deno.test("Authenticated Sentinel chat reads exact approved cross-case graph fin
             "list_trace_workers",
             "worker_trace_progress",
             "worker_trace_result",
+            "constraints",
+            "narrow_constraints",
           ],
         );
       } else if (!next) {
@@ -181,16 +197,22 @@ Deno.test("Authenticated Sentinel chat reads exact approved cross-case graph fin
       providerRegistry: registry,
       sentinelSnapshotPath: main.path,
       resolveSentinelChatCase: (id) =>
-        id === "approved" ? approved.path : undefined,
+        id === "approved" && constraintsAllowed ? approved.path : undefined,
       allowSentinelModelAccess: true,
       hookRunner: {
         evaluateHook(hook, { input }) {
           const selectsTool = input.tool_name === "operator_runs";
           if (selectsTool || hook === "PRE_OUTPUT") hooks.push(hook);
+          if (
+            selectsTool && hook === "PRE_TOOL_CALL" &&
+            input.operation_type === "write"
+          ) {
+            constraintLabels.push(input);
+          }
           const blocked = hook === reject &&
             (selectsTool || hook === "PRE_OUTPUT" &&
                 typeof input.content === "string" &&
-                [secretLabel, inventoryLabel].some((label) =>
+                [secretLabel, inventoryLabel, restrictionNote].some((label) =>
                   String(input.content).includes(label)
                 ));
           return Promise.resolve({
@@ -424,6 +446,97 @@ Deno.test("Authenticated Sentinel chat reads exact approved cross-case graph fin
       runId: main.state.plan.runId,
     });
     assertStringIncludes(result, "unavailable");
+
+    const narrow = {
+      action: "narrow_constraints",
+      ...exact,
+      runId: approved.state.plan.runId,
+      expectedVersion: 1,
+      requestId: crypto.randomUUID(),
+      deniedKinds: ["trace"],
+      note: restrictionNote,
+    };
+    await turn("Try narrowing a different case", narrow);
+    assertStringIncludes(result, "unavailable");
+    assertEquals(constraintConfirmations, []);
+    await turn("/sentinel case approved");
+    await turn("Read selected case restrictions", {
+      action: "constraints",
+      ...exact,
+      runId: narrow.runId,
+    });
+    assertEquals(JSON.parse(result).version, 1);
+    await turn("Try an old revision", {
+      ...narrow,
+      revision: approved.revision + 1,
+    });
+    assertStringIncludes(result, "unavailable");
+    await turn("Try changing asset scope", {
+      ...narrow,
+      allowedAssetIds: ["asset-c"],
+    });
+    assertStringIncludes(result, "unavailable");
+    reject = "PRE_TOOL_CALL";
+    await turn("Policy denies the selected change", narrow);
+    reject = undefined;
+    assertEquals(constraintConfirmations, []);
+    assertEquals(
+      readSentinelOperatingConstraints(approved.path),
+      approvedScope,
+    );
+
+    await turn("Decline the reviewed change", narrow);
+    assertStringIncludes(result, "operator declined");
+    approveRestriction = true;
+    revokeDuringConfirmation = true;
+    await turn("Authorization revoked while reviewing", narrow);
+    assertEquals(
+      readSentinelOperatingConstraints(approved.path),
+      approvedScope,
+    );
+    constraintsAllowed = true;
+    revokeDuringConfirmation = false;
+    assertEquals(constraintConfirmations.length, 2);
+
+    reject = "POST_TOOL_RESPONSE";
+    await turn("Commit a reviewed restriction with response withheld", narrow);
+    assert(!result.includes(restrictionNote));
+    assert(hooks.includes("POST_TOOL_RESPONSE"));
+    const committedRestriction = readSentinelOperatingConstraints(
+      approved.path,
+    );
+    assertEquals(committedRestriction?.version, 2);
+    assertEquals(committedRestriction?.constraints.deniedKinds, ["trace"]);
+    assertEquals(
+      committedRestriction?.constraints.allowedAssetIds,
+      membership.assetIds,
+    );
+    assertEquals(committedRestriction?.membership, membership);
+    assertEquals(constraintConfirmations.length, 3);
+    assert(
+      constraintLabels.some((labels) =>
+        labels.case_id === exact.id &&
+        labels.evidence_revision === exact.revision &&
+        labels.resource_classification === "INTERNAL"
+      ),
+    );
+    reject = "PRE_OUTPUT";
+    const frames = await turn("Reopen the exact restriction", narrow);
+    assertStringIncludes(result, restrictionNote);
+    assert(frames.every((frame) => !frame.includes(restrictionNote)));
+    reject = undefined;
+    await turn("Reject removing the reviewed restriction", {
+      ...narrow,
+      expectedVersion: 2,
+      requestId: crypto.randomUUID(),
+      deniedKinds: [],
+    });
+    assertStringIncludes(result, "unavailable");
+    assertEquals(constraintConfirmations.length, 3);
+    assertEquals(
+      readSentinelOperatingConstraints(approved.path),
+      committedRestriction,
+    );
   } finally {
     socket.close();
     await gateway.stop();
