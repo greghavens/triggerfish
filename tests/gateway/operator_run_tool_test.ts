@@ -6037,6 +6037,21 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
         title: "Local investigations",
         requestId: crypto.randomUUID(),
       };
+      const rejectCategoryAfterReview = async (
+        request: Record<string, unknown>,
+      ) => {
+        const beforeReview = confirmations.length;
+        duringConfirmation = () => {
+          denied = "PRE_TOOL_CALL";
+        };
+        try {
+          assertStringIncludes((await turn(request)).result, "unavailable");
+        } finally {
+          duringConfirmation = undefined;
+          denied = undefined;
+        }
+        assertEquals(confirmations.length, beforeReview + 1);
+      };
       const beforeCategoryReview = confirmations.length;
       denied = "PRE_TOOL_CALL";
       await turn(createCategory);
@@ -6048,6 +6063,7 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
         "operator declined",
       );
       approved = true;
+      await rejectCategoryAfterReview(createCategory);
       const emptyTaxonomy = JSON.parse(
         (await turn({ action: "run_categories" })).result,
       );
@@ -6101,6 +6117,17 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
         ...staleCategoryMove,
         runTargets: [exactCategoryTarget, batchWorkflow],
       };
+      await rejectCategoryAfterReview(moveCategory);
+      for (const target of moveCategory.runTargets) {
+        const listed = JSON.parse(
+          (await turn({ action: "list", kind: target.kind })).result,
+        ).runs;
+        const displayed = listed.find(({ ref }: { ref: { id: string } }) =>
+          ref.id === target.id
+        );
+        assert(displayed);
+        assertEquals(displayed.category, undefined);
+      }
       const moveReceipt = JSON.parse((await turn(moveCategory)).result).receipt;
       assertEquals(moveReceipt.affected, 2);
       const renamed = JSON.parse(

@@ -3555,8 +3555,10 @@ ${
       ) {
         const { categoryId, title, requestId, expectedVersion, runTargets } =
           args;
+        const authorize = context?.authorizeOwnerRunCall;
         if (
           !canReadRunCategories ||
+          !authorize ||
           !canFlowTo(context?.inputClassification ?? "PUBLIC", "INTERNAL") ||
           typeof requestId !== "string" || !digestPattern.test(requestId)
         ) return unavailable;
@@ -3637,7 +3639,9 @@ ${
         ) {
           return "Error: The operator declined the run action.";
         }
-        if (!await visibleTargets()) return unavailable;
+        if (!await visibleTargets() || !await authorize(args)) {
+          return unavailable;
+        }
         const after = links.categories.review(id, change, before.preview);
         return after?.receipt
           ? safeProjection({ receipt: after.receipt })
