@@ -1,3 +1,4 @@
+import type { NamedConversationAgentProfile } from "../core/named_records.ts";
 import type { ManagedNotificationSource } from "../core/managed_notification_channels.ts";
 import {
   executeOperatorNotificationChannel,
@@ -1454,6 +1455,11 @@ export const operatorRunTool: ToolDefinition = {
       type: "string",
       description: "Independent list display name.",
     },
+    conversationAgentProfile: {
+      type: "object",
+      description:
+        "Exact reviewed agent profile {id,version}, or {clear:true} to clear the named conversation model binding.",
+    },
     conversationTargets: {
       type: "array",
       items: { type: "object" },
@@ -1901,6 +1907,9 @@ export interface OperatorRunToolContext {
   readonly authorizeOwnerRunCall?: (
     args: Record<string, unknown>,
   ) => Promise<boolean>;
+  readonly authorizeNamedConversationProfile?: (
+    profile: NamedConversationAgentProfile,
+  ) => boolean;
   readonly authorizeNotificationOutput?: (
     channelId: string,
     origin: string,

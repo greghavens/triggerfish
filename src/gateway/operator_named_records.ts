@@ -1,3 +1,4 @@
+import { isAgentProfileId } from "../core/agent_profiles.ts";
 import {
   namedConversations,
   type NamedRecordChange,
@@ -24,17 +25,31 @@ function version(value: unknown): value is number {
     value >= 0 && value < Number.MAX_SAFE_INTEGER;
 }
 
+function parseConversationAgentProfile(raw: unknown) {
+  if (
+    raw && typeof raw === "object" && Object.keys(raw).length === 1 &&
+    (raw as Record<string, unknown>).clear === true
+  ) return null;
+  if (!raw || typeof raw !== "object" || Object.keys(raw).length !== 2) return;
+  const { id, version: revision } = raw as Record<string, unknown>;
+  if (!isAgentProfileId(id) || !version(revision) || revision < 1) return;
+  return { id, version: revision };
+}
+
 function orderedChange(
   id: string,
   args: Record<string, unknown>,
   creationNeedsName: boolean,
 ): NamedRecordChange | undefined {
-  const { expectedVersion, displayName, pinned } = args;
+  const { expectedVersion, displayName, pinned, conversationAgentProfile } =
+    args;
+  const agentProfile = parseConversationAgentProfile(conversationAgentProfile);
   const name = parseDisplayName(displayName);
   if (
     !version(expectedVersion) || (displayName !== undefined && !name) ||
     (pinned !== undefined && typeof pinned !== "boolean") ||
-    (!name && pinned === undefined) ||
+    (conversationAgentProfile !== undefined && agentProfile === undefined) ||
+    (!name && pinned === undefined && agentProfile === undefined) ||
     (creationNeedsName && expectedVersion === 0 && !name)
   ) return;
   return {
@@ -42,6 +57,7 @@ function orderedChange(
     expectedVersion,
     ...(name && { name }),
     ...(pinned !== undefined && { pinned }),
+    ...(agentProfile !== undefined && { agentProfile }),
   };
 }
 
@@ -81,7 +97,14 @@ export async function executeNamedRecordAction(
     if (action === "set_named_conversation") {
       if (
         typeof id !== "string" || !uuid.test(id) ||
-        !only("id", "expectedVersion", "displayName", "pinned", "requestId")
+        !only(
+          "id",
+          "expectedVersion",
+          "displayName",
+          "pinned",
+          "requestId",
+          "conversationAgentProfile",
+        )
       ) return unavailable;
       const change = orderedChange(id, args, true);
       if (!change) return unavailable;
@@ -120,8 +143,14 @@ export async function executeNamedRecordAction(
     ) return unavailable;
     const store = namedConversations(baseDir);
     const saved = store.receipt(requestId, changes);
+    const profilesCurrent = () =>
+      changes.every(({ agentProfile }) =>
+        !agentProfile ||
+        context.authorizeNamedConversationProfile?.(agentProfile) === true
+      );
     if (!saved) {
       if (
+        !profilesCurrent() ||
         !changes.every((change) =>
           (store.read(change.id)?.version ?? 0) === change.expectedVersion
         )
@@ -132,10 +161,18 @@ export async function executeNamedRecordAction(
       );
       if (!reviewed) return "Error: The operator declined the run action.";
     }
-    if (!await authorize(args)) return unavailable;
+    if (!await authorize(args) || (!saved && !profilesCurrent())) {
+      return unavailable;
+    }
     const records = saved ?? store.apply(requestId, changes);
     for (const record of records ?? []) {
-      if (record.deleted) stopNamedConversationTurns(baseDir, record.id);
+      if (
+        record.deleted ||
+        (!saved &&
+          changes.some((change) =>
+            change.id === record.id && change.agentProfile !== undefined
+          ))
+      ) stopNamedConversationTurns(baseDir, record.id);
     }
     return records ? output({ records }) : unavailable;
   } catch {

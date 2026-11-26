@@ -1,6 +1,10 @@
 import { recoverSentinelArchiveQuarantines } from "./operator_run_archive_purge.ts";
 import { reviewedRuleActions } from "./operator_reviewed_rules.ts";
-import { namedConversations } from "../core/named_records.ts";
+import {
+  type NamedConversationAgentProfile,
+  namedConversations,
+} from "../core/named_records.ts";
+import { selectedModelProvider } from "../core/model_profile_selection.ts";
 import { namedRecordActions } from "./operator_named_records.ts";
 import { startNamedConversationTurn } from "./named_conversation_turns.ts";
 import { inventoryConnectorTools } from "./operator_scopesentry_import.ts";
@@ -800,6 +804,11 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
         );
         return allowed && isCurrent();
       },
+      authorizeNamedConversationProfile: (binding) =>
+        !!readNamedConversationProfile(
+          binding,
+          maxClassification("INTERNAL", taint()),
+        ),
       async authorizeNotificationOutput(
         channelId,
         origin,
@@ -1001,6 +1010,23 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
   const agentProfiles = config.customToolsBaseDir
     ? openAgentProfiles(config.customToolsBaseDir)
     : undefined;
+  function readNamedConversationProfile(
+    binding: NamedConversationAgentProfile,
+    classification: ClassificationLevel,
+  ) {
+    if (reservedAgentProfiles.has(binding.id)) return;
+    const profile = agentProfiles?.read(binding.id);
+    const model = profile?.definition?.modelProfile;
+    return profile?.version === binding.version && model &&
+        selectedModelProvider(
+          config.providerRegistry,
+          model,
+          classification,
+          config.agentModelProfileAllowlists,
+        )
+      ? profile
+      : undefined;
+  }
   const readActiveAgentProfile = () => {
     if (
       !agentProfiles ||
@@ -1811,11 +1837,19 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
           ) return unavailable();
           const [, id, prompt] = selected;
           const store = namedConversations(config.customToolsBaseDir);
+          const binding = store.read(id)?.agentProfile;
+          const taint = maxClassification("INTERNAL", getSessionTaint());
+          const readProfile = () =>
+            binding
+              ? readNamedConversationProfile(binding, taint) ?? null
+              : undefined;
           const isCurrent = () => {
             const record = store.read(id);
-            return !!record && !record.deleted && !signal?.aborted;
+            return !!record && !record.deleted && !signal?.aborted &&
+              record.agentProfile?.id === binding?.id &&
+              record.agentProfile?.version === binding?.version &&
+              (!binding || !!readProfile());
           };
-          const taint = maxClassification("INTERNAL", getSessionTaint());
           if (!isCurrent() || !canFlowTo(taint, ownerTargetClassification)) {
             return unavailable();
           }
@@ -1829,7 +1863,13 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
             session: { ...conversation, taint },
             getSessionTaint: () => taint,
             targetClassification: ownerTargetClassification,
-            providerRegistry: config.providerRegistry,
+            providerRegistry: binding
+              ? withReviewedAgentModel(
+                config.providerRegistry,
+                readProfile,
+                config.agentModelProfileAllowlists,
+              )
+              : config.providerRegistry,
             messageStore: config.messageStore,
             enableStreaming: false,
             hookRunner: {

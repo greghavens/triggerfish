@@ -1,3 +1,5 @@
+import { assert } from "@std/assert";
+import { liveProviderRouteSettings } from "../../src/agent/providers/live_routes.ts";
 import { assertEquals, assertStringIncludes } from "@std/assert";
 import { createProviderRegistry } from "../../src/agent/llm.ts";
 import { createMessageStore } from "../../src/core/conversation/mod.ts";
@@ -62,6 +64,28 @@ Deno.test("Named conversations retain isolated turns and reviewed lifecycle acro
       return Promise.resolve({ content, usage, toolCalls: [] });
     },
   });
+  let pinnedCalls = 0;
+  const allowlists: { INTERNAL: string[] } = {
+    INTERNAL: ["named-profile-fixture"],
+  };
+  registry.register({
+    name: "named-profile-fixture",
+    model: "named-route",
+    supportsStreaming: false,
+    complete(history, tools) {
+      pinnedCalls++;
+      assert(!JSON.stringify(tools).includes("fixture_profile_only"));
+      assert(!JSON.stringify(history).includes("Prompt for other run types."));
+      const context = history.filter(({ role }) => role === "user").map(
+        ({ content }) => String(content),
+      ).join(" | ");
+      return Promise.resolve({
+        content: `Pinned model: ${context}`,
+        usage: { inputTokens: 1, outputTokens: 1 },
+        toolCalls: [],
+      });
+    },
+  });
   registry.setDefault("named-conversation-fixture");
   const open = (messages: ReturnType<typeof createMessageStore>) =>
     createGatewayServer({
@@ -74,6 +98,7 @@ Deno.test("Named conversations retain isolated turns and reviewed lifecycle acro
         }),
         customToolsBaseDir: baseDir,
         providerRegistry: registry,
+        agentModelProfileAllowlists: allowlists,
         messageStore: messages,
         hookRunner: {
           evaluateHook: () =>
@@ -86,6 +111,11 @@ Deno.test("Named conversations retain isolated turns and reviewed lifecycle acro
         },
         operatorRunExecutor: createOperatorRunToolExecutor({
           baseDir,
+          liveModelRoutes: liveProviderRouteSettings(
+            registry,
+            baseDir,
+            allowlists,
+          ),
           confirm: () => {
             reviews++;
             return Promise.resolve(allow);
@@ -152,12 +182,42 @@ Deno.test("Named conversations retain isolated turns and reviewed lifecycle acro
     expectedVersion: 0,
     requestId: crypto.randomUUID(),
   });
+  const profile = {
+    action: "set_agent_profile",
+    id: "named-profile",
+    expectedVersion: 0,
+    requestId: crypto.randomUUID(),
+    profileSettings: {
+      name: "Reviewed named profile",
+      description: "Model-only association for a named conversation.",
+      role: "assistant",
+      prompt: "Prompt for other run types.",
+      tools: ["fixture_profile_only"],
+      modelProfile: { provider: "named-profile-fixture", model: "named-route" },
+    },
+  };
   try {
     await withGateway(async (turn, manage) => {
-      const add = create(first, "First");
+      assertEquals(JSON.parse(await manage(profile)).profile.version, 1);
+      const add = {
+        ...create(first, "First"),
+        conversationAgentProfile: { id: profile.id, version: 1 },
+      };
+      const before = reviews;
+      assertStringIncludes(
+        await manage({
+          ...add,
+          requestId: crypto.randomUUID(),
+          conversationAgentProfile: { id: profile.id, version: 2 },
+        }),
+        "unavailable",
+      );
+      allow = false;
+      assertStringIncludes(await manage(add), "declined");
+      allow = true;
       assertEquals(JSON.parse(await manage(add)).records[0].version, 1);
       assertEquals(JSON.parse(await manage(add)).records[0].version, 1);
-      assertEquals(reviews, 1);
+      assertEquals(reviews, before + 2);
       await manage(create(second, "Second"));
       const pin = {
         ...create(first, "Pinned first"),
@@ -174,7 +234,7 @@ Deno.test("Named conversations retain isolated turns and reviewed lifecycle acro
       );
       assertEquals(
         (await turn(`/conversation ${first} First private context.`)).text,
-        "First private context.",
+        "Pinned model: First private context.",
       );
       assertEquals(
         (await turn(`/conversation ${second} Second isolated context.`)).text,
@@ -192,13 +252,68 @@ Deno.test("Named conversations retain isolated turns and reviewed lifecycle acro
       ]);
       assertEquals(
         (await turn(`/conversation ${first} Continue first.`)).text,
-        "First private context. | Continue first.",
+        "Pinned model: First private context. | Continue first.",
+      );
+      assertEquals(conversations[0].agentProfile, {
+        id: profile.id,
+        version: 1,
+      });
+      const verifiedCalls = pinnedCalls;
+      assertEquals(
+        JSON.parse(
+          await manage({
+            ...profile,
+            expectedVersion: 1,
+            requestId: crypto.randomUUID(),
+          }),
+        ).profile.version,
+        2,
+      );
+      assertStringIncludes(
+        (await turn(`/conversation ${first} Superseded profile.`)).text,
+        "unavailable",
+      );
+      assertEquals(pinnedCalls, verifiedCalls);
+      assertEquals(
+        JSON.parse(
+          await manage({
+            action: "set_named_conversation",
+            id: first,
+            expectedVersion: 2,
+            requestId: crypto.randomUUID(),
+            conversationAgentProfile: { id: profile.id, version: 2 },
+          }),
+        ).records[0].version,
+        3,
+      );
+      allowlists.INTERNAL = [];
+      assertStringIncludes(
+        (await turn(`/conversation ${first} Revoked route.`)).text,
+        "unavailable",
+      );
+      assertEquals(pinnedCalls, verifiedCalls);
+      allowlists.INTERNAL = ["named-profile-fixture"];
+      assertEquals(
+        (await turn(`/conversation ${first} Continue under review.`)).text,
+        "Pinned model: First private context. | Continue first. | Continue under review.",
+      );
+      assertEquals(
+        JSON.parse(
+          await manage({
+            action: "set_named_conversation",
+            id: first,
+            expectedVersion: 3,
+            requestId: crypto.randomUUID(),
+            conversationAgentProfile: { clear: true },
+          }),
+        ).records[0].agentProfile,
+        null,
       );
       const remove = {
         action: "delete_named_conversations",
         requestId: crypto.randomUUID(),
         conversationTargets: [
-          { id: first, expectedVersion: 2 },
+          { id: first, expectedVersion: 4 },
           { id: second, expectedVersion: 1 },
         ],
       };

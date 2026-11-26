@@ -4,11 +4,17 @@ import { DatabaseSync } from "node:sqlite";
 import { join } from "@std/path";
 import { redactCredentialText } from "./logger/redactor.ts";
 
+export interface NamedConversationAgentProfile {
+  readonly id: string;
+  readonly version: number;
+}
+
 export interface NamedRecord {
   readonly id: string;
   readonly version: number;
   readonly name: string;
   readonly pinnedAt: string | null;
+  readonly agentProfile?: NamedConversationAgentProfile | null;
   readonly updatedAt: string;
   readonly deleted: boolean;
 }
@@ -18,6 +24,7 @@ export interface NamedRecordChange {
   readonly expectedVersion: number;
   readonly name?: string;
   readonly pinned?: boolean;
+  readonly agentProfile?: NamedConversationAgentProfile | null;
   readonly deleted?: true;
 }
 
@@ -138,6 +145,12 @@ export function namedConversations(baseDir: string) {
                 : change.pinned
                 ? prior[i]?.pinnedAt ?? now
                 : null,
+              ...((change.agentProfile !== undefined ||
+                prior[i]?.agentProfile !== undefined) && {
+                agentProfile: change.agentProfile === undefined
+                  ? prior[i]?.agentProfile
+                  : change.agentProfile,
+              }),
               updatedAt: now,
               deleted: change.deleted === true,
             }));
