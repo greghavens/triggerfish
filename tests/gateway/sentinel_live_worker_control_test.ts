@@ -1467,6 +1467,7 @@ async function verifyInteractiveCaseControl(manual = false) {
   const newerEntered = Promise.withResolvers<AbortSignal>();
   const allowNewer = Promise.withResolvers<void>();
   const allowBackground = Promise.withResolvers<void>();
+  let backgroundNow = Date.now();
   let backgroundSignal: AbortSignal | undefined;
   let backgroundTaskId: string | undefined;
   let background: ReturnType<typeof createSentinelModelPlanner> | undefined;
@@ -1649,11 +1650,27 @@ async function verifyInteractiveCaseControl(manual = false) {
         (state, taskId, lease) => {
           if (!taskId || !lease) {
             return {
-              execute(_content, send) {
+              execute(content, send) {
+                const inputs = JSON.parse(String(content).split("\n").at(-1)!);
+                const committedReview = inputs.workerObservations.find(
+                  (observation: { taskId: string; reviewSummary?: string }) =>
+                    observation.taskId === backgroundTaskId &&
+                    observation.reviewSummary ===
+                      "Completed independent background review.",
+                );
                 send({
                   type: "response",
                   taint: "INTERNAL",
-                  text: '[{"kind":"impact","nodeId":"background-asset"}]',
+                  text: JSON.stringify(
+                    committedReview
+                      ? [{
+                        kind: "trace",
+                        nodeId: "background-asset",
+                        sourceTaskId: committedReview.taskId,
+                        sourceKind: "model_review",
+                      }]
+                      : [{ kind: "impact", nodeId: "background-asset" }],
+                  ),
                 });
                 return Promise.resolve();
               },
@@ -1679,6 +1696,8 @@ async function verifyInteractiveCaseControl(manual = false) {
             allowModelAccess: true,
           });
         },
+        undefined,
+        () => backgroundNow,
       );
       background.advance(initial);
       await until(() => !!backgroundSignal);
@@ -1870,6 +1889,7 @@ async function verifyInteractiveCaseControl(manual = false) {
         },
       );
       assert(newerTurnId);
+      backgroundNow += 60_001;
       allowBackground.resolve();
       await until(() =>
         readAdaptiveSentinel(firstPath, state)?.modelReviews.some((
@@ -1877,6 +1897,15 @@ async function verifyInteractiveCaseControl(manual = false) {
         ) =>
           taskId === backgroundTaskId &&
           summary === "Completed independent background review."
+        ) === true
+      );
+      await until(() =>
+        readAdaptiveSentinel(firstPath, state)?.tasks.some((task) =>
+          task.kind === "trace" &&
+          task.nodeId === "background-asset" &&
+          task.plannerRound?.sourceKind === "model_review" &&
+          task.reviewedFrom === backgroundTaskId &&
+          task.prerequisites.includes(backgroundTaskId!)
         ) === true
       );
       await Deno.writeTextFile(
