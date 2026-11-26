@@ -1483,6 +1483,15 @@ Deno.test("A linked child reuses only approved discoveries from its reviewed sou
       worker: [] as string[],
     };
     let plannerReceivedSources = false;
+    type Candidate = {
+      id: string;
+      sourceCaseId: string;
+      sourceRunId: string;
+      sourceEvidenceRevision: number;
+      localAssetId: string;
+    };
+    const catalogReads: Candidate[][] = [];
+
     const modelFor = (role: keyof typeof observed) => {
       const providers = createProviderRegistry();
       providers.register({
@@ -1490,17 +1499,24 @@ Deno.test("A linked child reuses only approved discoveries from its reviewed sou
         supportsStreaming: false,
         complete(messages) {
           const results = messages.filter(({ role }) => role === "tool");
+          let hints: Candidate[] = [];
           if (role === "planner") {
-            plannerReceivedSources ||= messages.some(({ content }) =>
+            const prompt = messages.find(({ content }) =>
               typeof content === "string" &&
               content.includes('"approvedDiscoverySources"')
-            );
+            )?.content;
+            if (typeof prompt === "string") {
+              plannerReceivedSources = true;
+              hints = JSON.parse(prompt.slice(prompt.lastIndexOf("\n") + 1))
+                .linkedDiscoveryCandidates ?? [];
+              if (!results.length) catalogReads.push(hints);
+            }
           }
           const args = [
             {},
             { id: excludedCase },
             { id: excludedRevision },
-            { id: approval.id },
+            { id: hints[0]?.id ?? approval.id },
           ];
           if (results.length === args.length) {
             observed[role] = results.map(({ content }) => String(content));
@@ -1533,6 +1549,7 @@ Deno.test("A linked child reuses only approved discoveries from its reviewed sou
     };
     const child = childState();
     advanceAdaptiveSentinel(childPath, child);
+    let plannerNow = Date.now();
     planner = createSentinelModelPlanner(
       childPath,
       (state) =>
@@ -1545,12 +1562,21 @@ Deno.test("A linked child reuses only approved discoveries from its reviewed sou
           sharedInventoryBaseDir: baseDir,
           allowModelAccess: true,
         }),
+      undefined,
+      () => plannerNow,
     );
     planner.advance(child);
     await until(() =>
       observed.planner.length === 4 && !planner!.hasInFlightWork()
     );
     assert(plannerReceivedSources);
+    assertEquals(catalogReads, [[{
+      id: approval.id,
+      sourceCaseId: "approved",
+      sourceRunId,
+      sourceEvidenceRevision: source.revision,
+      localAssetId: "local-a",
+    }]]);
 
     const queue = openSentinelAdaptiveStore(
       join(dirname(childPath), "sentinel-adaptive.db"),
@@ -1631,6 +1657,22 @@ Deno.test("A linked child reuses only approved discoveries from its reviewed sou
       });
       assertEquals((response.record as typeof approval).status, "withdrawn");
     });
+    await withOwnerControl(baseDir, async (request) => {
+      const response = await request({
+        action: "hint",
+        kind: "sentinel",
+        id: "child",
+        revision: child.revision,
+        note: "Check current approved evidence.",
+        requestId: crypto.randomUUID(),
+      });
+      assert(!response.startsWith("Error:"));
+    });
+    plannerNow += 60_001;
+    planner.advance(childState());
+    await until(() => catalogReads.length >= 2 && !planner!.hasInFlightWork());
+    assertEquals(catalogReads.at(-1), []);
+
     const currentReader = createSentinelSubagent({
       snapshotPath: childPath,
       assessmentRevision: child.revision,

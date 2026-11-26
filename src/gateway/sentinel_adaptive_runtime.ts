@@ -4,6 +4,7 @@ import {
   type SentinelHintTrafficReference,
 } from "../sentinel/traffic_receipts.ts";
 import { notifyCommittedEvidence } from "../core/evidence_task_progression.ts";
+import { readScopedSentinelSharedAssetDiscoveries } from "./sentinel_asset_discoveries.ts";
 import { readLinkedFindingProof } from "./sentinel_linked_findings.ts";
 import { reopenSentinelAssignedInventory } from "./sentinel_inventory_tool.ts";
 import { createEvidencePlanningGate } from "../core/evidence_task_progression.ts";
@@ -6251,7 +6252,7 @@ export function createSentinelModelPlanner(
               operatingConstraints(snapshotPath, current),
             ) === baseIdentity;
       };
-      void Promise.resolve().then(() => {
+      void Promise.resolve().then(async () => {
         if (signal.aborted) return;
         const current = readSentinelAssessment(snapshotPath);
         if (!current?.active || current.paused) {
@@ -6309,8 +6310,59 @@ export function createSentinelModelPlanner(
         const committedHistory = location && runId
           ? committedPlannerHistory(snapshotPath, state)
           : [];
+        const linkedSources = state.plan.linkedCaseSources;
+        const currentlyPlanning = () => {
+          if (signal.aborted) return false;
+          const latest = readSentinelAssessment(snapshotPath);
+          return !!latest?.active && !latest.paused && matchesRound(latest);
+        };
+        const linkedDiscoveryCandidates = linkedSources?.length && location
+          ? await readScopedSentinelSharedAssetDiscoveries(
+            snapshotPath,
+            state.revision,
+            undefined,
+            signal,
+            undefined,
+            (asset, other) =>
+              sentinelOperatingConstraintsAllow(constraints?.constraints, {
+                kind: "review_evidence",
+                nodeId: asset,
+              }, snapshot) &&
+              (other === undefined ||
+                sentinelOperatingConstraintsAllow(constraints?.constraints, {
+                  kind: "review_evidence",
+                  nodeId: other,
+                }, snapshot)),
+            currentlyPlanning,
+          ).then((records) =>
+            records.slice(0, 4).flatMap((record) => {
+              const source = linkedSources.find(({ caseId, revision }) =>
+                caseId === record.sourceCaseId &&
+                revision === record.evidenceRevision
+              );
+              return source
+                ? [{
+                  id: record.id,
+                  sourceCaseId: source.caseId,
+                  sourceRunId: source.runId,
+                  sourceEvidenceRevision: source.revision,
+                  localAssetId: record.mappedAssetId,
+                }]
+                : [];
+            })
+          ).catch(() => [])
+          : [];
+        if (linkedSources && !currentlyPlanning()) {
+          controller.abort(superseded);
+          return;
+        }
         const instructions = [
           "Plan a defensive investigation of the supplied graph.",
+          ...(linkedDiscoveryCandidates.length
+            ? [
+              "Reopen exact IDs in linkedDiscoveryCandidates with sentinel_shared_asset_discoveries. The pointers are discovery hints only and do not establish evidence.",
+            ]
+            : []),
           "Use only reviews of recorded findings, evidence or existing incident candidates, dependency impact, or relationship tracing.",
           "Output a JSON array of up to eight objects with kind and nodeId. Allowed kinds: review_finding, review_evidence, review_incident, verify_control_coverage, impact, trace.",
           ...(runningWorkerAttempts.length
@@ -6400,6 +6452,8 @@ export function createSentinelModelPlanner(
               ({ caseId, revision }) => ({ caseId, revision }),
             ),
           }),
+          ...(linkedDiscoveryCandidates.length &&
+            { linkedDiscoveryCandidates }),
           goal: state.plan.goal ??
             "Investigate high-priority evidence gaps",
           goalCompletion: goalCompletion && {
@@ -6524,6 +6578,8 @@ export function createSentinelModelPlanner(
               firstActionable > 0 && firstActionable === last ? last - 1 : last,
               1,
             );
+          } else if (inputs.linkedDiscoveryCandidates?.length) {
+            inputs.linkedDiscoveryCandidates.pop();
           } else if (inputs.operatorHints.length) inputs.operatorHints.pop();
           else if (
             inputs.operatorAssetHints && inputs.operatorAssetHints.length > 1
