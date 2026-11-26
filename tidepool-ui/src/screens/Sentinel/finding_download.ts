@@ -1,5 +1,16 @@
 /** Assemble one finding report from responses for the same retained manifest. */
-export type FindingDownloadFormat = "csv" | "findings-json";
+import {
+  encodeSentinelFindingZip,
+  SENTINEL_FINDING_ZIP_END_BYTES,
+  sentinelFindingZipEntryBytes,
+} from "../../../../src/sentinel/finding_export_zip.ts";
+
+export type FindingDownloadFormat =
+  | "csv"
+  | "findings-json"
+  | "markdown"
+  | "md-zip";
+type FindingDownloadLanguage = "en" | "es" | "ko" | "zh" | "ja";
 
 type FindingDownloadSelection =
   | { readonly findingFilter: Record<string, unknown> }
@@ -8,13 +19,15 @@ type FindingDownloadSelection =
 type FindingDownloadRequest = FindingDownloadSelection & {
   readonly revision: number;
   readonly format: FindingDownloadFormat;
+  readonly language?: FindingDownloadLanguage;
+  readonly findingZipEntries?: true;
   readonly findingPageSize?: number;
   readonly findingCursor?: string;
 };
 
 type FindingDownloadResult =
   | { readonly request: FindingDownloadRequest }
-  | { readonly content: readonly string[] }
+  | { readonly content: readonly (string | ArrayBuffer)[] }
   | { readonly error: string };
 
 const maxBytes = 8 * 1024 * 1024;
@@ -45,8 +58,14 @@ export function createFindingDownload(
   revision: number,
   format: FindingDownloadFormat,
   selection: FindingDownloadSelection,
+  language?: FindingDownloadLanguage,
 ) {
-  const initial = { revision, format, ...selection };
+  const initial = {
+    revision,
+    format,
+    ...selection,
+    ...(language && { language }),
+  };
   let pageSize: number | undefined;
   let digest: string | undefined;
   let total: number | undefined;
@@ -57,16 +76,22 @@ export function createFindingDownload(
   const encoder = new TextEncoder();
   const header = format === "csv"
     ? csvHeader
-    : `{"version":1,"caseId":${
+    : format === "findings-json"
+    ? `{"version":1,"caseId":${
       JSON.stringify(caseId)
-    },"revision":${revision},"findings":[`;
-  const footer = format === "csv" ? "" : "]}\n";
-  const pieces = [header];
-  let bytes = encoder.encode(header + footer).byteLength;
+    },"revision":${revision},"findings":[`
+    : "";
+  const footer = format === "findings-json" ? "]}\n" : "";
+  const pieces: string[] = header ? [header] : [];
+  let markdownHeader: string | undefined;
+  let bytes = format === "md-zip"
+    ? SENTINEL_FINDING_ZIP_END_BYTES
+    : encoder.encode(header + footer).byteLength;
   const next = () => ({
     request: {
       ...initial,
       findingPageSize: pageSize,
+      ...(format === "md-zip" && { findingZipEntries: true as const }),
       ...(cursor !== undefined && { findingCursor: cursor }),
     },
   });
@@ -97,6 +122,20 @@ export function createFindingDownload(
         message.findingPage !== undefined ||
         encoder.encode(content).byteLength > maxBytes
       ) return reject();
+      if (format === "md-zip") {
+        if (message.encoding !== "base64") return reject();
+        try {
+          const zip = Uint8Array.from(
+            atob(content),
+            (char) => char.charCodeAt(0),
+          );
+          if (zip.byteLength > maxBytes) return reject();
+          finished = true;
+          return { content: [zip.buffer] };
+        } catch {
+          return reject();
+        }
+      }
       finished = true;
       return { content: [content] };
     }
@@ -117,42 +156,90 @@ export function createFindingDownload(
     const expected = end === total ? null : `finding-export:${digest}:${end}`;
     if (page.nextCursor !== expected) return reject();
 
-    let piece: string;
-    if (format === "csv") {
-      if (!content.startsWith(csvHeader) || !content.endsWith("\r\n")) {
-        return reject();
-      }
-      piece = content.slice(csvHeader.length);
-      if (countCsvRecords(piece) !== end - offset) return reject();
-    } else {
+    if (format === "md-zip") {
+      if (message.encoding !== "markdown-entries") return reject();
       try {
-        const body = JSON.parse(content);
+        const entries = JSON.parse(content);
         if (
-          body?.version !== 1 || body.caseId !== caseId ||
-          body.revision !== revision ||
-          !Array.isArray(body.findings) || body.findings.length !== end - offset
+          !Array.isArray(entries) || entries.length !== end - offset ||
+          entries.some((entry) => typeof entry !== "string" || !entry)
         ) return reject();
-        const records: string[] = [];
-        for (const finding of body.findings) {
-          if (
-            typeof finding?.id !== "string" || !finding.id ||
-            ids.has(finding.id)
-          ) return reject();
-          ids.add(finding.id);
-          records.push(JSON.stringify(finding));
+        for (const [index, entry] of entries.entries()) {
+          bytes += sentinelFindingZipEntryBytes(
+            offset + index,
+            encoder.encode(entry).byteLength,
+          );
+          if (bytes > maxBytes) return reject();
+          pieces.push(entry);
         }
-        piece = (offset > 0 && records.length ? "," : "") + records.join(",");
       } catch {
         return reject();
       }
+    } else {
+      let piece: string;
+      if (format === "csv") {
+        if (!content.startsWith(csvHeader) || !content.endsWith("\r\n")) {
+          return reject();
+        }
+        piece = content.slice(csvHeader.length);
+        if (countCsvRecords(piece) !== end - offset) return reject();
+      } else if (format === "markdown") {
+        const lines = content.split("\n", 4);
+        if (
+          lines.length !== 4 || !lines[0].startsWith("# ") || lines[1] !== "" ||
+          !lines[2].startsWith("- ") || !lines[3].startsWith("- ")
+        ) return reject();
+        const prelude = lines.join("\n") + "\n";
+        if (
+          !content.startsWith(prelude) ||
+          (markdownHeader && markdownHeader !== prelude)
+        ) return reject();
+        piece = content.slice(prelude.length);
+        if ([...piece.matchAll(/^## /gm)].length !== end - offset) {
+          return reject();
+        }
+        if (!markdownHeader) {
+          markdownHeader = prelude;
+          bytes += encoder.encode(prelude).byteLength;
+          pieces.push(prelude);
+        }
+      } else {
+        try {
+          const body = JSON.parse(content);
+          if (
+            body?.version !== 1 || body.caseId !== caseId ||
+            body.revision !== revision ||
+            !Array.isArray(body.findings) ||
+            body.findings.length !== end - offset
+          ) return reject();
+          const records: string[] = [];
+          for (const finding of body.findings) {
+            if (
+              typeof finding?.id !== "string" || !finding.id ||
+              ids.has(finding.id)
+            ) return reject();
+            ids.add(finding.id);
+            records.push(JSON.stringify(finding));
+          }
+          piece = (offset > 0 && records.length ? "," : "") + records.join(",");
+        } catch {
+          return reject();
+        }
+      }
+      bytes += encoder.encode(piece).byteLength;
+      if (bytes > maxBytes) return reject();
+      pieces.push(piece);
     }
-    bytes += encoder.encode(piece).byteLength;
-    if (bytes > maxBytes) return reject();
-    pieces.push(piece);
     offset = end;
     if (expected !== null) {
       cursor = expected;
       return next();
+    }
+    if (format === "md-zip") {
+      const zip = encodeSentinelFindingZip(pieces, maxBytes);
+      if (!zip) return reject();
+      finished = true;
+      return { content: [zip] };
     }
     finished = true;
     return { content: [...pieces, footer] };

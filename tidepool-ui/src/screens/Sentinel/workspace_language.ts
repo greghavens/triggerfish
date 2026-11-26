@@ -139,6 +139,8 @@ const messages = {
   "Exporting…": ["Exportando…", "내보내는 중…", "正在导出…", "エクスポート中…"],
   "Findings CSV": ["Hallazgos (CSV)", "발견 사항 (CSV)", "发现结果（CSV）", "検出事項（CSV）"],
   "Findings JSON": ["Hallazgos (JSON)", "발견 사항 (JSON)", "发现结果（JSON）", "検出事項（JSON）"],
+  "Findings Markdown": ["Hallazgos (Markdown)", "발견 사항 (Markdown)", "发现结果（Markdown）", "検出事項（Markdown）"],
+  "Findings ZIP": ["Hallazgos (ZIP)", "발견 사항 (ZIP)", "发现结果（ZIP）", "検出事項（ZIP）"],
   "Provenance JSON": ["Procedencia (JSON)", "출처 정보 (JSON)", "溯源信息（JSON）", "来歴（JSON）"],
   "Inventory JSON": ["Inventario (JSON)", "인벤토리 (JSON)", "清单（JSON）", "インベントリ（JSON）"],
   "Alerts JSON": ["Alertas (JSON)", "경보 (JSON)", "告警（JSON）", "アラート（JSON）"],

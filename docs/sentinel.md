@@ -324,8 +324,9 @@ Each page names its offset, count, complete selection total and manifest
 digest. The cursor binds the case, saved revision, filter or selected IDs,
 format and reviewed report inputs. If selected evidence or decisions change,
 start a new export. Each page can carry up to 256 KiB of report content. In
-Tidepool, **Findings CSV** and **Findings JSON** can assemble these pages into
-a single download of up to 8 MiB when the direct export reaches its byte limit. The
+Tidepool, the **Findings CSV**, **Findings JSON**, **Findings Markdown**, and
+**Findings ZIP** actions can assemble these pages into a single download of up
+to 8 MiB when the direct export reaches its byte limit. The
 download aborts if the report selection changes before all pages arrive.
 
 The `md-zip` response provides a base64 ZIP with one Markdown file per finding,

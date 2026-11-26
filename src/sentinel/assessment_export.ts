@@ -1,3 +1,4 @@
+import { Buffer } from "node:buffer";
 /** Render a saved defensive assessment without writing files or fetching data. */
 import { createHash } from "node:crypto";
 
@@ -398,6 +399,7 @@ export function renderScopedSentinelFindingsPage(
   size: unknown,
   cursor: unknown,
   onByteLimit?: () => void,
+  zipEntries = false,
 ) {
   if (
     typeof size !== "number" || !Number.isSafeInteger(size) ||
@@ -421,6 +423,7 @@ export function renderScopedSentinelFindingsPage(
       ...(match && { manifestDigest: match[1] }),
     },
     onByteLimit,
+    zipEntries,
   );
 }
 
@@ -434,6 +437,7 @@ function renderFindingExport(
   language: SentinelReportLanguage,
   page?: FindingExportPageRequest,
   onByteLimit?: () => void,
+  zipEntries = false,
 ): { content: string; findingPage?: FindingExportPage } | undefined {
   const explicit = Array.isArray(selection);
   if (locateSentinelCase(path)?.caseId !== caseId) return;
@@ -779,18 +783,23 @@ function renderFindingExport(
         "",
       ].join("\n");
     if (format === "md-zip") {
-      const zip = encodeSentinelFindingZip(
-        records.map((record) => renderMarkdown([record])),
-        MAX_FINDING_EXPORT_BYTES,
-        page?.offset,
-      );
-      if (zip === undefined) {
-        onByteLimit?.();
-        return;
+      const entries = records.map((record) => renderMarkdown([record]));
+      if (!zipEntries) {
+        const zip = encodeSentinelFindingZip(
+          entries,
+          MAX_FINDING_EXPORT_BYTES,
+          page?.offset,
+        );
+        if (zip === undefined) {
+          onByteLimit?.();
+          return;
+        }
+        return { content: Buffer.from(zip).toString("base64"), findingPage };
       }
-      return { content: zip, findingPage };
+      content = JSON.stringify(entries);
+    } else {
+      content = renderMarkdown(records);
     }
-    content = renderMarkdown(records);
   }
   if (new TextEncoder().encode(content).byteLength > MAX_FINDING_EXPORT_BYTES) {
     onByteLimit?.();

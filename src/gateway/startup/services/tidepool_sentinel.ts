@@ -1363,10 +1363,12 @@ export function createTidepoolSentinelHandler(
             );
           }
           const format = message.format;
+          const zipEntries = message.findingZipEntries === true;
           const paged = message.findingPageSize !== undefined ||
             message.findingCursor !== undefined;
           if (
-            paged || message.findingIds !== undefined ||
+            message.findingZipEntries !== undefined || paged ||
+            message.findingIds !== undefined ||
             message.findingFilter !== undefined || format === "findings-json" ||
             format === "md-zip"
           ) {
@@ -1381,6 +1383,8 @@ export function createTidepoolSentinelHandler(
             if (
               typeof revision !== "number" ||
               !selection ||
+              (message.findingZipEntries !== undefined &&
+                (!zipEntries || !paged || format !== "md-zip")) ||
               (format !== "csv" && format !== "markdown" &&
                 format !== "findings-json" && format !== "md-zip") ||
               !isSentinelReportLanguage(language)
@@ -1404,6 +1408,7 @@ export function createTidepoolSentinelHandler(
                 message.findingPageSize ?? 16,
                 message.findingCursor,
                 markByteLimit,
+                zipEntries,
               )
               : undefined;
             const content = paged
@@ -1446,7 +1451,8 @@ export function createTidepoolSentinelHandler(
               format,
               content,
               ...(page?.findingPage && { findingPage: page.findingPage }),
-              ...(format === "md-zip" && {
+              ...(zipEntries && { encoding: "markdown-entries" }),
+              ...(format === "md-zip" && !zipEntries && {
                 encoding: "base64",
                 contentType: "application/zip",
                 filename: `sentinel-findings-r${state.revision}${

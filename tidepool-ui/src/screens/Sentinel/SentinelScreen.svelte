@@ -46,7 +46,7 @@
 
   import { createFindingDownload, type FindingDownloadFormat } from "./finding_download.js";
 
-  type ExportFormat = FindingDownloadFormat | "markdown" | "provenance" | "inventory" | "alerts" | "decisions" | "incidents";
+  type ExportFormat = FindingDownloadFormat | "provenance" | "inventory" | "alerts" | "decisions" | "incidents";
   const incidentDispositions = ["investigating", "resolved", "dismissed", "requires_review"];
   type DecisionDetail = {
     id: number; kind: "finding" | "incident"; subjectId: string; revision: number;
@@ -1025,19 +1025,19 @@
   function startFindingDownload(format: FindingDownloadFormat) {
     const revision = historical?.revision ?? assessment?.revision;
     if (!online || pending || revision === undefined) return;
-    const download = createFindingDownload(caseId, revision, format, { findingFilter: {} });
+    const download = createFindingDownload(caseId, revision, format, { findingFilter: {} }, reportLanguage);
     findingDownload = download;
     request("export", download.initial);
   }
 
-  function downloadReport(format: ExportFormat, content: string | readonly string[], revision?: number, baseline?: number, suffix?: string) {
+  function downloadReport(format: ExportFormat, content: string | readonly (string | ArrayBuffer)[], revision?: number, baseline?: number, suffix?: string) {
     const mime =
-      format === "csv"
+      format === "md-zip" ? "application/zip" : format === "csv"
         ? "text/csv;charset=utf-8"
         : format === "provenance" || format === "inventory" || format === "alerts" || format === "decisions" || format === "incidents" || format === "findings-json"
         ? "application/json;charset=utf-8"
         : "text/markdown;charset=utf-8";
-    const extension = format === "csv" ? "csv" : format === "markdown" ? "md" : "json";
+    const extension = format === "md-zip" ? "zip" : format === "csv" ? "csv" : format === "markdown" ? "md" : "json";
     if (format === "inventory" || format === "alerts" || format === "decisions" || format === "incidents") suffix = format;
     const url = URL.createObjectURL(new Blob(typeof content === "string" ? [content] : [...content], { type: mime }));
     const link = document.createElement("a");
@@ -2011,6 +2011,14 @@
                   <button type="button" class="button" disabled={!online || !!pending}
                     onclick={() => startFindingDownload("findings-json")}>
                     {t("Findings JSON")}
+                  </button>
+                  <button type="button" class="button" disabled={!online || !!pending}
+                    onclick={() => startFindingDownload("markdown")}>
+                    {t("Findings Markdown")}
+                  </button>
+                  <button type="button" class="button" disabled={!online || !!pending}
+                    onclick={() => startFindingDownload("md-zip")}>
+                    {t("Findings ZIP")}
                   </button>
                   <button type="button" class="button" disabled={!online || !!pending}
                     onclick={() => request("export", { format: "provenance", revision: historical?.revision })}>

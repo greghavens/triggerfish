@@ -3990,7 +3990,9 @@ Deno.test("Tidepool assembles oversized exact-version finding downloads without 
     const state = startSentinelAssessment(path);
     await withTidepool(baseDir, async (_list, _provenance, request) => {
       const scope = { findingFilter: {} };
-      for (const format of ["csv", "findings-json"] as const) {
+      for (
+        const format of ["csv", "findings-json", "markdown", "md-zip"] as const
+      ) {
         const download = createFindingDownload(
           "main",
           state.revision,
@@ -4017,7 +4019,29 @@ Deno.test("Tidepool assembles oversized exact-version finding downloads without 
         }
         assert(pages > 1);
         assert("content" in outcome);
-        const content = await new Blob([...outcome.content]).text();
+        const blob = new Blob([...outcome.content]);
+        assert(blob.size > 256 * 1024);
+        if (format === "md-zip") {
+          const zip = Buffer.from(await blob.arrayBuffer());
+          const end = zip.length - 22;
+          assertEquals(zip.readUInt32LE(end), 0x06054b50);
+          assertEquals(zip.readUInt16LE(end + 10), 280);
+          let entry = zip.readUInt32LE(end + 16);
+          for (let index = 0; index < 280; index++) {
+            assertEquals(zip.readUInt32LE(entry), 0x02014b50);
+            const nameSize = zip.readUInt16LE(entry + 28);
+            const local = zip.readUInt32LE(entry + 42);
+            assertEquals(zip.readUInt32LE(local), 0x04034b50);
+            assertEquals(
+              zip.subarray(entry + 46, entry + 46 + nameSize).toString(),
+              `finding-${String(index + 1).padStart(2, "0")}.md`,
+            );
+            entry += 46 + nameSize;
+          }
+          assertEquals(entry, end);
+          continue;
+        }
+        const content = await blob.text();
         if (format === "csv") {
           const lines = content.trimEnd().split("\r\n");
           assertEquals(lines.length, 281);
@@ -4029,6 +4053,9 @@ Deno.test("Tidepool assembles oversized exact-version finding downloads without 
             new Set(lines.slice(1).map((line) => line.split(",")[2])).size,
             280,
           );
+        } else if (format === "markdown") {
+          assertEquals([...content.matchAll(/^# /gm)].length, 1);
+          assertEquals([...content.matchAll(/^## /gm)].length, 280);
         } else {
           const result = JSON.parse(content);
           assertEquals(result.caseId, "main");
@@ -4040,26 +4067,79 @@ Deno.test("Tidepool assembles oversized exact-version finding downloads without 
           );
         }
       }
-      const stale = createFindingDownload(
-        "main",
-        state.revision,
-        "findings-json",
-        scope,
-      );
-      const firstRequest = stale.accept(
-        await request("export", {
+      for (const format of ["markdown", "md-zip"] as const) {
+        const selection = {
+          findingIds: Array.from(
+            { length: 17 },
+            (_, index) => `finding-${index}`,
+          ),
+        };
+        const direct = createFindingDownload(
+          "main",
+          state.revision,
+          format,
+          selection,
+          "es",
+        );
+        const directFrame = await request("export", {
           caseId: "main",
-          ...stale.initial,
-        }),
-      );
-      assert("request" in firstRequest);
-      const more = stale.accept(
-        await request("export", {
+          ...direct.initial,
+        });
+        const original = direct.accept(directFrame);
+        assert("content" in original);
+        const paged = createFindingDownload(
+          "main",
+          state.revision,
+          format,
+          selection,
+          "es",
+        );
+        let assembled = paged.accept({
+          type: "error",
+          code: "finding_export_byte_limit",
           caseId: "main",
-          ...firstRequest.request,
-        }),
-      );
-      assert("request" in more);
+          revision: state.revision,
+          format,
+        });
+        for (let index = 0; index < 2; index++) {
+          assert("request" in assembled);
+          assembled = paged.accept(
+            await request("export", {
+              caseId: "main",
+              ...assembled.request,
+            }),
+          );
+        }
+        assert("content" in assembled);
+        assertEquals(
+          await new Blob([...assembled.content]).arrayBuffer(),
+          await new Blob([...original.content]).arrayBuffer(),
+        );
+      }
+      const pending = [];
+      for (const format of ["markdown", "md-zip"] as const) {
+        const stale = createFindingDownload(
+          "main",
+          state.revision,
+          format,
+          scope,
+        );
+        const firstRequest = stale.accept(
+          await request("export", {
+            caseId: "main",
+            ...stale.initial,
+          }),
+        );
+        assert("request" in firstRequest);
+        const more = stale.accept(
+          await request("export", {
+            caseId: "main",
+            ...firstRequest.request,
+          }),
+        );
+        assert("request" in more);
+        pending.push({ stale, request: more.request });
+      }
       const update = await request("review_finding", {
         caseId: "main",
         revision: state.revision,
@@ -4068,12 +4148,14 @@ Deno.test("Tidepool assembles oversized exact-version finding downloads without 
         note: "New reviewed disposition",
       });
       assertEquals(update.type, "sentinel_state");
-      const expired = await request("export", {
-        caseId: "main",
-        ...more.request,
-      });
-      assertEquals(expired.type, "error");
-      assert("error" in stale.accept(expired));
+      for (const continuation of pending) {
+        const expired = await request("export", {
+          caseId: "main",
+          ...continuation.request,
+        });
+        assertEquals(expired.type, "error");
+        assert("error" in continuation.stale.accept(expired));
+      }
     });
   } finally {
     await Deno.remove(baseDir, { recursive: true });
