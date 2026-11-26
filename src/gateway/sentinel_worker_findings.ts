@@ -25,6 +25,7 @@ import {
 } from "../sentinel/worker_finding_evidence.ts";
 import {
   hasSentinelWorkerFindingJournal,
+  normalizeFindingReportCategory,
   openSentinelWorkerFindingStore,
   readSentinelCaseFindingReceipts,
   readSentinelWorkerFindingWriteReceipt,
@@ -657,9 +658,11 @@ export async function amendOperatorSentinelFindingReport(
     title,
     summary,
     severity,
+    findingCategory,
     requestId,
   } = args;
   const rating = sentinelFindingSeverities.find((value) => value === severity);
+  const category = normalizeFindingReportCategory(findingCategory);
   const caseId = locateSentinelCase(path)?.caseId;
   if (
     !caseId || typeof receiptId !== "string" ||
@@ -668,7 +671,9 @@ export async function amendOperatorSentinelFindingReport(
     reportVersion < 1 || typeof evidenceVersion !== "string" ||
     !/^[a-f0-9]{64}$/.test(evidenceVersion) ||
     (severity !== undefined && rating === undefined) ||
-    (rating === undefined && (title === undefined || summary === undefined)) ||
+    (findingCategory !== undefined && category === undefined) ||
+    (rating === undefined && category === undefined &&
+      (title === undefined || summary === undefined)) ||
     (title !== undefined &&
       (typeof title !== "string" || !title.trim() || title.length > 256 ||
         title.includes("\0"))) ||
@@ -693,7 +698,7 @@ export async function amendOperatorSentinelFindingReport(
         if (!finding || finding.caseId !== caseId || finding.runId !== runId) {
           return;
         }
-        if (rating !== undefined) {
+        if (rating !== undefined || category !== undefined) {
           const policy = readSentinelOperatingConstraints(
             path,
             runId,
@@ -718,6 +723,7 @@ export async function amendOperatorSentinelFindingReport(
           expectedVersion: reportVersion,
           evidenceVersion,
           ...(rating !== undefined && { severity: rating }),
+          ...(category !== undefined && { findingCategory: category }),
           title: typeof title === "string" ? title : report.title,
           summary: typeof summary === "string" ? summary : report.summary,
         };
@@ -733,6 +739,7 @@ export async function amendOperatorSentinelFindingReport(
             receipt.expectedVersion === reportVersion &&
             receipt.evidenceVersion === evidenceVersion &&
             receipt.severity === rating &&
+            receipt.findingCategory === category &&
             (title === undefined || receipt.title === title) &&
             (summary === undefined || receipt.summary === summary)
           ) return { runId, amendment: receipt };
@@ -750,6 +757,7 @@ export async function amendOperatorSentinelFindingReport(
         return {
           runId,
           priorSeverity: report.severity,
+          priorCategory: report.findingCategory,
           amendment: approvedRunId === undefined
             ? undefined
             : journal.updateFindingReport(input, evidenceIsCurrent),
@@ -772,6 +780,14 @@ export async function amendOperatorSentinelFindingReport(
         `Amend Sentinel finding ${receiptId} in case ${caseId}, revision ${revision}, report version ${reportVersion}, with attachment digest ${evidenceVersion}?${
           rating !== undefined
             ? `\nSeverity: ${preview.priorSeverity ?? "unrated"} → ${rating}`
+            : ""
+        }${
+          category !== undefined
+            ? `\nFinding category: ${
+              preview.priorCategory === undefined
+                ? "(none)"
+                : JSON.stringify(preview.priorCategory)
+            } → ${category ? JSON.stringify(category) : "(clear)"}`
             : ""
         }${typeof title === "string" ? `\nTitle: ${title}` : ""}${
           typeof summary === "string" ? `\nSummary: ${summary}` : ""

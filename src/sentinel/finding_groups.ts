@@ -69,6 +69,8 @@ export function readSentinelFindingGroup(
         taskId: report.finding.taskId,
         reportVersion: report.version,
         ...(report.severity !== undefined && { severity: report.severity }),
+        ...(report.findingCategory &&
+          { findingCategory: report.findingCategory }),
       });
     }
     const entries = [...graphEntries, ...workerEntries];

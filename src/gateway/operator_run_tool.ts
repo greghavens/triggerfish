@@ -215,7 +215,7 @@ import {
   readSharedSentinelTopologySource,
 } from "../sentinel/shared_inventory.ts";
 import {
-  findingReportSeverity,
+  findingReportMetadata,
   hasSentinelWorkerFindingJournal,
   openSentinelWorkerFindingStore,
   readSentinelCaseFindingReceipts,
@@ -579,6 +579,11 @@ export const operatorRunTool: ToolDefinition = {
       description:
         "Reviewed severity correction on the exact current finding report.",
       enum: ["critical", "high", "medium", "low", "info"],
+    },
+    findingCategory: {
+      type: "string",
+      description:
+        "Reviewed finding category label (up to 64 characters). Use an empty string to clear.",
     },
     summary: { type: "string", description: "New finding report summary" },
     reportVersion: {
@@ -7947,7 +7952,8 @@ ${
         if (
           ref.kind !== "sentinel" || ref.revision === undefined ||
           !canFlowTo("INTERNAL", context?.ceiling ?? "INTERNAL") ||
-          (args.severity !== undefined &&
+          ((args.severity !== undefined ||
+            args.findingCategory !== undefined) &&
             (!context?.authenticatedOwnerSessionId ||
               !canFlowTo(
                 context.inputClassification ?? "PUBLIC",
@@ -7965,6 +7971,7 @@ ${
               "title",
               "summary",
               "severity",
+              "findingCategory",
               "requestId",
             ].includes(key)
           ) ||
@@ -8181,7 +8188,6 @@ ${
                 amendment.version === version && amendment.caseId === ref.id &&
                 amendment.runId === runId
               );
-            const severity = findingReportSeverity(report.amendments, version);
             return selected
               ? safeProjection({
                 run: ref,
@@ -8195,7 +8201,7 @@ ${
                   ...("evidenceVersion" in selected && {
                     evidenceVersion: selected.evidenceVersion,
                   }),
-                  ...(severity !== undefined && { severity }),
+                  ...findingReportMetadata(report.amendments, version),
                   title: selected.title,
                   summary: selected.summary,
                 },

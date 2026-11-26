@@ -25,6 +25,7 @@ import { exportSentinelFindingTrafficLinks } from "./finding_traffic_links.ts";
 import { loadSentinelGraph, sentinelFindingSeverities } from "./graph.ts";
 import {
   hasSentinelWorkerFindingJournal,
+  normalizeFindingReportCategory,
   openSentinelWorkerFindingStore,
   readSentinelWorkerFindingReport,
 } from "./worker_finding_store.ts";
@@ -294,16 +295,19 @@ interface FindingExportFilter {
   readonly query?: string;
   readonly severity?: typeof sentinelFindingSeverities[number];
   readonly disposition?: SentinelFindingReview["disposition"];
+  readonly findingCategory?: string;
 }
 
 export function parseFindingExportFilter(
   raw: unknown,
 ): FindingExportFilter | undefined {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return;
-  const { kind, assetId, query, severity, disposition } = raw as Record<
-    string,
-    unknown
-  >;
+  const { kind, assetId, query, severity, disposition, findingCategory } =
+    raw as Record<
+      string,
+      unknown
+    >;
+  const category = normalizeFindingReportCategory(findingCategory);
   const severityFilter = sentinelFindingSeverities.find((value) =>
     value === severity
   );
@@ -312,10 +316,18 @@ export function parseFindingExportFilter(
   );
   if (
     Object.keys(raw).some((key) =>
-      !["kind", "assetId", "query", "severity", "disposition"].includes(key)
+      ![
+        "kind",
+        "assetId",
+        "query",
+        "severity",
+        "disposition",
+        "findingCategory",
+      ].includes(key)
     ) ||
     (kind !== undefined && kind !== "imported" && kind !== "worker") ||
     (severity !== undefined && !severityFilter) ||
+    (findingCategory !== undefined && !category) ||
     (disposition !== undefined && !dispositionFilter) ||
     (assetId !== undefined &&
       (typeof assetId !== "string" || !assetId || assetId.length > 4096 ||
@@ -327,6 +339,7 @@ export function parseFindingExportFilter(
   return {
     ...(kind && { kind }),
     ...(severityFilter && { severity: severityFilter }),
+    ...(category && { findingCategory: category.toLowerCase() }),
     ...(dispositionFilter && { disposition: dispositionFilter }),
     ...(typeof assetId === "string" && { assetId }),
     ...(typeof query === "string" && { query: query.trim().toLowerCase() }),
@@ -395,7 +408,8 @@ export function renderScopedSentinelFindings(
       const report = journal?.readFindingReport(id, assessment.revision);
       if (imported && report) return;
       if (!explicit) {
-        const { assetId, query, severity, disposition } = selection;
+        const { assetId, query, severity, disposition, findingCategory } =
+          selection;
         const scope = imported ? imported.assets : [report?.finding.targetId];
         const title = redactCredentialText(
           imported?.label ?? report?.title ?? "",
@@ -403,6 +417,8 @@ export function renderScopedSentinelFindings(
         const summary = redactCredentialText(report?.summary ?? "");
         if (
           (severity && (imported?.severity ?? report?.severity) !== severity) ||
+          (findingCategory &&
+            report?.findingCategory?.toLowerCase() !== findingCategory) ||
           (disposition &&
             (!imported || (dispositions.get(id) ?? "open") !== disposition)) ||
           (assetId && !scope.includes(assetId)) ||
@@ -460,6 +476,8 @@ export function renderScopedSentinelFindings(
         title: redactCredentialText(report.title),
         summary: redactCredentialText(report.summary),
         ...(report.severity !== undefined && { severity: report.severity }),
+        ...(report.findingCategory &&
+          { findingCategory: report.findingCategory }),
         assetIds: [source.targetId],
         controlIds: [source.controlId],
         evidenceIds: [source.evidenceId],
@@ -524,6 +542,11 @@ export function renderScopedSentinelFindings(
           "",
           `- ${t("Finding ID")} ${markdownText(row.id)}`,
           ...(row.severity ? [`- ${t("Severity")} ${row.severity}`] : []),
+          ...(row.kind === "worker" && row.findingCategory
+            ? [
+              `- ${t("Finding category")} ${markdownText(row.findingCategory)}`,
+            ]
+            : []),
           ...(row.kind === "worker" ? [`- ${markdownText(row.summary)}`] : []),
           `- ${t("Affected asset IDs")} ${
             linkedIds(row.assetIds, t("None linked"))

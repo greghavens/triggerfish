@@ -4,6 +4,7 @@
 import { dirname, join, resolve } from "@std/path";
 import { createHash } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
+import { redactCredentialText } from "../core/logger/redactor.ts";
 import { isSentinelCaseId, locateSentinelCase } from "./cases.ts";
 import { sentinelFindingSeverities } from "./graph.ts";
 import { assertOperatorSourceDirectoryInfo } from "./source_snapshot_lock.ts";
@@ -63,13 +64,30 @@ export type SentinelWorkerFindingJournalRecord =
   | SentinelWorkerFindingRecord
   | SentinelWorkerFindingRecheckRecord;
 
-export function findingReportSeverity(
+export function normalizeFindingReportCategory(
+  value: unknown,
+): string | undefined {
+  if (
+    typeof value !== "string" || value.length > 64 ||
+    /[\p{Cc}\p{Cf}]/u.test(value) || redactCredentialText(value) !== value
+  ) return;
+  return value.trim();
+}
+
+export function findingReportMetadata(
   amendments: readonly SentinelWorkerFindingReportAmendment[],
   version = Number.MAX_SAFE_INTEGER,
 ) {
-  return amendments.findLast((item) =>
+  const severity = amendments.findLast((item) =>
     item.version <= version && item.severity !== undefined
   )?.severity;
+  const findingCategory = amendments.findLast((item) =>
+    item.version <= version && item.findingCategory !== undefined
+  )?.findingCategory;
+  return {
+    ...(severity !== undefined && { severity }),
+    ...(findingCategory && { findingCategory }),
+  };
 }
 
 export interface SentinelWorkerFindingReportUpdate {
@@ -83,6 +101,7 @@ export interface SentinelWorkerFindingReportUpdate {
   readonly expectedVersion: number;
   readonly evidenceVersion?: string;
   readonly severity?: typeof sentinelFindingSeverities[number];
+  readonly findingCategory?: string;
   readonly title: string;
   readonly summary: string;
 }
@@ -221,9 +240,11 @@ function normalizeAmendment(raw: SentinelWorkerFindingReportUpdate) {
     expectedVersion,
     evidenceVersion,
     severity,
+    findingCategory,
     title,
     summary,
   } = raw;
+  const category = normalizeFindingReportCategory(findingCategory);
   if (
     !isSentinelCaseId(caseId) || !bounded(runId, 128) ||
     !Number.isSafeInteger(evidenceRevision) || evidenceRevision < 1 ||
@@ -238,6 +259,8 @@ function normalizeAmendment(raw: SentinelWorkerFindingReportUpdate) {
     (severity !== undefined &&
       (taskId !== "operator" ||
         !sentinelFindingSeverities.includes(severity))) ||
+    (findingCategory !== undefined &&
+      (taskId !== "operator" || category === undefined)) ||
     !bounded(title, 256) || !bounded(summary, 4096)
   ) throw new Error("Invalid Sentinel worker finding report amendment");
   return {
@@ -251,6 +274,7 @@ function normalizeAmendment(raw: SentinelWorkerFindingReportUpdate) {
     expectedVersion,
     ...(evidenceVersion !== undefined && { evidenceVersion }),
     ...(severity !== undefined && { severity }),
+    ...(category !== undefined && { findingCategory: category }),
     title,
     summary,
   };
@@ -577,13 +601,12 @@ export function openSentinelWorkerFindingStore(
       "SELECT * FROM receipts WHERE findingId = ? AND revision <= ? AND reportVersion IS NOT NULL ORDER BY reportVersion",
     ).all(findingId, revision).map(decodeAmendment);
     const latest = amendments.at(-1);
-    const severity = findingReportSeverity(amendments);
     return {
       finding,
       version: latest?.version ?? 1,
       title: latest?.title ?? finding.title,
       summary: latest?.summary ?? finding.summary,
-      ...(severity !== undefined && { severity }),
+      ...findingReportMetadata(amendments),
       amendments,
     };
   }
@@ -672,6 +695,9 @@ export function openSentinelWorkerFindingStore(
       recordedAt: item.recordedAt,
       ...(item.kind === "report_amendment" && item.severity !== undefined &&
         { severity: item.severity }),
+      ...(item.kind === "report_amendment" &&
+        item.findingCategory !== undefined &&
+        { findingCategory: item.findingCategory }),
       ...(item.kind === "finding"
         ? { evidenceId: item.evidenceId }
         : item.evidenceVersion

@@ -1309,6 +1309,7 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
           ratedFinding.id,
         ).digest,
         severity: "high",
+        findingCategory: "  Access control  ",
         requestId: crypto.randomUUID(),
       };
       const beforeRating = confirmations.length;
@@ -1330,6 +1331,11 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
           { ...correction, revision: treeAssessment.revision },
           { ...correction, evidenceVersion: "a".repeat(64) },
           { ...correction, severity: "unrated" },
+          {
+            ...correction,
+            severity: undefined,
+            findingCategory: "Invalid\ncategory",
+          },
         ]
       ) {
         assertStringIncludes((await turn(change)).result, "unavailable");
@@ -1337,9 +1343,11 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
       assertEquals(confirmations.length, beforeRating);
       const rated = JSON.parse((await turn(correction)).result).amendment;
       assertEquals(rated.severity, "high");
+      assertEquals(rated.findingCategory, "Access control");
       assertEquals(rated.title, ratedFinding.title);
       assertEquals(rated.summary, ratedFinding.summary);
       assertStringIncludes(confirmations.at(-1)!, "unrated → high");
+      assertStringIncludes(confirmations.at(-1)!, '(none) → "Access control"');
       assertEquals(confirmations.length, beforeRating + 1);
       const reportRead = {
         action: "finding_report",
@@ -1361,11 +1369,13 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
         const current =
           JSON.parse((await reconnected(reportRead)).result).report;
         assertEquals(current.severity, "high");
+        assertEquals(current.findingCategory, "Access control");
         assertEquals(current.sourceReceiptId, rated.id);
         const originalVersion = JSON.parse(
           (await reconnected({ ...reportRead, reportVersion: 1 })).result,
         ).report;
         assertEquals(originalVersion.severity, undefined);
+        assertEquals(originalVersion.findingCategory, undefined);
         assertEquals(originalVersion.sourceReceiptId, ratedFinding.id);
         const old = JSON.parse(
           (await reconnected({
@@ -1375,6 +1385,26 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
         ).report;
         assertEquals(old.sourceReceiptId, ratedFinding.id);
         assertEquals(old.severity, undefined);
+        assertEquals(old.findingCategory, undefined);
+        const clearCategory = {
+          ...correction,
+          severity: undefined,
+          findingCategory: "",
+          reportVersion: 2,
+          requestId: crypto.randomUUID(),
+        };
+        const cleared =
+          JSON.parse((await reconnected(clearCategory)).result).amendment;
+        assertEquals(cleared.findingCategory, "");
+        const uncategorized =
+          JSON.parse((await reconnected(reportRead)).result).report;
+        assertEquals(uncategorized.findingCategory, undefined);
+        assertEquals(uncategorized.severity, "high");
+        const archivedCategory = JSON.parse(
+          (await reconnected({ ...reportRead, reportVersion: 2 })).result,
+        ).report;
+        assertEquals(archivedCategory.findingCategory, "Access control");
+        assertEquals(archivedCategory.sourceReceiptId, rated.id);
         denied = "POST_TOOL_RESPONSE";
         assertEquals(
           (await reconnected(reportRead)).result,

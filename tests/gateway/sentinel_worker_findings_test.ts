@@ -67,7 +67,10 @@ import {
 } from "../../src/sentinel/formal_goals.ts";
 import { resolveSentinelCasePath } from "../../src/sentinel/cases.ts";
 import { importSentinelHar } from "../../src/sentinel/har.ts";
-import type { SentinelFindingTrafficLink } from "../../src/sentinel/finding_traffic_links.ts";
+import {
+  sentinelFindingTrafficEvidenceVersion,
+  type SentinelFindingTrafficLink,
+} from "../../src/sentinel/finding_traffic_links.ts";
 import { readSentinelTrafficReceiptPage } from "../../src/sentinel/traffic_receipts.ts";
 import { readSentinelWorkerFindingPublications } from "../../src/sentinel/worker_finding_publications.ts";
 import {
@@ -1593,6 +1596,46 @@ Deno.test("Leased Sentinel workers report, recheck, and amend findings visible i
         [undefined, undefined, [check!.id], undefined],
       );
       assertEquals(restored.workerFindings.amendments, [amendment!]);
+      await withFindingAssignmentGateway(
+        baseDir,
+        () => Promise.resolve(true),
+        async (turn) => {
+          const amended = JSON.parse(
+            await turn({
+              action: "amend_finding_report",
+              kind: "sentinel",
+              id: "main",
+              revision: secondRevision,
+              receiptId: finding!.id,
+              reportVersion: amendment!.version,
+              evidenceVersion: sentinelFindingTrafficEvidenceVersion(
+                path,
+                secondRevision!,
+                finding!.id,
+              ).digest,
+              requestId: crypto.randomUUID(),
+              findingCategory: "Identity control",
+            }),
+          ).amendment;
+          assertEquals(amended.findingCategory, "Identity control");
+        },
+      );
+      const categoryExport = {
+        ...filterExport,
+        findingFilter: { findingCategory: "identity control" },
+      };
+      const categoryReport = await request("export", categoryExport);
+      assertEquals(categoryReport.type, "export");
+      const categoryFindings =
+        JSON.parse(String(categoryReport.content)).findings;
+      assertEquals(categoryFindings.length, 1);
+      assertEquals(categoryFindings[0].id, finding!.id);
+      assertEquals(categoryFindings[0].findingCategory, "Identity control");
+      const earlierCategories = await request("export", {
+        ...categoryExport,
+        revision: first.revision,
+      });
+      assertEquals(JSON.parse(String(earlierCategories.content)).findings, []);
     });
     assert(stopSentinelAssessment(path));
     const latest = startSentinelAssessment(path, { goal: "New assessment" });
