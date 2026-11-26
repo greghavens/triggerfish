@@ -89,6 +89,7 @@ import {
   SENTINEL_GOAL_PROVE,
   SENTINEL_GOAL_RECHECK_READ,
   SENTINEL_PROVENANCE_NODE_READ,
+  SENTINEL_SAVED_WORKFLOW_READ,
   SENTINEL_SHARED_WORKER_REVIEW,
   sentinelDefenseReadArgs,
   sentinelGoalProofArguments,
@@ -705,6 +706,11 @@ function portablePausedWorkerRead(
       args && typeof args === "object" && !Array.isArray(args) &&
       Object.keys(args).length === 0
     ) return { id: call.id, tool: ASSIGNED_TARGET_CHECKPOINT_TOOL } as const;
+    if (
+      call.function.name === SENTINEL_SAVED_WORKFLOW_READ &&
+      args && typeof args === "object" && !Array.isArray(args) &&
+      Object.keys(args).length === 0
+    ) return { id: call.id, tool: SENTINEL_SAVED_WORKFLOW_READ } as const;
     if (call.function.name === SENTINEL_PROVENANCE_NODE_READ) {
       const provenance = sentinelGoalReceiptReadArguments(
         SENTINEL_PROVENANCE_NODE_READ,
@@ -739,7 +745,94 @@ type PortableWorkerSources = {
   ) => boolean;
 };
 
+function retainedWorkerWorkflowReceipt(
+  db: DatabaseSync,
+  revision: string,
+  sourceTaskId: string,
+  targetId: string,
+  evidenceRevision: number,
+  resultSha256: string,
+) {
+  const row = db.prepare(`
+    SELECT trace.steps FROM adaptive_tasks AS source
+    JOIN adaptive_model_reviews AS review ON review.taskId = source.id
+    JOIN adaptive_notes AS note ON note.rowid = review.noteId
+      AND note.revision = source.revision AND note.taskId = source.id
+    JOIN adaptive_note_steps AS trace ON trace.note_id = note.rowid
+    WHERE source.id = ? AND source.revision = ? AND source.nodeId = ?
+      AND source.status = 'completed'
+  `).get(taskId(sourceTaskId), revisionKey(revision), targetId);
+  if (typeof row?.steps !== "string") return undefined;
+  const steps = JSON.parse(row.steps) as SentinelReviewStep[];
+  let matched:
+    | {
+      sourceTaskId: string;
+      stepIndex: number;
+      receipt: SentinelGitHubWorkflowReadReceipt;
+    }
+    | undefined;
+  for (const [stepIndex, step] of steps.slice(0, 16).entries()) {
+    if (
+      step.tool !== "sentinel_live_workflow_status" ||
+      step.outcome !== "returned" ||
+      (step.target !== targetId && step.target !== targetId.slice(0, 256))
+    ) continue;
+    const receipt = readSentinelGitHubWorkflowReadReceipt(
+      step.githubWorkflowRead,
+      evidenceRevision,
+    );
+    if (receipt?.resultSha256 === resultSha256) {
+      if (matched && !isDeepStrictEqual(matched.receipt, receipt)) {
+        return undefined;
+      }
+      matched ??= { sourceTaskId, stepIndex, receipt };
+    }
+  }
+  return matched;
+}
+
+function matchesPortableSavedWorkflow(
+  db: DatabaseSync,
+  evidenceRevision: number,
+  taskId: string,
+  targetId: string,
+  text: string,
+) {
+  const row = db.prepare(`
+    SELECT task.* FROM adaptive_tasks AS task
+    WHERE task.id = ? AND task.nodeId = ? AND task.revision = (
+      SELECT revision FROM adaptive_evidence_revisions
+      WHERE evidenceNumber = ? ORDER BY rowid DESC LIMIT 1
+    )
+  `).get(taskId, targetId, evidenceRevision);
+  if (!row) return false;
+  const task = decodeTask(row);
+  const citation = task.plannerRound?.githubWorkflowCitation;
+  if (
+    !citation || citation.sourceTaskId === task.id ||
+    !task.prerequisites.includes(citation.sourceTaskId) ||
+    !taskWorkerSources(task).some(({ taskId, kind }) =>
+      taskId === citation.sourceTaskId && kind === "model_review"
+    )
+  ) return false;
+  const proof = retainedWorkerWorkflowReceipt(
+    db,
+    task.revision,
+    citation.sourceTaskId,
+    targetId,
+    evidenceRevision,
+    citation.resultSha256,
+  );
+  return proof?.receipt.connectorId === "github-actions" &&
+    createHash("sha256").update(JSON.stringify(proof.receipt.runs)).digest(
+        "hex",
+      ) ===
+      proof.receipt.resultSha256 &&
+    text === JSON.stringify({ targetId, ...proof });
+}
+
 function portablePausedWorkerProgress(
+  db: DatabaseSync,
   value: AgentTurnCheckpoint,
   steps: readonly SentinelReviewStep[],
   evidenceRevision: number,
@@ -774,6 +867,25 @@ function portablePausedWorkerProgress(
         tool: SENTINEL_TRAFFIC_READ,
         outcome: "returned",
         trafficRead: proof,
+      });
+      continue;
+    }
+    if (call.tool === SENTINEL_SAVED_WORKFLOW_READ) {
+      const proof = { args: {}, sha256: hash };
+      if (
+        !isDeepStrictEqual(step.goalReceiptRead, proof) ||
+        !matchesPortableSavedWorkflow(
+          db,
+          evidenceRevision,
+          taskId,
+          nodeId,
+          result.content,
+        )
+      ) return;
+      safe.push({
+        tool: call.tool,
+        outcome: "returned",
+        goalReceiptRead: proof,
       });
       continue;
     }
@@ -927,10 +1039,13 @@ export function retainPortablePausedGraphCheckpoints(
           hold.scope.taskId !== taskId ||
           hold.scope.evidenceRevision !== evidenceRevision ||
           hold.scope.attempt !== Number(row.attempts) + 1 ||
+          (value.attempt !== undefined &&
+            value.attempt !== hold.scope.attempt) ||
           hold.checkpointSha256 !==
             createHash("sha256").update(checkpoint).digest("hex")
         ) continue;
         const safeSteps = portablePausedWorkerProgress(
+          db,
           value,
           JSON.parse(progress.steps),
           evidenceRevision,
@@ -952,6 +1067,7 @@ export function retainPortablePausedGraphCheckpoints(
           !normalized ||
           !isDeepStrictEqual({
             ...normalized,
+            ...(value.attempt !== undefined && { attempt: value.attempt }),
             ...(control && { controlClaimSha256: control }),
           }, value)
         ) continue;
@@ -10911,42 +11027,14 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
         this.forEvidence(evidenceRevision)?.revision !== revision ||
         !/^[a-f0-9]{64}$/.test(resultSha256)
       ) return undefined;
-      const row = db.prepare(`
-        SELECT trace.steps FROM adaptive_tasks AS source
-        JOIN adaptive_model_reviews AS review ON review.taskId = source.id
-        JOIN adaptive_notes AS note ON note.rowid = review.noteId
-          AND note.revision = source.revision AND note.taskId = source.id
-        JOIN adaptive_note_steps AS trace ON trace.note_id = note.rowid
-        WHERE source.id = ? AND source.revision = ? AND source.nodeId = ?
-          AND source.status = 'completed'
-      `).get(taskId(sourceTaskId), revisionKey(revision), targetId);
-      if (typeof row?.steps !== "string") return undefined;
-      const steps = JSON.parse(row.steps) as SentinelReviewStep[];
-      let matched:
-        | {
-          sourceTaskId: string;
-          stepIndex: number;
-          receipt: SentinelGitHubWorkflowReadReceipt;
-        }
-        | undefined;
-      for (const [stepIndex, step] of steps.slice(0, 16).entries()) {
-        if (
-          step.tool !== "sentinel_live_workflow_status" ||
-          step.outcome !== "returned" ||
-          (step.target !== targetId && step.target !== targetId.slice(0, 256))
-        ) continue;
-        const receipt = readSentinelGitHubWorkflowReadReceipt(
-          step.githubWorkflowRead,
-          evidenceRevision,
-        );
-        if (receipt?.resultSha256 === resultSha256) {
-          if (matched && !isDeepStrictEqual(matched.receipt, receipt)) {
-            return undefined;
-          }
-          matched ??= { sourceTaskId, stepIndex, receipt };
-        }
-      }
-      return matched;
+      return retainedWorkerWorkflowReceipt(
+        db,
+        revision,
+        sourceTaskId,
+        targetId,
+        evidenceRevision,
+        resultSha256,
+      );
     },
 
     committedPlannerToolResponses() {

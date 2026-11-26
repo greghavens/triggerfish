@@ -1,3 +1,5 @@
+import { createSentinelLiveWorkflowReader } from "../../src/gateway/sentinel_live_workflow.ts";
+import { createHash } from "node:crypto";
 import { ModelFailoverExhausted } from "../../src/agent/providers/retry.ts";
 import { ingestSentinelTraffic } from "../../src/cli/commands/sentinel_traffic.ts";
 import { DatabaseSync } from "node:sqlite";
@@ -909,7 +911,7 @@ async function verifyPausedGraphWorker(
   pinnedTemplate = false,
   askCheckpoint?: "approved" | "missing",
   trafficCheckpoint = false,
-  provenanceCheckpoint?: "node" | "finding" | "adaptive-finding",
+  provenanceCheckpoint?: "node" | "finding" | "adaptive-finding" | "workflow",
 ) {
   const baseDir = await Deno.makeTempDir();
   const caseId = cold ? "portable-worker" : "main";
@@ -930,6 +932,38 @@ async function verifyPausedGraphWorker(
   let originalRead: string | undefined;
   const findingCheckpoint = provenanceCheckpoint === "finding" ||
     provenanceCheckpoint === "adaptive-finding";
+  const workflowCheckpoint = provenanceCheckpoint === "workflow";
+  const localProvenance = provenanceCheckpoint && !workflowCheckpoint;
+  let workflowTarget: string | undefined;
+  let workflowSource: string | undefined;
+  let sourceMetadataChecks = 0;
+  let credentialReads = 0;
+  let repeatedResultFetches = 0;
+  const readRetainedWorkflow = createSentinelLiveWorkflowReader({
+    scopes: [{
+      case: caseId,
+      asset: heldAsset,
+      owner: "owner",
+      repo: "retained",
+      workflow_id: 42,
+    }],
+    resolveToken: () => {
+      credentialReads++;
+      return Promise.resolve("synthetic-connector-secret");
+    },
+    ssrfChecker: () => Promise.resolve({ ok: true, value: "192.0.2.1" }),
+    verifyAccess: (target) => {
+      assertEquals(target.workflowId, 42);
+      sourceMetadataChecks++;
+      return Promise.resolve(!enforceReadRevocation);
+    },
+    readRuns: () => {
+      repeatedResultFetches++;
+      return Promise.reject(
+        new Error("A retained result must never be fetched again"),
+      );
+    },
+  });
   let exactProvenance: {
     revision: number;
     node: string;
@@ -939,7 +973,9 @@ async function verifyPausedGraphWorker(
   let heldAssignmentId: string | undefined;
   const approvalTool = trafficCheckpoint
     ? "sentinel_traffic_get"
-    : provenanceCheckpoint
+    : workflowCheckpoint
+    ? "sentinel_saved_workflow_receipt"
+    : localProvenance
     ? "sentinel_provenance_node"
     : "sentinel_assigned_target";
   const approvalPath = join(baseDir, "tool-approvals.db");
@@ -993,7 +1029,9 @@ async function verifyPausedGraphWorker(
                   type: "function" as const,
                   function: {
                     name: approvalTool,
-                    arguments: JSON.stringify(exactTraffic ?? exactProvenance),
+                    arguments: JSON.stringify(
+                      exactTraffic ?? exactProvenance ?? {},
+                    ),
                   },
                 }]
                 : []),
@@ -1004,7 +1042,18 @@ async function verifyPausedGraphWorker(
           assert(String(saved.content).includes(id));
         }
         if (id === heldAsset) {
-          if (provenanceCheckpoint) {
+          if (workflowCheckpoint) {
+            const text = String(saved.content);
+            const page = JSON.parse(text);
+            assertEquals(page.sourceTaskId, workflowSource);
+            assertEquals(page.targetId, heldAsset);
+            assertEquals(page.receipt.workflowId, 42);
+            assertEquals(page.receipt.runs[0].id, 300);
+            assert(!text.includes("synthetic-connector-secret"));
+            if (heldStep) assertEquals(text, originalRead);
+            else originalRead = text;
+          }
+          if (localProvenance) {
             assert(exactProvenance);
             const text = String(saved.content);
             const result = JSON.parse(text);
@@ -1111,7 +1160,7 @@ async function verifyPausedGraphWorker(
       }
       if (
         enforceReadRevocation && hook === "PRE_TOOL_CALL" &&
-        input.tool_name === approvalTool
+        input.tool_name === approvalTool && !workflowCheckpoint
       ) {
         blockedSavedRead++;
         return Promise.resolve({
@@ -1142,7 +1191,9 @@ async function verifyPausedGraphWorker(
             send({
               type: "response",
               text: JSON.stringify([
-                { kind: "impact", nodeId: heldAsset },
+                ...(!workflowCheckpoint
+                  ? [{ kind: "impact", nodeId: heldAsset }]
+                  : []),
                 { kind: "impact", nodeId: "peer-graph" },
               ]),
               taint: "INTERNAL",
@@ -1153,12 +1204,16 @@ async function verifyPausedGraphWorker(
         };
       }
       const target = adaptive()?.tasks.find(({ id }) => id === taskId)?.nodeId;
+      if (workflowCheckpoint && target === heldAsset) {
+        assertEquals(taskId, workflowTarget);
+      }
       const registry = target === heldAsset ? heldProvider : peerProvider;
       return createSentinelSubagent({
         snapshotPath: path,
         assessmentRevision: state.revision,
         assignedTaskId: taskId,
         assignedTaskLeaseToken: token,
+        ...(workflowCheckpoint && { readRetainedWorkflow }),
         hookRunner,
         providerRegistry: registry,
         allowModelAccess: true,
@@ -1185,7 +1240,7 @@ async function verifyPausedGraphWorker(
         nodes: [
           ...(trafficCheckpoint ? ["peer-graph"] : [heldAsset, "peer-graph"])
             .map((id) => ({ kind: "asset", id, label: id })),
-          ...(provenanceCheckpoint
+          ...(localProvenance
             ? [{
               kind: "evidence",
               id: "portable-source",
@@ -1202,7 +1257,7 @@ async function verifyPausedGraphWorker(
             : []),
         ],
         edges: [
-          ...(provenanceCheckpoint
+          ...(localProvenance
             ? [{
               from: "portable-source",
               to: provenanceCheckpoint === "finding" ? "peer-graph" : heldAsset,
@@ -1285,7 +1340,7 @@ async function verifyPausedGraphWorker(
         digest: receipt.digest,
       };
     }
-    if (provenanceCheckpoint) {
+    if (localProvenance) {
       exactProvenance = {
         revision: initial.revision,
         node: findingCheckpoint
@@ -1310,6 +1365,70 @@ async function verifyPausedGraphWorker(
       });
     }
     advanceAdaptiveSentinel(path, initial);
+    if (workflowCheckpoint) {
+      const revision = adaptiveRevision(initial);
+      const store = openSentinelAdaptiveStore(
+        join(dirname(path), "sentinel-adaptive.db"),
+      );
+      try {
+        store.sync(revision, [{
+          kind: "impact",
+          nodeId: heldAsset,
+          reason: MODEL_ASSIGNMENT_REASON,
+        }], revision);
+        advanceAdaptiveSentinel(path, initial);
+        const source = store.claimModelReview(
+          revision,
+          MODEL_ASSIGNMENT_REASON,
+          ({ nodeId, kind }) => nodeId === heldAsset && kind === "impact",
+        );
+        assert(source);
+        workflowSource = source.task.id;
+        const runs = [{ id: 300, status: "completed", conclusion: "success" }];
+        const resultSha256 = createHash("sha256").update(JSON.stringify(runs))
+          .digest("hex");
+        assert(store.finishModelReview(revision, source.task.id, source.token, {
+          note: "Recorded the permitted workflow response.",
+          steps: [{
+            tool: "sentinel_live_workflow_status",
+            target: heldAsset,
+            outcome: "returned",
+            githubWorkflowRead: {
+              evidenceRevision: initial.revision,
+              repository: "owner/retained",
+              workflowId: 42,
+              connectorId: "github-actions",
+              observedAt: new Date().toISOString(),
+              runs,
+              resultSha256,
+            },
+          }],
+        }));
+        workflowTarget = store.sync(revision, [{
+          kind: "trace",
+          nodeId: heldAsset,
+          depth: 6,
+          reason: MODEL_ASSIGNMENT_REASON,
+          prerequisites: [source.task.id],
+          reviewedFrom: source.task.id,
+          plannerRound: {
+            identity: revision,
+            attempt: 1,
+            sourceKind: "model_review",
+            githubWorkflowCitation: {
+              sourceTaskId: source.task.id,
+              resultSha256,
+            },
+          },
+        }], revision).find(({ kind, nodeId, depth }) =>
+          kind === "trace" && nodeId === heldAsset && depth === 6
+        )?.id;
+        assert(workflowTarget);
+      } finally {
+        store.close();
+      }
+      advanceAdaptiveSentinel(path, initial);
+    }
     const first = startPlanner();
     first.advance(initial);
     await until(() =>
@@ -1516,10 +1635,12 @@ async function verifyPausedGraphWorker(
           ?.status,
         "paused",
       );
-      first.advance(initial);
-      await until(() => peerStarted);
-      releasePeer.resolve();
-      await until(() => peerCompleted);
+      if (!workflowCheckpoint) {
+        first.advance(initial);
+        await until(() => peerStarted);
+        releasePeer.resolve();
+        await until(() => peerCompleted);
+      }
       assertEquals(sourceCalls.get(heldAsset), 1);
     });
     first.stop();
@@ -1590,6 +1711,7 @@ async function verifyPausedGraphWorker(
         ).get(held.id);
         assert(typeof saved?.checkpoint === "string");
         assert(!saved.checkpoint.includes("private-response-fixture"));
+        assert(!saved.checkpoint.includes("synthetic-connector-secret"));
         assertEquals(
           JSON.parse(saved.checkpoint).history.findLast(
             ({ role }: { role: string }) => role === "tool",
@@ -1646,7 +1768,17 @@ async function verifyPausedGraphWorker(
       assertEquals(approvals.length, 1);
     });
     enforceReadRevocation = denySavedRead;
+    const priorMetadataChecks = sourceMetadataChecks;
+    if (workflowCheckpoint) releasePeer.resolve();
     resumed.advance(readSentinelAssessment(path)!);
+    if (denySavedRead && workflowCheckpoint) {
+      await until(() => sourceMetadataChecks > priorMetadataChecks);
+      await until(() => !resumed.hasInFlightWork());
+      assertEquals(reused, false);
+      assertEquals(sourceCalls.get(heldAsset), 1);
+      assertEquals(repeatedResultFetches, 0);
+      return;
+    }
     if (askCheckpoint === "missing") {
       await until(() => !resumed.hasInFlightWork());
       assertEquals(reused, false);
@@ -1667,6 +1799,11 @@ async function verifyPausedGraphWorker(
     }
     await until(() => reused);
     assertEquals(sourceCalls.get(heldAsset), 1);
+    if (workflowCheckpoint) {
+      assert(sourceMetadataChecks > priorMetadataChecks);
+      assertEquals(credentialReads, sourceMetadataChecks);
+      assertEquals(repeatedResultFetches, 0);
+    }
     await until(() =>
       adaptive()?.modelReviewStates.some(({ taskId, status }) =>
         taskId === held.id && status === "completed"
@@ -1771,6 +1908,36 @@ Deno.test("Portable Sentinel worker restores an approved finding page with a sea
     "approved",
     false,
     "adaptive-finding",
+  );
+});
+
+Deno.test("Portable Sentinel worker restores an exactly approved saved workflow receipt without a result fetch", async () => {
+  await verifyPausedGraphWorker(
+    true,
+    false,
+    undefined,
+    true,
+    "approved",
+    false,
+    "workflow",
+  );
+  await verifyPausedGraphWorker(
+    true,
+    true,
+    undefined,
+    true,
+    "approved",
+    false,
+    "workflow",
+  );
+  await verifyPausedGraphWorker(
+    true,
+    false,
+    undefined,
+    true,
+    "missing",
+    false,
+    "workflow",
   );
 });
 

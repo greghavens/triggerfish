@@ -23,6 +23,7 @@ import {
   isSentinelInventoryFindingRead,
   isSentinelInventoryNeighborhoodRead,
   parseSentinelPinnedFindingRead,
+  SENTINEL_SAVED_WORKFLOW_READ,
   sentinelGoalReceiptReadArguments,
   sentinelSharedAssetLinksArgs,
 } from "./worker_goal_recovery.ts";
@@ -763,6 +764,15 @@ function retainedTraceReceiptFields(
   if (step.tool === SENTINEL_TRAFFIC_SEARCH) {
     const page = sentinelTrafficPageReference(step.trafficSearchPage);
     if (page) fields.trafficSearchPage = page;
+  }
+  if (step.tool === SENTINEL_SAVED_WORKFLOW_READ) {
+    const read = step.goalReceiptRead as
+      | { args?: unknown; sha256?: unknown }
+      | undefined;
+    const args = sentinelGoalReceiptReadArguments(step.tool, read?.args);
+    if (args && digest(read?.sha256)) {
+      fields.goalReceiptRead = { args, sha256: read?.sha256 };
+    }
   }
   if (step.tool === "sentinel_live_workflow_status") {
     const revision =

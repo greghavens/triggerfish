@@ -6105,11 +6105,29 @@ function createAgent(
       : tool === SENTINEL_TRAFFIC_READ && !reporter
       ? sentinelTrafficReadArgs(args)
       : undefined;
+    const workflowTask = worker && tool === SENTINEL_SAVED_WORKFLOW_READ &&
+        !Object.keys(args).length
+      ? readAssignedModelReview(options)
+      : undefined;
+    const workflowSource = workflowTask &&
+      readSentinelPrerequisiteWorkflowReceipt(
+        options.snapshotPath,
+        current.revision,
+        workflowTask,
+      );
     const selector = worker
       ? workerArgs && approvalIsCurrent(turn) &&
           (workerArgs.revision === undefined ||
             workerArgs.revision === current.revision)
         ? { name: tool, args: workerArgs }
+        : workflowSource && approvalIsCurrent(turn)
+        ? {
+          name: tool,
+          args: {},
+          sourceSha256: createHash("sha256").update(workflowSource).digest(
+            "hex",
+          ),
+        }
         : undefined
       : currentPlannerReceiptScope(turn) && turn.plannerRound &&
           turn.plannerRoundIsCurrent?.()
