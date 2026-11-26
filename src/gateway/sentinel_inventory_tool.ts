@@ -21,6 +21,7 @@ import {
   validSentinelCoverageTime,
 } from "../sentinel/inventory_queries.ts";
 import { digestSentinelSnapshot } from "../sentinel/shared_inventory.ts";
+import type { SentinelPeerCoverageReceipt } from "../sentinel/peer_coverage.ts";
 import { locateSentinelCase } from "../sentinel/cases.ts";
 import type { SentinelAgentOptions } from "./sentinel_agent.ts";
 import {
@@ -40,6 +41,7 @@ type InventoryScope = Pick<
   | "snapshotOverride"
   | "assignedTaskId"
   | "assignedTaskLeaseToken"
+  | "plannerExecutionEvidenceRunId"
 >;
 
 export const sentinelInventoryTool: ToolDefinition = {
@@ -91,7 +93,21 @@ export function sentinelInventoryToolForScope(
       options.snapshotPath,
       options.assessmentRevision,
     ) !== false
-  ) return sentinelInventoryTool;
+  ) {
+    return options.plannerExecutionEvidenceRunId
+      ? {
+        ...sentinelInventoryTool,
+        parameters: {
+          ...sentinelInventoryTool.parameters,
+          linkedFinding: {
+            type: "object",
+            description:
+              "Exact authorized peer finding returned earlier for this local member. Only for evidence coverage. Supply asset, sourceCase, sourceAsset, finding and snapshotDigest.",
+          },
+        },
+      }
+      : sentinelInventoryTool;
+  }
   const { coverageGap: _gap, asOf: _asOf, ...parameters } =
     sentinelInventoryTool.parameters;
   return {
@@ -334,6 +350,7 @@ export async function executeSentinelInventoryTool(
   args: Record<string, unknown>,
   signal?: AbortSignal,
   allowedAssetIds?: readonly string[],
+  peerCoverage?: SentinelPeerCoverageReceipt,
 ): Promise<string> {
   try {
     const { view } = args;
@@ -406,6 +423,7 @@ export async function executeSentinelInventoryTool(
           coverageGap,
           asOf: args.asOf as string | undefined,
           reviewedAssetIds: reviewedAssets(options, state),
+          peerCoverage,
         },
       )
       : view === "organizations"

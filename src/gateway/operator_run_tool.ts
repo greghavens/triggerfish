@@ -1,3 +1,4 @@
+import { reopenSentinelPeerCoverage } from "./sentinel_peer_coverage.ts";
 import { discoverSentinelFindingNodeTraffic } from "./sentinel_finding_traffic_tool.ts";
 import { isSentinelHintTrafficReference } from "../sentinel/traffic_receipts.ts";
 import type {
@@ -8386,12 +8387,21 @@ ${
                   allowed.includes(id)
                 );
             };
+            const peerCoverage = inventoryPage.peerCoverage;
+            const peerAllowed = async () =>
+              !peerCoverage ||
+              !!await reopenSentinelPeerCoverage(
+                path,
+                ref.revision!,
+                peerCoverage.selector,
+                peerCoverage,
+              );
             if (
-              !assetsAllowed() ||
+              !assetsAllowed() || !await peerAllowed() ||
               createHash("sha256").update(inventory.text).digest("hex") !==
                 inventory.sha256 ||
               !await authorize(scope, read.tool, selector, inventory.text) ||
-              !assetsAllowed() || !isCurrent()
+              !assetsAllowed() || !await peerAllowed() || !isCurrent()
             ) return unavailable;
             return safeProjection({
               ...selected,

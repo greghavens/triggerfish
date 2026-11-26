@@ -1,3 +1,4 @@
+import { resolveSentinelCaseMembership } from "../../src/sentinel/case_membership.ts";
 import { sentinelAlertsPath } from "../../src/sentinel/paths.ts";
 import { sentinelAlertReference } from "../../src/sentinel/telemetry.ts";
 import { addSentinelCaseHint } from "../../src/gateway/sentinel_adaptive_runtime.ts";
@@ -44,6 +45,7 @@ import {
   readSentinelAssessment,
   recordSentinelOperatingConstraints,
   refreshSentinelAssessment,
+  resumeSentinelAssessment,
   startSentinelAssessment,
   stopSentinelAssessment,
 } from "../../src/sentinel/assessment_store.ts";
@@ -143,6 +145,7 @@ async function withArchivedPlannerRead(
               [
                 "sentinel_expand_evidence_digest",
                 "sentinel_graph_facts",
+                "sentinel_case_inventory",
                 "sentinel_shared_asset_links",
                 "sentinel_shared_finding_source",
                 ...(sentinelMode ? ["operator_runs"] : []),
@@ -1766,7 +1769,12 @@ Deno.test("Sentinel plans from an exact published case finding and keeps its evi
   const privatePath = resolveSentinelCasePath(directory, privateCase);
   const graph = {
     version: 1,
-    nodes: [{ id: "app", kind: "asset", label: "Application" }],
+    nodes: [{
+      id: "app",
+      kind: "asset",
+      label: "Application",
+      aliases: ["reviewed.example"],
+    }],
     edges: [],
   };
   const findingGraph = (id: string) => ({
@@ -2191,7 +2199,14 @@ Deno.test("Sentinel plans from an exact published case finding and keeps its evi
     const selectedCase = "selected-finding-source";
     const selectedPath = resolveSentinelCasePath(directory, selectedCase);
     await Deno.mkdir(dirname(selectedPath), { recursive: true, mode: 0o700 });
-    await Deno.writeTextFile(selectedPath, JSON.stringify(graph), {
+    const selectedAsset = "local-app";
+    const selectedGraph = {
+      ...graph,
+      nodes: graph.nodes.map((node) =>
+        node.id === "app" ? { ...node, id: selectedAsset } : node
+      ),
+    };
+    await Deno.writeTextFile(selectedPath, JSON.stringify(selectedGraph), {
       mode: 0o600,
     });
     await withArchivedPlannerRead(directory, async (read) => {
@@ -2214,6 +2229,40 @@ Deno.test("Sentinel plans from an exact published case finding and keeps its evi
       id: selectedCase,
       revision: selected.revision,
     } as const;
+    const selectedMember = resolveSentinelCaseMembership(
+      selected.result?.sharedGraph.snapshot,
+      {
+        caseId: selectedCase,
+        evidenceRevision: selected.revision,
+        selector: { kind: "assets", assetIds: [selectedAsset] },
+      },
+    );
+    assert(selectedMember);
+    const selectedPolicy = recordSentinelOperatingConstraints(selectedPath, {
+      runId: selected.plan.runId,
+      evidenceRevision: selected.revision,
+      expectedVersion: 0,
+      requestId: crypto.randomUUID(),
+      operatorScope: "peer-coverage-fixture-owner",
+      constraints: {
+        allowedAssetIds: selectedMember.assetIds,
+        deniedKinds: [],
+      },
+      membership: selectedMember,
+    });
+    assert(selectedPolicy);
+    const findSelected = (caseId: string) => ({
+      ...find(caseId),
+      asset: selectedAsset,
+    });
+    const exactSelected = { ...exact, asset: selectedAsset };
+    const localCoverage = {
+      view: "coverage",
+      assetId: selectedAsset,
+      coverageGap: "missing_evidence",
+    };
+    const linkedCoverage = { ...localCoverage, linkedFinding: exactSelected };
+    const inventoryRead = "sentinel_case_inventory";
     const selectedReads: string[] = [];
     const selectedDone = Promise.withResolvers<void>();
     let readSelectedAgain = false;
@@ -2225,30 +2274,64 @@ Deno.test("Sentinel plans from an exact published case finding and keeps its evi
         const prior = messages.findLast(({ role }) => role === "tool");
         if (readSelectedAgain) {
           if (!prior) {
-            return Promise.resolve(completion("", discovery, find(source)));
+            return Promise.resolve(
+              completion("", discovery, findSelected(source)),
+            );
           }
           selectedReads.push(String(prior.content));
           return Promise.resolve(completion("[]"));
         }
-        if (prior) selectedReads.push(String(prior.content));
+        selectedReads.splice(
+          0,
+          selectedReads.length,
+          ...messages
+            .filter(({ role }) => role === "tool")
+            .map(({ content }) => String(content)),
+        );
         switch (selectedReads.length) {
           case 0:
             return Promise.resolve(
-              completion("", discovery, find("other-publication")),
+              completion("", discovery, findSelected("other-publication")),
             );
           case 1:
-            return Promise.resolve(completion("", discovery, find(source)));
+            return Promise.resolve(
+              completion("", discovery, findSelected(source)),
+            );
           case 2:
-            return Promise.resolve(completion("", sourceRead, exact));
+            return Promise.resolve(completion("", sourceRead, exactSelected));
+          case 3:
+            return Promise.resolve({
+              ...completion(""),
+              toolCalls: [
+                localCoverage,
+                linkedCoverage,
+                {
+                  view: "coverage",
+                  assetId: selectedAsset,
+                  linkedFinding: exactSelected,
+                },
+                {
+                  ...linkedCoverage,
+                  linkedFinding: { ...exactSelected, sourceCase: privateCase },
+                },
+              ].map((args, index) => ({
+                type: "function",
+                id: "coverage-" + index,
+                function: {
+                  name: inventoryRead,
+                  arguments: JSON.stringify(args),
+                },
+              })),
+            });
           default:
             selectedDone.resolve();
             return Promise.resolve(completion(JSON.stringify({
               assignments: [{
                 kind: "trace",
-                nodeId: "app",
+                nodeId: selectedAsset,
                 depth: 1,
                 peerFinding: {
-                  localAssetId: "app",
+                  localAssetId: selectedAsset,
                   sourceCaseId: source,
                   sourceAssetId: "app",
                   sourceFindingId: exact.finding,
@@ -2300,6 +2383,19 @@ Deno.test("Sentinel plans from an exact published case finding and keeps its evi
       JSON.parse(selectedReads[2]).finding.workerFindingSource,
       publication.finding.workerFindingSource,
     );
+    assertEquals(
+      JSON.parse(selectedReads[3]).assets[0].asset.id,
+      selectedAsset,
+    );
+    const exactCoveragePage = JSON.parse(selectedReads[4]);
+    assertEquals(exactCoveragePage.assets, []);
+    assertEquals(
+      exactCoveragePage.peerCoverage.source,
+      publication.finding.workerFindingSource,
+    );
+    const completeCoverage = JSON.parse(selectedReads[5]);
+    assertEquals(completeCoverage.assets[0].reviewed, false);
+    assertEquals(completeCoverage.assets[0].evidence, []);
     const selectedHistory = readAdaptiveSentinel(selectedPath, selected);
     const selectedTask = selectedHistory?.tasks.find(({ plannerRound }) =>
       plannerRound?.peerFindingCitations?.some(({ sourceFindingId }) =>
@@ -2312,6 +2408,25 @@ Deno.test("Sentinel plans from an exact published case finding and keeps its evi
     ) => reads?.some(({ tool }) => tool === sourceRead));
     assert(selectedRound);
     const selectedOriginal = JSON.parse(selectedReads[2]);
+    assertStringIncludes(selectedReads[6], "unavailable");
+    const peerCoverageOrdinal = selectedRound.reads
+      ?.flatMap(({ tool }, index) => tool === inventoryRead ? [index + 1] : [])
+      .at(1) ?? 0;
+    assert(peerCoverageOrdinal > 0);
+    const peerCoverageRead = {
+      ...selectedRef,
+      action: "planner_reads",
+      plannerIdentity: selectedRound.identity,
+      attempt: selectedRound.attempt,
+      ordinal: peerCoverageOrdinal,
+      includeResult: true,
+    };
+    await withArchivedPlannerRead(directory, async (read) => {
+      assertEquals(
+        JSON.parse(await read(peerCoverageRead)).result,
+        exactCoveragePage,
+      );
+    });
     readSelectedAgain = true;
     const readSelected = async () => {
       const agent = createSelectedAgent();
@@ -2319,6 +2434,15 @@ Deno.test("Sentinel plans from an exact published case finding and keeps its evi
         await agent.execute(
           "Read current approvals for the selected source.",
           () => {},
+          undefined,
+          undefined,
+          undefined,
+          {
+            operatingConstraints: {
+              version: selectedPolicy.version,
+              digest: selectedPolicy.digest,
+            },
+          },
         );
         return JSON.parse(selectedReads.at(-1)!).findings;
       } finally {
@@ -2386,6 +2510,27 @@ Deno.test("Sentinel plans from an exact published case finding and keeps its evi
       [exact.finding],
     );
 
+    await archiveAndRestoreDigestFixture(
+      directory,
+      selectedPath,
+      selectedRef,
+      selected.plan.runId,
+    );
+    await withArchivedPlannerRead(directory, async (read) => {
+      assertEquals(
+        JSON.parse(await read(peerCoverageRead)).result,
+        exactCoveragePage,
+      );
+      assertStringIncludes(await read(peerCoverageRead, true), "unavailable");
+    });
+    const resumed = resumeSentinelAssessment(
+      selectedPath,
+      undefined,
+      selected.revision,
+      selected.plan.runId,
+    );
+    assertEquals(resumed?.revision, selected.revision);
+
     // Withdrawal hides the promoted finding and leaves the operator's base graph intact.
     await withArchivedPlannerRead(directory, async (read) => {
       const withdraw = {
@@ -2404,12 +2549,6 @@ Deno.test("Sentinel plans from an exact published case finding and keeps its evi
       ["original-finding"],
     );
     assertEquals(await readSelected(), []);
-    await archiveAndRestoreDigestFixture(
-      directory,
-      selectedPath,
-      selectedRef,
-      selected.plan.runId,
-    );
     await withArchivedPlannerRead(directory, async (read) => {
       const ordinal = (selectedRound.reads?.findLastIndex(({ tool }) =>
         tool === sourceRead
@@ -2426,6 +2565,7 @@ Deno.test("Sentinel plans from an exact published case finding and keeps its evi
         }),
       );
       assertEquals(reopened.result, selectedOriginal);
+      assertStringIncludes(await read(peerCoverageRead), "unavailable");
     });
     await archiveAndRestoreDigestFixture(
       directory,

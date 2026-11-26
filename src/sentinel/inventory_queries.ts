@@ -9,6 +9,11 @@ import {
   sentinelAssetTypes,
 } from "./asset_hierarchy.ts";
 import { loadSentinelGraph } from "./graph.ts";
+import {
+  readSentinelPeerCoverageReceipt,
+  readSentinelPeerCoverageSelector,
+  type SentinelPeerCoverageReceipt,
+} from "./peer_coverage.ts";
 import { digestSentinelSnapshot } from "./shared_inventory.ts";
 
 type Snapshot = ReturnType<ReturnType<typeof loadSentinelGraph>["snapshot"]>;
@@ -47,6 +52,7 @@ export interface SentinelAssetReviewCoverageOptions
   readonly coverageGap?: SentinelAssetCoverageGap;
   readonly asOf?: string;
   readonly reviewedAssetIds?: readonly string[];
+  readonly peerCoverage?: SentinelPeerCoverageReceipt;
   readonly evidenceReviewTasks?: readonly {
     readonly evidenceId: string;
     readonly taskId: string;
@@ -261,6 +267,7 @@ export function querySentinelAssetReviewCoverage(
     coverageGap,
     asOf,
     reviewedAssetIds = [],
+    peerCoverage,
     evidenceReviewTasks = [],
   } = options;
   if (!Number.isSafeInteger(evidenceRevision) || evidenceRevision < 1) {
@@ -309,6 +316,7 @@ export function querySentinelAssetReviewCoverage(
   // Bind continuation to the supplied review overlay before projecting a page.
   const overlayDigest = hash(JSON.stringify([
     [...reviewed].sort(),
+    ...(peerCoverage ? [peerCoverage] : []),
     [...latest].sort(([a], [b]) => compareIds(a, b)),
     [...tasksByEvidence].sort(([a], [b]) => compareIds(a, b)).map(
       ([id, taskIds]) => [id, [...new Set(taskIds)].sort()],
@@ -331,7 +339,8 @@ export function querySentinelAssetReviewCoverage(
     : assets.filter(({ id }) => {
       if (asOf !== undefined) return !currentlyVerified.has(id);
       const unreviewed = !reviewed.has(id);
-      const missingEvidence = !assetEvidence.get(id)?.length &&
+      const missingEvidence = peerCoverage?.selector.asset !== id &&
+        !assetEvidence.get(id)?.length &&
         !(assetFindings.get(id) ?? []).some((finding) =>
           findingEvidence.get(finding)?.length
         );
@@ -392,7 +401,13 @@ export function querySentinelAssetReviewCoverage(
     );
     return { asset, reviewed: reviewed.has(asset.id), findings, evidence };
   });
-  return { snapshotDigest, evidenceRevision, nextCursor, assets: visible };
+  return {
+    snapshotDigest,
+    evidenceRevision,
+    nextCursor,
+    assets: visible,
+    ...(peerCoverage && { peerCoverage }),
+  };
 }
 
 /** Validate the bounded coverage projection before retaining its exact bytes. */
@@ -406,8 +421,14 @@ export function readSentinelPlannerCoverageResult(
     text.length > 6000 || redactCredentialText(text) !== text ||
     redactCredentialText(JSON.stringify(args)) !== JSON.stringify(args)
   ) return;
-  const { view, coverageGap, asOf, limit = 5, ...filters } = args;
+  const { view, coverageGap, asOf, limit = 5, linkedFinding, ...filters } =
+    args;
+  const linkedSelector = readSentinelPeerCoverageSelector(linkedFinding);
   if (
+    (linkedFinding !== undefined &&
+      (!linkedSelector || filters.assetId !== linkedSelector.asset ||
+        Object.keys(filters).some((key) => key !== "assetId") ||
+        (coverageGap !== undefined && coverageGap !== "missing_evidence"))) ||
     coverageGap !== undefined &&
       !sentinelAssetCoverageGaps.some((gap) => gap === coverageGap) ||
     !validSentinelCoverageTime(coverageGap, asOf) ||
@@ -422,8 +443,14 @@ export function readSentinelPlannerCoverageResult(
   ) return;
   try {
     const page = JSON.parse(text);
+    const peerCoverage = linkedSelector &&
+      readSentinelPeerCoverageReceipt(page.peerCoverage);
     if (
-      Object.keys(page).length !== 6 || page._classification !== "INTERNAL" ||
+      (linkedSelector &&
+        (!peerCoverage ||
+          !isDeepStrictEqual(peerCoverage.selector, linkedSelector))) ||
+      Object.keys(page).length !== (linkedSelector ? 7 : 6) ||
+      page._classification !== "INTERNAL" ||
       !isSentinelCaseId(page.caseId) ||
       !Number.isSafeInteger(page.evidenceRevision) ||
       page.evidenceRevision < 1 ||
@@ -456,11 +483,13 @@ export function readSentinelPlannerCoverageResult(
       args: {
         view,
         ...filters,
+        ...(linkedSelector && { linkedFinding: linkedSelector }),
         ...(coverageGap !== undefined && { coverageGap }),
         ...(asOf !== undefined && { asOf }),
         ...(args.limit !== undefined && { limit }),
       },
       assetIds,
+      ...(peerCoverage && { peerCoverage }),
     };
   } catch {
     return;
@@ -557,6 +586,7 @@ export function readSentinelPlannerInventoryResult(
       },
       assetIds: ids,
       requestedAssetIds: batch,
+      peerCoverage: undefined,
     };
   } catch {
     return;

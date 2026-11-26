@@ -1,4 +1,9 @@
 import {
+  readSentinelPeerCoverageReceipt,
+  readSentinelPeerCoverageSelector,
+} from "../sentinel/peer_coverage.ts";
+import { reopenSentinelPeerCoverage } from "./sentinel_peer_coverage.ts";
+import {
   parseSentinelSteeringNote,
   sentinelPlannerSteerToolName,
 } from "../core/approval_inbox.ts";
@@ -4072,6 +4077,28 @@ function createAgent(
             }
             : context,
         );
+        if (
+          result.allowed && name === "POST_TOOL_RESPONSE" &&
+          canReadPlannerCase &&
+          toolName === sentinelInventoryTool.name &&
+          typeof context.input.tool_response === "string" &&
+          context.input.tool_response.startsWith("{")
+        ) {
+          const page = JSON.parse(context.input.tool_response);
+          if (page.peerCoverage !== undefined) {
+            const receipt = readSentinelPeerCoverageReceipt(page.peerCoverage);
+            if (
+              !turn || !receipt || options.assessmentRevision === undefined ||
+              !currentPlannerReceiptScope(turn, receipt.selector.asset) ||
+              !await reopenSentinelPeerCoverage(
+                options.snapshotPath,
+                options.assessmentRevision,
+                receipt.selector,
+                receipt,
+              ) || !currentPlannerReceiptScope(turn, receipt.selector.asset)
+            ) return { ...result, allowed: false, action: "BLOCK" };
+          }
+        }
         if (name === "PRE_TOOL_CALL" && plannerControl) {
           const permits = result.action === "REQUIRE_APPROVAL" ||
             (result.action === "ALLOW" && result.allowed);
@@ -4286,11 +4313,47 @@ function createAgent(
           options.snapshotPath,
           runId,
         )?.constraints;
+        const { linkedFinding, ...inventoryArgs } = args;
+        let peerCoverage;
+        if (linkedFinding !== undefined) {
+          const linked = readSentinelPeerCoverageSelector(linkedFinding);
+          const discovered = linked &&
+            turn.sharedFindings.has(sharedFindingReference(
+              linked.asset,
+              linked.sourceCase,
+              linked.sourceAsset,
+              linked.finding,
+              linked.snapshotDigest,
+            ));
+          if (
+            !linked || !discovered || args.view !== "coverage" ||
+            args.assetId !== linked.asset ||
+            (args.coverageGap !== undefined &&
+              args.coverageGap !== "missing_evidence") ||
+            !currentPlannerReceiptScope(turn, linked.asset) ||
+            Object.keys(args).some((key) =>
+              !["view", "assetId", "coverageGap", "limit", "linkedFinding"]
+                .includes(key)
+            ) ||
+            options.assessmentRevision === undefined
+          ) return "Error: The authorized peer coverage source is unavailable.";
+          peerCoverage = await reopenSentinelPeerCoverage(
+            options.snapshotPath,
+            options.assessmentRevision,
+            linked,
+          );
+          if (
+            !peerCoverage || !currentPlannerReceiptScope(turn, linked.asset)
+          ) {
+            return "Error: The authorized peer coverage source is unavailable.";
+          }
+        }
         const result = await executeSentinelInventoryTool(
           options,
-          args,
+          inventoryArgs,
           turn.signal,
           constraints?.allowedAssetIds,
+          peerCoverage,
         );
         return currentPlannerReceiptScope(turn)
           ? result
