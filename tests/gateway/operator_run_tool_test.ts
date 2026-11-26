@@ -1984,6 +1984,12 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
       approved = false;
       assertStringIncludes((await turn(attachTraffic)).result, "declined");
       approved = true;
+      duringConfirmation = () => {
+        denied = "PRE_TOOL_CALL";
+      };
+      assertStringIncludes((await turn(attachTraffic)).result, "unavailable");
+      duringConfirmation = undefined;
+      denied = undefined;
       assertEquals(
         JSON.parse(
           (await turn({
@@ -3601,9 +3607,6 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
             summary: "Retained remediation evidence was reviewed.",
           });
         const edited: { amendment?: ReturnType<typeof amendReport> } = {};
-        duringConfirmation = () => {
-          edited.amendment = amendReport();
-        };
         const currentTraffic = readSentinelTrafficReceiptPage(
           peerPath,
           nextPeer.revision,
@@ -3616,6 +3619,26 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
           evidenceId: currentTraffic.evidenceId,
           digest: currentTraffic.digest,
           recheckId: recheck.id,
+        };
+        const beforeOutOfScopeAttachment = confirmations.length;
+        assertStringIncludes(
+          (await turn(staleAttachment)).result,
+          "unavailable",
+        );
+        assertEquals(confirmations.length, beforeOutOfScopeAttachment);
+        const membershipWithTraffic = JSON.parse(
+          (await turn({
+            ...updateMembership,
+            revision: nextPeer.revision,
+            expectedVersion: 1,
+            organizationId: undefined,
+            allowedAssetIds: ["peer-asset", original.targetId],
+            requestId: crypto.randomUUID(),
+          })).result,
+        );
+        assertEquals(membershipWithTraffic.version, 2);
+        duringConfirmation = () => {
+          edited.amendment = amendReport();
         };
         assertStringIncludes(
           (await turn(staleAttachment)).result,
@@ -3764,7 +3787,17 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
       } finally {
         rechecks.close();
       }
-      assertEquals(readSentinelOperatingConstraints(peerPath)?.version, 1);
+      const restoredMembership = JSON.parse(
+        (await turn({
+          ...updateMembership,
+          revision: nextPeer.revision,
+          expectedVersion: 2,
+          organizationId: undefined,
+          allowedAssetIds: ["peer-asset"],
+          requestId: crypto.randomUUID(),
+        })).result,
+      );
+      assertEquals(restoredMembership.version, 3);
       const currentMembership = JSON.parse(
         (await turn({
           action: "inventory",

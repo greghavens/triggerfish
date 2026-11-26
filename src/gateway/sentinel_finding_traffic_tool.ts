@@ -4,7 +4,6 @@ import type { ToolDefinition } from "../core/types/tool.ts";
 import {
   readSentinelAssessment,
   readSentinelAssessmentRevision,
-  readSentinelOperatingConstraints,
   readSentinelRunIdForRevision,
   withSentinelAssessmentWriteLock,
 } from "../sentinel/assessment_store.ts";
@@ -883,6 +882,7 @@ export async function attachOperatorSentinelFindingTraffic(
   revision: number,
   args: Record<string, unknown>,
   confirm: (prompt: string) => Promise<boolean>,
+  authorize?: () => Promise<boolean>,
 ): Promise<string> {
   const { receiptId, recheckId, reportVersion, evidenceId, digest, requestId } =
     args;
@@ -903,8 +903,10 @@ export async function attachOperatorSentinelFindingTraffic(
   ) =>
     withSentinelAssessmentWriteLock(snapshotPath, (state) => {
       const runId = state?.plan.runId;
+      const scope = readSentinelTrafficAssetScope(snapshotPath, revision);
       if (
-        !runId || !state.active || state.revision !== revision ||
+        !runId || scope?.runId !== runId || !state.active ||
+        state.revision !== revision ||
         !hasSentinelWorkerFindingJournal(snapshotPath)
       ) return;
       const findings = openSentinelWorkerFindingStore(snapshotPath);
@@ -913,7 +915,8 @@ export async function attachOperatorSentinelFindingTraffic(
         const original = report?.finding;
         if (
           !original || report.version !== reportVersion ||
-          original.caseId !== caseId || original.runId !== runId
+          original.caseId !== caseId || original.runId !== runId ||
+          !scope.assets.has(original.targetId)
         ) return;
         if (recheckId !== undefined) {
           const recheck = findings.read(recheckId);
@@ -924,10 +927,16 @@ export async function attachOperatorSentinelFindingTraffic(
             recheck.evidenceRevision > revision
           ) return;
         }
-        const traffic = readSentinelTrafficReceipt(snapshotPath, revision, {
-          evidenceId,
-          digest,
-        }, original.targetId);
+        const traffic = readSentinelTrafficReceipt(
+          snapshotPath,
+          revision,
+          {
+            evidenceId,
+            digest,
+          },
+          original.targetId,
+          scope.assets,
+        );
         if (!traffic) return;
         const input: SentinelFindingTrafficLinkInput = {
           caseId,
@@ -972,6 +981,7 @@ export async function attachOperatorSentinelFindingTraffic(
       }`,
     )
   ) return "Error: The operator declined the traffic attachment.";
+  if (authorize && !await authorize()) return unavailable;
   const committed = inspect(preview);
   return committed && "link" in committed && committed.link
     ? JSON.stringify({ _classification: "INTERNAL", link: committed.link })
@@ -984,6 +994,7 @@ export async function annotateOperatorSentinelFindingTraffic(
   revision: number,
   args: Record<string, unknown>,
   confirm: (prompt: string) => Promise<boolean>,
+  authorize?: () => Promise<boolean>,
 ): Promise<string> {
   const { receiptId } = args;
   const change = parseSentinelFindingTrafficAnnotationChange({
@@ -998,8 +1009,10 @@ export async function annotateOperatorSentinelFindingTraffic(
   const inspect = (approvedRunId?: string) =>
     withSentinelAssessmentWriteLock(snapshotPath, (state) => {
       const runId = state?.plan.runId;
+      const scope = readSentinelTrafficAssetScope(snapshotPath, revision);
       if (
-        !runId || !state.active || state.revision !== revision ||
+        !runId || scope?.runId !== runId || !state.active ||
+        state.revision !== revision ||
         (approvedRunId !== undefined && approvedRunId !== runId) ||
         !hasSentinelWorkerFindingJournal(snapshotPath)
       ) return;
@@ -1017,16 +1030,18 @@ export async function annotateOperatorSentinelFindingTraffic(
           !report || report.finding.caseId !== caseId ||
           report.finding.runId !== runId ||
           report.finding.targetId !== link.assetId ||
-          readSentinelOperatingConstraints(snapshotPath, runId, revision)
-              ?.constraints.allowedAssetIds?.includes(link.assetId) === false ||
-          !state.result?.sharedGraph.snapshot?.nodes.some(({ id, kind }) =>
-            kind === "asset" && id === link.assetId
-          )
+          !scope.assets.has(link.assetId)
         ) return;
-        const evidence = readSentinelTrafficReceipt(snapshotPath, revision, {
-          evidenceId: link.trafficId,
-          digest: link.trafficDigest,
-        }, link.assetId);
+        const evidence = readSentinelTrafficReceipt(
+          snapshotPath,
+          revision,
+          {
+            evidenceId: link.trafficId,
+            digest: link.trafficDigest,
+          },
+          link.assetId,
+          scope.assets,
+        );
         if (evidence?.family !== link.trafficSource) return;
         const links = openSentinelFindingTrafficLinks(snapshotPath);
         try {
@@ -1064,6 +1079,7 @@ export async function annotateOperatorSentinelFindingTraffic(
       }`,
     )
   ) return "Error: The operator declined the traffic annotation.";
+  if (authorize && !await authorize()) return unavailable;
   const committed = inspect(preview.runId);
   return committed?.amendment
     ? JSON.stringify({
@@ -1078,6 +1094,7 @@ export async function editOperatorSentinelFindingTrafficSet(
   revision: number,
   args: Record<string, unknown>,
   confirm: (prompt: string) => Promise<boolean>,
+  authorize?: () => Promise<boolean>,
 ): Promise<string> {
   const { receiptId } = args;
   const caseId = locateSentinelCase(snapshotPath)?.caseId;
@@ -1114,8 +1131,10 @@ export async function editOperatorSentinelFindingTrafficSet(
   const inspect = (approved?: SentinelTrafficCompositionChange) =>
     withSentinelAssessmentWriteLock(snapshotPath, (state) => {
       const runId = state?.plan.runId;
+      const scope = readSentinelTrafficAssetScope(snapshotPath, revision);
       if (
-        !runId || !state.active || state.revision !== revision ||
+        !runId || scope?.runId !== runId || !state.active ||
+        state.revision !== revision ||
         (approved !== undefined && approved.runId !== runId) ||
         !hasSentinelWorkerFindingJournal(snapshotPath)
       ) return;
@@ -1126,11 +1145,7 @@ export async function editOperatorSentinelFindingTrafficSet(
         if (
           !report || !target || report.finding.caseId !== caseId ||
           report.finding.runId !== runId ||
-          readSentinelOperatingConstraints(snapshotPath, runId, revision)
-              ?.constraints.allowedAssetIds?.includes(target) === false ||
-          !state.result?.sharedGraph.snapshot?.nodes.some(({ id, kind }) =>
-            kind === "asset" && id === target
-          )
+          !scope.assets.has(target)
         ) return;
         const links = openSentinelFindingTrafficLinks(snapshotPath);
         try {
@@ -1231,6 +1246,7 @@ export async function editOperatorSentinelFindingTrafficSet(
       }`,
     )
   ) return "Error: The operator declined the traffic set change.";
+  if (authorize && !await authorize()) return unavailable;
   const saved = inspect(preview.proposal)?.amendment;
   return saved ? present(saved) : unavailable;
 }
@@ -1241,6 +1257,7 @@ export async function attachOperatorSentinelFindingTrafficBatch(
   revision: number,
   args: Record<string, unknown>,
   confirm: (prompt: string) => Promise<boolean>,
+  authorize?: () => Promise<boolean>,
 ): Promise<string> {
   const { receiptId, recheckId, reportVersion, requestId, trafficRefs } = args;
   const caseId = locateSentinelCase(snapshotPath)?.caseId;
@@ -1289,8 +1306,10 @@ export async function attachOperatorSentinelFindingTrafficBatch(
   const inspect = (approvedBinding?: string) =>
     withSentinelAssessmentWriteLock(snapshotPath, (state) => {
       const runId = state?.plan.runId;
+      const scope = readSentinelTrafficAssetScope(snapshotPath, revision);
       if (
-        !runId || !state.active || state.revision !== revision ||
+        !runId || scope?.runId !== runId || !state.active ||
+        state.revision !== revision ||
         !hasSentinelWorkerFindingJournal(snapshotPath)
       ) return;
       const journal = openSentinelWorkerFindingStore(snapshotPath);
@@ -1299,12 +1318,7 @@ export async function attachOperatorSentinelFindingTrafficBatch(
         const original = report?.finding;
         if (
           !original || original.caseId !== caseId || original.runId !== runId ||
-          readSentinelOperatingConstraints(snapshotPath, runId, revision)
-              ?.constraints.allowedAssetIds?.includes(original.targetId) ===
-            false ||
-          !state.result?.sharedGraph.snapshot?.nodes.some(({ id, kind }) =>
-            kind === "asset" && id === original.targetId
-          )
+          !scope.assets.has(original.targetId)
         ) return;
         if (recheckId !== undefined) {
           const recheck = journal.read(recheckId);
@@ -1319,10 +1333,16 @@ export async function attachOperatorSentinelFindingTrafficBatch(
         for (
           const { evidenceId, digest, annotation, itemRequestId } of submitted
         ) {
-          const receipt = readSentinelTrafficReceipt(snapshotPath, revision, {
-            evidenceId,
-            digest,
-          }, original.targetId);
+          const receipt = readSentinelTrafficReceipt(
+            snapshotPath,
+            revision,
+            {
+              evidenceId,
+              digest,
+            },
+            original.targetId,
+            scope.assets,
+          );
           if (!receipt) return;
           inputs.push({
             caseId,
@@ -1391,6 +1411,7 @@ export async function attachOperatorSentinelFindingTrafficBatch(
       }`,
     )
   ) return "Error: The operator declined the traffic attachment batch.";
+  if (authorize && !await authorize()) return unavailable;
   const links = inspect(preview.binding)?.links;
   return links
     ? JSON.stringify({ _classification: "INTERNAL", links })

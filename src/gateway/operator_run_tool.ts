@@ -10599,8 +10599,9 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
         action === "reorder_finding_traffic" ||
         action === "withdraw_finding_traffic"
       ) {
+        const authorize = context?.authorizeOwnerRunCall;
         if (
-          ref.kind !== "sentinel" || ref.revision === undefined ||
+          ref.kind !== "sentinel" || ref.revision === undefined || !authorize ||
           !context?.authenticatedOwnerSessionId ||
           !canFlowTo("INTERNAL", context.ceiling ?? "PUBLIC") ||
           !canFlowTo(context.inputClassification ?? "PUBLIC", "INTERNAL") ||
@@ -10626,11 +10627,13 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
           ref.revision,
           args,
           options.confirm,
+          () => authorize(args),
         );
       }
       if (action === "annotate_finding_traffic") {
+        const authorize = context?.authorizeOwnerRunCall;
         if (
-          ref.kind !== "sentinel" || ref.revision === undefined ||
+          ref.kind !== "sentinel" || ref.revision === undefined || !authorize ||
           !context?.authenticatedOwnerSessionId ||
           !canFlowTo("INTERNAL", context.ceiling ?? "PUBLIC") ||
           !canFlowTo(context.inputClassification ?? "PUBLIC", "INTERNAL") ||
@@ -10655,11 +10658,13 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
           ref.revision,
           args,
           options.confirm,
+          () => authorize(args),
         );
       }
       if (action === "attach_finding_traffic_batch") {
+        const authorize = context?.authorizeOwnerRunCall;
         if (
-          ref.kind !== "sentinel" || ref.revision === undefined ||
+          ref.kind !== "sentinel" || ref.revision === undefined || !authorize ||
           !context?.authenticatedOwnerSessionId ||
           !canFlowTo("INTERNAL", context.ceiling ?? "PUBLIC") ||
           !canFlowTo(context.inputClassification ?? "PUBLIC", "INTERNAL") ||
@@ -10682,11 +10687,16 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
           ref.revision,
           args,
           options.confirm,
+          () => authorize(args),
         );
       }
       if (action === "attach_finding_traffic") {
+        const authorize = context?.authorizeOwnerRunCall;
         if (
-          ref.kind !== "sentinel" || ref.revision === undefined ||
+          ref.kind !== "sentinel" || ref.revision === undefined || !authorize ||
+          !context?.authenticatedOwnerSessionId ||
+          !canFlowTo("INTERNAL", context.ceiling ?? "PUBLIC") ||
+          !canFlowTo(context.inputClassification ?? "PUBLIC", "INTERNAL") ||
           Object.keys(args).some((key) =>
             ![
               "action",
@@ -10710,6 +10720,7 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
           ref.revision,
           args,
           options.confirm,
+          () => authorize(args),
         );
       }
       if (action === "finding_traffic") {

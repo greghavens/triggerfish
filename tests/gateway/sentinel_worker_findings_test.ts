@@ -6410,6 +6410,23 @@ async function verifyNativeFindingTrafficReadScope(
       assertEquals(report.findingTrafficLinks, undefined);
       assertEquals(report.workerFindings, undefined);
     });
+    const beforeAttach = listSentinelFindingTrafficLinks(path);
+    await withFindingAssignmentGateway(baseDir, () => {
+      throw new Error("Out-of-scope traffic must not reach confirmation");
+    }, async (turn) => {
+      const result = await turn({
+        action: "attach_finding_traffic",
+        kind: "sentinel",
+        id: caseId,
+        revision: state.revision,
+        receiptId: findingId,
+        reportVersion: 1,
+        requestId: crypto.randomUUID(),
+        ...nativeReceipt,
+      });
+      assertStringIncludes(result, "unavailable");
+    });
+    assertEquals(listSentinelFindingTrafficLinks(path), beforeAttach);
     setPolicy(6, []);
   } finally {
     socket.close();
