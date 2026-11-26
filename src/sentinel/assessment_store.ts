@@ -63,6 +63,7 @@ import {
   normalizeSentinelOperatingConstraints,
   type SentinelOperatingConstraintRecord as BaseOperatingConstraintRecord,
   type SentinelOperatingConstraints,
+  sentinelOperatingConstraintsAllow,
   type SentinelOperatingConstraintUpdate as BaseOperatingConstraintUpdate,
   validateSentinelOperatingConstraintAssets,
 } from "./operating_constraints.ts";
@@ -94,6 +95,7 @@ export type AssessmentPlan =
   & {
     readonly goal?: string;
     readonly runId?: string;
+    readonly admissionAt?: number;
     readonly timeoutSeconds?: number;
     readonly deadlineAt?: number;
     readonly modelProfile?: SelectedModelProfile;
@@ -585,6 +587,15 @@ function openStore(
 export const SENTINEL_ASSESSMENT_TIMED_OUT = 4;
 const assessmentDeadlineReview = 5;
 export const MAX_SENTINEL_RUN_TIMEOUT_SECONDS = 7 * 24 * 60 * 60;
+
+let lastAssessmentAdmission = 0;
+
+function nextAssessmentAdmission(): number {
+  // Unix microseconds retain arrival order for starts in the same millisecond.
+  const now = Math.floor((performance.timeOrigin + performance.now()) * 1000);
+  lastAssessmentAdmission = Math.max(now, lastAssessmentAdmission + 1);
+  return lastAssessmentAdmission;
+}
 
 function expireAssessmentRow<
   T extends Pick<
@@ -1327,6 +1338,7 @@ export function startSentinelAssessment(
     caseId: string;
     graphDigest: string;
     seedTask?: SentinelLinkedSeedTask;
+    goalApproval?: SentinelFormalGoalApproval;
     childDescription?: string;
     timeoutSeconds?: number;
     modelProfile?: SelectedModelProfile;
@@ -1373,6 +1385,19 @@ export function startSentinelAssessment(
     (!Number.isSafeInteger(timeoutSeconds) || timeoutSeconds < 1 ||
       timeoutSeconds > MAX_SENTINEL_RUN_TIMEOUT_SECONDS)
   ) throw new Error("Invalid Sentinel assessment timeout");
+  const approval = linkedStart?.goalApproval;
+  const formal = approval && formalGoalApprovalBinding(approval);
+  if (
+    approval && (approval.mode !== "start" ||
+      approval.requestId !== linkedStart!.input.requestId ||
+      approval.expectedRevision !== 0 ||
+      approval.expectedRunId !== undefined ||
+      !isDeepStrictEqual(
+        formal?.planChanges,
+        plan.goal === undefined ? {} : { goal: plan.goal },
+      ))
+  ) throw new Error("Invalid linked Sentinel goal approval");
+  if (formal) validateActiveSentinelCriteria(formal.goals);
   const seedTask = parseSentinelLinkedSeedTask(linkedStart?.seedTask);
   if (linkedStart?.seedTask !== undefined && !seedTask) {
     throw new Error("Invalid linked Sentinel seed task");
@@ -1410,9 +1435,16 @@ export function startSentinelAssessment(
           const asJson = JSON.stringify({
             ...settings,
             runId: crypto.randomUUID(),
+            admissionAt: nextAssessmentAdmission(),
             ...(modelProfile && { modelProfile }),
             ...(linkedCaseSources && { linkedCaseSources }),
             ...(childDescription !== undefined && { childDescription }),
+            ...(formal && {
+              goal: plan.goal ?? formal.goals[0].title,
+              formalGoals: formal.goals,
+              activeFormalGoalIds: formal.goals.map(({ id }) => id),
+              completedFormalGoalIds: [],
+            }),
             ...(plannerHeartbeatSeconds !== undefined &&
               { plannerHeartbeatSeconds }),
             ...(timeoutSeconds !== undefined && {
@@ -1420,7 +1452,11 @@ export function startSentinelAssessment(
               deadlineAt: startedAt + timeoutSeconds * 1000,
             }),
           });
-          if (asJson.length > 4096) {
+          if (
+            formal
+              ? new TextEncoder().encode(asJson).byteLength > MAX_SNAPSHOT_BYTES
+              : asJson.length > 4096
+          ) {
             throw new Error("Sentinel assessment plan is too large");
           }
           db.prepare(`
@@ -1438,6 +1474,26 @@ export function startSentinelAssessment(
             linkedStart?.graphDigest,
             seedTask,
           );
+          if (approval && formal) {
+            if (
+              seedTask && !sentinelOperatingConstraintsAllow(
+                formal.constraints,
+                seedTask,
+                started.result?.sharedGraph.snapshot,
+              )
+            ) {
+              throw new Error(
+                "The approved constraints prohibit the linked seed task",
+              );
+            }
+            saveInitialSentinelConstraints(
+              db,
+              started,
+              approval.requestId,
+              formal.constraints,
+            );
+            saveFormalGoalRequest(db, approval, formal.binding, started);
+          }
           if (linkedStart) {
             if (plan.goal !== undefined) {
               if (
@@ -1728,6 +1784,85 @@ function formalGoalApprovalBinding(approval: SentinelFormalGoalApproval) {
   return { binding, goals, planChanges, constraints };
 }
 
+function validateActiveSentinelCriteria(goals: readonly SentinelFormalGoal[]) {
+  if (goals.reduce((count, goal) => count + goal.criteria.length, 0) > 32) {
+    throw new Error(
+      "An active Sentinel goal set can contain at most 32 criteria",
+    );
+  }
+}
+
+function saveInitialSentinelConstraints(
+  db: DatabaseSync,
+  state: StoredAssessment,
+  requestId: string,
+  constraints?: SentinelOperatingConstraints,
+) {
+  if (constraints) {
+    if (
+      !state.result ||
+      !validateSentinelOperatingConstraintAssets(
+        constraints,
+        state.result.sharedGraph.snapshot,
+      )
+    ) {
+      throw new Error(
+        "Initial operating constraints require published case assets.",
+      );
+    }
+    const original = createHash("sha256").update(JSON.stringify([
+      "assessment-initial-constraints",
+      state.plan.runId,
+      requestId,
+    ])).digest("hex");
+    const constraintRequestId = [
+      original.slice(0, 8),
+      original.slice(8, 12),
+      original.slice(12, 16),
+      original.slice(16, 20),
+      original.slice(20, 32),
+    ].join("-");
+    ensureOperatingConstraintsTable(db);
+    insertOperatingConstraintRecord(db, {
+      runId: state.plan.runId!,
+      evidenceRevision: state.revision,
+      expectedVersion: 0,
+      requestId: constraintRequestId,
+      operatorScope: "assessment-goal-start",
+      constraints,
+      digest: digestSentinelOperatingConstraints(constraints),
+      version: 1,
+      recordedAt: state.updatedAt,
+    });
+  }
+}
+
+function ensureFormalGoalRequests(db: DatabaseSync) {
+  db.exec(`CREATE TABLE IF NOT EXISTS assessment_formal_goal_requests (
+    requestId TEXT PRIMARY KEY, binding TEXT NOT NULL, appliedRevision INTEGER NOT NULL,
+    proposalDigest TEXT NOT NULL, mode TEXT NOT NULL, actor TEXT NOT NULL, at TEXT NOT NULL
+  )`);
+}
+
+function saveFormalGoalRequest(
+  db: DatabaseSync,
+  approval: SentinelFormalGoalApproval,
+  binding: string,
+  state: StoredAssessment,
+) {
+  ensureFormalGoalRequests(db);
+  db.prepare(
+    "INSERT INTO assessment_formal_goal_requests VALUES (?, ?, ?, ?, ?, 'operator', ?)",
+  ).run(
+    approval.requestId,
+    binding,
+    state.revision,
+    approval.proposalDigest,
+    approval.mode,
+    state.updatedAt,
+  );
+}
+
 function readFormalGoalRequest(
   db: DatabaseSync,
   requestId: string,
@@ -1784,10 +1919,7 @@ export function applySentinelFormalGoals(
   const db = openStore(path, true)!;
   try {
     return transact(db, () => {
-      db.exec(`CREATE TABLE IF NOT EXISTS assessment_formal_goal_requests (
-        requestId TEXT PRIMARY KEY, binding TEXT NOT NULL, appliedRevision INTEGER NOT NULL,
-        proposalDigest TEXT NOT NULL, mode TEXT NOT NULL, actor TEXT NOT NULL, at TEXT NOT NULL
-      )`);
+      ensureFormalGoalRequests(db);
       const prior = readFormalGoalRequest(db, requestId, binding);
       const row = getRow(db);
       if (prior) {
@@ -1878,22 +2010,15 @@ export function applySentinelFormalGoals(
         ? [...pending]
         : [...pending, ...goals.map(({ id }) => id)];
       const active = new Set(activeFormalGoalIds);
-      if (
-        formalGoals.reduce(
-          (count, goal) =>
-            count + (active.has(goal.id) ? goal.criteria.length : 0),
-          0,
-        ) > 32
-      ) {
-        throw new Error(
-          "An active Sentinel goal set can contain at most 32 criteria",
-        );
-      }
+      validateActiveSentinelCriteria(
+        formalGoals.filter(({ id }) => active.has(id)),
+      );
       const plan: AssessmentPlan = {
         ...current,
         ...planChanges,
         goal: planChanges.goal ?? current.goal ?? goals[0].title,
         runId: current.runId ?? crypto.randomUUID(),
+        ...(row?.active !== 1 && { admissionAt: nextAssessmentAdmission() }),
         formalGoals,
         activeFormalGoalIds,
         completedFormalGoalIds,
@@ -1920,43 +2045,7 @@ export function applySentinelFormalGoals(
         undefined,
         true,
       );
-      if (constraints) {
-        if (
-          !state.result ||
-          !validateSentinelOperatingConstraintAssets(
-            constraints,
-            state.result.sharedGraph.snapshot,
-          )
-        ) {
-          throw new Error(
-            "Initial operating constraints require published case assets.",
-          );
-        }
-        const original = createHash("sha256").update(JSON.stringify([
-          "assessment-initial-constraints",
-          plan.runId,
-          requestId,
-        ])).digest("hex");
-        const constraintRequestId = [
-          original.slice(0, 8),
-          original.slice(8, 12),
-          original.slice(12, 16),
-          original.slice(16, 20),
-          original.slice(20, 32),
-        ].join("-");
-        ensureOperatingConstraintsTable(db);
-        insertOperatingConstraintRecord(db, {
-          runId: plan.runId!,
-          evidenceRevision: state.revision,
-          expectedVersion: 0,
-          requestId: constraintRequestId,
-          operatorScope: "assessment-goal-start",
-          constraints,
-          digest: digestSentinelOperatingConstraints(constraints),
-          version: 1,
-          recordedAt: state.updatedAt,
-        });
-      }
+      saveInitialSentinelConstraints(db, state, requestId, constraints);
       if (approval.sourceProposalId) {
         const prior = JSON.parse(row!.result) as Result;
         if (
@@ -1970,17 +2059,7 @@ export function applySentinelFormalGoals(
           );
         }
       }
-      db.prepare(
-        "INSERT INTO assessment_formal_goal_requests VALUES (?, ?, ?, ?, ?, 'operator', ?)",
-      )
-        .run(
-          requestId,
-          binding,
-          state.revision,
-          proposalDigest,
-          mode,
-          state.updatedAt,
-        );
+      saveFormalGoalRequest(db, approval, binding, state);
       if (approval.sourceProposalId) {
         db.prepare(
           "UPDATE assessment_worker_goal_proposals SET acceptedRevision = ? WHERE id = ?",
@@ -2033,15 +2112,19 @@ function activateSentinelAssessment(
   try {
     return transact(db, () => {
       const row = getRow(db);
-      const { deadlineAt } = row ? JSON.parse(row.plan) as AssessmentPlan : {};
+      const plan = row ? JSON.parse(row.plan) as AssessmentPlan : {};
+      const { deadlineAt } = plan;
       if (
         row?.active !== priorState ||
         (expectedRevision !== undefined && row.revision !== expectedRevision) ||
         (deadlineAt !== undefined && Date.now() >= deadlineAt)
       ) return undefined;
       const changed = db.prepare(
-        "UPDATE assessment SET active = 1 WHERE id = 1 AND active = ?",
-      ).run(priorState);
+        "UPDATE assessment SET active = 1, plan = ? WHERE id = 1 AND active = ?",
+      ).run(
+        JSON.stringify({ ...plan, admissionAt: nextAssessmentAdmission() }),
+        priorState,
+      );
       if (!changed.changes) return undefined;
       return refresh(db, getRow(db)!, path, webContainmentConfigured);
     });
@@ -3017,6 +3100,38 @@ export function readSentinelCaseStatus(path: string) {
       revision: Number(row.revision),
       updatedAt: String(row.updatedAt),
     };
+  } finally {
+    db.close();
+  }
+}
+
+export function isSentinelAssessmentRunning(path: string): boolean {
+  return readSentinelCaseStatus(path)?.status === "running";
+}
+
+/** Read the durable enqueue key without loading case evidence. */
+export function readSentinelAssessmentAdmission(
+  path: string,
+): number | undefined {
+  const db = openStore(path, false);
+  if (!db) return;
+  try {
+    const row = db.prepare(
+      "SELECT plan, updatedAt FROM assessment WHERE id = 1",
+    ).get();
+    if (!row) return;
+    const { admissionAt } = JSON.parse(String(row.plan)) as AssessmentPlan;
+    if (
+      typeof admissionAt === "number" && Number.isSafeInteger(admissionAt) &&
+      admissionAt > 0
+    ) {
+      return admissionAt;
+    }
+    const legacy = db.prepare(
+      "SELECT updatedAt FROM assessment_history ORDER BY revision ASC LIMIT 1",
+    ).get();
+    const at = Date.parse(String(legacy?.updatedAt ?? row.updatedAt));
+    return Number.isFinite(at) ? at * 1000 : undefined;
   } finally {
     db.close();
   }

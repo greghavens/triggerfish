@@ -164,6 +164,7 @@ import {
   recordSentinelIncidentReview,
   recordSentinelOperatingConstraints,
   sentinelFindingDispositions,
+  type SentinelFormalGoalApproval,
   sentinelIncidentDispositions,
   type SentinelReviewStep,
   validSentinelChildDescription,
@@ -648,6 +649,11 @@ export const operatorRunTool: ToolDefinition = {
     childDescription: {
       type: "string",
       description: "Optional display title for a linked Sentinel assessment.",
+    },
+    goalProposal: {
+      type: "object",
+      description:
+        "Reviewed initial goal draft for a linked Sentinel run, with goals and optional initialConstraints.",
     },
     childGoal: {
       type: "string",
@@ -7888,6 +7894,7 @@ export function createOperatorRunToolExecutor(options: {
           requestId,
           childGoal,
           childDescription,
+          goalProposal,
           seedTask: rawSeedTask,
           timeoutSeconds,
           modelProfile: namedProfile,
@@ -7913,6 +7920,7 @@ export function createOperatorRunToolExecutor(options: {
               "requestId",
               "childGoal",
               "childDescription",
+              "goalProposal",
               "seedTask",
               "timeoutSeconds",
               "modelProfile",
@@ -7945,6 +7953,32 @@ export function createOperatorRunToolExecutor(options: {
           (targetKind === "sentinel" &&
             (targetId === "main" || !canFlowTo("INTERNAL", ceiling)))
         ) return unavailable;
+        const request = requestId.toLowerCase();
+        let goalApproval: SentinelFormalGoalApproval | undefined;
+        if (goalProposal !== undefined) {
+          if (
+            targetKind !== "sentinel" || !goalProposal ||
+            typeof goalProposal !== "object" || Array.isArray(goalProposal) ||
+            Object.keys(goalProposal).some((key) =>
+              key !== "goals" && key !== "initialConstraints"
+            )
+          ) return unavailable;
+          const { goals: definitions, initialConstraints: restrictions } =
+            goalProposal as Record<string, unknown>;
+          const goals = normalizeSentinelFormalGoals(definitions);
+          const initialConstraints = restrictions === undefined
+            ? undefined
+            : normalizeSentinelOperatingConstraints(restrictions);
+          goalApproval = {
+            mode: "start" as const,
+            requestId: request,
+            expectedRevision: 0,
+            goals,
+            proposalDigest: digestSentinelGoalProposal(goals),
+            ...(typeof childGoal === "string" && { plan: { goal: childGoal } }),
+            ...(initialConstraints && { initialConstraints }),
+          };
+        }
         const parent = (await controller.inspect(ref))?.ref;
         if (!parent) return unavailable;
         const readSourceCases = async () => {
@@ -8005,7 +8039,6 @@ export function createOperatorRunToolExecutor(options: {
         const parentScope = backgroundRole &&
           readBackgroundTrace(backgroundRole, parent.id)?.scope;
         if (backgroundRole && !parentScope) return unavailable;
-        const request = requestId.toLowerCase();
         const childRequest = createHash("sha256").update(
           JSON.stringify(["operator-spawn", linkScope, operatorId, request]),
         ).digest("hex");
@@ -8027,6 +8060,10 @@ export function createOperatorRunToolExecutor(options: {
               link.origin !== "spawn" || link.requestId !== request ||
               other.id !== targetId || other.revision === undefined ||
               !providers.sentinel.matchesStartGoal(other, childGoal) ||
+              !providers.sentinel.matchesStartGoalApproval(
+                other,
+                goalApproval,
+              ) ||
               providers.sentinel.childDescription(other) !== childDescription ||
               !isDeepStrictEqual(
                 providers.sentinel.startSeed(other),
@@ -8072,6 +8109,7 @@ export function createOperatorRunToolExecutor(options: {
                 ...(graphDigest && { graphDigest }),
                 ...(childGoal !== undefined && { childGoal }),
                 ...(childDescription !== undefined && { childDescription }),
+                ...(goalApproval && { goalApproval }),
                 ...(seedTask && { seedTask }),
                 ...(timeoutSeconds !== undefined && { timeoutSeconds }),
                 ...(modelProfile && { modelProfile }),
@@ -8108,6 +8146,7 @@ export function createOperatorRunToolExecutor(options: {
               graphDigest,
               childGoal,
               childDescription,
+              goalApproval,
               seedTask,
               timeoutSeconds,
               modelProfile,

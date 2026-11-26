@@ -5014,6 +5014,7 @@ export function createSentinelModelPlanner(
         release?.();
         return;
       }
+      let seedInvestigationId: string | undefined;
       let existing: {
         id: string;
         kind: string;
@@ -5035,7 +5036,7 @@ export function createSentinelModelPlanner(
             snapshotPath,
             state.revision,
           );
-          const seedId = seed &&
+          seedInvestigationId = seed &&
             store.readOperatorAssignmentIntent(seed.requestId)?.taskId;
           existing = store.list(revisionForStore(state, store))
             .filter(({ nodeId, status }) =>
@@ -5043,7 +5044,8 @@ export function createSentinelModelPlanner(
               ["queued", "running", "completed"].includes(status)
             )
             .sort((a, b) =>
-              Number(b.id === seedId) - Number(a.id === seedId) ||
+              Number(b.id === seedInvestigationId) -
+                Number(a.id === seedInvestigationId) ||
               Number(b.status === "queued" && !!b.plannerRound) -
                 Number(a.status === "queued" && !!a.plannerRound)
             )
@@ -5389,7 +5391,11 @@ export function createSentinelModelPlanner(
         const render = () => `${instructions}\n${JSON.stringify(inputs)}`;
         while (render().length > SENTINEL_MAX_INPUT_CHARS - 900) {
           if (inputs.inventory.length) inputs.inventory.pop();
-          else if (inputs.currentInvestigations.length) {
+          else if (
+            inputs.currentInvestigations.some(({ id }) =>
+              id !== seedInvestigationId
+            )
+          ) {
             inputs.currentInvestigations.pop();
           } else if (inputs.incidents.length) {
             const last = inputs.incidents.length - 1;

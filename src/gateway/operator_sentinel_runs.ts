@@ -1,3 +1,4 @@
+import { ensureSentinelFormalGoalContract } from "./sentinel_goal_completion.ts";
 import type { SentinelLinkedSeedTask } from "../sentinel/linked_seed_task.ts";
 import type { SentinelLinkedCaseSource } from "../sentinel/linked_case_sources.ts";
 /** Exact Sentinel case adapter for authenticated operator run control. */
@@ -20,12 +21,14 @@ import {
   readSentinelAssessmentRevision,
   readSentinelCaseStatus,
   readSentinelChildDescription,
+  readSentinelFormalGoalApproval,
   readSentinelLinkedSourcesForRevision,
   readSentinelLinkedStartSeed,
   readSentinelModelProfileForRevision,
   readSentinelPlannerHeartbeatForRevision,
   readSentinelRunTimeoutForRevision,
   resumeSentinelAssessment,
+  type SentinelFormalGoalApproval,
   startSentinelAssessment,
   stopSentinelAssessment,
 } from "../sentinel/assessment_store.ts";
@@ -52,6 +55,10 @@ export function createOperatorSentinelRuns(
   linkedCaseSources(
     ref: OperatorRunRef,
   ): readonly SentinelLinkedCaseSource[] | undefined;
+  matchesStartGoalApproval(
+    ref: OperatorRunRef,
+    approval?: SentinelFormalGoalApproval,
+  ): boolean;
   childDescription(ref: OperatorRunRef): string | undefined;
   startSeed(ref: OperatorRunRef): SentinelLinkedSeedTask | undefined;
   matchesStartGoal(ref: OperatorRunRef, goal?: string): boolean;
@@ -63,6 +70,7 @@ export function createOperatorSentinelRuns(
       input: Omit<OperatorRunLinkInput, "right">;
       graphDigest: string;
       childGoal?: string;
+      goalApproval?: SentinelFormalGoalApproval;
       childDescription?: string;
       seedTask?: SentinelLinkedSeedTask;
       timeoutSeconds?: number;
@@ -259,6 +267,16 @@ export function createOperatorSentinelRuns(
         ? readSentinelModelProfileForRevision(path, ref.revision)
         : undefined;
     },
+    matchesStartGoalApproval(ref, approval) {
+      const path = pathFor(ref);
+      if (!path || ref.revision === undefined) return false;
+      if (approval) {
+        return readSentinelFormalGoalApproval(path, approval)
+          ?.appliedRevision ===
+          ref.revision;
+      }
+      return !readSentinelAssessmentRevision(path, ref.revision)?.formalGoals;
+    },
     childDescription(ref) {
       const path = pathFor(ref);
       return path && ref.revision !== undefined
@@ -294,6 +312,7 @@ export function createOperatorSentinelRuns(
           caseId: ref.id,
         },
       );
+      if (link.goalApproval) ensureSentinelFormalGoalContract(path, started);
       advanceAdaptiveSentinel(path, started);
       return inspect({ ...ref, revision: started.revision });
     },
