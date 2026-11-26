@@ -420,6 +420,35 @@ Deno.test("Reviewed event subscription dispatches committed case metadata only o
     });
     assertEquals(JSON.parse(intervalRestart).deliveries.length, 3);
     assertEquals(messages.length, 3);
+
+    const remove = {
+      action: "delete_agent_event_subscription",
+      id: interval.subscriptionSettings.id,
+      expectedVersion: 1,
+    };
+    approve = false;
+    assertStringIncludes(await manage(remove), "declined");
+    approve = true;
+    assertStringIncludes(
+      await manage({ ...remove, expectedVersion: 2 }),
+      "unavailable",
+    );
+    const deleted = JSON.parse(await manage(remove));
+    assertEquals(deleted.saved, { id: remove.id, version: 2, deleted: true });
+    scheduler.stop();
+    scheduler.start();
+    assertEquals(JSON.parse(await manage(remove)), deleted);
+    const remaining = JSON.parse(
+      await manage({ action: "agent_event_subscriptions" }),
+    );
+    assertEquals(
+      remaining.subscriptions.map(({ subscription }: {
+        subscription: { id: string };
+      }) => subscription.id),
+      [subscription.subscriptionSettings.id],
+    );
+    assertEquals(remaining.deliveries.length, 3);
+    assertEquals(messages.length, 3);
   } finally {
     scheduler.stop();
     socket?.close();

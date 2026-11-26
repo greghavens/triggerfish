@@ -106,6 +106,22 @@ Deno.test("Agent event intervals persist due times and do not reclaim expired ex
       "running",
       "interrupted",
     ]);
+    now += 60_000;
+    assertEquals(schedule.claim(), undefined);
+    assertEquals(schedule.deliveries().map(({ state }) => state), [
+      "queued",
+      "running",
+      "interrupted",
+    ]);
+    assertEquals(schedule.remove("heartbeat", 1), {
+      id: "heartbeat",
+      version: 2,
+      deleted: true,
+    });
+    assert(!schedule.current(next));
+    assert(!schedule.finish(next, "completed"));
+    assertEquals(schedule.claim(), undefined);
+    assertEquals(schedule.deliveries()[0].state, "revoked");
   } finally {
     schedule.close();
     await Deno.remove(directory, { recursive: true });

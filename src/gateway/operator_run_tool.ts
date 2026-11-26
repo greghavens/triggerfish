@@ -623,6 +623,7 @@ export const operatorRunTool: ToolDefinition = {
         "model_route",
         "agent_event_subscriptions",
         "set_agent_event_subscription",
+        "delete_agent_event_subscription",
         ...namedRecordActions,
         ...reviewedRuleActions,
         "agent_profiles",
@@ -3458,7 +3459,8 @@ export function createOperatorRunToolExecutor(options: {
     }
     if (
       action === "agent_event_subscriptions" ||
-      action === "set_agent_event_subscription"
+      action === "set_agent_event_subscription" ||
+      action === "delete_agent_event_subscription"
     ) {
       return await executeAgentEventAction(
         options.baseDir,

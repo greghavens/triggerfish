@@ -25,7 +25,7 @@ export async function executeAgentEventAction(
   const path = agentEventSchedulePath(baseDir);
   const output = (value: object) =>
     JSON.stringify({ ...value, _classification: "INTERNAL" });
-  const { action, subscriptionSettings, expectedVersion } = args;
+  const { action, id, subscriptionSettings, expectedVersion } = args;
   if (
     action === "agent_event_subscriptions" && Object.keys(args).length === 1
   ) {
@@ -44,6 +44,41 @@ export async function executeAgentEventAction(
         subscriptions: schedule.list(),
         deliveries: schedule.deliveries(),
       });
+    } finally {
+      schedule.close();
+    }
+  }
+  if (action === "delete_agent_event_subscription") {
+    if (
+      Object.keys(args).length !== 3 ||
+      typeof id !== "string" || !/^[a-z][a-z0-9_-]{0,63}$/.test(id) ||
+      typeof expectedVersion !== "number" ||
+      !Number.isSafeInteger(expectedVersion) ||
+      expectedVersion < 1 || expectedVersion >= Number.MAX_SAFE_INTEGER ||
+      !await authorize(args)
+    ) return unavailable;
+    const schedule = openAgentEventSchedule(path);
+    try {
+      const saved = schedule.deletion(id, expectedVersion);
+      if (saved) return output({ saved });
+      if (
+        !schedule.list().some((row) =>
+          row.subscription.id === id && row.version === expectedVersion
+        )
+      ) return unavailable;
+      if (
+        !await confirm(
+          `Remove this exact agent event subscription?\n${
+            JSON.stringify({ id, expectedVersion })
+          }`,
+        )
+      ) {
+        return "Error: The operator declined the run action.";
+      }
+      if (!await authorize(args)) return unavailable;
+      const removed = schedule.remove(id, expectedVersion) ??
+        schedule.deletion(id, expectedVersion);
+      return removed ? output({ saved: removed }) : unavailable;
     } finally {
       schedule.close();
     }

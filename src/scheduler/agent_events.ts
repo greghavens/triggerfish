@@ -258,6 +258,7 @@ export function openAgentEventSchedule(path: string, now = Date.now) {
     const subscriptions = db.prepare("SELECT * FROM agent_event_subscriptions")
       .all();
     for (const row of subscriptions) {
+      if (row.spec === "null") continue;
       const { subscription: s, version } = decode(row);
       if (!s.enabled) continue;
       const events = db.prepare(
@@ -309,12 +310,35 @@ export function openAgentEventSchedule(path: string, now = Date.now) {
     publish,
     list: () =>
       db.prepare(
-        "SELECT version,spec FROM agent_event_subscriptions ORDER BY id",
+        "SELECT version,spec FROM agent_event_subscriptions WHERE spec != 'null' ORDER BY id",
       ).all().map(decode),
     deliveries: () =>
       db.prepare(
         "SELECT id,subscription,version,agent,state FROM agent_event_deliveries ORDER BY rowid DESC LIMIT 20",
       ).all(),
+    deletion(key: string, expectedVersion: number) {
+      const row = at(key);
+      if (row?.spec === "null" && row.version === expectedVersion + 1) {
+        return { id: key, version: expectedVersion + 1, deleted: true };
+      }
+    },
+    remove(key: string, expectedVersion: number) {
+      if (
+        !id.test(key) || !Number.isSafeInteger(expectedVersion) ||
+        expectedVersion < 1 || expectedVersion >= Number.MAX_SAFE_INTEGER
+      ) return;
+      return transact(() => {
+        const removed = db.prepare(`
+          UPDATE agent_event_subscriptions
+          SET spec='null', version=version+1, next_interval=NULL
+          WHERE id=? AND version=? AND spec != 'null'
+        `).run(key, expectedVersion);
+        if (removed.changes !== 1) return;
+        db.prepare(`UPDATE agent_event_deliveries SET state='revoked'
+          WHERE subscription=? AND state='queued'`).run(key);
+        return { id: key, version: expectedVersion + 1, deleted: true };
+      });
+    },
     set(input: unknown, expectedVersion: number) {
       const s = parseAgentEventSubscription(input);
       if (
@@ -323,7 +347,10 @@ export function openAgentEventSchedule(path: string, now = Date.now) {
       ) return;
       return transact(() => {
         const current = at(s.id);
-        if (Number(current?.version ?? 0) !== expectedVersion) return;
+        if (
+          current?.spec === "null" ||
+          Number(current?.version ?? 0) !== expectedVersion
+        ) return;
         const version = expectedVersion + 1;
         const cursor = Number(
           db.prepare(
