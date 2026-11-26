@@ -312,8 +312,8 @@ findings, their saved report versions, linked rechecks, and retained traffic
 references from that revision. An unavailable ID rejects the whole selection.
 Use `findingFilter` in place of `findingIds` to match an exact `assetId`,
 the source `kind` (`imported` or `worker`), or a case-insensitive text
-`query` on saved report titles and summaries. Filter imported findings by
-their saved `severity` or analyst `disposition` at that revision. An empty
+`query` on saved report titles and summaries. Filter findings by their
+saved `severity`, or imported findings by their analyst `disposition`. An empty
 filter selects every finding in the case at that revision. Over-limit reports require narrower
 filters or exact IDs.
 
@@ -329,6 +329,12 @@ For up to sixteen selected `findingIds`, use `operator_runs finding_asset_tree`
 with `kind: sentinel`, the case `id`, and a saved `revision`. It shows the
 affected assets and their declared in-scope ancestors. Aggregate counts count
 each finding once per asset, even when it affects multiple descendants.
+
+An authenticated owner can use `operator_runs amend_finding_report` with
+`severity`, the current `reportVersion`, and the exact saved attachment
+`evidenceVersion` to correct a worker finding in scope. The reviewed
+correction appends a report version while earlier versions keep their
+original rating and evidence.
 
 ### Archive and restore a named assessment
 
