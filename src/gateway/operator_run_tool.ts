@@ -9530,6 +9530,30 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
                 ref.revision!,
                 peerCoverage.selector,
                 peerCoverage,
+                async (source, current) => {
+                  if (!context) return false;
+                  const evidence = await readAuthorizedCaseEvidence(
+                    peerCoverage.selector.sourceCase,
+                    source.path,
+                    source.revision,
+                    source.evidence.id,
+                    context,
+                    () =>
+                      isCurrent() && current() &&
+                      context.authorizeSentinelCaseRead?.(
+                          peerCoverage.selector.sourceCase,
+                          source.revision,
+                        ) !== false,
+                  );
+                  return !!evidence && executionReceiptSupportsCheck(
+                    source.evidence,
+                    source.runId,
+                    source.assetId,
+                    source.controlId,
+                    "fail",
+                    executionControlReceipt(evidence.payload),
+                  );
+                },
               );
             if (
               !assetsAllowed() || !await peerAllowed() ||

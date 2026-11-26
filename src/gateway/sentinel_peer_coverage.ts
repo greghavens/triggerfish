@@ -107,19 +107,31 @@ export async function reopenSentinelSelectedFinding(
   }
 }
 
+type LinkedFindingExecution = NonNullable<
+  NonNullable<ReturnType<typeof readLinkedFindingProof>>["execution"]
+>;
+
 export async function reopenSentinelPeerCoverage(
   path: string,
   revision: number,
   selector: SentinelPeerCoverageReceipt["selector"],
   expected?: SentinelPeerCoverageReceipt,
+  authorizeExecution?: (
+    source: LinkedFindingExecution,
+    current: () => boolean,
+  ) => Promise<boolean>,
 ) {
   const exact = await reopenSentinelSelectedFinding(path, revision, selector);
-  if (!exact || exact.execution) return;
+  if (!exact) return;
   const receipt = readSentinelPeerCoverageReceipt({
     selector,
     source: exact.source,
   });
-  if (receipt && (!expected || isDeepStrictEqual(expected, receipt))) {
-    return receipt;
-  }
+  if (!receipt || (expected && !isDeepStrictEqual(expected, receipt))) return;
+  if (
+    exact.execution && (!authorizeExecution ||
+      !await authorizeExecution(exact.execution, exact.isCurrent) ||
+      !exact.isCurrent())
+  ) return;
+  return receipt;
 }

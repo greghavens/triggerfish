@@ -4385,6 +4385,16 @@ function createAgent(
                 options.assessmentRevision,
                 receipt.selector,
                 receipt,
+                (_, current) =>
+                  authorizeLinkedFinding(
+                    receipt.selector.sourceCase,
+                    receipt.selector.sourceAsset,
+                    receipt.selector.finding,
+                    turn.signal,
+                    () =>
+                      current() &&
+                      currentPlannerReceiptScope(turn, receipt.selector.asset),
+                  ),
               ) || !currentPlannerReceiptScope(turn, receipt.selector.asset)
             ) return { ...result, allowed: false, action: "BLOCK" };
           }
@@ -4631,6 +4641,16 @@ function createAgent(
             options.snapshotPath,
             options.assessmentRevision,
             linked,
+            undefined,
+            (_, current) =>
+              authorizeLinkedFinding(
+                linked.sourceCase,
+                linked.sourceAsset,
+                linked.finding,
+                turn.signal,
+                () =>
+                  current() && currentPlannerReceiptScope(turn, linked.asset),
+              ),
           );
           if (
             !peerCoverage || !currentPlannerReceiptScope(turn, linked.asset)

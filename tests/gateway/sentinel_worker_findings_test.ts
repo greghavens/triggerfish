@@ -3561,6 +3561,13 @@ async function verifyConnectorFindingPublication(
       let revokeOnProposal = true;
       let proposed = 0;
       let plannerClock = Date.now();
+      let coverageResult: unknown;
+      const linkedCoverage = tool("sentinel_case_inventory", {
+        view: "coverage",
+        assetId: "app",
+        coverageGap: "missing_evidence",
+        linkedFinding: exactSelected.args,
+      });
       const providers = createProviderRegistry();
       providers.register({
         name: "selected-connector-planner",
@@ -3575,6 +3582,16 @@ async function verifyConnectorFindingPublication(
             : undefined;
           if (!call) {
             assertStringIncludes(prior, finding.id);
+            const page = JSON.parse(prior);
+            assertEquals(page.assets, []);
+            assertEquals(
+              page.peerCoverage.source,
+              publication.finding.workerFindingSource,
+            );
+            coverageResult = page;
+            assert(
+              !prior.includes(credential) && !prior.includes("owner/repo"),
+            );
             proposed++;
             if (revokeOnProposal) access = false;
           }
@@ -3595,16 +3612,18 @@ async function verifyConnectorFindingPublication(
                 },
               }],
             }),
-            toolCalls: call
-              ? [{
+            toolCalls: (call === exactSelected
+              ? [exactSelected, linkedCoverage]
+              : call
+              ? [call]
+              : []).map((selected) => ({
                 id: crypto.randomUUID(),
-                type: "function",
+                type: "function" as const,
                 function: {
-                  name: call.name,
-                  arguments: JSON.stringify(call.args),
+                  name: selected.name,
+                  arguments: JSON.stringify(selected.args),
                 },
-              }]
-              : [],
+              })),
           });
         },
       });
@@ -3660,6 +3679,38 @@ async function verifyConnectorFindingPublication(
         );
         planner.advance(consumerState);
         await waitForCondition(hasCitedAssignment, () => {});
+        const round = readAdaptiveSentinel(
+          consumerPath,
+          consumerState,
+          "revision",
+        )
+          ?.modelPlannerHistory.find(({ reads }) =>
+            reads?.some(({ tool }) => tool === "sentinel_case_inventory")
+          );
+        assert(round);
+        const ordinal = (round.reads?.findIndex(({ tool }) =>
+          tool === "sentinel_case_inventory"
+        ) ?? -1) + 1;
+        assert(ordinal > 0);
+        const history = {
+          id: consumerCase,
+          revision: consumerState.revision,
+          action: "planner_reads",
+          plannerIdentity: round.identity,
+          attempt: round.attempt,
+          ordinal,
+          includeResult: true,
+        };
+        assertEquals(JSON.parse(await turn(history)).result, coverageResult);
+        for (const hook of ["PRE_TOOL_CALL", "POST_TOOL_RESPONSE"] as const) {
+          blockSource = hook;
+          const before = checks;
+          assertStringIncludes(await turn(history), "unavailable");
+          assertEquals(checks === before, hook === "PRE_TOOL_CALL");
+        }
+        blockSource = undefined;
+        access = false;
+        assertStringIncludes(await turn(history), "unavailable");
       } finally {
         planner.stop();
       }
