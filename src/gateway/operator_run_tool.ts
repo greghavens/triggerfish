@@ -11652,7 +11652,9 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
       }
       if (action === "confirm_goal_completion") {
         const { runId, goalProofDigest } = args;
+        const authorize = context?.authorizeOwnerRunCall;
         if (
+          !authorize || !context?.authenticatedOwnerSessionId ||
           ref.kind !== "sentinel" || ref.revision === undefined ||
           typeof runId !== "string" || !digestPattern.test(runId) ||
           typeof goalProofDigest !== "string" ||
@@ -11708,6 +11710,7 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
             }`,
           )
         ) return "Error: The operator declined the run action.";
+        if (!await authorize(args)) return unavailable;
         return completeSentinelRegisteredGoal(
             path,
             ref.revision,

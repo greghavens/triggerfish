@@ -129,6 +129,7 @@ async function ownerFacts(
   denyPublicationRead?: "PRE_TOOL_CALL" | "POST_TOOL_RESPONSE",
   workflows?: ReturnType<typeof createOperatorWorkflowRuns>,
   sentinelMode = false,
+  authorizeCompletion?: () => boolean,
 ) {
   const registry = createProviderRegistry();
   let result = "";
@@ -197,10 +198,19 @@ async function ownerFacts(
     }),
     hookRunner: {
       evaluateHook(hook, { input }) {
-        const allowed = hook !== denyPublicationRead ||
+        const toolCall = input.tool_call as {
+          name?: string;
+          args?: Record<string, unknown>;
+        } | undefined;
+        const completionAllowed = hook !== "PRE_TOOL_CALL" ||
+          toolCall?.name !== "operator_runs" ||
+          toolCall.args?.action !== "confirm_goal_completion" ||
+          authorizeCompletion?.() !== false;
+        const publicationAllowed = hook !== denyPublicationRead ||
           ![publish, propose, prove, read, observation].includes(
             String(input.tool_name),
           );
+        const allowed = completionAllowed && publicationAllowed;
         return Promise.resolve({
           allowed,
           action: allowed ? "ALLOW" : "BLOCK",
@@ -2353,6 +2363,25 @@ Deno.test("Leased worker proposals require assigned evidence and exact owner app
           "unavailable",
         );
       });
+      let completionAuthorized = true;
+      await ownerFacts(
+        baseDir,
+        async (turn) => {
+          const pending = JSON.parse(await turn(goalLookup)).proof;
+          assertStringIncludes(await turn(completionRequest), "unavailable");
+          assertEquals(JSON.parse(await turn(goalLookup)).proof, pending);
+          assertEquals(pending.status, "awaiting_confirmation");
+          assert(readSentinelAssessment(path)?.active);
+        },
+        () => {
+          completionAuthorized = false;
+          return true;
+        },
+        undefined,
+        undefined,
+        false,
+        () => completionAuthorized,
+      );
       await ownerFacts(baseDir, async (turn) => {
         assertStringIncludes(await turn(completionRequest), "unavailable");
         assert(readSentinelAssessment(path)?.active);
