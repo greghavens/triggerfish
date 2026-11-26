@@ -2814,7 +2814,7 @@ export async function reopenOwnedSentinelRepositoryVisibility(
   return stored.projection;
 }
 
-async function authorizeRetainedNarrativeTraffic(
+async function authorizeRetainedNarrativeSource(
   context: OperatorRunToolContext | undefined,
   caseId: string,
   path: string,
@@ -2822,24 +2822,44 @@ async function authorizeRetainedNarrativeTraffic(
   record: NonNullable<ReturnType<typeof retainedNarrativeForProvenance>>,
   isCurrent: () => boolean,
 ) {
-  const { evidenceId, trafficDigest, sourceSha256 } = record.receipt;
-  if (!trafficDigest) return true;
+  const { evidenceId, trafficDigest, upstreamCheck, sourceSha256 } =
+    record.receipt;
+  if (!trafficDigest && !upstreamCheck) return true;
   const authorize = context?.authorizeSentinelTraceRead;
   const scope = { caseId, revision, taskId: record.taskId };
-  const args = { evidenceId, digest: trafficDigest, revision };
-  const load = () => {
+  const current = () => {
     const runId = readSentinelRunIdForRevision(path, revision);
     const exact = runId &&
       retainedNarrativeForProvenance(path, revision, runId, record.id);
-    const traffic = exact && isDeepStrictEqual(exact, record) &&
-      readProjectedSentinelTrafficReceipt(
-        path,
-        caseId,
-        revision,
-        args,
-        record.targetId,
-      );
-    return traffic ? JSON.stringify(traffic) : undefined;
+    return isCurrent() && isDeepStrictEqual(exact, record);
+  };
+  if (upstreamCheck) {
+    const args = { upstreamCheck, alertId: evidenceId };
+    if (
+      !authorize || !current() ||
+      !await authorize(scope, "sentinel_defense", args) || !current()
+    ) return false;
+    const source = await readDefenseCoverage(
+      { snapshotPath: path, assessmentRevision: revision },
+      args,
+      { assignment: { kind: "trace", nodeId: record.targetId } },
+    );
+    return source.startsWith("{") && current() &&
+      createHash("sha256").update(source).digest("hex") === sourceSha256 &&
+      await authorize(scope, "sentinel_defense", args, source) && current();
+  }
+  if (!trafficDigest) return false;
+  const args = { evidenceId, digest: trafficDigest, revision };
+  const load = () => {
+    if (!current()) return;
+    const receipt = readProjectedSentinelTrafficReceipt(
+      path,
+      caseId,
+      revision,
+      args,
+      record.targetId,
+    );
+    return receipt && JSON.stringify(receipt);
   };
   const source = load();
   const evidence = readSentinelAssessmentRevision(path, revision)?.result
@@ -6572,10 +6592,12 @@ ${request}`)
               !await authorize({
                 ...ref,
                 action: "node",
-                node: `evidence:${record.receipt.evidenceId}`,
+                node: record.receipt.upstreamCheck
+                  ? `observation:assessment:${record.receipt.evidenceId}`
+                  : `evidence:${record.receipt.evidenceId}`,
               }) ||
               !current() || !isDeepStrictEqual(read(), record) ||
-              !await authorizeRetainedNarrativeTraffic(
+              !await authorizeRetainedNarrativeSource(
                 context,
                 ref.id,
                 path,
@@ -12962,7 +12984,7 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
           snapshotPath: resolveSentinelCasePath(options.baseDir, ref.id),
           assessmentRevision: ref.revision,
           scopeCaseGraph: !!authorizeCaseRead,
-          allowScopedTrafficNarrative: true,
+          allowProtectedNarrative: true,
         };
         const page = {
           revision: ref.revision,
@@ -13003,8 +13025,9 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
         const graphPage = JSON.parse(response);
         const narrative = graphPage.node?.workerNarrative;
         if (
-          narrative?.receipt.trafficDigest &&
-          !await authorizeRetainedNarrativeTraffic(
+          (narrative?.receipt.trafficDigest ||
+            narrative?.receipt.upstreamCheck) &&
+          !await authorizeRetainedNarrativeSource(
             context,
             ref.id,
             scope.snapshotPath,

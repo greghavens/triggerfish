@@ -1,3 +1,4 @@
+import { resolveWorkerNarrativeAlert } from "./worker_narrative_alerts.ts";
 import {
   projectRepositoryVisibility,
   repositoryControlOutcome,
@@ -740,22 +741,15 @@ function validateArchivedWorkerNarratives(
       const record = exact.nodes.get(receipt.evidenceId);
       if (
         source?.goalId !== exact.runId || source.nodeId !== targetId ||
-        record?.kind !== "evidence" || record.executionSource ||
-        record.nativeWorkflowSource ||
         exact.nodes.get(targetId)?.kind !== "asset" ||
-        (!exact.edges.has(JSON.stringify([targetId, record.id])) &&
-          !exact.edges.has(JSON.stringify([record.id, targetId])))
+        (!receipt.upstreamCheck && (
+          record?.kind !== "evidence" || record.executionSource ||
+          record.nativeWorkflowSource ||
+          (!exact.edges.has(JSON.stringify([targetId, record.id])) &&
+            !exact.edges.has(JSON.stringify([record.id, targetId])))
+        ))
       ) throw invalid();
-      if (receipt.trafficDigest) {
-        const traffic = readSentinelTrafficReceipt(
-          snapshotPath,
-          evidenceRevision,
-          {
-            evidenceId: receipt.evidenceId,
-            digest: receipt.trafficDigest,
-          },
-          targetId,
-        );
+      if (receipt.trafficDigest || receipt.upstreamCheck) {
         const steps = completeSteps?.get(taskId)?.steps ??
           archivedSteps?.get(revision, taskId)?.steps;
         const decoded = typeof steps === "string"
@@ -764,6 +758,35 @@ function validateArchivedWorkerNarratives(
         const step = Array.isArray(decoded) && decoded.length <= 16
           ? decoded[stepIndex]
           : undefined;
+        if (receipt.upstreamCheck) {
+          const proof = step?.goalReceiptRead;
+          const alert = resolveWorkerNarrativeAlert(
+            snapshotPath,
+            exact.runId,
+            evidenceRevision,
+            targetId,
+            receipt.evidenceId,
+            receipt.upstreamCheck,
+            true,
+          );
+          if (
+            !alert || step?.tool !== "sentinel_defense" ||
+            step.outcome !== "returned" ||
+            !proof || !isDeepStrictEqual(proof.args, {
+              upstreamCheck: receipt.upstreamCheck,
+              alertId: receipt.evidenceId,
+            }) || proof.sha256 !== receipt.sourceSha256 ||
+            createHash("sha256").update(JSON.stringify(alert.projection))
+                .digest("hex") !== receipt.sourceSha256
+          ) throw invalid();
+          continue;
+        }
+        const traffic = readSentinelTrafficReceipt(
+          snapshotPath,
+          evidenceRevision,
+          { evidenceId: receipt.evidenceId, digest: receipt.trafficDigest! },
+          targetId,
+        );
         const proof = step?.trafficRead;
         if (
           !traffic || step?.tool !== "sentinel_traffic_get" ||

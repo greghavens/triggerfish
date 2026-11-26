@@ -891,12 +891,14 @@ export function sentinelGoalReceiptReadArguments(
       sourceSha256: "0".repeat(64),
     });
     if (receipt) {
-      const { summary, confidence, evidenceId, trafficDigest } = receipt;
+      const { summary, confidence, evidenceId, trafficDigest, upstreamCheck } =
+        receipt;
       return {
         summary,
         confidence,
         evidenceId,
         ...(trafficDigest && { trafficDigest }),
+        ...(upstreamCheck && { upstreamCheck }),
       };
     }
     return;

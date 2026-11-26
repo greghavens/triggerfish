@@ -1,3 +1,5 @@
+import { sentinelAlertsPath } from "../../src/sentinel/paths.ts";
+import { sentinelAlertReference } from "../../src/sentinel/telemetry.ts";
 import {
   assert,
   assertEquals,
@@ -217,9 +219,11 @@ async function tidepoolNarrative(
   }
 }
 
-Deno.test("Leased traffic observations wake the planner and retain exact peer evidence", async () => {
+async function verifyRetainedNarrative(fromAlert: boolean) {
   const baseDir = await Deno.makeTempDir();
-  const caseId = "traffic-narrative";
+  const caseId = fromAlert ? "alert-narrative" : "traffic-narrative";
+  const sourceTool = fromAlert ? "sentinel_defense" : "sentinel_traffic_get";
+  const upstreamCheck = "cloudtrail_logging_stopped";
   const path = resolveSentinelCasePath(baseDir, caseId);
   const publication = Promise.withResolvers<void>();
   const finishSource = Promise.withResolvers<void>();
@@ -240,7 +244,7 @@ Deno.test("Leased traffic observations wake the planner and retain exact peer ev
   const hooks: HookRunner = {
     evaluateHook(hook, { input }) {
       const denied = !allowTraffic && hook === "PRE_TOOL_CALL" &&
-        input.tool_name === "sentinel_traffic_get";
+        input.tool_name === sourceTool;
       if (denied) scopeDenials++;
       return Promise.resolve({
         allowed: !denied,
@@ -256,33 +260,67 @@ Deno.test("Leased traffic observations wake the planner and retain exact peer ev
     await Deno.mkdir(dirname(path), { recursive: true });
     await Deno.writeTextFile(
       path,
-      JSON.stringify({ version: 1, nodes: [], edges: [] }),
+      JSON.stringify({
+        version: 1,
+        nodes: fromAlert
+          ? [{ id: "app", kind: "asset", label: "Application" }]
+          : [],
+        edges: [],
+      }),
       { mode: 0o600 },
     );
-    await ingestSentinelTraffic(
-      new Blob([JSON.stringify({
-        startedDateTime: "2026-06-01T00:00:00.000Z",
-        request: {
-          url: "https://traffic.example/private?signature=private-query",
-          method: "GET",
-        },
-        response: { status: 200, content: { text: "retained private body" } },
-      })]).stream(),
-      "reviewed traffic fixture",
-      path,
-      "har",
-      true,
-    );
+    if (!fromAlert) {
+      await ingestSentinelTraffic(
+        new Blob([JSON.stringify({
+          startedDateTime: "2026-06-01T00:00:00.000Z",
+          request: {
+            url: "https://traffic.example/private?signature=private-query",
+            method: "GET",
+          },
+          response: {
+            status: 200,
+            content: { text: "retained private body" },
+          },
+        })]).stream(),
+        "reviewed traffic fixture",
+        path,
+        "har",
+        true,
+      );
+    }
+    const alert = {
+      type: "integrity_change" as const,
+      asset: "app",
+      severity: "high" as const,
+      subject: "Exact retained source event",
+      triggeringAction: "cloudtrail.amazonaws.com:StopLogging",
+      observedAt: "2026-06-01T00:00:00.000Z",
+      evidenceIds: ["approved-event"],
+    };
+    if (fromAlert) {
+      await Deno.writeTextFile(
+        sentinelAlertsPath(path),
+        JSON.stringify([alert]),
+        { mode: 0o600 },
+      );
+    }
     const state = startSentinelAssessment(path);
     const runId = state.plan.runId;
     assert(runId);
-    const page = readSentinelTrafficReceiptPage(path, state.revision, {
-      limit: 1,
-    });
-    const retained = page?.receipts[0];
-    assert(retained);
-    const { evidenceId, digest: trafficDigest } = retained;
-    const asset = retained.assetIds[0];
+    const retained = !fromAlert &&
+      readSentinelTrafficReceiptPage(path, state.revision, { limit: 1 })
+        ?.receipts[0];
+    const evidenceId = retained
+      ? retained.evidenceId
+      : sentinelAlertReference(alert);
+    const asset = retained ? retained.assetIds[0] : "app";
+    const sourceSelection = retained
+      ? { trafficDigest: retained.digest }
+      : { upstreamCheck };
+    const summary = fromAlert
+      ? "The retained alert reports a CloudTrail StopLogging event."
+      : "The retained application request returned HTTP 200.";
+    assert(fromAlert || retained);
     assert(asset);
     assert(
       updateSentinelWorkerLimit(path, {
@@ -299,11 +337,17 @@ Deno.test("Leased traffic observations wake the planner and retain exact peer ev
       async complete(messages) {
         const results = messages.filter(({ role }) => role === "tool");
         if (!results.length) {
-          return complete("", "sentinel_traffic_get", {
-            evidenceId,
-            digest: trafficDigest,
-            revision: state.revision,
-          });
+          return complete(
+            "",
+            sourceTool,
+            retained
+              ? {
+                evidenceId,
+                digest: retained.digest,
+                revision: state.revision,
+              }
+              : { upstreamCheck, alertId: evidenceId },
+          );
         }
         if (results.length === 1) {
           const source = String(results[0].content);
@@ -316,20 +360,20 @@ Deno.test("Leased traffic observations wake the planner and retain exact peer ev
           sourceWaiting = true;
           await publication.promise;
           return complete("", commit, {
-            summary: "The retained application request returned HTTP 200.",
+            summary,
             confidence: "observed",
             evidenceId,
-            trafficDigest,
+            ...sourceSelection,
           });
         }
         publicationResult = String(results[1].content);
         created = JSON.parse(publicationResult);
         assertEquals(created?.receipt, {
-          summary: "The retained application request returned HTTP 200.",
+          summary,
           confidence: "observed",
           sourceSha256: sourceDigest,
           evidenceId,
-          trafficDigest,
+          ...sourceSelection,
         });
         await finishSource.promise;
         sourceFinished = true;
@@ -348,7 +392,8 @@ Deno.test("Leased traffic observations wake the planner and retain exact peer ev
         const prompt = String(
           messages.findLast(({ role }) => role === "user")?.content,
         );
-        const id = JSON.parse(prompt.split("\n").at(-1)!).workerNarratives?.[0]
+        const id = JSON.parse(prompt.split("\n").at(-1)!).workerNarratives
+          ?.[0]
           ?.id;
         if (!id) {
           wakeOffset = 58_750;
@@ -457,7 +502,11 @@ Deno.test("Leased traffic observations wake the planner and retain exact peer ev
     assertEquals(JSON.parse(peerRead!), created);
     assertEquals(sourceFinished, false);
     assertEquals(scopeDenials, 0);
-    const selected = { kind: "sentinel", id: caseId, revision: state.revision };
+    const selected = {
+      kind: "sentinel",
+      id: caseId,
+      revision: state.revision,
+    };
     const selection = {
       ...selected,
       action: "node",
@@ -506,11 +555,17 @@ Deno.test("Leased traffic observations wake the planner and retain exact peer ev
       await Deno.readTextFile(join(directory, "manifest.json")),
     );
     const altered = join(baseDir, "altered-traffic.db");
-    const trafficName = "sentinel-traffic-receipts.db";
+    const trafficName = fromAlert
+      ? "sentinel-assessment.db"
+      : "sentinel-traffic-receipts.db";
     await Deno.copyFile(join(directory, trafficName), altered);
     const journal = new DatabaseSync(altered);
     try {
-      journal.exec("DELETE FROM traffic_receipts_v1");
+      journal.exec(
+        fromAlert
+          ? "UPDATE assessment_alert_history SET alerts = json_set(alerts, '$[0].subject', 'Tampered subject with the same alert ID')"
+          : "DELETE FROM traffic_receipts_v1",
+      );
     } finally {
       journal.close();
     }
@@ -533,7 +588,10 @@ Deno.test("Leased traffic observations wake the planner and retain exact peer ev
       Error,
       "Invalid archived Sentinel worker observation",
     );
-    await assertRejects(() => Deno.lstat(dirname(path)), Deno.errors.NotFound);
+    await assertRejects(
+      () => Deno.lstat(dirname(path)),
+      Deno.errors.NotFound,
+    );
     await ownerGateway(baseDir, hooks, async (turn, session) => {
       const restored = await turn({
         ...selected,
@@ -557,7 +615,11 @@ Deno.test("Leased traffic observations wake the planner and retain exact peer ev
           selection.node,
         );
       const visible = await pool();
-      assertEquals(visible.type, "sentinel_revision", JSON.stringify(visible));
+      assertEquals(
+        visible.type,
+        "sentinel_revision",
+        JSON.stringify(visible),
+      );
       assertStringIncludes(JSON.stringify(visible), id);
       allowTraffic = false;
       assertStringIncludes(await turn(selection), "unavailable");
@@ -576,4 +638,10 @@ Deno.test("Leased traffic observations wake the planner and retain exact peer ev
     );
     await Deno.remove(baseDir, { recursive: true });
   }
-});
+}
+
+Deno.test("Leased traffic observations wake the planner and retain exact peer evidence", () =>
+  verifyRetainedNarrative(false));
+
+Deno.test("Leased alert observations wake the planner and retain exact peer evidence", () =>
+  verifyRetainedNarrative(true));

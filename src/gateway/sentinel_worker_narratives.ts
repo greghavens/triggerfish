@@ -9,6 +9,7 @@ import { SENTINEL_PROVENANCE_NODE_READ } from "../sentinel/worker_goal_recovery.
 import { sentinelOperatingConstraintsAllow } from "../sentinel/operating_constraints.ts";
 import { locateSentinelCase } from "../sentinel/cases.ts";
 import { readProjectedSentinelTrafficReceipt } from "./sentinel_traffic_tool.ts";
+import { resolveWorkerNarrativeAlert } from "../sentinel/worker_narrative_alerts.ts";
 
 export function currentWorkerNarrativeScope(
   path: string,
@@ -48,7 +49,33 @@ export function currentWorkerNarrativeScope(
     if (!owned) links.set(asset, owned = new Set());
     owned.add(evidence);
   }
-  return (asset: string, evidenceId: string, trafficDigest?: string) => {
+  return (
+    asset: string,
+    evidenceId: string,
+    trafficDigest?: string,
+    upstreamCheck?: string,
+  ) => {
+    if (upstreamCheck) {
+      const source = resolveWorkerNarrativeAlert(
+        path,
+        runId,
+        revision,
+        asset,
+        evidenceId,
+        upstreamCheck,
+      );
+      return source &&
+        {
+          caseId: location.caseId,
+          runId,
+          alert: source.alert,
+          alertProjection: source.projection,
+          constraintsVersion: source.constraintsVersion,
+          constraintsDigest: source.constraintsDigest,
+          evidence: undefined,
+          traffic: undefined,
+        };
+    }
     const evidence = nodes.get(evidenceId);
     if (
       evidence?.kind !== "evidence" || evidence.executionSource ||
@@ -69,6 +96,8 @@ export function currentWorkerNarrativeScope(
       caseId: location.caseId,
       runId,
       evidence,
+      alert: undefined,
+      alertProjection: undefined,
       ...(traffic && { traffic }),
       constraintsVersion: constraints?.version,
       constraintsDigest: constraints?.digest,
@@ -83,11 +112,13 @@ export function currentWorkerNarrativeEvidence(
   asset: string,
   evidenceId: string,
   trafficDigest?: string,
+  upstreamCheck?: string,
 ) {
   return currentWorkerNarrativeScope(path, runId, revision)?.(
     asset,
     evidenceId,
     trafficDigest,
+    upstreamCheck,
   );
 }
 
@@ -114,12 +145,12 @@ export function currentWorkerNarrative(
     asset,
     record.receipt.evidenceId,
     record.receipt.trafficDigest,
+    record.receipt.upstreamCheck,
   );
+  const projection = source?.traffic ?? source?.alertProjection;
   if (
-    !source || (source.traffic &&
-      createHash("sha256").update(JSON.stringify(source.traffic)).digest(
-          "hex",
-        ) !==
+    !source || (projection &&
+      createHash("sha256").update(JSON.stringify(projection)).digest("hex") !==
         record.receipt.sourceSha256)
   ) return;
   return record;

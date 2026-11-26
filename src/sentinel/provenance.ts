@@ -1319,10 +1319,15 @@ function addAdaptive(
     const source = assignments.get(taskId);
     const evidence = imported.get(narrative.receipt.evidenceId);
     const receipt = readWorkerNarrativeReceipt(narrative.receipt);
+    const evidenceRef = receipt?.upstreamCheck
+      ? derivedRef("observation", "assessment", receipt.evidenceId)
+      : evidence?.kind === "evidence"
+      ? evidence.ref
+      : undefined;
     if (
       isWorkerNarrativeId(id) && source?.revision &&
       source.nodeId === targetId &&
-      evidence?.kind === "evidence" && receipt &&
+      evidenceRef && index.hasNode(evidenceRef) && receipt &&
       evidenceRevision === view.evidenceRevision &&
       Number.isSafeInteger(stepIndex) && stepIndex >= 0 && stepIndex < 16 &&
       id === `worker-narrative:${
@@ -1354,7 +1359,7 @@ function addAdaptive(
         narrativeRef,
         "produces",
       );
-      index.addEdge(narrativeRef, evidence.ref, "references");
+      index.addEdge(narrativeRef, evidenceRef, "references");
       for (const assignment of assignments.values()) {
         if (
           assignment.nodeId === targetId &&

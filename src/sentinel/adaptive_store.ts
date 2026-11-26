@@ -84,6 +84,7 @@ import {
   SENTINEL_GOAL_PROVE,
   SENTINEL_GOAL_RECHECK_READ,
   SENTINEL_SHARED_WORKER_REVIEW,
+  sentinelDefenseReadArgs,
   sentinelGoalProofArguments,
   sentinelGoalProposalArguments,
   sentinelGoalReceiptReadArguments,
@@ -3323,8 +3324,14 @@ export function readAdaptiveWorkerNarrative(
       stepIndex === select.stepIndex
     );
     return (occupied ? [occupied] : records).find(({ stepIndex, receipt }) => {
-      const { summary, confidence, evidenceId, sourceSha256, trafficDigest } =
-        receipt;
+      const {
+        summary,
+        confidence,
+        evidenceId,
+        sourceSha256,
+        trafficDigest,
+        upstreamCheck,
+      } = receipt;
       return stepIndex <= select.stepIndex &&
         sourceSha256 === select.sourceSha256 &&
         createHash("sha256").update(
@@ -3333,6 +3340,7 @@ export function readAdaptiveWorkerNarrative(
               confidence,
               evidenceId,
               ...(trafficDigest && { trafficDigest }),
+              ...(upstreamCheck && { upstreamCheck }),
             }),
           )
             .digest("hex") === select.argsDigest;
@@ -8353,6 +8361,8 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
           authority.controlClaimSha256,
         )[stepIndex];
         const producer = lookup.get(id);
+        const alert = source?.goalReceiptRead &&
+          sentinelDefenseReadArgs(source.goalReceiptRead.args);
         if (
           typeof producer?.nodeId !== "string" ||
           source?.outcome !== "returned" ||
@@ -8362,6 +8372,11 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
               source.trafficRead.evidenceId !== receipt.evidenceId ||
               source.trafficRead.digest !== receipt.trafficDigest ||
               source.trafficRead.revision !== evidenceRevision
+            : receipt.upstreamCheck
+            ? source.tool !== "sentinel_defense" ||
+              source.goalReceiptRead?.sha256 !== receipt.sourceSha256 ||
+              alert?.alertId !== receipt.evidenceId ||
+              alert?.upstreamCheck !== receipt.upstreamCheck
             : source.tool !== ASSIGNED_TARGET_CHECKPOINT_TOOL ||
               source.assignedTarget?.targetId !== producer.nodeId ||
               !source.assignedTarget.linkedNodeIds.includes(
@@ -8407,6 +8422,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
         asset: string,
         evidence: string,
         trafficDigest?: string,
+        upstreamCheck?: string,
       ) => boolean,
       limit = 6,
       offset = 0,
@@ -8431,6 +8447,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
               record.targetId,
               record.receipt.evidenceId,
               record.receipt.trafficDigest,
+              record.receipt.upstreamCheck,
             )
           ) continue;
           if (authorized++ < offset) continue;
@@ -11056,8 +11073,14 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
                   if (source.outcome !== "returned") return [];
                   const isTraffic = source.tool === SENTINEL_TRAFFIC_READ;
                   const metadata = source.trafficRead;
+                  const isAlert = source.tool === "sentinel_defense";
+                  const alert = isAlert && source.goalReceiptRead
+                    ? sentinelDefenseReadArgs(source.goalReceiptRead.args)
+                    : undefined;
                   const sourceSha256 = isTraffic
                     ? metadata?.sha256
+                    : isAlert
+                    ? source.goalReceiptRead?.sha256
                     : source.resultSnapshot?.sha256;
                   const sourceResult = earlierResults[index]?.content;
                   if (
@@ -11067,6 +11090,9 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
                       ? !metadata ||
                         metadata.evidenceId !== admitted.requestId ||
                         metadata.revision !== evidenceRevision
+                      : isAlert
+                      ? alert?.alertId !== admitted.requestId ||
+                        typeof alert?.upstreamCheck !== "string"
                       : source.tool !== ASSIGNED_TARGET_CHECKPOINT_TOOL ||
                         source.assignedTarget?.targetId !== row.nodeId ||
                         !source.assignedTarget.linkedNodeIds.includes(

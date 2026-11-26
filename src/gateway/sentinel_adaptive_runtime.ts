@@ -1,3 +1,5 @@
+import type { TelemetryAlert } from "../sentinel/telemetry.ts";
+import { resolveWorkerNarrativeAlert } from "../sentinel/worker_narrative_alerts.ts";
 import {
   currentWorkerNarrative,
   currentWorkerNarrativeScope,
@@ -2269,6 +2271,23 @@ export function retainedNarrativeForProvenance(
     id,
   });
   if (!record || record.evidenceRevision !== revision) return;
+  if (record.receipt.upstreamCheck) {
+    const source = resolveWorkerNarrativeAlert(
+      path,
+      runId,
+      revision,
+      record.targetId,
+      record.receipt.evidenceId,
+      record.receipt.upstreamCheck,
+    );
+    return source &&
+        createHash("sha256").update(JSON.stringify(source.projection)).digest(
+            "hex",
+          ) ===
+          record.receipt.sourceSha256
+      ? record
+      : undefined;
+  }
   const saved = readSentinelAssessmentRevision(path, revision)?.result
     .sharedGraph.snapshot;
   const currentRevision = readSentinelLatestRunRevision(path, runId) ??
@@ -2399,6 +2418,7 @@ export function readSentinelProvenance(
     };
   }
   const narrativeId = retainedWorkerNarrativeId(focusedNode);
+  let narrativeAlert: TelemetryAlert | undefined;
   if (narrativeId && visible) {
     const record = retainedNarrativeForProvenance(
       snapshotPath,
@@ -2408,12 +2428,22 @@ export function readSentinelProvenance(
     );
     if (record && visible.tasks.some(({ id }) => id === record.taskId)) {
       visible = { ...visible, workerNarrative: record };
+      if (record.receipt.upstreamCheck) {
+        narrativeAlert = resolveWorkerNarrativeAlert(
+          snapshotPath,
+          visible.goal.id,
+          revision,
+          record.targetId,
+          record.receipt.evidenceId,
+          record.receipt.upstreamCheck,
+        )?.alert;
+      }
     }
   }
   const graph = buildSentinelProvenance(
     state.result,
     visible,
-    undefined,
+    narrativeAlert,
     readSentinelIncidentReviews(snapshotPath, state.revision),
     readSentinelFindingReviews(snapshotPath, state.revision),
   );
@@ -4143,9 +4173,14 @@ function plannerWorkerNarratives(path: string, state: State) {
   try {
     const map = store.forEvidence(state.revision);
     if (map?.goal.id !== runId) return [];
-    return store.listWorkerNarratives(map.revision, {
-      evidenceRevision: state.revision,
-    }, (asset, evidence, digest) => !!scope(asset, evidence, digest)).map((
+    return store.listWorkerNarratives(
+      map.revision,
+      {
+        evidenceRevision: state.revision,
+      },
+      (asset, evidence, digest, check) =>
+        !!scope(asset, evidence, digest, check),
+    ).map((
       { id, taskId, targetId, stepIndex },
     ) => ({ id, taskId, targetId, stepIndex }));
   } finally {
@@ -6468,14 +6503,20 @@ export function createSentinelModelPlanner(
           selection,
         );
         if (!record || record.targetId !== targetId) return;
-        const { evidenceId, summary, confidence, trafficDigest } =
-          record.receipt;
+        const {
+          evidenceId,
+          summary,
+          confidence,
+          trafficDigest,
+          upstreamCheck,
+        } = record.receipt;
         const args = committedBeforeProgress
           ? sentinelGoalReceiptReadArguments(tool, {
             summary,
             confidence,
             evidenceId,
             ...(trafficDigest && { trafficDigest }),
+            ...(upstreamCheck && { upstreamCheck }),
           })
           : requested;
         if (
@@ -6484,6 +6525,7 @@ export function createSentinelModelPlanner(
             : summary !== args.summary || confidence !== args.confidence ||
               evidenceId !== args.evidenceId ||
               trafficDigest !== args.trafficDigest ||
+              upstreamCheck !== args.upstreamCheck ||
               (committedBeforeProgress && evidenceId !== requestId)) ||
           !currentWorkerNarrative(
             snapshotPath,
@@ -7100,6 +7142,8 @@ export function createSentinelModelPlanner(
                 signal,
                 currentSource,
                 record.receipt.trafficDigest,
+                record.receipt.upstreamCheck,
+                record.receipt.sourceSha256,
               )
             ) return false;
           }
@@ -7818,6 +7862,8 @@ export function createSentinelModelPlanner(
               signal,
               currentSource,
               record.receipt.trafficDigest,
+              record.receipt.upstreamCheck,
+              record.receipt.sourceSha256,
             )
           ) return;
         }
@@ -9767,6 +9813,8 @@ export function createSentinelModelPlanner(
               signal,
               authorizeCurrent,
               record.receipt.trafficDigest,
+              record.receipt.upstreamCheck,
+              record.receipt.sourceSha256,
             )
           ) checkedNarratives.set(id, asset);
         }

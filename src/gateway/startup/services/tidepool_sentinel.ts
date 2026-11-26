@@ -1698,7 +1698,8 @@ export function createTidepoolSentinelHandler(
             }
             const narrative = focused.node.workerNarrative;
             if (
-              narrative.receipt.trafficDigest &&
+              (narrative.receipt.trafficDigest ||
+                narrative.receipt.upstreamCheck) &&
               !isDeepStrictEqual(
                 narrative,
                 await readWorkerNarrative?.(

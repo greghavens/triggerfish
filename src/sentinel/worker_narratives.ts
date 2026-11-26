@@ -15,19 +15,33 @@ export interface SentinelWorkerNarrativeReceipt {
   readonly sourceSha256: string;
   readonly evidenceId: string;
   readonly trafficDigest?: string;
+  readonly upstreamCheck?: string;
 }
 
 export function readWorkerNarrativeReceipt(
   value: unknown,
 ): SentinelWorkerNarrativeReceipt | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) return;
-  const { summary, confidence, sourceSha256, evidenceId, trafficDigest } =
-    value as Record<
-      string,
-      unknown
-    >;
+  const {
+    summary,
+    confidence,
+    sourceSha256,
+    evidenceId,
+    trafficDigest,
+    upstreamCheck,
+  } = value as Record<
+    string,
+    unknown
+  >;
   if (
-    Object.keys(value).length !== (trafficDigest === undefined ? 4 : 5) ||
+    Object.keys(value).length !==
+      (trafficDigest === undefined && upstreamCheck === undefined ? 4 : 5) ||
+    (upstreamCheck !== undefined &&
+      (trafficDigest !== undefined ||
+        typeof upstreamCheck !== "string" ||
+        !/^[a-z][a-z0-9_]{0,127}$/.test(upstreamCheck) ||
+        typeof evidenceId !== "string" ||
+        !/^case-alert:[a-f0-9]{64}$/.test(evidenceId))) ||
     (trafficDigest !== undefined &&
       (typeof trafficDigest !== "string" ||
         !/^[a-f0-9]{64}$/.test(trafficDigest))) ||
@@ -46,5 +60,6 @@ export function readWorkerNarrativeReceipt(
     sourceSha256,
     evidenceId,
     ...(trafficDigest && { trafficDigest }),
+    ...(typeof upstreamCheck === "string" && { upstreamCheck }),
   };
 }

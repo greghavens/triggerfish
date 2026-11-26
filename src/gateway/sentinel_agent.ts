@@ -239,6 +239,7 @@ import {
 } from "../sentinel/case_report.ts";
 import {
   assessSentinelDefenseCoverage,
+  projectSentinelExactUpstreamAlert,
   sentinelTelemetryAssetResolver,
 } from "../sentinel/defense_coverage.ts";
 
@@ -534,6 +535,8 @@ export interface SentinelAgent {
     signal: AbortSignal,
     isCurrent: () => boolean,
     trafficDigest?: string,
+    upstreamCheck?: string,
+    sourceSha256?: string,
   ) => Promise<boolean>;
   readonly authorizeLinkedWorkerReview?: (
     reference: SentinelPeerWorkerReviewReference,
@@ -1126,6 +1129,11 @@ const workerNarrativeCommit: ToolDefinition = {
         "An exact linked local evidence ID from the assigned target or an approved retained traffic read",
       required: true,
     },
+    upstreamCheck: {
+      type: "string",
+      description:
+        "Exact upstream check ID, required when citing an authorized sentinel_defense alert. Supply that alert ID as evidenceId.",
+    },
     trafficDigest: {
       type: "string",
       description:
@@ -1312,6 +1320,32 @@ interface SentinelTelemetryEvidenceScope {
 }
 
 /** Bind alert assets to the saved case graph and current investigation scope. */
+function rememberNarrativeAlertRead(
+  turn: ActiveTurn,
+  args: Record<string, unknown>,
+  text: string,
+  stepIndex: number,
+) {
+  const selection = sentinelDefenseReadArgs(args);
+  if (
+    !selection?.alertId || !selection.upstreamCheck || stepIndex >= 16 ||
+    !text.startsWith("{")
+  ) return;
+  const result = JSON.parse(text);
+  if (
+    result.matchCount !== 1 ||
+    result.matches?.[0]?.alertId !== selection.alertId ||
+    result.id !== selection.upstreamCheck
+  ) return;
+  const key = JSON.stringify([selection.upstreamCheck, selection.alertId]);
+  if (!turn.narrativeAlertReads.has(key)) {
+    turn.narrativeAlertReads.set(key, {
+      stepIndex,
+      sha256: createHash("sha256").update(text).digest("hex"),
+    });
+  }
+}
+
 function sentinelTelemetryEvidenceFilter(
   path: string,
   revision: number,
@@ -1418,13 +1452,24 @@ export async function readDefenseCoverage(
     }
     const members = incidentMembers &&
       new Set(incidentMembers.map(sentinelAlertReference));
+    const allowAlert = (alert: TelemetryAlert) =>
+      (!allowAsset || allowAsset(alert)) &&
+      (!members || members.has(sentinelAlertReference(alert)));
+    if (upstreamCheck !== undefined && alertId !== undefined) {
+      const exact = projectSentinelExactUpstreamAlert(
+        alerts,
+        revision,
+        upstreamCheck,
+        alertId,
+        allowAlert,
+      );
+      return exact
+        ? boundResult(exact)
+        : "Error: The exact alert did not match this check in the selected evidence.";
+    }
     const assessment = assessSentinelDefenseCoverage({
       alerts,
-      ...(allowAsset && {
-        allowAlert: (alert) =>
-          allowAsset(alert) &&
-          (!members || members.has(sentinelAlertReference(alert))),
-      }),
+      allowAlert,
       webContainmentConfigured: options.webContainmentConfigured,
     });
     if (upstreamCheck !== undefined) {
@@ -1448,15 +1493,8 @@ export async function readDefenseCoverage(
           alertId: sentinelAlertReference(alert),
         };
       };
-      const exact = alertId === undefined
-        ? undefined
-        : records.find((record) => project(record).alertId === alertId);
-      const selected = exact ? [exact] : records;
-      if (alertId !== undefined && !exact) {
-        return "Error: The exact alert did not match this check in the selected evidence.";
-      }
       return pageProvenance(
-        selected,
+        records,
         offset,
         limit,
         project,
@@ -1464,7 +1502,7 @@ export async function readDefenseCoverage(
           ...check,
           revision: options.assessmentRevision,
           evidenceAvailable: alerts !== undefined,
-          matchCount: selected.length,
+          matchCount: records.length,
           offset,
           nextOffset,
           matches,
@@ -1535,6 +1573,10 @@ interface ActiveTurn {
   >;
   narrativeBatchStart?: number;
   narrativeSource?: { stepIndex: number; sha256: string };
+  readonly narrativeAlertReads: Map<
+    string,
+    { stepIndex: number; sha256: string }
+  >;
   narrativeSearchFence?: { response: string; isCurrent: () => boolean };
   readonly stagedGraphFacts: ReturnType<typeof stageSentinelGraphFacts>;
   reads: number;
@@ -3264,7 +3306,7 @@ type ProvenanceScope =
   >
   & {
     readonly scopeCaseGraph?: boolean;
-    readonly allowScopedTrafficNarrative?: boolean;
+    readonly allowProtectedNarrative?: boolean;
   };
 
 function readAgentProvenance(
@@ -4038,8 +4080,9 @@ export function inspectSentinelProvenance(
     if (
       !record ||
       ("workerNarrative" in record.node &&
-        record.node.workerNarrative?.receipt.trafficDigest &&
-        !options.allowScopedTrafficNarrative)
+        (record.node.workerNarrative?.receipt.trafficDigest ||
+          record.node.workerNarrative?.receipt.upstreamCheck) &&
+        !options.allowProtectedNarrative)
     ) return "Error: The requested provenance node is unavailable.";
     return pageProvenance(
       record.connections,
@@ -6060,7 +6103,8 @@ function createAgent(
               targetId,
             );
             if (
-              selected?.receipt.trafficDigest &&
+              (selected?.receipt.trafficDigest ||
+                selected?.receipt.upstreamCheck) &&
               !await authorizeWorkerNarrative(
                 runId,
                 revision,
@@ -6080,6 +6124,8 @@ function createAgent(
                     ),
                   ),
                 selected.receipt.trafficDigest,
+                selected.receipt.upstreamCheck,
+                selected.receipt.sourceSha256,
               )
             ) return { ...result, allowed: false, action: "BLOCK" };
           }
@@ -8085,6 +8131,9 @@ function createAgent(
             receipt: githubWorkflowRead,
           };
         }
+        if (!failed && name === SENTINEL_DEFENSE_READ) {
+          rememberNarrativeAlertRead(turn, args, result, turn.traceStepCount);
+        }
         if (assigned && turn.traceStepCount < 16) {
           turn.narrativeSource = {
             stepIndex: turn.traceStepCount,
@@ -9030,6 +9079,8 @@ function createAgent(
     signal: AbortSignal,
     isCurrent: () => boolean,
     trafficDigest?: string,
+    upstreamCheck?: string,
+    sourceSha256?: string,
   ) {
     const scope = () =>
       currentWorkerNarrativeEvidence(
@@ -9039,19 +9090,31 @@ function createAgent(
         asset,
         evidenceId,
         trafficDigest,
+        upstreamCheck,
       );
     const origin = scope();
     if (!origin) return false;
     const sources: {
       call: { name: string; args: Record<string, unknown> };
       result: string;
-    }[] = [{
-      call: workerNarrativeEvidenceCall(evidenceId, revision),
-      result: boundResult({
-        _classification: "INTERNAL",
-        evidence: origin.evidence,
-      }),
-    }];
+    }[] = origin.evidence
+      ? [{
+        call: workerNarrativeEvidenceCall(evidenceId, revision),
+        result: boundResult({
+          _classification: "INTERNAL",
+          evidence: origin.evidence,
+        }),
+      }]
+      : [];
+    if (upstreamCheck && origin.alertProjection) {
+      const args = { upstreamCheck, alertId: evidenceId };
+      const result = JSON.stringify(origin.alertProjection);
+      if (
+        !result.startsWith("{") || !sourceSha256 ||
+        createHash("sha256").update(result).digest("hex") !== sourceSha256
+      ) return false;
+      sources.push({ call: { name: SENTINEL_DEFENSE_READ, args }, result });
+    }
     if (trafficDigest && origin.traffic) {
       sources.push({
         call: {
@@ -9087,6 +9150,7 @@ function createAgent(
     const current = () =>
       !signal.aborted && isCurrent() &&
       isDeepStrictEqual(scope(), origin);
+    if (!sources.length) return false;
     for (const { call, result } of sources) {
       if (
         !current() || !await authorizeSavedToolCalls(
@@ -9141,6 +9205,7 @@ function createAgent(
             task.nodeId!,
             parsed.evidenceId!,
             parsed.trafficDigest,
+            parsed.upstreamCheck,
           );
         const origin = scope();
         if (!origin) return unavailable;
@@ -9148,6 +9213,10 @@ function createAgent(
           approvedSentinelTrafficAttachmentKey(JSON.stringify(origin.traffic));
         const source = parsed.trafficDigest
           ? trafficKey && turn.approvedTrafficReads.get(trafficKey)
+          : parsed.upstreamCheck
+          ? turn.narrativeAlertReads.get(
+            JSON.stringify([parsed.upstreamCheck, parsed.evidenceId]),
+          )
           : turn.narrativeSource;
         if (
           !source ||
@@ -9173,6 +9242,8 @@ function createAgent(
             turn.signal,
             () => isDeepStrictEqual(scope(), origin),
             receipt.trafficDigest,
+            receipt.upstreamCheck,
+            receipt.sourceSha256,
           )
         ) return unavailable;
         const committed = withSentinelAssessmentWriteLock(
@@ -9227,14 +9298,17 @@ function createAgent(
             ...(task?.nodeId &&
               { targetIds: [task.nodeId], excludeTaskId: task.id }),
           },
-          (asset, evidence, digest) => !!scope(asset, evidence, digest),
+          (asset, evidence, digest, check) =>
+            !!scope(asset, evidence, digest, check),
           MAX_WORKER_NARRATIVES,
         );
         let records = candidates.slice(offset, offset + 7);
         let searchCurrent: (() => boolean) | undefined;
         if (
           typeof query === "string" ||
-          candidates.some(({ receipt }) => receipt.trafficDigest)
+          candidates.some(({ receipt }) =>
+            receipt.trafficDigest || receipt.upstreamCheck
+          )
         ) {
           const savedPolicy = readSentinelOperatingConstraints(
             options.snapshotPath,
@@ -9271,9 +9345,13 @@ function createAgent(
               targetId,
               receipt.evidenceId,
               receipt.trafficDigest,
+              receipt.upstreamCheck,
             ]);
             let allowed = sourceAccess.get(source);
-            if (allowed === undefined && (term || receipt.trafficDigest)) {
+            if (
+              allowed === undefined &&
+              (term || receipt.trafficDigest || receipt.upstreamCheck)
+            ) {
               if (!searchCurrent()) return unavailable;
               allowed = await authorizeWorkerNarrative(
                 runId,
@@ -9283,6 +9361,8 @@ function createAgent(
                 turn.signal,
                 searchCurrent,
                 receipt.trafficDigest,
+                receipt.upstreamCheck,
+                receipt.sourceSha256,
               );
               if (!searchCurrent()) return unavailable;
               sourceAccess.set(source, allowed);
@@ -9350,6 +9430,8 @@ function createAgent(
           turn.signal,
           current,
           record.receipt.trafficDigest,
+          record.receipt.upstreamCheck,
+          record.receipt.sourceSha256,
         )
       ) return unavailable;
       return boundResult({ _classification: "INTERNAL", ...record });
@@ -9631,6 +9713,7 @@ function createAgent(
             },
           }),
           approvedTrafficReads: new Map(),
+          narrativeAlertReads: new Map(),
           stagedGraphFacts: [],
           trace,
           onBatchReadReceipt,
@@ -9740,6 +9823,9 @@ function createAgent(
                     await config.toolExecutor!(call.name, args) !== saved ||
                     signal.aborted || !readAssignedModelReview(options)
                   ) return false;
+                  if (call.name === SENTINEL_DEFENSE_READ) {
+                    rememberNarrativeAlertRead(turn, args, saved, stepIndex);
+                  }
                   if (
                     call.name === SENTINEL_ASSIGNED_EXECUTION_EVIDENCE &&
                     args.node
@@ -9899,7 +9985,9 @@ function createAgent(
                           record.receipt.confidence !== args.confidence ||
                           record.receipt.evidenceId !== args.evidenceId ||
                           record.receipt.trafficDigest !==
-                            args.trafficDigest)) ||
+                            args.trafficDigest ||
+                          record.receipt.upstreamCheck !==
+                            args.upstreamCheck)) ||
                       saved !==
                         boundResult({
                           _classification: "INTERNAL",
@@ -9913,6 +10001,8 @@ function createAgent(
                         signal,
                         current,
                         record.receipt.trafficDigest,
+                        record.receipt.upstreamCheck,
+                        record.receipt.sourceSha256,
                       )
                     ) return false;
                     continue;

@@ -6,7 +6,7 @@ import {
   type SentinelOperatingConstraints,
   sentinelOperatingConstraintsAllow,
 } from "./operating_constraints.ts";
-import type { TelemetryAlert } from "./telemetry.ts";
+import { sentinelAlertReference, type TelemetryAlert } from "./telemetry.ts";
 
 type Signal = TelemetryAlert["type"];
 type SignalOrigin = "sentinel_rule" | "source_alert";
@@ -781,6 +781,51 @@ export function matchesSentinelUpstreamCheck(
 ): boolean {
   return alert.type === check.type && alert.triggeringAction !== undefined &&
     check.actions.includes(alert.triggeringAction);
+}
+
+/** Canonical exact alert response for a retained upstream check. */
+export function projectSentinelExactUpstreamAlert(
+  alerts: readonly unknown[] | undefined,
+  revision: number | undefined,
+  checkId: string,
+  alertId: string,
+  allowAlert: (alert: TelemetryAlert) => boolean,
+) {
+  const check = sentinelUpstreamChecks.find(({ id }) => id === checkId);
+  if (!check || !alerts) return;
+  let match: ReturnType<typeof projectMatch> | undefined;
+  function projectMatch(alert: TelemetryAlert, sourceRecord: number) {
+    return {
+      sourceRecord,
+      asset: alert.asset,
+      observedAt: alert.observedAt,
+      evidenceIds: alert.evidenceIds,
+      triggeringAction: alert.triggeringAction,
+      severity: alert.severity,
+      subject: alert.subject,
+      ...(alert.entraRoleGrant && { entraRoleGrant: alert.entraRoleGrant }),
+      alertId,
+    };
+  }
+  for (const [index, raw] of alerts.entries()) {
+    const alert = parseSentinelTelemetryAlert(raw, index + 1);
+    if (
+      !allowAlert(alert) || !matchesSentinelUpstreamCheck(check, alert) ||
+      sentinelAlertReference(alert) !== alertId
+    ) continue;
+    if (match) return;
+    match = projectMatch(alert, index + 1);
+  }
+  if (!match) return;
+  return {
+    ...check,
+    revision,
+    evidenceAvailable: true,
+    matchCount: 1,
+    offset: 0,
+    nextOffset: null,
+    matches: [match],
+  };
 }
 
 /** Resolve an alert to an authorized canonical asset without exposing unmapped records. */
