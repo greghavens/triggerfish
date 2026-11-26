@@ -2,11 +2,73 @@
 import { createHash } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 import { isDeepStrictEqual } from "node:util";
+import { redactCredentialText } from "./logger/redactor.ts";
 
 export interface OperatorRunCategory {
   readonly id: string;
   readonly title: string;
   readonly version: number;
+}
+
+export type OperatorRunCategorySelection = Pick<
+  OperatorRunCategory,
+  "id" | "version"
+>;
+
+export function parseOperatorRunCategorySelection(
+  raw: unknown,
+): OperatorRunCategorySelection | undefined {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return;
+  const { id, version } = raw as Partial<OperatorRunCategorySelection>;
+  if (
+    typeof id !== "string" ||
+    !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(id) ||
+    typeof version !== "number" || !Number.isSafeInteger(version) ||
+    version < 1 ||
+    Object.keys(raw).length !== 2
+  ) return;
+  return { id: id.toLowerCase(), version };
+}
+
+export function parseOperatorRunAdmissionCategory(
+  raw: unknown,
+): OperatorRunCategory | undefined {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return;
+  const { id, version, title } = raw as Partial<OperatorRunCategory>;
+  const selection = parseOperatorRunCategorySelection({ id, version });
+  if (
+    !selection || Object.keys(raw).length !== 3 ||
+    typeof title !== "string" || !title || title !== title.trim() ||
+    Array.from(title).length > 80 || /[\p{Cc}\p{Cf}]/u.test(title) ||
+    redactCredentialText(title) !== title
+  ) return;
+  return { ...selection, title };
+}
+
+/** Resolve the selected category inside the caller's shared run-admission transaction. */
+export function readAdmissionRunCategory(
+  db: DatabaseSync,
+  selected: OperatorRunCategorySelection,
+): OperatorRunCategory | undefined {
+  const tables = db.prepare(
+    "SELECT 1 FROM run_links.sqlite_schema WHERE name = 'run_categories' AND type = 'table'",
+  ).get();
+  if (!tables) return;
+  const row = db.prepare(
+    "SELECT title FROM run_links.run_categories WHERE id = ? AND version = ?",
+  )
+    .get(selected.id, selected.version);
+  return parseOperatorRunAdmissionCategory({ ...selected, title: row?.title });
+}
+
+/** Bind an admitted run to the already reviewed exact workspace category. */
+export function assignAdmissionRunCategory(
+  db: DatabaseSync,
+  run: CategorizedOperatorRun,
+  category: OperatorRunCategory,
+) {
+  db.prepare("INSERT INTO run_links.run_category_members VALUES (?, ?)")
+    .run(runKey(run), category.id);
 }
 
 export interface CategorizedOperatorRun {

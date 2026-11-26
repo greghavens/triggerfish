@@ -1,3 +1,4 @@
+import { parseOperatorRunAdmissionCategory } from "../core/operator_run_categories.ts";
 import { retainPortablePausedGraphCheckpoints } from "./adaptive_store.ts";
 import { decodeInconclusiveRecheck } from "./recheck_inconclusive.ts";
 import {
@@ -358,6 +359,7 @@ function restoreAssessment(
     const {
       childDescription,
       assessmentTemplate,
+      admissionCategory,
       timeoutSeconds,
       deadlineAt,
       modelProfile,
@@ -378,6 +380,12 @@ function restoreAssessment(
       (!parseSentinelAssessmentTemplateBinding(assessmentTemplate) ||
         childDescription === undefined)
     ) throw new Error("Invalid archived Sentinel assessment template binding");
+    if (
+      admissionCategory !== undefined &&
+      !parseOperatorRunAdmissionCategory(admissionCategory)
+    ) {
+      throw new Error("Invalid archived Sentinel admission category");
+    }
     const {
       linkedCaseSources,
       modelFallbackProfiles,

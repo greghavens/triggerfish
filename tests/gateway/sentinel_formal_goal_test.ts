@@ -15,6 +15,7 @@ import {
 import { createChatSession } from "../../src/gateway/chat.ts";
 import { subscribeCommittedEvidence } from "../../src/core/evidence_task_progression.ts";
 import { executeAssessmentTemplates } from "../../src/gateway/sentinel_assessment_templates.ts";
+import { openOperatorRunLinkStore } from "../../src/core/operator_runs.ts";
 import { createOperatorRunToolExecutor } from "../../src/gateway/operator_run_tool.ts";
 import { createSentinelSubagent } from "../../src/gateway/sentinel_agent.ts";
 import { readSentinelGoalCompletion } from "../../src/gateway/sentinel_goal_completion.ts";
@@ -1269,6 +1270,112 @@ Deno.test("standalone Sentinel start binds the reviewed template version and exa
       const unchanged = readSentinelAssessment(path);
       assertEquals(unchanged?.revision, approved?.appliedRevision);
       assertEquals(unchanged?.plan.goal, objective);
+    });
+  } finally {
+    await Deno.remove(directory, { recursive: true });
+  }
+});
+
+Deno.test("reviewed standalone Sentinel admission binds the exact workspace category version", async () => {
+  const directory = await Deno.makeTempDir();
+  const caseId = "categorized-standalone";
+  const path = resolveSentinelCasePath(directory, caseId);
+  const linkPath = join(directory, "operator-run-links.db");
+  const id = crypto.randomUUID();
+  const objective = "Review the published service controls.";
+  const title = "Service control audits";
+  const start = (version: number, requestId = "categorized-start") =>
+    `assessment goals start ${
+      JSON.stringify({
+        requestId,
+        objective,
+        goals: [goal("categorized", "published-evidence")],
+        category: { id, version },
+      })
+    }`;
+  try {
+    await Deno.mkdir(dirname(path), { recursive: true });
+    await Deno.writeTextFile(
+      path,
+      JSON.stringify({ version: 1, nodes: [], edges: [] }),
+    );
+    let journal = openOperatorRunLinkStore(linkPath);
+    try {
+      const change = { kind: "create", title } as const;
+      const preview = journal.categories.review(id, change)?.preview;
+      assert(preview);
+      assert(journal.categories.review(id, change, preview)?.receipt);
+    } finally {
+      journal.close();
+    }
+    let initial: ReturnType<typeof readSentinelAssessment>;
+    await withSentinelGoalSocket(path, async (turn) => {
+      await assertRejects(
+        () => turn(start(2)),
+        Error,
+        "category version is unavailable",
+      );
+      assertEquals(readSentinelAssessment(path), undefined);
+      const admission = JSON.parse(await turn(start(1)));
+      assertEquals(admission.duplicate, false);
+      assertEquals(admission.admissionCategory, { id, version: 1, title });
+      initial = readSentinelAssessment(path);
+      assert(initial?.plan.runId);
+      assertEquals(initial.plan.admissionCategory, admission.admissionCategory);
+      const readback = JSON.parse(await turn("assessment goals status"));
+      assertEquals(readback.admissionCategory, admission.admissionCategory);
+    });
+    assert(initial?.plan.runId);
+    const exactRun = {
+      kind: "sentinel",
+      id: caseId,
+      runId: initial.plan.runId,
+      revision: initial.revision,
+    } as const;
+    journal = openOperatorRunLinkStore(linkPath);
+    try {
+      assertEquals(journal.categories.forRun(exactRun), {
+        id,
+        version: 1,
+        title,
+      });
+      const change = {
+        kind: "rename",
+        categoryId: id,
+        version: 1,
+        title: "Control verification",
+      } as const;
+      const renameId = crypto.randomUUID();
+      const preview = journal.categories.review(renameId, change)?.preview;
+      assert(preview);
+      assert(journal.categories.review(renameId, change, preview)?.receipt);
+      assertEquals(journal.categories.forRun(exactRun)?.version, 2);
+    } finally {
+      journal.close();
+    }
+    await withSentinelGoalSocket(path, async (turn) => {
+      const replay = JSON.parse(await turn(start(1)));
+      assertEquals(replay.duplicate, true);
+      assertEquals(replay.appliedRevision, initial?.revision);
+      assertEquals(replay.admissionCategory, { id, version: 1, title });
+      await assertRejects(() => turn(start(2)), Error, "already used");
+      await assertRejects(
+        () => turn(start(1, "fresh-stale-category")),
+        Error,
+        "category version is unavailable",
+      );
+      assertEquals(readSentinelAssessment(path)?.revision, initial?.revision);
+      await turn("assessment stop");
+      const next = JSON.parse(await turn(start(2, "next-category-version")));
+      assertEquals(next.admissionCategory, {
+        id,
+        version: 2,
+        title: "Control verification",
+      });
+      const historical = JSON.parse(await turn(start(1)));
+      assertEquals(historical.duplicate, true);
+      assertEquals(historical.appliedRevision, initial?.revision);
+      assertEquals(historical.admissionCategory, { id, version: 1, title });
     });
   } finally {
     await Deno.remove(directory, { recursive: true });

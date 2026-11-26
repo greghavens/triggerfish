@@ -1,4 +1,11 @@
 import {
+  assignAdmissionRunCategory,
+  type OperatorRunCategory,
+  type OperatorRunCategorySelection,
+  parseOperatorRunCategorySelection,
+  readAdmissionRunCategory,
+} from "../core/operator_run_categories.ts";
+import {
   notifySentinelAssessmentInterruption,
   type SentinelAssessmentInterruption,
 } from "./assessment_interruptions.ts";
@@ -37,6 +44,7 @@ import {
   readSentinelProvenanceSearchReference,
 } from "./worker_goal_recovery.ts";
 import {
+  openOperatorRunLinkStore,
   type OperatorRunLinkInput,
   type OperatorRunRef,
   recordOperatorRunLink,
@@ -131,6 +139,7 @@ export type AssessmentPlan =
     readonly linkedCaseSources?: readonly SentinelLinkedCaseSource[];
     readonly childDescription?: string;
     readonly assessmentTemplate?: SentinelAssessmentTemplateBinding;
+    readonly admissionCategory?: OperatorRunCategory;
     readonly formalGoals?: readonly SentinelFormalGoal[];
     readonly activeFormalGoalIds?: readonly string[];
     readonly completedFormalGoalIds?: readonly string[];
@@ -183,6 +192,7 @@ export interface SentinelFormalGoalApproval {
   readonly expectedRunId?: string;
   readonly plan?: FormalGoalPlan;
   readonly initialConstraints?: SentinelOperatingConstraints;
+  readonly category?: OperatorRunCategorySelection;
 }
 
 export interface SentinelSavedWorkerTrace {
@@ -757,6 +767,8 @@ function saveFormalGoalHistory(
     .run(
       revision,
       JSON.stringify({
+        ...(plan.admissionCategory &&
+          { admissionCategory: plan.admissionCategory }),
         runId: plan.runId,
         goal: plan.goal,
         formalGoals: plan.formalGoals,
@@ -2062,6 +2074,12 @@ function formalGoalApprovalBinding(approval: SentinelFormalGoalApproval) {
     throw new Error("Assessment templates require a new assessment");
   }
   const planChanges = JSON.parse(JSON.stringify(patch)) as FormalGoalPlan;
+  const category = parseOperatorRunCategorySelection(approval.category);
+  if (approval.category !== undefined && (mode !== "start" || !category)) {
+    throw new Error(
+      "Select an exact category version for a new Sentinel assessment",
+    );
+  }
   const binding = createHash("sha256").update(JSON.stringify([
     mode,
     proposalDigest,
@@ -2070,8 +2088,9 @@ function formalGoalApprovalBinding(approval: SentinelFormalGoalApproval) {
     planChanges,
     ...(approval.sourceProposalId ? [approval.sourceProposalId] : []),
     ...(constraints === undefined ? [] : [constraints]),
+    ...(category === undefined ? [] : [category]),
   ])).digest("hex");
-  return { binding, goals, planChanges, constraints };
+  return { binding, goals, planChanges, constraints, category };
 }
 
 function validateActiveSentinelCriteria(goals: readonly SentinelFormalGoal[]) {
@@ -2247,10 +2266,26 @@ export function applySentinelFormalGoals(
 } {
   const { mode, requestId, proposalDigest, expectedRevision, expectedRunId } =
     approval;
-  const { binding, goals, planChanges, constraints } =
+  const { binding, goals, planChanges, constraints, category } =
     formalGoalApprovalBinding(approval);
+  const location = category && locateSentinelCase(path);
+  if (category && !location) {
+    throw new Error("The Sentinel case category is unavailable");
+  }
+  const categoryStore = location &&
+    join(location.baseDir, "operator-run-links.db");
+  const priorCategoryAdmission = category &&
+    readSentinelFormalGoalApproval(path, approval);
+  if (categoryStore && !priorCategoryAdmission) {
+    try {
+      Deno.lstatSync(categoryStore);
+      openOperatorRunLinkStore(categoryStore).close();
+    } catch {
+      throw new Error("The selected Sentinel category version is unavailable");
+    }
+  }
   const db = openStore(path, true)!;
-  try {
+  function apply() {
     return transact(db, () => {
       ensureFormalGoalRequests(db);
       const prior = readFormalGoalRequest(db, requestId, binding);
@@ -2264,6 +2299,13 @@ export function applySentinelFormalGoals(
       if (replayOnly) {
         throw new Error(
           "This assessment template version is no longer current",
+        );
+      }
+      const admissionCategory = category &&
+        readAdmissionRunCategory(db, category);
+      if (category && !admissionCategory) {
+        throw new Error(
+          "The selected Sentinel category version is unavailable",
         );
       }
       const previousPlan = row ? JSON.parse(row.plan) as AssessmentPlan : {};
@@ -2295,7 +2337,10 @@ export function applySentinelFormalGoals(
         );
       }
       if (approval.sourceProposalId) {
-        const proposal = readWorkerGoalProposal(db, approval.sourceProposalId);
+        const proposal = readWorkerGoalProposal(
+          db,
+          approval.sourceProposalId,
+        );
         if (
           !proposal || proposal.acceptedRevision !== null ||
           proposal.runId !== expectedRunId ||
@@ -2373,6 +2418,7 @@ export function applySentinelFormalGoals(
       const plan: AssessmentPlan = {
         ...current,
         ...planChanges,
+        ...(admissionCategory && { admissionCategory }),
         goal: planChanges.goal ?? current.goal ?? goals[0].title,
         runId: current.runId ?? crypto.randomUUID(),
         ...(mode === "start" && { runStartedAt: Date.now() }),
@@ -2427,6 +2473,14 @@ export function applySentinelFormalGoals(
           );
         }
       }
+      if (admissionCategory && location) {
+        assignAdmissionRunCategory(db, {
+          kind: "sentinel",
+          id: location.caseId,
+          runId: state.plan.runId!,
+          revision: state.revision,
+        }, admissionCategory);
+      }
       saveFormalGoalRequest(db, approval, binding, state);
       if (approval.sourceProposalId) {
         db.prepare(
@@ -2438,10 +2492,14 @@ export function applySentinelFormalGoals(
         state,
         appliedRevision: state.revision,
         duplicate: false,
-        actor: "operator",
+        actor: "operator" as const,
         at: state.updatedAt,
       };
     });
+  }
+  try {
+    if (priorCategoryAdmission) return apply();
+    return withOperatorRunLinks(db, categoryStore || undefined, apply);
   } finally {
     db.close();
   }

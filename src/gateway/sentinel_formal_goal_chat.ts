@@ -1,3 +1,4 @@
+import { parseOperatorRunCategorySelection } from "../core/operator_run_categories.ts";
 /** Operator-reviewed goal decomposition and formal amendments in Sentinel chat. */
 import { createHash } from "node:crypto";
 import { locateSentinelCase } from "../sentinel/cases.ts";
@@ -12,6 +13,7 @@ import {
   applySentinelFormalGoals,
   readSentinelAssessment,
   readSentinelAssessmentHistory,
+  readSentinelAssessmentRevision,
   readSentinelOperatingConstraintsForRevision,
 } from "../sentinel/assessment_store.ts";
 import {
@@ -168,6 +170,9 @@ export async function handleSentinelFormalGoalChat(
         {
           inventoryCoverageEnabled:
             state.plan.inventoryCoverageEnabled !== false,
+          ...(state.plan.admissionCategory && {
+            admissionCategory: state.plan.admissionCategory,
+          }),
           ...(state.plan.assessmentTemplate && {
             assessmentTemplate: state.plan.assessmentTemplate,
           }),
@@ -246,6 +251,12 @@ export async function handleSentinelFormalGoalChat(
       "Choose whether inventory coverage is enabled when starting an assessment.",
     );
   }
+  const category = parseOperatorRunCategorySelection(input.category);
+  if (input.category !== undefined && (mode !== "start" || !category)) {
+    throw new Error(
+      "Select an exact category version for a new Sentinel assessment",
+    );
+  }
   const selected = templateInput(path, input);
   if (selected && mode !== "start") {
     throw new Error("Assessment templates require a new assessment");
@@ -284,6 +295,7 @@ export async function handleSentinelFormalGoalChat(
     goals,
     ...(plan && { plan }),
     ...(initialConstraints && { initialConstraints }),
+    ...(category && { category }),
     expectedRevision: input.expectedRevision,
     expectedRunId: input.expectedRunId,
   } as const;
@@ -311,6 +323,13 @@ export async function handleSentinelFormalGoalChat(
     paused: applied.state.paused,
     ...(mode === "start" && {
       inventoryCoverageEnabled: inventoryCoverageEnabled !== false,
+      ...(category && {
+        admissionCategory: readSentinelAssessmentRevision(
+          path,
+          applied.appliedRevision,
+        )
+          ?.plan?.admissionCategory,
+      }),
       ...(plan?.assessmentTemplate && {
         assessmentTemplate: plan.assessmentTemplate,
       }),
