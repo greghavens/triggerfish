@@ -129,7 +129,11 @@ async function checkRecoveredGoal(kind: "subagent" | "team") {
     );
   };
 
-  const turn = async (content?: string) => {
+  const turn = async (
+    content?: string,
+    operatorRequest?: Record<string, unknown>,
+    actor = owner,
+  ) => {
     const completion = buildDelegatedGoalCompletion(
       directory,
       [goal],
@@ -338,15 +342,51 @@ async function checkRecoveredGoal(kind: "subagent" | "team") {
       (team
         ? `/recover-team ${execution} ${team.id} ${team.member} Review the pipeline result and report the exact evidence.`
         : subagentCommand);
+    const ownerProviders = createProviderRegistry();
+    if (operatorRequest) {
+      ownerProviders.register({
+        name: "team-history-reader",
+        supportsStreaming: false,
+        complete(context, tools) {
+          assert(
+            tools?.some((tool) =>
+              (tool as { function?: { name: string } }).function?.name ===
+                "operator_runs"
+            ),
+          );
+          const result = context.at(-1);
+          if (result?.role === "tool") {
+            return Promise.resolve({
+              content: String(result.content),
+              toolCalls: [],
+              usage: { inputTokens: 1, outputTokens: 1 },
+            });
+          }
+          return Promise.resolve({
+            content: "",
+            toolCalls: [{
+              type: "function",
+              id: crypto.randomUUID(),
+              function: {
+                name: "operator_runs",
+                arguments: JSON.stringify(operatorRequest),
+              },
+            }],
+            usage: { inputTokens: 1, outputTokens: 1 },
+          });
+        },
+      });
+      ownerProviders.setDefault("team-history-reader");
+    }
     const token = crypto.randomUUID();
     const gateway = createGatewayServer({
       port: 0,
       token,
       chatSession: createChatSession({
-        session: owner,
+        session: actor,
         targetClassification: "INTERNAL",
         getSessionTaint: () => "INTERNAL",
-        providerRegistry: createProviderRegistry(),
+        providerRegistry: ownerProviders,
         hookRunner: createHookRunner(createPolicyEngine()),
         goalCompletionPath: join(directory, "goal-completion.db"),
         messageStore: messages,
@@ -479,6 +519,75 @@ async function checkRecoveredGoal(kind: "subagent" | "team") {
       const completed = JSON.parse(await turn(confirm));
       assertEquals(completed.status, "completed");
       assertEquals(completed.observations, pending.observations);
+      if (team) {
+        const target = {
+          traceRole: "team_delivery",
+          id: [team.id, team.member, execution].join(":"),
+        };
+        const lookup = (args: Record<string, unknown>) =>
+          turn("Read the retained execution history.", { ...target, ...args });
+        const history = JSON.parse(
+          await lookup({ action: "execution_traces", limit: 1 }),
+        );
+        assertEquals(history.run.scope, {
+          role: "team_delivery",
+          runId: target.id,
+        });
+        assertEquals(history.page.steps[0].scope, history.run.scope);
+        assert(history.page.nextCursor);
+        const next = JSON.parse(
+          await lookup({
+            action: "execution_traces",
+            limit: 1,
+            cursor: history.page.nextCursor,
+          }),
+        );
+        assertEquals(next.page.steps[0].ordinal, 2);
+        assertEquals(next.page.steps[0].scope, history.run.scope);
+        assertStringIncludes(
+          await turn(
+            "Read another owner's history.",
+            { ...target, action: "execution_traces" },
+            createSession({ userId: owner.userId, channelId: owner.channelId }),
+          ),
+          "unavailable",
+        );
+        const step = JSON.parse(
+          await lookup({ action: "execution_traces", ordinal: 1 }),
+        );
+        assertEquals(step.step.tool, sourceRead.name);
+        assertEquals(step.step, history.page.steps[0]);
+        const search = JSON.parse(
+          await lookup({ action: "execution_traces", query: "github_actions" }),
+        );
+        assertEquals(search.page.matches[0].runId, target.id);
+        assertEquals(search.page.matches[0].role, "team_delivery");
+
+        const action = { action: "execution_trace_payload", ordinal: 1 };
+        sourceAllowed = false;
+        assertStringIncludes(await lookup(action), "unavailable");
+        sourceAllowed = true;
+        const exact = JSON.parse(await lookup(action));
+        assertEquals(exact.run.scope, history.run.scope);
+        assertEquals(exact.step, step.step);
+        assertEquals(exact.payload, {
+          kind: "github_actions_run_status",
+          repo,
+          repositoryId: output.repositoryId,
+          id: output.id,
+          attempt: output.attempt,
+          status: output.status,
+          conclusion: output.conclusion,
+        });
+        assertStringIncludes(
+          await lookup({
+            ...action,
+            id: [crypto.randomUUID(), team.member, execution].join(":"),
+          }),
+          "unavailable",
+        );
+        assertEquals(sourceCalls, 1);
+      }
     } finally {
       store.close();
     }

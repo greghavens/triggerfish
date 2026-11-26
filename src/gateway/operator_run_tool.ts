@@ -1121,7 +1121,7 @@ export const operatorRunTool: ToolDefinition = {
     traceRole: {
       type: "string",
       description: "Trusted execution trace role",
-      enum: ["delegated", "scheduled", "owner_chat"],
+      enum: ["delegated", "scheduled", "owner_chat", "team_delivery"],
     },
     includeResult: {
       type: "boolean",
@@ -2582,6 +2582,18 @@ export function createOperatorRunToolExecutor(options: {
     }
   }
 
+  function exactTeamTraceAdmission(
+    run: ExecutionTraceRun,
+    owner: string | null,
+    [teamId, member, delivery]: readonly string[],
+  ) {
+    const team = parseTeamDeliveryTraceSource(run.scope.sourceId);
+    return team && team.sender === owner && team.teamId === teamId &&
+        team.delivery === delivery && run.scope.sessionId === member
+      ? teamAdmissionArchive(options.baseDir, run.scope)
+      : undefined;
+  }
+
   const readAuthorizedCaseEvidence = readAuthorizedSentinelCaseEvidence.bind(
     null,
     options,
@@ -2694,7 +2706,7 @@ export function createOperatorRunToolExecutor(options: {
       controllingTeam && (!backgroundOwner || teamControl.length !== 3 ||
         !teamControl.every((part) => digestPattern.test(part)))
     ) return unavailable;
-    const [controlTeamId, controlMember, controlDelivery] = teamControl;
+    const [, controlMember, controlDelivery] = teamControl;
     const teamControlRef = controllingTeam && backgroundOwner
       ? {
         kind: "delegated" as const,
@@ -2709,16 +2721,9 @@ export function createOperatorRunToolExecutor(options: {
       kind: "team_delivery",
       id: teamControl.join(":"),
     };
-    const teamControlAdmission = (run: ExecutionTraceRun) => {
-      if (!teamControlRef) return;
-      const team = parseTeamDeliveryTraceSource(run.scope.sourceId);
-      return team?.sender === backgroundOwner &&
-          team?.teamId === controlTeamId &&
-          team.delivery === controlDelivery &&
-          run.scope.sessionId === controlMember
-        ? teamAdmissionArchive(options.baseDir, run.scope)
-        : undefined;
-    };
+    const teamControlAdmission = (run: ExecutionTraceRun) =>
+      teamControlRef &&
+      exactTeamTraceAdmission(run, backgroundOwner, teamControl);
     const backgroundRole = teamControlRef?.kind ??
       (args.kind === "delegated" || args.kind === "scheduled"
         ? args.kind
@@ -2876,8 +2881,13 @@ export function createOperatorRunToolExecutor(options: {
     }
     if (action === "execution_traces" || action === "execution_trace_payload") {
       const reopen = action === "execution_trace_payload";
-      const { traceRole: role, id, ordinal, cursor, query } = args;
+      const { traceRole, id, ordinal, cursor, query } = args;
+      const teamTrace = traceRole === "team_delivery";
+      const role = teamTrace ? "delegated" : traceRole;
       const ownerTrace = role === "owner_chat";
+      const teamTuple = teamTrace && typeof id === "string"
+        ? id.toLowerCase().split(":")
+        : [];
       const owner = context?.ownerRecoverySessionId;
       const searchPayload = reopen && query !== undefined;
       const limit = args.limit === undefined
@@ -2899,6 +2909,9 @@ export function createOperatorRunToolExecutor(options: {
           !/^[A-Za-z0-9_.:/-]{1,128}$/.test(query))) ||
         (role !== undefined && role !== "delegated" && role !== "scheduled" &&
           !ownerTrace) ||
+        (teamTrace &&
+          (!backgroundOwner || teamTuple.length !== 3 ||
+            !teamTuple.every((part) => digestPattern.test(part)))) ||
         (ownerTrace &&
           (!owner ||
             (id !== undefined &&
@@ -2919,10 +2932,16 @@ export function createOperatorRunToolExecutor(options: {
         );
         try {
           const requestedId = typeof id === "string"
-            ? ownerTrace ? id.toLowerCase() : id
+            ? ownerTrace || teamTrace ? id.toLowerCase() : id
             : undefined;
-          const runKey = ownerTrace && requestedId !== undefined
-            ? assignmentRecoveryKey(owner!, requestedId!)
+          const runKey = teamTrace
+            ? await teamDeliveryExecutionId(
+              backgroundOwner! as SessionId,
+              teamTuple[1] as SessionId,
+              teamTuple[2],
+            )
+            : ownerTrace && requestedId !== undefined
+            ? assignmentRecoveryKey(owner!, requestedId)
             : requestedId;
           const run = role && runKey
             ? journal.readRun(role, runKey, "INTERNAL")
@@ -2933,11 +2952,34 @@ export function createOperatorRunToolExecutor(options: {
               (!run || run.scope.sessionId !== owner ||
                 run.scope.sourceId !== requestedId))
           ) return unavailable;
+          const admission = teamTrace && run &&
+            exactTeamTraceAdmission(run, backgroundOwner, teamTuple);
+          const reviewedAdmission = admission && await admission.read();
+          if (teamTrace && !reviewedAdmission) return unavailable;
+          const teamCurrent = async () => {
+            if (!teamTrace) return true;
+            if (
+              !admission || !runKey ||
+              !isDeepStrictEqual(await admission.read(), reviewedAdmission)
+            ) return false;
+            const current = journal.readRun("delegated", runKey, "INTERNAL");
+            return !!current && canReadBackgroundTrace(current) &&
+              isDeepStrictEqual(current.scope, run?.scope);
+          };
           const projectMatch = <
             T extends { role: ExecutionTraceRole; runId: string },
-          >(match: T): T[] => {
+          >(match: T): Array<
+            Omit<T, "role"> & {
+              role: ExecutionTraceRole | "team_delivery";
+            }
+          > => {
             const source = journal.readRun(match.role, match.runId, "INTERNAL");
             if (!source || !canReadBackgroundTrace(source)) return [];
+            if (teamTrace) {
+              return source.scope.runId === runKey
+                ? [{ ...match, role: "team_delivery", runId: requestedId! }]
+                : [];
+            }
             if (!ownerTrace) return [match];
             if (source.scope.sessionId !== owner || !source.scope.sourceId) {
               return [];
@@ -3006,7 +3048,10 @@ export function createOperatorRunToolExecutor(options: {
                 matches.push(candidate);
               }
             }
-            if (role && runKey && !journal.readRun(role, runKey, "INTERNAL")) {
+            if (
+              !await teamCurrent() ||
+              (role && runKey && !journal.readRun(role, runKey, "INTERNAL"))
+            ) {
               return unavailable;
             }
             return safeProjection({
@@ -3039,11 +3084,15 @@ export function createOperatorRunToolExecutor(options: {
               : unavailable;
           }
           if (!role || !runKey || !run) return unavailable;
-          const outputRun = ownerTrace
-            ? { ...run, scope: { ...run.scope, runId: id.toLowerCase() } }
+          const outputRun = teamTrace
+            ? { ...run, scope: { role: "team_delivery", runId: requestedId } }
+            : ownerTrace
+            ? { ...run, scope: { ...run.scope, runId: requestedId } }
             : run;
           const outputStep = <T extends { scope: typeof run.scope }>(step: T) =>
-            ownerTrace ? { ...step, scope: outputRun.scope } : step;
+            ownerTrace || teamTrace
+              ? { ...step, scope: outputRun.scope }
+              : step;
           if (ordinal !== undefined) {
             const step = journal.inspect(run.scope, ordinal, "INTERNAL");
             if (!step) return unavailable;
@@ -3064,7 +3113,8 @@ export function createOperatorRunToolExecutor(options: {
                 options.authorizeExecutionTracePayload,
                 payload,
                 step.classification,
-              ) || !journal.readRun(role, runKey, "INTERNAL")
+              ) || !await teamCurrent() ||
+              !journal.readRun(role, runKey, "INTERNAL")
             ) return unavailable;
             return safeProjection({
               run: outputRun,
@@ -3087,7 +3137,7 @@ export function createOperatorRunToolExecutor(options: {
             ? safeProjection({
               run: outputRun,
               ...(controls && { controls }),
-              page: ownerTrace
+              page: ownerTrace || teamTrace
                 ? { ...page, steps: page.steps.map(outputStep) }
                 : page,
             })
