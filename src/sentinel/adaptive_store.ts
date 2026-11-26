@@ -16,6 +16,13 @@ import type { TodoItem, TodoList } from "../tools/todo_defs.ts";
 import { createEvidenceTaskSettler } from "../core/evidence_task_progression.ts";
 import { createAssignmentObservationJournal } from "../core/assignment_observations.ts";
 import {
+  isWorkerNarrativeId,
+  readWorkerNarrativeReceipt,
+  SENTINEL_WORKER_NARRATIVE_COMMIT,
+  SENTINEL_WORKER_NARRATIVE_READ,
+  type SentinelWorkerNarrativeReceipt,
+} from "./worker_narratives.ts";
+import {
   type AssignmentControlReceipt,
   createAssignmentCheckpointJournal,
   createAssignmentControlJournal,
@@ -413,6 +420,9 @@ function normalizeWorkerCheckpoint(
           ? "sentinel-case-inventory"
           : name === SENTINEL_SHARED_WORKER_REVIEW
           ? "sentinel-shared-worker-review"
+          : name === SENTINEL_WORKER_NARRATIVE_READ ||
+              name === SENTINEL_WORKER_NARRATIVE_COMMIT
+          ? "sentinel-worker-narrative"
           : undefined;
         const sha256 = createHash("sha256").update(tool.content).digest("hex");
         const receipt = progress.find((step) =>
@@ -1003,6 +1013,7 @@ export interface AdaptivePlannerRound {
   };
   readonly findingFollowup?: AdaptiveFindingFollowup;
   readonly peerWorkerReview?: SentinelPeerWorkerReviewReference;
+  readonly workerNarrativeId?: string;
   readonly passingRecheckId?: string;
   readonly passingRecheckForFindingId?: string;
   readonly recheckFindingId?: string;
@@ -1543,6 +1554,7 @@ type RelationshipTaskIdentity = Pick<
   AdaptivePlannerRound,
   | "sourceEvidence"
   | "peerWorkerReview"
+  | "workerNarrativeId"
   | "graphFactOnly"
   | "graphFactId"
   | "graphRelationship"
@@ -2252,6 +2264,9 @@ export function sentinelAdaptiveTaskId(
           request.plannerRound.assignmentQuestion.sha256,
         ]]
         : []),
+      ...(receipt.workerNarrativeId
+        ? [["worker_narrative", receipt.workerNarrativeId]]
+        : []),
       ...(receipt.peerWorkerReview
         ? [["peer_worker_review", receipt.peerWorkerReview]]
         : []),
@@ -2448,6 +2463,7 @@ function normalizePlannerRound(round: AdaptivePlannerRound | undefined) {
     carriedAssignedTargetCitations,
     findingFollowup,
     peerWorkerReview,
+    workerNarrativeId,
     sourceEvidence,
     assignmentQuestion,
     cancelledTaskRequestId,
@@ -2552,6 +2568,15 @@ function normalizePlannerRound(round: AdaptivePlannerRound | undefined) {
       )
     )
   ) throw new Error("Invalid Sentinel reviewed assignment sources");
+  if (
+    workerNarrativeId !== undefined && (
+      !isWorkerNarrativeId(workerNarrativeId) ||
+      !/^[a-f0-9]{64}(?::|$)/.test(identity) ||
+      Object.keys(round).some((key) =>
+        !["identity", "attempt", "workerNarrativeId"].includes(key)
+      )
+    )
+  ) throw new Error("Invalid Sentinel narrative review binding");
   if (
     peerWorkerReview !== undefined && (
       !/^[a-f0-9]{64}(?::|$)/.test(identity) ||
@@ -2719,6 +2744,7 @@ function normalizePlannerRound(round: AdaptivePlannerRound | undefined) {
     ...(sourceEvidence && { sourceEvidence }),
     ...(peerWorkerReview &&
       { peerWorkerReview: parseSentinelPeerWorkerReview(peerWorkerReview) }),
+    ...(workerNarrativeId && { workerNarrativeId }),
     ...(assignmentQuestion && { assignmentQuestion }),
     ...(findingFollowup && {
       findingFollowup: {
@@ -2823,6 +2849,11 @@ function normalizeTask(revision: string, request: AdaptiveTaskRequest) {
     plannerRound?.sourceEvidence &&
     (identity.kind !== "trace" || identity.depth !== 1)
   ) throw new Error("Reviewed assignment evidence requires a one-hop trace");
+  if (
+    plannerRound?.workerNarrativeId &&
+    (identity.kind !== "trace" || identity.depth !== 1 ||
+      request.prerequisites?.length)
+  ) throw new Error("Worker narrative requires an independent local trace");
   if (
     plannerRound?.peerWorkerReview &&
     (identity.kind !== "trace" || identity.depth !== 1 ||
@@ -3132,6 +3163,37 @@ export function readAdaptiveOperatorTrafficHint(
   }
 }
 
+function openWorkerNarrativeJournal(db: DatabaseSync) {
+  return createAssignmentObservationJournal(
+    db,
+    "adaptive_worker_narratives",
+    "adaptive_tasks",
+    "worker-narrative",
+    readWorkerNarrativeReceipt,
+  );
+}
+
+export function readAdaptiveWorkerNarrative(
+  path: string,
+  runId: string,
+  evidenceRevision: number,
+  select: { id: string } | { taskId: string },
+) {
+  const db = openPrivateDatabase(path, true);
+  try {
+    const map = db.prepare(
+      "SELECT revision, goalId FROM adaptive_evidence_revisions WHERE evidenceNumber = ? ORDER BY rowid DESC LIMIT 1",
+    ).get(evidenceRevision);
+    if (map?.goalId !== runId || typeof map.revision !== "string") return;
+    const journal = openWorkerNarrativeJournal(db);
+    return "id" in select
+      ? journal.readById(map.revision, select.id)
+      : journal.readByAssignment(map.revision, select.taskId, evidenceRevision);
+  } finally {
+    db.close();
+  }
+}
+
 export function readAdaptivePeerWorkerReview(
   path: string,
   id: string,
@@ -3372,7 +3434,8 @@ export function readSentinelCompletedGoalTask(
       scope.goal.label,
       ...scope.revisions,
     );
-    return row ? decodeTask(row) : undefined;
+    const task = row && decodeTask(row);
+    return task?.plannerRound?.workerNarrativeId ? undefined : task;
   } finally {
     db.close();
   }
@@ -3942,6 +4005,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
     "workflow-observation",
     readSentinelGitHubWorkflowReadReceipt,
   );
+  const narrativeJournal = openWorkerNarrativeJournal(db);
   const settleEvidenceTask = createEvidenceTaskSettler(
     db,
     "adaptive_tasks",
@@ -7980,6 +8044,87 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
       );
     },
 
+    commitLeasedWorkerNarrative(
+      revision: string,
+      id: string,
+      token: string,
+      evidenceRevision: number,
+      stepIndex: number,
+      value: SentinelWorkerNarrativeReceipt,
+    ) {
+      const receipt = readWorkerNarrativeReceipt(value);
+      if (
+        !receipt || !Number.isSafeInteger(stepIndex) || stepIndex < 0 ||
+        stepIndex >= 16
+      ) return;
+      return transaction(db, () => {
+        const authority = workerCheckpointAuthority(
+          revision,
+          id,
+          token,
+          evidenceRevision,
+        );
+        if (!authority) return;
+        const source = progressForAuthority(
+          revision,
+          id,
+          authority.controlClaimSha256,
+        )[stepIndex];
+        const producer = lookup.get(id);
+        if (
+          typeof producer?.nodeId !== "string" ||
+          source?.outcome !== "returned" ||
+          source.tool !== ASSIGNED_TARGET_CHECKPOINT_TOOL ||
+          source.assignedTarget?.targetId !== producer.nodeId ||
+          !source.assignedTarget.linkedNodeIds.includes(receipt.evidenceId) ||
+          source.resultSnapshot?.sha256 !== receipt.sourceSha256
+        ) return;
+        const committed = narrativeJournal.publish({
+          revision,
+          taskId: id,
+          evidenceRevision,
+          stepIndex,
+          targetId: producer.nodeId,
+        }, receipt);
+        if (committed?.created) {
+          event.run(
+            revision,
+            id,
+            "worker_narrative_committed",
+            producer.attempts,
+            now(),
+            committed.observation.id,
+          );
+        }
+        return committed;
+      });
+    },
+
+    readWorkerNarrative(revision: string, id: string) {
+      return isWorkerNarrativeId(id)
+        ? narrativeJournal.readById(revision, id)
+        : undefined;
+    },
+
+    listWorkerNarratives(
+      revision: string,
+      options: {
+        evidenceRevision: number;
+        targetIds?: readonly string[];
+        excludeTaskId?: string;
+      },
+      allowed: (asset: string, evidence: string) => boolean,
+      limit = 6,
+      offset = 0,
+    ) {
+      if (!validWorkflowObservationPage(offset, limit)) return [];
+      return narrativeJournal.list(revision, 0, MAX_ADAPTIVE_TASKS, {
+        ...options,
+        latestFirst: true,
+      }).filter((record) => allowed(record.targetId, record.receipt.evidenceId))
+        .slice(offset, offset + limit);
+    },
+
     commitLeasedWorkflowObservation(
       revision: string,
       id: string,
@@ -10726,6 +10871,9 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
               ? "sentinel-case-inventory"
               : tool === SENTINEL_SHARED_WORKER_REVIEW
               ? "sentinel-shared-worker-review"
+              : tool === SENTINEL_WORKER_NARRATIVE_READ ||
+                  tool === SENTINEL_WORKER_NARRATIVE_COMMIT
+              ? "sentinel-worker-narrative"
               : tool === SENTINEL_TRAFFIC_LINKS &&
                   sentinelLinkedTrafficPayloadArgs(args)
               ? "sentinel-linked-payload"

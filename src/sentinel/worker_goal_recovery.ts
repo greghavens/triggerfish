@@ -1,4 +1,10 @@
 import {
+  isWorkerNarrativeId,
+  readWorkerNarrativeReceipt,
+  SENTINEL_WORKER_NARRATIVE_COMMIT,
+  SENTINEL_WORKER_NARRATIVE_READ,
+} from "./worker_narratives.ts";
+import {
   SENTINEL_TRAFFIC_BLOB,
   sentinelTrafficBlobArgs,
 } from "./traffic_recovery.ts";
@@ -566,7 +572,9 @@ export function isSentinelGoalReceiptRead(tool: unknown) {
 }
 
 export function isRepeatableSentinelReceiptRead(tool: unknown) {
-  return tool === SENTINEL_SHARED_WORKER_REVIEW ||
+  return tool === SENTINEL_WORKER_NARRATIVE_READ ||
+    tool === SENTINEL_WORKER_NARRATIVE_COMMIT ||
+    tool === SENTINEL_SHARED_WORKER_REVIEW ||
     tool === SENTINEL_TRAFFIC_BLOB ||
     tool === SENTINEL_CASE_INVENTORY_READ ||
     tool === SENTINEL_ASSIGNED_EXECUTION_EVIDENCE ||
@@ -701,6 +709,8 @@ type GoalReceiptReadArguments =
     kind?: string;
     origin?: string;
     evidenceId?: string;
+    summary?: string;
+    confidence?: "observed" | "inferred";
     digest?: string;
     payloadPart?: string;
     byteLength?: number;
@@ -846,6 +856,23 @@ export function sentinelGoalReceiptReadArguments(
 ): GoalReceiptReadArguments | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) return;
   const args = value as Record<string, unknown>;
+  if (tool === SENTINEL_WORKER_NARRATIVE_READ) {
+    return Object.keys(args).length === 1 && isWorkerNarrativeId(args.id)
+      ? { id: args.id }
+      : undefined;
+  }
+  if (tool === SENTINEL_WORKER_NARRATIVE_COMMIT) {
+    if (Object.hasOwn(args, "sourceSha256")) return;
+    const receipt = readWorkerNarrativeReceipt({
+      ...args,
+      sourceSha256: "0".repeat(64),
+    });
+    if (receipt) {
+      const { summary, confidence, evidenceId } = receipt;
+      return { summary, confidence, evidenceId };
+    }
+    return;
+  }
   if (tool === SENTINEL_SHARED_WORKER_REVIEW) {
     const { sourceCase, taskId, asset } = args;
     if (

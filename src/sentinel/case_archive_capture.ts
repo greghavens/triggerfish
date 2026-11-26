@@ -157,6 +157,7 @@ const adaptiveTables = new Set([
   "adaptive_archived_worker_traces",
   "adaptive_worker_settings",
   "adaptive_workflow_observations",
+  "adaptive_worker_narratives",
 ]);
 
 interface EvidenceStoreSchema {

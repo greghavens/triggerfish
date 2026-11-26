@@ -1,3 +1,4 @@
+import { isWorkerNarrativeId } from "./worker_narratives.ts";
 import {
   parseSentinelPeerWorkerReview,
   type SentinelPeerWorkerReviewReference,
@@ -845,11 +846,13 @@ export function validateSentinelPlanSuggestions(
     asset: string,
     ids: readonly string[],
   ) => readonly AdaptiveReviewedAssignmentSource[] | undefined,
+  approvesWorkerNarrative?: (id: string, asset: string) => boolean,
 ):
   | (AdaptiveTaskRequest & {
     analystObservationHintId?: number;
     sourceEvidence?: readonly AdaptiveReviewedAssignmentSource[];
     peerWorkerReview?: SentinelPeerWorkerReviewReference;
+    workerNarrativeId?: string;
     cancelledTaskRequestId?: string;
     sourceKind?: AdaptiveSourceKind;
     workerSources?: readonly AdaptiveWorkerSource[];
@@ -892,6 +895,7 @@ export function validateSentinelPlanSuggestions(
     analystObservationHintId?: number;
     sourceEvidence?: readonly AdaptiveReviewedAssignmentSource[];
     peerWorkerReview?: SentinelPeerWorkerReviewReference;
+    workerNarrativeId?: string;
     cancelledTaskRequestId?: string;
     sourceKind?: AdaptiveSourceKind;
     workerSources?: readonly AdaptiveWorkerSource[];
@@ -952,6 +956,16 @@ export function validateSentinelPlanSuggestions(
       dependencies.some((dependency) =>
         !Number.isSafeInteger(dependency) || !accepted.has(dependency)
       )
+    ) continue;
+    const workerNarrativeId = item.workerNarrativeId;
+    if (
+      workerNarrativeId !== undefined &&
+      (!isWorkerNarrativeId(workerNarrativeId) || kind !== "trace" ||
+        item.depth !== 1 ||
+        Object.keys(item).some((key) =>
+          !["kind", "nodeId", "depth", "workerNarrativeId"].includes(key)
+        ) ||
+        !approvesWorkerNarrative?.(workerNarrativeId, nodeId))
     ) continue;
     const peerWorkerReview = item.peerWorkerReview !== undefined
       ? parseSentinelPeerWorkerReview(item.peerWorkerReview)
@@ -1295,6 +1309,7 @@ export function validateSentinelPlanSuggestions(
         ...task,
         ...(sourceEvidence && { plannerRound: { sourceEvidence } }),
         ...(peerWorkerReview && { peerWorkerReview }),
+        ...(isWorkerNarrativeId(workerNarrativeId) && { workerNarrativeId }),
         ...(futureWorkflowOutcome && { futureWorkflowOutcome }),
         ...(committed && requiredWorkflowOutcome && {
           requiredWorkflowOutcome,
@@ -1339,6 +1354,7 @@ export function validateSentinelPlanSuggestions(
         ...task,
         ...(sourceEvidence && { sourceEvidence }),
         ...(peerWorkerReview && { peerWorkerReview }),
+        ...(isWorkerNarrativeId(workerNarrativeId) && { workerNarrativeId }),
         ...(typeof analystObservationHintId === "number" &&
           { analystObservationHintId }),
         ...(typeof cancelledTaskRequestId === "string" &&

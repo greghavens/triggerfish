@@ -1,3 +1,9 @@
+import {
+  isWorkerNarrativeId,
+  readWorkerNarrativeReceipt,
+  SENTINEL_WORKER_NARRATIVE_READ,
+  type SentinelWorkerNarrativeReceipt,
+} from "./worker_narratives.ts";
 import type { SentinelWorkerFindingRecheckRecord } from "./worker_finding_store.ts";
 import {
   satisfiesSentinelGraphFactRequirement,
@@ -98,6 +104,7 @@ type ProvenanceNode =
     readonly factSatisfaction?: AdaptiveFactSatisfaction;
     readonly githubWorkflowRead?: SentinelGitHubWorkflowReadReceipt;
     readonly graphFact?: Omit<SentinelWorkerGraphFact, "requestId">;
+    readonly workerNarrative?: WorkerNarrativeProvenance;
     readonly workflowObservation?: Omit<AdaptiveWorkflowObservation, "receipt">;
     readonly assetDiscovery?: SentinelAssetDiscoveryRecord;
     readonly remediationRecheck?: RemediationRecheckProvenance;
@@ -158,6 +165,15 @@ type RemediationRecheckProvenance =
   >
   & { readonly receiptSha256: string };
 
+export interface WorkerNarrativeProvenance {
+  readonly id: string;
+  readonly taskId: string;
+  readonly targetId: string;
+  readonly evidenceRevision: number;
+  readonly stepIndex: number;
+  readonly receipt: SentinelWorkerNarrativeReceipt;
+}
+
 /** An adaptive goal and its current persisted task list. */
 export interface AdaptiveProvenanceView {
   readonly goal: { readonly id: string; readonly label: string };
@@ -172,6 +188,7 @@ export interface AdaptiveProvenanceView {
   }[];
   readonly remediationRechecks?: readonly RemediationRecheckProvenance[];
   readonly graphFacts?: readonly SentinelWorkerGraphFact[];
+  readonly workerNarrative?: WorkerNarrativeProvenance;
   readonly workflowObservations?: readonly AdaptiveWorkflowObservation[];
   readonly assetDiscoveries?: readonly SentinelAssetDiscoveryRecord[];
   readonly verificationReviewSources?: readonly {
@@ -1271,6 +1288,65 @@ function addAdaptive(
     }
   }
 
+  const narrative = view.workerNarrative;
+  const narrativeRef = narrative &&
+    derivedRef("observation", "adaptive", narrative.id);
+  if (narrative && narrativeRef) {
+    const { id, taskId, targetId, evidenceRevision, stepIndex } = narrative;
+    const source = assignments.get(taskId);
+    const evidence = imported.get(narrative.receipt.evidenceId);
+    const receipt = readWorkerNarrativeReceipt(narrative.receipt);
+    if (
+      isWorkerNarrativeId(id) && source?.revision &&
+      source.nodeId === targetId &&
+      evidence?.kind === "evidence" && receipt &&
+      evidenceRevision === view.evidenceRevision &&
+      Number.isSafeInteger(stepIndex) && stepIndex >= 0 && stepIndex < 16 &&
+      id === `worker-narrative:${
+          createHash("sha256").update(JSON.stringify([
+            source.revision,
+            taskId,
+            targetId,
+            evidenceRevision,
+            stepIndex,
+            receipt,
+          ])).digest("hex")
+        }`
+    ) {
+      const status = view.modelReviewStates?.find((row) =>
+        row.taskId === taskId
+      )
+        ?.status;
+      index.addNode({
+        id: narrativeRef,
+        sourceId: id,
+        origin: "adaptive",
+        kind: "observation",
+        label: "Committed worker observation",
+        ...(status && { status }),
+        workerNarrative: narrative,
+      });
+      index.addEdge(
+        derivedRef("task", "adaptive", taskId),
+        narrativeRef,
+        "produces",
+      );
+      index.addEdge(narrativeRef, evidence.ref, "references");
+      for (const assignment of assignments.values()) {
+        if (
+          assignment.nodeId === targetId &&
+          assignment.plannerRound?.workerNarrativeId === id
+        ) {
+          index.addEdge(
+            derivedRef("task", "adaptive", assignment.id),
+            narrativeRef,
+            "references",
+          );
+        }
+      }
+    }
+  }
+
   const workflowObservations = addWorkflowObservations(
     index,
     view,
@@ -1515,6 +1591,17 @@ function addAdaptive(
     });
     index.addEdge(derivedRef("task", origin, source), id, "produces");
     for (const [stepIndex, step] of (modelReview?.steps ?? []).entries()) {
+      if (
+        narrative && narrativeRef && index.hasNode(narrativeRef) &&
+        step.tool === SENTINEL_WORKER_NARRATIVE_READ &&
+        step.target === narrative.id && step.outcome === "returned" &&
+        step.goalReceiptRead?.sha256 === createHash("sha256").update(
+            JSON.stringify({ _classification: "INTERNAL", ...narrative }),
+          ).digest("hex")
+      ) {
+        index.addEdge(id, narrativeRef, "references");
+      }
+
       if (step.tool === "sentinel_shared_asset_discoveries") {
         if (step.targetRef && step.sharedAssetDiscovery) {
           index.addEdge(id, step.targetRef, "references");

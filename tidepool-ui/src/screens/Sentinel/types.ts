@@ -8,6 +8,7 @@ export interface SentinelPeerFindingCitation {
 
 interface SentinelPlannerRound {
   readonly recheckFindingId?: string;
+  readonly workerNarrativeId?: string;
   readonly identity: string;
   readonly attempt: number;
   readonly hintId?: number;
@@ -85,6 +86,19 @@ export interface SentinelNode {
     readonly findingRecheckId?: string;
     readonly workflowObservationId?: string;
     readonly evidenceRevision?: number;
+  };
+  readonly workerNarrative?: {
+    readonly id: string;
+    readonly taskId: string;
+    readonly targetId: string;
+    readonly evidenceRevision: number;
+    readonly stepIndex: number;
+    readonly receipt: {
+      readonly summary: string;
+      readonly confidence: "observed" | "inferred";
+      readonly evidenceId: string;
+      readonly sourceSha256: string;
+    };
   };
   readonly workflowObservation?: {
     readonly id: string;

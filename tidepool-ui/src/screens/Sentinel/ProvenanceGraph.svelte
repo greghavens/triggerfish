@@ -12,12 +12,14 @@
     onOpenPeerFinding,
     onOpenAliasSource,
     onOpenDecision,
+    onOpenWorkerNarrative,
     onDownloadPath,
     sourceNavigationDisabled,
   }: {
     graph: SentinelGraph | null;
     language?: WorkspaceLanguage;
     selectedId?: string;
+    onOpenWorkerNarrative?: (id: string) => void;
     onOpenDecision?: (kind: "finding" | "incident", id: number) => void;
     onOpenSource: (caseId: string, assetId: string, snapshotDigest?: string) => void;
     onOpenAliasSource?: (taskId: string, stepIndex: number, sourceCase: string, snapshotDigest: string) => void;
@@ -323,6 +325,12 @@
             </button>
           {/if}
         {/if}
+        {#if selected.plannerRound?.workerNarrativeId && onOpenWorkerNarrative}
+          <button type="button" disabled={sourceNavigationDisabled}
+            onclick={() => onOpenWorkerNarrative?.(selected.plannerRound!.workerNarrativeId!)}>
+            {t("Open source observation")}
+          </button>
+        {/if}
         {#if selected.plannerRound}
           <p>{t("Model planner")} · {t("Attempt")} {selected.plannerRound.attempt}{#if selected.plannerRound.hintId} · {t("Hint")} #{selected.plannerRound.hintId}{/if}</p>
         {/if}
@@ -458,6 +466,12 @@
                           {t("Open source observation")}
                         </button>
                       {/if}
+                      {#if onOpenWorkerNarrative && step.tool === "sentinel_worker_narrative" && step.outcome === "returned" && step.target?.startsWith("worker-narrative:")}
+                        <button type="button" disabled={sourceNavigationDisabled}
+                          onclick={() => onOpenWorkerNarrative?.(step.target!)}>
+                          {t("Open source observation")}
+                        </button>
+                      {/if}
                       {#if onOpenAliasSource && step.aliasMapping?.sources.length}
                         <ul>
                           {#each step.aliasMapping.sources as source (source.caseId)}
@@ -500,6 +514,17 @@
               <dt>{t("Evidence ID")}</dt><dd><code>{discovery.claim.evidenceId}</code></dd>
               <dt>{t("Snapshot digest")}</dt><dd><code>{discovery.sourceDigest}</code></dd>
               <dt>{t("Status")}</dt><dd>{t(discovery.status)}</dd>
+            </dl>
+          {/if}
+          {#if selected.workerNarrative}
+            {@const observation = selected.workerNarrative}
+            <p class="review-summary">{observation.receipt.summary}</p>
+            <dl class="alert-metadata">
+              <dt>{t("Producing task")}</dt><dd><code>{observation.taskId}</code></dd>
+              <dt>{t("Worker step")}</dt><dd>{observation.stepIndex + 1}</dd>
+              <dt>{t("Evidence revision")}</dt><dd>{observation.evidenceRevision}</dd>
+              <dt>{t("Evidence ID")}</dt><dd><code>{observation.receipt.evidenceId}</code></dd>
+              <dt>{t("Result digest")}</dt><dd><code>{observation.receipt.sourceSha256}</code></dd>
             </dl>
           {/if}
           {#if selected.githubWorkflowRead}

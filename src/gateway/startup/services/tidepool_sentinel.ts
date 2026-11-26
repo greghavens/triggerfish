@@ -155,7 +155,9 @@ import {
   readSentinelCaseHints,
   readSentinelInteractiveModelUsage,
   readSentinelModelSettings,
+  readSentinelProvenance,
   readSentinelWorkerSnapshotCitations,
+  retainedWorkerNarrativeId,
   SentinelAssignmentError,
   setSentinelOutputLanguage,
   setSentinelWorkerLimit,
@@ -1671,6 +1673,51 @@ export function createTidepoolSentinelHandler(
               ? fullAlertFeed()
               : undefined,
           ).snapshot();
+          if (
+            typeof message.focusId === "string" &&
+            retainedWorkerNarrativeId(message.focusId)
+          ) {
+            const exact = readSentinelProvenance(
+              path,
+              revision,
+              null,
+              message.focusId,
+            );
+            const focused = exact?.graph.inspect(message.focusId);
+            if (
+              !focused || !("workerNarrative" in focused.node) ||
+              !focused.node.workerNarrative || !exact
+            ) {
+              throw new SentinelAssignmentError(
+                "That worker observation is unavailable in this evidence revision.",
+              );
+            }
+            const visible = new Set(provenance.nodes.map(({ id }) => id));
+            provenance.nodes.push(focused.node);
+            visible.add(focused.node.id);
+            for (const relation of focused.connections) {
+              if (relation.kind !== "edge") continue;
+              const endpoint = relation.from === focused.node.id
+                ? relation.to
+                : relation.from;
+              if (!visible.has(endpoint)) {
+                const retained = exact.graph.inspect(endpoint)?.node;
+                if (!retained || retained.origin !== "adaptive") continue;
+                const { id, sourceId, kind, origin, label, status } = retained;
+                provenance.nodes.push({
+                  id,
+                  sourceId,
+                  kind,
+                  origin,
+                  label,
+                  status,
+                });
+                visible.add(endpoint);
+              }
+              const { from, to, relation: edgeType } = relation;
+              provenance.edges.push({ from, to, relation: edgeType });
+            }
+          }
           const taskTarget = message.focusTarget === true && priorTask
             ? adaptive?.tasks.find(({ id }) => id === priorTask)?.nodeId
             : undefined;

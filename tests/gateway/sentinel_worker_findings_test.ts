@@ -6471,6 +6471,447 @@ async function verifyConnectorMixedAssignment(
   assertEquals(resultFetches, 0);
 }
 
+Deno.test("Committed worker narrative reaches peers and planning while its source lease remains running", async () => {
+  const baseDir = await Deno.makeTempDir();
+  const caseId = "worker-narrative";
+  const path = resolveSentinelCasePath(baseDir, caseId);
+  const publish = "sentinel_publish_worker_narrative";
+  const reopen = "sentinel_worker_narrative";
+  const narrative = {
+    evidenceId: "app-check",
+    summary: "The assigned application exposes a stale local inventory check.",
+    confidence: "observed",
+  };
+  const sourceRead = Promise.withResolvers<string[]>();
+  const releaseSource = Promise.withResolvers<void>();
+  let sourceCoordinator:
+    | ReturnType<typeof createSentinelModelPlanner>
+    | undefined;
+  let sourceLeaseToken: string | undefined;
+  let sourceTurn: Promise<void> | undefined;
+  let coordinator: ReturnType<typeof createSentinelModelPlanner> | undefined;
+  try {
+    await Deno.mkdir(dirname(path), { recursive: true });
+    await Deno.writeTextFile(
+      path,
+      JSON.stringify({
+        version: 1,
+        nodes: [
+          { id: "app", kind: "asset", label: "Assigned application" },
+          { id: "other", kind: "asset", label: "Independent application" },
+          {
+            id: narrative.evidenceId,
+            kind: "evidence",
+            label: "Saved local check",
+          },
+        ],
+        edges: [{
+          from: narrative.evidenceId,
+          to: "app",
+          relation: "observed_on",
+        }],
+      }),
+    );
+    const state = startSentinelAssessment(path);
+    const revision = adaptiveRevision(state);
+    advanceAdaptiveSentinel(path, state);
+    const seed = openSentinelAdaptiveStore(
+      join(dirname(path), "sentinel-adaptive.db"),
+    );
+    let sourceTaskId: string;
+    try {
+      const task = seed.sync(revision, [{
+        kind: "impact",
+        nodeId: "app",
+        reason: MODEL_ASSIGNMENT_REASON,
+      }], revision).find(({ kind, nodeId }) =>
+        kind === "impact" && nodeId === "app"
+      );
+      assert(task);
+      sourceTaskId = task.id;
+    } finally {
+      seed.close();
+    }
+    advanceAdaptiveSentinel(path, state);
+    const peer = assignedLease(path, state, "review_evidence");
+    const unrelated = assignedLease(path, state, "trace", "other");
+    const denied = await workerTurn(path, peer, [[tool(publish, narrative)]]);
+    assertStringIncludes(denied.results[0][0], "unavailable");
+
+    const call = (name: string, args: Record<string, unknown>, id: string) => {
+      return {
+        type: "function" as const,
+        id,
+        function: {
+          name,
+          arguments: JSON.stringify(args),
+        },
+      };
+    };
+    const usage = { inputTokens: 1, outputTokens: 1 };
+    const hooks: HookRunner = {
+      evaluateHook: () =>
+        Promise.resolve({
+          allowed: true,
+          action: "ALLOW",
+          duration: 0,
+          ruleId: null,
+        }),
+    };
+    const providers = createProviderRegistry();
+    providers.register({
+      name: "narrative-source",
+      supportsStreaming: false,
+      async complete(messages) {
+        const results = messages.filter(({ role }) => role === "tool")
+          .map(({ content }) => String(content));
+        if (!results.length) {
+          return {
+            content: "",
+            usage,
+            toolCalls: [call(assigned, {}, "source-evidence")],
+          };
+        }
+        if (results.length < 3) {
+          return {
+            content: "",
+            usage,
+            toolCalls: [
+              call(publish, narrative, `source-publish-${results.length}`),
+            ],
+          };
+        }
+        sourceRead.resolve(results);
+        await releaseSource.promise;
+        return {
+          content: '{"summary":"Settled local review.","followUps":[]}',
+          usage,
+          toolCalls: [],
+        };
+      },
+    });
+    providers.setDefault("narrative-source");
+    sourceCoordinator = createSentinelModelPlanner(
+      path,
+      (current, taskId, token) => {
+        if (!taskId) {
+          throw new Error("The fixture uses a separate planner provider");
+        }
+        if (taskId !== sourceTaskId || !token) {
+          return { execute: () => Promise.resolve(), clear() {} };
+        }
+        sourceLeaseToken = token;
+        const worker = createSentinelSubagent({
+          assessmentRevision: current.revision,
+          assignedTaskId: taskId,
+          assignedTaskLeaseToken: token,
+          snapshotPath: path,
+          providerRegistry: providers,
+          allowModelAccess: true,
+          hookRunner: hooks,
+        });
+        return {
+          ...worker,
+          execute(...args) {
+            sourceTurn = worker.execute(...args);
+            return sourceTurn;
+          },
+        };
+      },
+    );
+    await waitForCondition(
+      () => sourceTurn !== undefined,
+      () => sourceCoordinator!.advance(state),
+    );
+    assert(sourceTurn);
+    const [read, publishResult, duplicateResult] = await Promise.race([
+      sourceRead.promise,
+      sourceTurn.then(() => {
+        throw new Error("Source ended before publication");
+      }),
+    ]);
+    const committed = JSON.parse(publishResult);
+    assertEquals(JSON.parse(duplicateResult), committed);
+    assertEquals(committed.taskId, sourceTaskId);
+    assertEquals(committed.targetId, "app");
+    assertEquals(committed.evidenceRevision, state.revision);
+    assertEquals(committed.receipt.summary, narrative.summary);
+    assertEquals(committed.receipt.evidenceId, narrative.evidenceId);
+    assertEquals(committed.receipt.confidence, narrative.confidence);
+    assertEquals(
+      committed.receipt.sourceSha256,
+      createHash("sha256").update(read).digest("hex"),
+    );
+    assertEquals(committed.stepIndex, 0);
+    const committedWithoutClassification = () => {
+      const { _classification: _, ...record } = committed;
+      return record;
+    };
+    const selector = { id: committed.id };
+    const node = `observation:adaptive:${committed.id}`;
+    await withFindingAssignmentGateway(
+      baseDir,
+      () => Promise.resolve(true),
+      async (turn) => {
+        const response = await turn({
+          kind: "sentinel",
+          id: caseId,
+          revision: state.revision,
+          action: "node",
+          node,
+        });
+        assert(response.startsWith("{"), response);
+        assertEquals(
+          JSON.parse(response).page.node.workerNarrative,
+          committedWithoutClassification(),
+        );
+      },
+    );
+    await withTidepool(baseDir, async (_list, _provenance, request) => {
+      const response = await request("revision", {
+        caseId,
+        revision: state.revision,
+        focusId: node,
+      });
+      assertEquals(response.type, "sentinel_revision");
+      assertEquals(response.focusId, node);
+      const graph = response.provenance as {
+        nodes: { id: string; workerNarrative?: unknown }[];
+      };
+      assertEquals(
+        graph.nodes.find(({ id }) => id === node)?.workerNarrative,
+        committedWithoutClassification(),
+      );
+    });
+
+    const retrieved = await workerTurn(path, peer, [
+      [tool(reopen)],
+      [tool(reopen, selector)],
+    ]);
+    assertEquals(
+      JSON.parse(retrieved.results[0][0]).observations.map(
+        ({ id }: { id: string }) => id,
+      ),
+      [committed.id],
+    );
+    assertEquals(JSON.parse(retrieved.results[1][0]), committed);
+    const blocked = await workerTurn(path, unrelated, [[
+      tool(reopen, selector),
+    ]]);
+    assertStringIncludes(blocked.results[0][0], "unavailable");
+
+    const planningRegistry = createProviderRegistry();
+    let plannerResult: unknown;
+    planningRegistry.register({
+      name: "narrative-planner",
+      supportsStreaming: false,
+      complete(messages) {
+        const saved = messages.findLast(({ role }) => role === "tool");
+        if (!saved) {
+          return Promise.resolve({
+            content: "",
+            usage,
+            toolCalls: [call(reopen, selector, "exact-worker-observation")],
+          });
+        }
+        plannerResult = JSON.parse(String(saved.content));
+        return Promise.resolve({
+          usage,
+          toolCalls: [],
+          content: JSON.stringify({
+            prioritize: [],
+            assignments: [{
+              kind: "trace",
+              nodeId: "app",
+              depth: 1,
+              workerNarrativeId: committed.id,
+            }],
+          }),
+        });
+      },
+    });
+    planningRegistry.setDefault("narrative-planner");
+    const tasks = () => readAdaptiveSentinel(path, state, "revision")?.tasks;
+    const followup = () =>
+      tasks()?.find(({ plannerRound }) =>
+        plannerRound?.workerNarrativeId === committed.id
+      );
+    const peerRegistry = createProviderRegistry();
+    let peerResult: unknown;
+    peerRegistry.register({
+      name: "narrative-citing-worker",
+      supportsStreaming: false,
+      complete(messages) {
+        const saved = messages.findLast(({ role }) => role === "tool");
+        if (!saved) {
+          return Promise.resolve({
+            content: "",
+            usage,
+            toolCalls: [call(reopen, selector, "cite-committed-observation")],
+          });
+        }
+        peerResult = JSON.parse(String(saved.content));
+        return Promise.resolve({
+          content:
+            '{"summary":"Confirmed the retained worker observation.","followUps":[]}',
+          usage,
+          toolCalls: [],
+        });
+      },
+    });
+    peerRegistry.setDefault("narrative-citing-worker");
+    coordinator = createSentinelModelPlanner(
+      path,
+      (current, taskId, token) =>
+        taskId && taskId !== followup()?.id
+          ? { execute: () => Promise.resolve(), clear() {} }
+          : createSentinelSubagent({
+            snapshotPath: path,
+            assessmentRevision: current.revision,
+            ...(taskId
+              ? { assignedTaskId: taskId, assignedTaskLeaseToken: token }
+              : { plannerExecutionEvidenceRunId: current.plan.runId }),
+            providerRegistry: taskId ? peerRegistry : planningRegistry,
+            hookRunner: hooks,
+            allowModelAccess: true,
+          }),
+    );
+    await waitForCondition(
+      () => !!followup(),
+      () => coordinator!.advance(state),
+    );
+    const peerReview = () =>
+      readAdaptiveSentinel(path, state, "revision")
+        ?.modelReviews.find(({ taskId }) => taskId === followup()?.id);
+    await waitForCondition(
+      () => !!peerReview(),
+      () => coordinator!.advance(state),
+    );
+    assertEquals(peerResult, committed);
+    assertEquals(
+      peerReview()?.steps.map(({ tool, target }) => [tool, target]),
+      [
+        [reopen, committed.id],
+      ],
+    );
+    assertEquals(plannerResult, committed);
+    assertEquals(followup()?.nodeId, "app");
+    assert(!followup()!.prerequisites.includes(sourceTaskId));
+    const store = openSentinelAdaptiveStore(
+      join(dirname(path), "sentinel-adaptive.db"),
+    );
+    try {
+      assertEquals(
+        store.runningModelReviewControlIdentity(
+          adaptiveRevision(state),
+          sourceTaskId,
+        )?.leaseToken,
+        sourceLeaseToken,
+      );
+    } finally {
+      store.close();
+    }
+
+    const run = {
+      kind: "sentinel",
+      id: caseId,
+      revision: state.revision,
+      runId: state.plan.runId,
+    };
+    const archiveId = crypto.randomUUID();
+    const peerTaskId = followup()!.id;
+    coordinator.stop();
+    sourceCoordinator.stop();
+    releaseSource.resolve();
+    await sourceTurn;
+    await withFindingAssignmentGateway(
+      baseDir,
+      () => Promise.resolve(true),
+      async (turn) => {
+        assertEquals(
+          JSON.parse(await turn({ ...run, action: "cancel" })).run.status,
+          "stopped",
+        );
+        assertEquals(
+          JSON.parse(
+            await turn({ ...run, action: "archive", requestId: archiveId }),
+          ).receipt.status,
+          "succeeded",
+        );
+      },
+    );
+    await Deno.rename(dirname(path), join(baseDir, "pre-narrative-restore"));
+    await withFindingAssignmentGateway(
+      baseDir,
+      () => Promise.resolve(true),
+      async (turn) => {
+        assertEquals(
+          JSON.parse(
+            await turn({
+              ...run,
+              action: "restore",
+              archiveId,
+              requestId: crypto.randomUUID(),
+            }),
+          ).receipt.status,
+          "succeeded",
+        );
+        const query = {
+          kind: "sentinel",
+          id: caseId,
+          revision: state.revision,
+          action: "node",
+          node,
+        };
+        assertEquals(
+          JSON.parse(await turn(query)).page.node.workerNarrative,
+          committedWithoutClassification(),
+        );
+      },
+    );
+    await withTidepool(baseDir, async (_list, _provenance, request) => {
+      const response = await request("revision", {
+        caseId,
+        revision: state.revision,
+        focusId: node,
+      });
+      assertEquals(response.type, "sentinel_revision");
+      assertEquals(response.focusId, node);
+      const graph = response.provenance as {
+        edges: { from: string; to: string; relation: string }[];
+      };
+      assert(
+        graph.edges.some(({ from, to, relation }) =>
+          from === `task:adaptive:${peerTaskId}` && to === node &&
+          relation === "references"
+        ),
+      );
+      assert(
+        graph.edges.some(({ from, to, relation }) =>
+          from === `task:adaptive:${sourceTaskId}` && to === node &&
+          relation === "produces"
+        ),
+      );
+    });
+    const restored = readSentinelAssessment(path);
+    assert(restored?.paused);
+    const savedPeerReview = readAdaptiveSentinel(path, restored, "revision")
+      ?.modelReviews.find(({ taskId }) => taskId === peerTaskId);
+    assertEquals(
+      savedPeerReview?.steps.map(({ tool, target }) => [tool, target]),
+      [
+        [reopen, committed.id],
+      ],
+    );
+  } finally {
+    coordinator?.stop();
+    releaseSource.resolve();
+    await sourceTurn;
+    sourceCoordinator?.stop();
+    await Deno.remove(baseDir, { recursive: true });
+  }
+});
+
 Deno.test("Reviewed cross-case worker review reaches a scoped planner and reopens after archive restore", async () => {
   const baseDir = await Deno.makeTempDir();
   const sourceCase = "shared-review-source";

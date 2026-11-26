@@ -2642,6 +2642,11 @@
             {/key}
             <ProvenanceGraph graph={displayGraph} language={workspaceLanguage} bind:selectedId onOpenDecision={openPlanningInput}
               onOpenPeerFinding={openPeerFinding}
+              onOpenWorkerNarrative={(id) => {
+                if (displayedRevision !== undefined) {
+                  request("revision", { revision: displayedRevision, focusId: `observation:adaptive:${id}` });
+                }
+              }}
               onOpenAliasSource={(traceId, stepIndex, sourceCase, snapshotDigest) => {
                 if (displayedRevision !== undefined) openAliasSource(displayedRevision, { traceKind: "worker", traceId, stepIndex }, sourceCase, snapshotDigest);
               }}
