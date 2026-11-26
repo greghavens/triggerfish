@@ -3,6 +3,7 @@ import {
   type SentinelModelRoute,
   type SentinelModelRouteEdit,
   sentinelModelRouteEditLimit,
+  type SentinelRoleModels,
   validSentinelModelRouteHistory,
 } from "./model_routes.ts";
 import {
@@ -111,6 +112,7 @@ export type AssessmentPlan =
     readonly modelFallbackProfiles?: readonly SelectedModelProfile[];
     readonly modelFallbackIndex?: number;
     readonly modelRouteHistory?: readonly SentinelModelRouteEdit[];
+    readonly modelRoleProfiles?: SentinelRoleModels;
     readonly plannerHeartbeatSeconds?: number;
     readonly linkedCaseSources?: readonly SentinelLinkedCaseSource[];
     readonly childDescription?: string;
@@ -1460,6 +1462,8 @@ export function startSentinelAssessment(
   if (
     plan.modelFallbackProfiles !== undefined ||
     plan.modelFallbackIndex !== undefined ||
+    plan.modelRouteHistory !== undefined ||
+    plan.modelRoleProfiles !== undefined ||
     (modelFallbackProfiles !== undefined &&
       !parseModelFallbackProfiles(modelFallbackProfiles, modelProfile))
   ) {
@@ -2767,6 +2771,7 @@ function savedModelRoute(plan: AssessmentPlan, revision: number) {
     primary: plan.modelProfile,
     alternates: plan.modelFallbackProfiles,
     activeIndex: plan.modelFallbackIndex ?? 0,
+    roles: plan.modelRoleProfiles,
   });
   const history = plan.modelRouteHistory ?? [];
   if (
@@ -2811,7 +2816,7 @@ export function replaceSentinelModelRoute(
   },
 ) {
   const after = parseSentinelModelRoute(input.after);
-  if (!after?.primary || !constraintUuid.test(input.requestId)) return;
+  if (!after || !constraintUuid.test(input.requestId)) return;
   const db = openStore(path, false);
   if (!db) return;
   try {
@@ -2854,6 +2859,7 @@ export function replaceSentinelModelRoute(
           modelFallbackProfiles: after.alternates,
           modelFallbackIndex: after.activeIndex || undefined,
           modelRouteHistory: [...current.history, applied],
+          modelRoleProfiles: after.roles,
         }),
       );
       return applied;

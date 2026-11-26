@@ -2164,3 +2164,306 @@ Deno.test("Selected Sentinel chat and its worker use the reviewed case model rou
     await Deno.remove(baseDir, { recursive: true });
   }
 });
+
+Deno.test("Reviewed Sentinel role routes resolve and dispatch independently of the case chain", async () => {
+  const baseDir = await Deno.makeTempDir();
+  const caseId = "per-role";
+  const path = resolveSentinelCasePath(baseDir, caseId);
+  const mainPath = resolveSentinelCasePath(baseDir);
+  const registry = createProviderRegistry();
+  const approved = ["run-model", "planner-model", "worker-model", "chat-model"];
+  const allowlists = { INTERNAL: approved, PUBLIC: ["public-model"] };
+  const calls: string[] = [];
+  let plannerCalls = 0;
+  let workerUnavailable = false;
+  for (const provider of ["ordinary", ...approved, "public-model"]) {
+    registry.register({
+      name: provider,
+      model: provider + "-version",
+      supportsStreaming: false,
+      complete() {
+        calls.push(provider);
+        if (provider === "worker-model" && workerUnavailable) {
+          return Promise.reject(
+            Object.assign(new Error("Unavailable"), { status: 503 }),
+          );
+        }
+        const content = provider === "planner-model"
+          ? (++plannerCalls === 1 ? '[{"kind":"impact","nodeId":"app"}]' : "[]")
+          : provider === "worker-model" &&
+              calls.filter((item) => item === "worker-model").length === 1
+          ? '{"summary":"Reviewed using worker-model","followUps":[]}'
+          : "Reviewed using " + provider;
+        return Promise.resolve({
+          content,
+          usage: { inputTokens: 1, outputTokens: 1 },
+          toolCalls: [],
+        });
+      },
+    });
+  }
+  registry.setDefault("ordinary");
+  const routing = sentinelAssessmentModelRouting(registry, allowlists);
+  const hooks: HookRunner = {
+    evaluateHook: () =>
+      Promise.resolve({
+        allowed: true,
+        action: "ALLOW",
+        ruleId: null,
+        duration: 0,
+      }),
+  };
+  let planner: ReturnType<typeof createSentinelModelPlanner> | undefined;
+  let gateway: ReturnType<typeof createGatewayServer> | undefined;
+  let socket: WebSocket | undefined;
+  try {
+    for (const file of [path, mainPath]) {
+      await Deno.mkdir(dirname(file), { recursive: true });
+      await Deno.writeTextFile(
+        file,
+        JSON.stringify({
+          version: 1,
+          nodes: [{ id: "app", kind: "asset", label: "Application" }],
+          edges: [],
+        }),
+      );
+    }
+    const assessment = startSentinelAssessment(path);
+    const runId = assessment.plan.runId;
+    assert(runId);
+    const ref = {
+      kind: "sentinel",
+      id: caseId,
+      revision: assessment.revision,
+      runId,
+    };
+    const edit = (
+      modelRole: string,
+      expectedVersion: number,
+      modelProfile?: string,
+    ) => ({
+      ...ref,
+      action: "set_model_role",
+      modelRole,
+      expectedVersion,
+      modelProfile,
+      requestId: crypto.randomUUID(),
+    });
+    const plannerEdit = edit("planner", 1, "planner-model");
+    await withOwnerControl(baseDir, async (request, confirmations) => {
+      const run = {
+        ...ref,
+        action: "set_model_route",
+        modelProfile: "run-model",
+        expectedVersion: 0,
+        requestId: crypto.randomUUID(),
+      };
+      assertEquals(JSON.parse(await request(run)).edit.version, 1);
+      assert(
+        (await request(edit("delegate", 1, "planner-model"))).startsWith(
+          "Error:",
+        ),
+      );
+      assert(
+        (await request(edit("planner", 1, "public-model"))).startsWith(
+          "Error:",
+        ),
+      );
+      assertEquals(confirmations.length, 1);
+      const first = JSON.parse(await request(plannerEdit));
+      assertEquals(first.edit.version, 2);
+      assertEquals(
+        JSON.parse(await request(edit("worker", 2, "worker-model"))).edit
+          .version,
+        3,
+      );
+      assertEquals(
+        JSON.parse(await request(edit("interactive", 3, "chat-model"))).edit
+          .version,
+        4,
+      );
+      assertEquals(JSON.parse(await request(plannerEdit)), first);
+      assertEquals(confirmations.length, 4);
+      const selection = JSON.parse(
+        await request({ ...ref, action: "model_route" }),
+      );
+      assertEquals(selection.route.primary.provider, "run-model");
+      assertEquals(selection.route.activeIndex, 0);
+      assertEquals(
+        Object.values(selection.roles).map((raw) => {
+          const role = raw as {
+            source: string;
+            available: boolean;
+            profile: { provider: string };
+          };
+          return [role.source, role.available, role.profile.provider];
+        }),
+        [["role", true, "chat-model"], ["role", true, "planner-model"], [
+          "role",
+          true,
+          "worker-model",
+        ]],
+      );
+    }, routing.list);
+
+    const state = readSentinelAssessment(path);
+    assert(state);
+    advanceAdaptiveSentinel(path, state);
+    planner = createSentinelModelPlanner(
+      path,
+      (current, taskId, token, role) =>
+        createSentinelSubagent({
+          ...routing.workerOptions(current.plan.modelProfile, {
+            path,
+            runId,
+            revision: current.revision,
+            role: role ?? "worker",
+          }),
+          snapshotPath: path,
+          assessmentRevision: current.revision,
+          assignedTaskId: taskId,
+          assignedTaskLeaseToken: token,
+          plannerExecutionEvidenceRunId: role === "planner" ? runId : undefined,
+          hookRunner: hooks,
+        }),
+    );
+    planner.advance(state);
+    await until(() =>
+      calls.includes("worker-model") && !planner!.hasInFlightWork()
+    );
+    assert(calls[0] === "planner-model");
+    assert(!calls.includes("run-model"));
+    assert(
+      readAdaptiveSentinel(path, state, "revision")?.modelReviews.some((
+        { summary },
+      ) => summary.includes("worker-model")),
+    );
+
+    const token = crypto.randomUUID();
+    gateway = createGatewayServer({
+      port: 0,
+      token,
+      chatSession: createChatSession({
+        session: createSession({
+          userId: "owner" as UserId,
+          channelId: "roles" as ChannelId,
+        }),
+        providerRegistry: registry,
+        hookRunner: hooks,
+        sentinelSnapshotPath: mainPath,
+        allowSentinelModelAccess: true,
+        sentinelModelProfileAllowlists: allowlists,
+        resolveSentinelChatCase: (id) => id === caseId ? path : undefined,
+        enableStreaming: false,
+      }),
+    });
+    const { port } = await gateway.start();
+    const connected = new WebSocket(
+      `ws://127.0.0.1:${port}/chat?token=${token}`,
+    );
+    socket = connected;
+    await new Promise<void>((resolve, reject) => {
+      connected.addEventListener("open", () => resolve(), { once: true });
+      connected.addEventListener("error", reject, { once: true });
+    });
+    async function turn(content: string) {
+      const done = Promise.withResolvers<string>();
+      const seen: string[] = [];
+      const timeout = setTimeout(
+        () => done.reject(new Error("Case chat did not end")),
+        3000,
+      );
+      function receive({ data }: MessageEvent) {
+        seen.push(String(data));
+        if (JSON.parse(data).type === "turn_end") done.resolve(seen.join("\n"));
+      }
+      connected.addEventListener("message", receive);
+      try {
+        connected.send(JSON.stringify({ type: "message", content }));
+        return await done.promise;
+      } finally {
+        clearTimeout(timeout);
+        connected.removeEventListener("message", receive);
+      }
+    }
+    await turn("/sentinel on");
+    await turn(`/sentinel case ${caseId}`);
+    assert(
+      (await turn("Review this assessment.")).includes(
+        "Reviewed using chat-model",
+      ),
+    );
+    assert(
+      (await turn("/sentinel-agent Review the assigned evidence.")).includes(
+        "worker-model",
+      ),
+    );
+    const callsBeforeFailure = calls.length;
+    workerUnavailable = true;
+    await turn("/sentinel-agent Check the unavailable scoped model.");
+    assertEquals(calls.slice(callsBeforeFailure), ["worker-model"]);
+    assertEquals(
+      readSentinelAssessment(path)?.plan.modelFallbackIndex,
+      undefined,
+    );
+
+    await withOwnerControl(baseDir, async (request) => {
+      const receipt = JSON.parse(await request(edit("interactive", 4)));
+      assertEquals(receipt.edit.after.roles.interactive, undefined);
+      assertEquals(receipt.edit.after.roles.planner.provider, "planner-model");
+      assertEquals(receipt.edit.after.roles.worker.provider, "worker-model");
+    }, routing.list);
+    assert(
+      (await turn("Review with the unchanged run model.")).includes(
+        "Reviewed using run-model",
+      ),
+    );
+    assertEquals(readSentinelAssessment(path)?.revision, assessment.revision);
+    planner.stop();
+    await withOwnerControl(baseDir, async (request) => {
+      assertEquals(
+        JSON.parse(await request({ ...ref, action: "cancel" })).run.status,
+        "stopped",
+      );
+      const archiveId = crypto.randomUUID();
+      assertEquals(
+        JSON.parse(
+          await request({
+            ...ref,
+            action: "archive",
+            requestId: archiveId,
+          }),
+        ).receipt.status,
+        "succeeded",
+      );
+      await Deno.rename(dirname(path), join(baseDir, "old-role-case"));
+      assertEquals(
+        JSON.parse(
+          await request({
+            ...ref,
+            action: "restore",
+            archiveId,
+            requestId: crypto.randomUUID(),
+          }),
+        ).receipt.status,
+        "succeeded",
+      );
+      const restored = JSON.parse(
+        await request({ ...ref, action: "model_route" }),
+      );
+      assertEquals(restored.version, 5);
+      assertEquals(restored.roles.interactive.source, "run");
+      assertEquals(restored.roles.worker.profile.provider, "worker-model");
+      assertEquals(
+        restored.history[3].after.roles.interactive.provider,
+        "chat-model",
+      );
+    }, routing.list);
+  } finally {
+    planner?.stop();
+    socket?.close();
+    await gateway?.stop();
+    await until(() => !planner?.hasInFlightWork());
+    await Deno.remove(baseDir, { recursive: true });
+  }
+});

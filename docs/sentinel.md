@@ -88,6 +88,10 @@ operator decisions. To replace it, use `set_model_route` with the exact case,
 run, revision, current `expectedVersion`, and request ID. The approval shows
 the full previous and replacement routes. Set `activeModelProfile` to begin
 with a specific approved provider in the chain.
+Use `set_model_role` to review a model for the `interactive`, `planner`,
+or `worker` role. Omit `modelProfile` to remove that role's override.
+An override uses its own approved provider. It does not advance the
+case's shared fallback chain. `model_route` shows how each role resolves.
 To direct the child's shared discovery reads, pass up to four
 `sourceCases` entries with an existing `caseId` and exact saved `revision`.
 The approval includes the resolved source run identities. The planner

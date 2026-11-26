@@ -356,6 +356,7 @@ function restoreAssessment(
       modelFallbackProfiles,
       modelFallbackIndex,
       modelRouteHistory,
+      modelRoleProfiles,
     } = object(JSON.parse(row.plan));
     if (
       linkedCaseSources !== undefined &&
@@ -397,11 +398,12 @@ function restoreAssessment(
         (row.active === SENTINEL_ASSESSMENT_TIMED_OUT &&
           Date.parse(row.updatedAt) !== deadlineAt))
     ) throw new Error("Invalid archived Sentinel assessment deadline");
-    if (modelRouteHistory !== undefined) {
+    if (modelRouteHistory !== undefined || modelRoleProfiles !== undefined) {
       const route = parseSentinelModelRoute({
         primary: modelProfile,
         alternates: modelFallbackProfiles,
         activeIndex: modelFallbackIndex ?? 0,
+        roles: modelRoleProfiles,
       });
       if (
         !route ||

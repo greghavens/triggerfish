@@ -6,10 +6,23 @@ import {
   type SelectedModelProfile,
 } from "../core/model_profile_selection.ts";
 
+export const sentinelModelRoles = ["interactive", "planner", "worker"] as const;
+export type SentinelModelRole = typeof sentinelModelRoles[number];
+export type SentinelRoleModels = Readonly<
+  Partial<Record<SentinelModelRole, SelectedModelProfile>>
+>;
+
+export function isSentinelModelRole(
+  value: unknown,
+): value is SentinelModelRole {
+  return sentinelModelRoles.some((role) => role === value);
+}
+
 export interface SentinelModelRoute {
   readonly primary?: SelectedModelProfile;
   readonly alternates?: readonly SelectedModelProfile[];
   readonly activeIndex: number;
+  readonly roles?: SentinelRoleModels;
 }
 
 export interface SentinelModelRouteEdit {
@@ -30,7 +43,7 @@ export function parseSentinelModelRoute(
   value: unknown,
 ): SentinelModelRoute | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) return;
-  const { primary, alternates, activeIndex, ...extra } = value as Record<
+  const { primary, alternates, activeIndex, roles, ...extra } = value as Record<
     string,
     unknown
   >;
@@ -47,8 +60,16 @@ export function parseSentinelModelRoute(
   if (
     (alternates !== undefined && !exact) || activeIndex > (exact?.length ?? 0)
   ) return;
+  if (
+    roles !== undefined && (!roles || typeof roles !== "object" ||
+      Array.isArray(roles) || !Object.keys(roles).length ||
+      Object.entries(roles).some(([role, profile]) =>
+        !isSentinelModelRole(role) || !isSelectedModelProfile(profile)
+      ))
+  ) return;
   return {
     ...(primary !== undefined && { primary }),
+    ...(roles !== undefined && { roles }),
     ...(exact && { alternates: exact }),
     activeIndex,
   } as SentinelModelRoute;
@@ -84,7 +105,7 @@ export function validSentinelModelRouteHistory(
     const before = parseSentinelModelRoute(entry.before);
     const after = parseSentinelModelRoute(entry.after);
     if (
-      !before || !after?.primary || !continuesModelRoute(previous, before) ||
+      !before || !after || !continuesModelRoute(previous, before) ||
       isDeepStrictEqual(before, after)
     ) return false;
     previous = after;
@@ -100,5 +121,6 @@ function continuesModelRoute(
 ) {
   return !previous || (isDeepStrictEqual(previous.primary, current.primary) &&
     isDeepStrictEqual(previous.alternates, current.alternates) &&
+    isDeepStrictEqual(previous.roles, current.roles) &&
     previous.activeIndex <= current.activeIndex);
 }

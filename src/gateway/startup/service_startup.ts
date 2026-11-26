@@ -496,6 +496,7 @@ export async function startServicesAndChannels(
               path: casePath,
               runId: state.plan.runId,
               revision: state.revision,
+              role: role ?? "worker",
             }
             : undefined,
         ),

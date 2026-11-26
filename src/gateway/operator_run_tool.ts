@@ -1,5 +1,7 @@
 import { applyOperatorRunBatch } from "./operator_run_batch_control.ts";
 import {
+  isSentinelModelRole,
+  sentinelModelRoles,
   type SentinelModelRoute,
   sentinelModelRouteEditLimit,
 } from "../sentinel/model_routes.ts";
@@ -369,6 +371,7 @@ export const operatorRunTool: ToolDefinition = {
         "profiles",
         "model_route",
         "set_model_route",
+        "set_model_role",
         "graph",
         "graph_overview",
         "findings",
@@ -718,6 +721,12 @@ export const operatorRunTool: ToolDefinition = {
       type: "array",
       description:
         "Up to three distinct approved INTERNAL provider names in failover order.",
+    },
+    modelRole: {
+      type: "string",
+      enum: [...sentinelModelRoles],
+      description:
+        "Exact Sentinel model role for set_model_role. Omit modelProfile to remove its override.",
     },
     activeModelProfile: {
       type: "string",
@@ -3192,7 +3201,10 @@ export function createOperatorRunToolExecutor(options: {
         return proposed ? safeProjection({ proposal: proposed }) : unavailable;
       }
 
-      if (action === "model_route" || action === "set_model_route") {
+      if (
+        action === "model_route" || action === "set_model_route" ||
+        action === "set_model_role"
+      ) {
         const {
           runId,
           requestId,
@@ -3200,8 +3212,10 @@ export function createOperatorRunToolExecutor(options: {
           modelProfile,
           fallbackModelProfiles,
           activeModelProfile,
+          modelRole,
         } = args;
-        const editing = action === "set_model_route";
+        const editing = action !== "model_route";
+        const roleEdit = action === "set_model_role";
         if (
           ref.kind !== "sentinel" || ref.revision === undefined ||
           !canFlowTo("INTERNAL", context?.ceiling ?? "INTERNAL") ||
@@ -3218,8 +3232,10 @@ export function createOperatorRunToolExecutor(options: {
                   "requestId",
                   "expectedVersion",
                   "modelProfile",
-                  "fallbackModelProfiles",
-                  "activeModelProfile",
+                  ...(roleEdit ? ["modelRole"] : [
+                    "fallbackModelProfiles",
+                    "activeModelProfile",
+                  ]),
                 ]
                 : []),
             ].includes(key)
@@ -3232,13 +3248,50 @@ export function createOperatorRunToolExecutor(options: {
         if (!saved) return unavailable;
         if (!editing) {
           const { route, history, version } = saved;
-          return safeProjection({ route, history, version });
+          const allowed = options.sentinelProfiles?.() ?? [];
+          const standard = options.sentinelModelAccess === false
+            ? undefined
+            : options.profiles?.("INTERNAL").find((
+              { classification },
+            ) => classification === "INTERNAL");
+          const activeRun = route.activeIndex
+            ? route.alternates?.[route.activeIndex - 1]
+            : route.primary;
+          const roles = Object.fromEntries(sentinelModelRoles.map((role) => {
+            const profile = route.roles?.[role] ?? activeRun;
+            return [
+              role,
+              profile
+                ? {
+                  source: route.roles?.[role] ? "role" : "run",
+                  profile,
+                  available: allowed.some((record) =>
+                    isDeepStrictEqual(record, profile)
+                  ),
+                }
+                : {
+                  source: "classification",
+                  ...(standard && {
+                    profile: {
+                      provider: standard.provider,
+                      ...(standard.model !== undefined &&
+                        { model: standard.model }),
+                    },
+                  }),
+                  available: standard !== undefined,
+                },
+            ];
+          }));
+          return safeProjection({ route, history, version, roles });
         }
         if (
           typeof requestId !== "string" || !digestPattern.test(requestId) ||
           typeof expectedVersion !== "number" ||
           !Number.isSafeInteger(expectedVersion) || expectedVersion < 0 ||
-          !isModelProfileName(modelProfile) ||
+          (roleEdit
+            ? !isSentinelModelRole(modelRole) ||
+              (modelProfile !== undefined && !isModelProfileName(modelProfile))
+            : !isModelProfileName(modelProfile)) ||
           (activeModelProfile !== undefined &&
             !isModelProfileName(activeModelProfile)) ||
           (fallbackModelProfiles !== undefined &&
@@ -3247,11 +3300,24 @@ export function createOperatorRunToolExecutor(options: {
               fallbackModelProfiles.length > 3 ||
               !fallbackModelProfiles.every(isModelProfileName)))
         ) return unavailable;
+        const request = requestId.toLowerCase();
+        const earlier = saved.history.find((edit) =>
+          edit.requestId === request
+        );
+        const before = earlier?.before ?? saved.route;
         const select = (): SentinelModelRoute | undefined => {
           const profiles = options.sentinelProfiles?.() ?? [];
           const primary = profiles.find(({ provider }) =>
             provider === modelProfile
           );
+          if (roleEdit && isSentinelModelRole(modelRole)) {
+            if (modelProfile !== undefined && !primary) return;
+            const roles = { ...before.roles };
+            if (primary) roles[modelRole] = primary;
+            else delete roles[modelRole];
+            const { roles: _previousRoles, ...route } = before;
+            return { ...route, ...(Object.keys(roles).length && { roles }) };
+          }
           if (!primary) return;
           const alternates = Array.isArray(fallbackModelProfiles) &&
             parseModelFallbackProfiles(
@@ -3267,14 +3333,15 @@ export function createOperatorRunToolExecutor(options: {
               provider === activeModelProfile
             );
           if (activeIndex < 0) return;
-          return { primary, ...(alternates && { alternates }), activeIndex };
+          return {
+            primary,
+            ...(alternates && { alternates }),
+            ...(before.roles && { roles: before.roles }),
+            activeIndex,
+          };
         };
         const after = select();
         if (!after) return unavailable;
-        const request = requestId.toLowerCase();
-        const earlier = saved.history.find((edit) =>
-          edit.requestId === request
-        );
         if (earlier) {
           return earlier.version === expectedVersion + 1 &&
               isDeepStrictEqual(earlier.after, after)

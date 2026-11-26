@@ -5,7 +5,10 @@ import {
   type SelectedModelProfile,
   selectedModelProvider,
 } from "../core/model_profile_selection.ts";
-import type { SentinelModelRoute } from "../sentinel/model_routes.ts";
+import type {
+  SentinelModelRole,
+  SentinelModelRoute,
+} from "../sentinel/model_routes.ts";
 import type { LlmProvider, LlmProviderRegistry } from "../core/types/llm.ts";
 import {
   advanceSentinelModelFallback,
@@ -17,6 +20,7 @@ interface SentinelModelRun {
   readonly path: string;
   readonly runId: string;
   readonly revision: number;
+  readonly role?: SentinelModelRole;
   readonly alternates?: readonly SelectedModelProfile[];
 }
 
@@ -34,15 +38,21 @@ function isAvailabilityFailure(error: unknown) {
 }
 
 function runModelProvider(
-  run: SentinelModelRun | { readonly path: string; readonly interactive: true },
+  run: SentinelModelRun | {
+    readonly path: string;
+    readonly interactive: true;
+    readonly role: SentinelModelRole;
+  },
   resolve: (profile: SelectedModelProfile) => LlmProvider | undefined,
   defaultProvider: () => LlmProvider | undefined,
 ) {
+  const role = run.role ?? "worker";
   const resolveProvider = (
     route: SentinelModelRoute,
     index: number,
   ) => {
-    const profile = index === 0 ? route.primary : route.alternates?.[index - 1];
+    const profile = route.roles?.[role] ??
+      (index === 0 ? route.primary : route.alternates?.[index - 1]);
     return profile
       ? resolve(profile)
       : index === 0
@@ -115,7 +125,8 @@ function runModelProvider(
         } catch (error) {
           signal?.throwIfAborted();
           if (
-            !selected.scope || !isAvailabilityFailure(error) ||
+            selected.route.roles?.[role] || !selected.scope ||
+            !isAvailabilityFailure(error) ||
             !resolveProvider(selected.route, index + 1)
           ) throw error;
           index = advanceSentinelModelFallback(
@@ -154,9 +165,13 @@ export function sentinelAssessmentModelRouting(
   });
   return {
     list: () => listSelectableModelProfiles(registry, "INTERNAL", allowlists),
-    interactiveOptions(path: string) {
+    interactiveOptions(path: string, role: SentinelModelRole = "interactive") {
       return optionsFor(
-        runModelProvider({ path, interactive: true }, resolve, defaultProvider),
+        runModelProvider(
+          { path, interactive: true, role },
+          resolve,
+          defaultProvider,
+        ),
       );
     },
     workerOptions(profile?: SelectedModelProfile, run?: SentinelModelRun) {

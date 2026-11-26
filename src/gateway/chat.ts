@@ -992,7 +992,10 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
           ...sentinelAssessmentModelRouting(
             config.providerRegistry,
             config.sentinelModelProfileAllowlists,
-          ).interactiveOptions(caseSnapshotPath),
+          ).interactiveOptions(
+            caseSnapshotPath,
+            worker ? "worker" : "interactive",
+          ),
           hookRunner: config.hookRunner,
           ...(!worker && { operatorRunReader }),
           outputLanguage: config.sentinelOutputLanguage,
