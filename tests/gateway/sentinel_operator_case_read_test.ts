@@ -5,7 +5,11 @@ import { createSession } from "../../src/core/types/session.ts";
 import type { ChannelId, UserId } from "../../src/core/types/session.ts";
 import { createChatSession } from "../../src/gateway/chat.ts";
 import { subscribeCommittedEvidence } from "../../src/core/evidence_task_progression.ts";
-import { readSentinelCaseHints } from "../../src/gateway/sentinel_adaptive_runtime.ts";
+import {
+  advanceAdaptiveSentinel,
+  readAdaptiveSentinel,
+  readSentinelCaseHints,
+} from "../../src/gateway/sentinel_adaptive_runtime.ts";
 import { createOperatorRunToolExecutor } from "../../src/gateway/operator_run_tool.ts";
 import { createGatewayServer } from "../../src/gateway/server/server.ts";
 import {
@@ -76,12 +80,21 @@ Deno.test("Authenticated Sentinel chat reads exact approved cross-case graph fin
   const restrictionNote = "Reviewed additional task-kind restriction";
   const constraintConfirmations: string[] = [];
   const hintConfirmations: string[] = [];
+  const assignmentConfirmations: string[] = [];
+  let revokeAssignmentDuringConfirmation = false;
   let constraintsAllowed = true;
   let approveRestriction = false;
   let revokeDuringConfirmation = false;
   const operator = createOperatorRunToolExecutor({
     baseDir,
     confirm(message) {
+      if (
+        message.startsWith("Approve these exact Sentinel graph assignments?")
+      ) {
+        assignmentConfirmations.push(message);
+        if (revokeAssignmentDuringConfirmation) constraintsAllowed = false;
+        return Promise.resolve(true);
+      }
       if (message.startsWith("Approve these exact Sentinel planner hints?")) {
         hintConfirmations.push(message);
         return Promise.resolve(true);
@@ -171,6 +184,7 @@ Deno.test("Authenticated Sentinel chat reads exact approved cross-case graph fin
             "narrow_constraints",
             "steer",
             "hint_batch",
+            "assign_batch",
           ],
         );
       } else if (!next) {
@@ -595,6 +609,66 @@ Deno.test("Authenticated Sentinel chat reads exact approved cross-case graph fin
     } finally {
       unsubscribe();
     }
+
+    advanceAdaptiveSentinel(approved.path, approved.state);
+    const adaptive = readAdaptiveSentinel(
+      approved.path,
+      approved.state,
+      "revision",
+    );
+    assert(adaptive?.revision);
+    const assignment = {
+      action: "assign_batch",
+      ...exact,
+      runId: narrow.runId,
+      adaptiveRevision: adaptive.revision,
+      requestId: crypto.randomUUID(),
+      assignments: [{ taskKind: "impact", node: "asset-a" }],
+    };
+    for (
+      const invalid of [
+        { ...assignment, id: "main", runId: main.state.plan.runId },
+        {
+          ...assignment,
+          assignments: [{ taskKind: "trace", node: "asset-a" }],
+        },
+        {
+          ...assignment,
+          assignments: [{ taskKind: "impact", node: "asset-c" }],
+        },
+        { ...assignment, assignments: [{ taskKind: "exec", node: "asset-a" }] },
+      ]
+    ) {
+      await turn("Reject an invalid graph assignment", invalid);
+      assertStringIncludes(result, "unavailable");
+    }
+    reject = "PRE_TOOL_CALL";
+    await turn("Reject an unapproved assignment", assignment);
+    reject = undefined;
+    assertEquals(assignmentConfirmations.length, 0);
+    const readTasks = () =>
+      readAdaptiveSentinel(approved.path, approved.state, "revision")?.tasks;
+    const before = readTasks();
+    revokeAssignmentDuringConfirmation = true;
+    await turn(
+      "Revoke assignment access before confirmation returns",
+      assignment,
+    );
+    assertEquals(readTasks(), before);
+    constraintsAllowed = true;
+    revokeAssignmentDuringConfirmation = false;
+    await turn("Assign exact reviewed graph work", assignment);
+    const receipt = JSON.parse(result).receipt;
+    assertEquals(receipt.requestId, assignment.requestId);
+    assertEquals(receipt.receipts.length, 1);
+    const accepted = readTasks()?.find(({ id }) =>
+      id === receipt.receipts[0].taskId
+    );
+    assertEquals(accepted?.kind, "impact");
+    assertEquals(accepted?.nodeId, "asset-a");
+    await turn("Reopen the exact assignment receipt", assignment);
+    assertEquals(JSON.parse(result).receipt, receipt);
+    assertEquals(assignmentConfirmations.length, 2);
   } finally {
     socket.close();
     await gateway.stop();

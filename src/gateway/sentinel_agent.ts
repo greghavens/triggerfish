@@ -3861,7 +3861,9 @@ function createAgent(
             ? call?.args?.action
             : undefined;
         const selectedCaseWrite = selectedCaseAction === "narrow_constraints" ||
-          selectedCaseAction === "steer" || selectedCaseAction === "hint_batch";
+          selectedCaseAction === "steer" ||
+          selectedCaseAction === "hint_batch" ||
+          selectedCaseAction === "assign_batch";
         const selectedCaseCall = selectedCaseAction === "constraints" ||
           selectedCaseWrite;
         const scoped = typeof toolName === "string" &&

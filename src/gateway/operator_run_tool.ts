@@ -1206,10 +1206,12 @@ export const sentinelOperatorCaseControlActions = [
   "narrow_constraints",
   "steer",
   "hint_batch",
+  "assign_batch",
 ] as const;
 
 export const sentinelOperatorCaseControlParameters = [
   "adaptiveRevision",
+  "assignments",
   "hints",
   "version",
   "expectedVersion",
@@ -4833,6 +4835,8 @@ ${
           adaptiveRevision,
           assignments: selected,
         };
+        const selectedCase = context.authorizeSelectedSentinelCase;
+        if (selectedCase && !selectedCase()) return unavailable;
         const before = reviewSentinelAssignmentBatch(path, batch);
         if (before?.receipt) {
           return safeProjection({ run: ref, receipt: before.receipt });
@@ -4845,6 +4849,12 @@ ${
             }`,
           )
         ) return "Error: The operator declined the run action.";
+        if (
+          selectedCase &&
+          (!await context.authorizeOwnerRunCall?.(args) || !selectedCase())
+        ) {
+          return unavailable;
+        }
         const committed = reviewSentinelAssignmentBatch(path, batch, true);
         return committed?.receipt
           ? safeProjection({ run: ref, receipt: committed.receipt })
