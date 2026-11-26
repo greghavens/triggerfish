@@ -216,6 +216,7 @@ export function buildCompositeToolExecutor(
       getConfirmPrompt: () => baseDeps.state.activeConfirmPrompt,
       getConnectorTools: integrations.mcpWiring?.getConnectorTools,
       prepareToolRefresh: integrations.mcpWiring?.prepareToolRefresh,
+      withdrawConnectorTools: integrations.mcpWiring?.withdrawConnectorTools,
     }),
     daemonManageExecutor: createDaemonManageExecutor({
       getDaemonStatus: fetchDaemonStatus,

@@ -89,6 +89,8 @@ export interface McpExecutorOptions {
    */
   readonly getServers: () => readonly ConnectedMcpServer[];
   readonly getSession: () => SessionState;
+  /** Current exposure for an already-connected exact server. */
+  readonly isServerAvailable?: (id: string) => boolean;
 }
 
 /**
@@ -102,7 +104,8 @@ export interface McpExecutorOptions {
 export function createMcpExecutor(
   options: McpExecutorOptions,
 ): (name: string, input: Record<string, unknown>) => Promise<string | null> {
-  const { gateway, getServers, getSession } = options;
+  const { gateway, getServers, getSession, isServerAvailable = () => true } =
+    options;
 
   return async (
     name: string,
@@ -118,6 +121,9 @@ export function createMcpExecutor(
 
     const server = serverMap.get(decoded.serverId);
     if (!server) return `Error: MCP server '${decoded.serverId}' not found`;
+    const available = () => isServerAvailable(decoded.serverId);
+    const unavailable = "The selected MCP server is unavailable.";
+    if (!available()) return `Error: ${unavailable}`;
     if (!server.tools.some(({ name }) => name === decoded.toolName)) {
       return "Error: The selected MCP tool is not registered.";
     }
@@ -128,9 +134,16 @@ export function createMcpExecutor(
       toolName: decoded.toolName,
       arguments: input,
       session: getSession(),
-      mcpServer: server.server,
+      mcpServer: {
+        callTool(tool, args) {
+          return available()
+            ? server.server.callTool(tool, args)
+            : Promise.resolve({ ok: false, error: unavailable });
+        },
+      },
     });
 
+    if (!available()) return `Error: ${unavailable}`;
     if (!result.ok) return `Error: ${result.error}`;
 
     // Extract text from the gateway result content

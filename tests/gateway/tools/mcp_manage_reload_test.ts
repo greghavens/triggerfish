@@ -370,6 +370,14 @@ mcp_servers:
           restart_needed: true,
           _classification: "INTERNAL",
         });
+        const live = JSON.parse(await turn("List inventory tools"));
+        assertEquals(live.connected, false);
+        assertEquals(live.tools, []);
+        assertStringIncludes(await turn("Call omitted tool"), "unavailable");
+        assertStringIncludes(
+          await turn("Refresh inventory tools"),
+          "unavailable",
+        );
         const completed = await nextApproval(
           inbox,
           ({ id, status }) => id === disabledId && status === "completed",
@@ -498,10 +506,8 @@ mcp_servers:
         assertEquals((await inbox.decide(removedId, true)).result, completed);
         assertEquals(await Deno.readTextFile(configPath), updated);
         assertEquals(readConfigYaml(configPath), expected);
-        assertEquals(
-          JSON.parse(await turn("List inventory tools")).connected,
-          true,
-        );
+        assertStringIncludes(await turn("List inventory tools"), "unavailable");
+        assertStringIncludes(await turn("Call omitted tool"), "unavailable");
       });
       await Deno.mkdir(proposals, { mode: 0o700 });
       const proposalSource = JSON.stringify(proposed);

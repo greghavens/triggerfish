@@ -255,6 +255,7 @@ const manage = createMcpManageExecutor({
   },
   getConnectorTools: wiring.getConnectorTools,
   prepareToolRefresh: wiring.prepareToolRefresh,
+  withdrawConnectorTools: wiring.withdrawConnectorTools,
 });
 const manageConfig = createConfigManageExecutor({ configPath });
 const gateway = createGatewayServer({

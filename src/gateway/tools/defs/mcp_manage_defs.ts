@@ -14,7 +14,7 @@ function buildMcpManageDef(): ToolDefinition {
   return {
     name: "mcp_manage",
     description:
-      "MCP server configuration management. Changes to running connectors apply after daemon restart.\n" +
+      "MCP server configuration management. Load saved settings after daemon restart. An approved disable or removal immediately withdraws that connector's model tools.\n" +
       "Actions: list, creation_status, add, replace, update, remove, enable, disable, status, lifecycle_status, tools, refresh_tools.\n" +
       "- list: list all configured MCP servers from config file\n" +
       "- creation_status: review redacted metadata for the operator-provided proposal with this server_id\n" +
@@ -85,6 +85,7 @@ until a separate enable approval.
 
 For \`enable\`, \`disable\`, and \`remove\`, read the saved connector's
 current revision with \`lifecycle_status\` and use it in the approval request.
+An approved disable or remove withdraws the connector's tools immediately.
 Use \`update\` to request owner-confirmed timeout or retry changes. When a
 successful write returns \`restart_needed: true\`, use \`daemon_manage(action: "restart")\` to apply it.
 

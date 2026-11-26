@@ -60,6 +60,8 @@ export interface McpWiringResult {
     id: string,
     saved: Record<string, unknown>,
   ) => Promise<ReturnType<McpServerManager["prepareToolRefresh"]>>;
+  /** Withdraw model-visible operations until the next configured connection startup. */
+  readonly withdrawConnectorTools: (id: string) => void;
   /** Live getter for MCP system prompt section (for getExtraSystemPromptSections). */
   readonly getSystemPrompt: () => string | null;
 }
@@ -102,6 +104,7 @@ export function wireMcpServers(
   lineageStore: LineageStore,
 ): McpWiringResult {
   const mcpManager = createMcpServerManager();
+  const withdrawn = new Set<string>();
 
   const mcpConfigs: McpServerConfig[] = [];
   for (const [id, serverCfg] of Object.entries(mcpServersConfig)) {
@@ -135,6 +138,7 @@ export function wireMcpServers(
     gateway: mcpGateway,
     getServers: () => mcpManager.getConnected(),
     getSession,
+    isServerAvailable: (id) => !withdrawn.has(id),
   });
 
   // Install status-change callback
@@ -198,7 +202,9 @@ export function wireMcpServers(
 
   const visibleServers = () =>
     mcpManager.getConnected().map((server) =>
-      server.classification ? server : { ...server, tools: [] }
+      server.classification && !withdrawn.has(server.id)
+        ? server
+        : { ...server, tools: [] }
     );
   return {
     manager: mcpManager,
@@ -206,6 +212,7 @@ export function wireMcpServers(
     getToolDefinitions: () =>
       getMcpToolDefinitions(visibleServers()) as readonly ToolDefinition[],
     getConnectorTools(id) {
+      if (withdrawn.has(id)) return;
       const servers = visibleServers();
       const connector = servers.find((server) => server.id === id);
       if (!connector) return undefined;
@@ -218,7 +225,7 @@ export function wireMcpServers(
       if (!Object.hasOwn(mcpServersConfig, id)) return;
       const matchesRuntime = async () => {
         const current = await resolveConfigSecrets(saved, keychain);
-        return current.ok &&
+        return !withdrawn.has(id) && current.ok &&
           isDeepStrictEqual(current.value, mcpServersConfig[id]);
       };
       if (!await matchesRuntime()) return;
@@ -227,6 +234,12 @@ export function wireMcpServers(
       return (authorize) =>
         refresh(async () => await matchesRuntime() && await authorize());
     },
-    getSystemPrompt: () => buildMcpSystemPrompt(visibleServers()),
+    withdrawConnectorTools: (id) => {
+      withdrawn.add(id);
+    },
+    getSystemPrompt: () =>
+      buildMcpSystemPrompt(
+        visibleServers().filter(({ id }) => !withdrawn.has(id)),
+      ),
   };
 }
