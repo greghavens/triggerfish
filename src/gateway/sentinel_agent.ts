@@ -4773,6 +4773,7 @@ export const sentinelScopedGraphReadActions = [
   "linked_finding",
   "finding_report",
   "finding_report_history",
+  "decision_history",
   "amend_finding_report",
   "preview_membership",
   "set_case_membership",

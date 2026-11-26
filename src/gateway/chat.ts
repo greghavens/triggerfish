@@ -1000,6 +1000,7 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
         const goalConfirmation = action === "confirm_goal_completion";
         const selectedReport = action === "finding_report" ||
           action === "finding_report_history";
+        const decisionHistory = action === "decision_history";
         const previewMembership = action === "preview_membership";
         const setMembership = action === "set_case_membership";
         const selectedControl = sentinelOperatorCaseControlActions.some((
@@ -1036,7 +1037,8 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
           ) return false;
           const casePath = resolveCase();
           if (!selectedControl) {
-            return directRead || linkedRead || selectedReport || goalRead ||
+            return directRead || linkedRead || selectedReport ||
+                decisionHistory || goalRead ||
                 previewMembership
               ? casePath === selectedPath
               : !!casePath;
@@ -1058,7 +1060,8 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
         if (!current()) return unavailable;
         const scopedDecision = action === "review_incident";
         const amendReport = action === "amend_finding_report";
-        const scopedRead = scopedDecision || amendReport || goalRead ||
+        const scopedRead = scopedDecision || decisionHistory || amendReport ||
+          goalRead ||
           goalConfirmation ||
           sentinelScopedTelemetryReadActions.some(
             (allowed) => allowed === action,
@@ -1215,7 +1218,8 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
                     JSON.stringify(JSON.parse(text).membership);
               }
               if (
-                linkedRead || selectedReport || scopedDecision || goalRead ||
+                linkedRead || selectedReport || scopedDecision ||
+                decisionHistory || goalRead ||
                 goalConfirmation
               ) {
                 return await read(goalConfirmation) === text &&

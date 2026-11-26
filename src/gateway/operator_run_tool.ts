@@ -1499,6 +1499,7 @@ export const sentinelOperatorCaseReadActions = [
   "finding_receipt",
   "finding_report",
   "finding_report_history",
+  "decision_history",
   ...sentinelScopedTelemetryReadActions,
   "list_digests",
   "expand_digest",
@@ -1546,6 +1547,8 @@ export const sentinelOperatorCaseReadParameters = [
   "reportVersion",
   "includeReportEvidence",
   "incidentId",
+  "findingId",
+  "before",
   "alertId",
   "upstreamCheck",
   "behavior",
@@ -1562,6 +1565,9 @@ export function sentinelOperatorCaseReadParameterAllowed(
   action: unknown,
   parameter: string,
 ): boolean {
+  if (parameter === "findingId" || parameter === "before") {
+    return action === "decision_history";
+  }
   return sentinelOperatorCaseReadParameters.some((key) => key === parameter) ||
     (action === "preview_membership" && parameter === "allowedAssetIds") ||
     (action === "goals" && ["goalId", "includeProof"].includes(parameter));

@@ -88,6 +88,13 @@ async function verifyReviewScope(kind: "incident" | "finding") {
   let wakeOffset = 0;
   let planRounds = 0;
   let scopedWriteCalls = 0;
+  let scopedDecisionReadCalls = 0;
+  let scopedDecisionResponses = 0;
+  let denyDecisionRead = false;
+  let revokeDecisionResponse = false;
+  let decisionOutputBlocked = false;
+  let denyDecisionOutput: string | undefined;
+  let leakedDecisionOutput = false;
   const confirmations: string[] = [];
   try {
     await Deno.mkdir(dirname(path), { recursive: true });
@@ -220,9 +227,34 @@ async function verifyReviewScope(kind: "incident" | "finding") {
                 assertEquals(input.operation_type, "write");
                 scopedWriteCalls++;
               }
+              const decisionRead = hook === "PRE_TOOL_CALL" &&
+                call?.args?.action === "decision_history" &&
+                input.case_id === caseId;
+              if (decisionRead) {
+                assertEquals(input.evidence_revision, call.args?.revision);
+                assertEquals(input.operation_type, "read");
+                scopedDecisionReadCalls++;
+              }
+              if (
+                hook === "POST_TOOL_RESPONSE" && input.case_id === caseId &&
+                typeof input.tool_response === "string" &&
+                input.tool_response.includes('"decisions":')
+              ) {
+                scopedDecisionResponses++;
+                if (revokeDecisionResponse) {
+                  revokeDecisionResponse = false;
+                  setAssets(["proxy"]);
+                }
+              }
+              const decisionOutput = hook === "PRE_OUTPUT" &&
+                denyDecisionOutput !== undefined &&
+                typeof input.content === "string" &&
+                input.content.includes(denyDecisionOutput);
+              if (decisionOutput) decisionOutputBlocked = true;
+              const denied = decisionOutput || decisionRead && denyDecisionRead;
               return Promise.resolve({
-                allowed: true,
-                action: "ALLOW",
+                allowed: !denied,
+                action: denied ? "BLOCK" : "ALLOW",
                 ruleId: null,
                 duration: 0,
               });
@@ -250,6 +282,11 @@ async function verifyReviewScope(kind: "incident" | "finding") {
             3_000,
           );
           const receive = ({ data }: MessageEvent) => {
+            if (
+              denyDecisionOutput && String(data).includes(denyDecisionOutput)
+            ) {
+              leakedDecisionOutput = true;
+            }
             const frame = JSON.parse(data);
             if (
               frame.type === "turn_end" || frame.type === "response" ||
@@ -395,7 +432,45 @@ async function verifyReviewScope(kind: "incident" | "finding") {
       >;
       assertEquals(subject, allowed.id);
       assertEquals(JSON.parse(trail).page.decisions, [decision]);
-      setAssets(["proxy"]);
+      await turn("/sentinel on");
+      await turn(`/sentinel case ${caseId}`);
+      const selected = {
+        ...ref,
+        action: "decision_history",
+        [selector]: allowed.id,
+      };
+      const reopenedHistory = await turn(selected);
+      assert(reopenedHistory.startsWith("{"), reopenedHistory);
+      assertEquals(JSON.parse(reopenedHistory).page.decisions, [decision]);
+      const past = await turn({ ...selected, before: decision.id });
+      assert(past.startsWith("{"), past);
+      assertEquals(JSON.parse(past).page.decisions, []);
+      assert(scopedDecisionReadCalls > 0);
+      assert(scopedDecisionResponses > 0);
+      assertStringIncludes(
+        await turn({ ...selected, [selector]: mixed.id }),
+        "unavailable",
+      );
+      assertStringIncludes(
+        await turn({ ...selected, id: "main" }),
+        "unavailable",
+      );
+      const priorResponses = scopedDecisionResponses;
+      denyDecisionRead = true;
+      const deniedRead = await turn(selected);
+      assert(!deniedRead.includes(String(decision.note)));
+      assertEquals(scopedDecisionResponses, priorResponses);
+      denyDecisionRead = false;
+      denyDecisionOutput = String(decision.note);
+      const classified = await turn(selected);
+      denyDecisionOutput = undefined;
+      assert(classified.includes(String(decision.note)));
+      assert(decisionOutputBlocked && !leakedDecisionOutput);
+      revokeDecisionResponse = true;
+      assert(!(await turn(selected)).includes(String(decision.note)));
+      assert(!revokeDecisionResponse);
+      assertStringIncludes(await turn(selected), "unavailable");
+      await turn("/sentinel off");
       assertStringIncludes(await turn(allowedReview), "unavailable");
       assertStringIncludes(
         await turn({
