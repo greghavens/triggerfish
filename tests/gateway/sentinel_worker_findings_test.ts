@@ -5879,7 +5879,7 @@ async function verifyConnectorMixedAssignment(
             },
           },
         }),
-    undefined,
+    () => followups().length === 0 ? () => {} : undefined,
     () => plannerClock,
   );
   let recordedRead: Record<string, unknown>;
@@ -5936,6 +5936,8 @@ async function verifyConnectorMixedAssignment(
     protectedPlanner.stop();
   }
   const reviewArchiveId = crypto.randomUUID();
+  const [followup] = followups();
+  assert(followup);
   await gateway(async (turn) => {
     assertEquals(JSON.parse(await turn(recordedRead)).result, exactReview);
     assertEquals(
@@ -5975,6 +5977,195 @@ async function verifyConnectorMixedAssignment(
     assertEquals(JSON.parse(await turn(recordedRead)).result, exactReview);
     assert((await credentials.deleteSecret("github-pat")).ok);
     assertStringIncludes(await turn(recordedRead), "unavailable");
+    assert((await credentials.setSecret("github-pat", credential)).ok);
+    assertEquals(
+      JSON.parse(await turn({ ...ref, action: "resume" })).run.status,
+      "running",
+    );
+  });
+  const restored = readSentinelAssessment(path);
+  assert(restored);
+  const unrelatedLease = (() => {
+    const store = openSentinelAdaptiveStore(
+      join(dirname(path), "sentinel-adaptive.db"),
+    );
+    try {
+      const alternate = store.sync(revision, [{
+        kind: "trace",
+        nodeId: "app",
+        depth: 7,
+        reason: MODEL_ASSIGNMENT_REASON,
+      }], revision).find(({ kind, depth }) => kind === "trace" && depth === 7);
+      assert(alternate && alternate.id !== followup.id);
+      advanceAdaptiveSentinel(path, restored);
+      const lease = store.claimModelReview(
+        revision,
+        MODEL_ASSIGNMENT_REASON,
+        ({ id }) => id === alternate.id,
+      );
+      assert(lease);
+      return {
+        assessmentRevision: restored.revision,
+        assignedTaskId: lease.task.id,
+        assignedTaskLeaseToken: lease.token,
+      };
+    } finally {
+      store.close();
+    }
+  })();
+  const unrelatedResult = await workerTurn(
+    path,
+    unrelatedLease,
+    [[tool(provenanceTool, selection)]],
+    undefined,
+    baseDir,
+    reader,
+  );
+  assert(
+    !unrelatedResult.results[0][0].includes("Verified both retained sources."),
+  );
+  const protectedTrace = {
+    ...ref,
+    action: "worker_trace_result",
+    taskId: followup.id,
+    stepIndices: [0],
+  };
+
+  const followupProviders = createProviderRegistry();
+  let phase: "interrupt" | "revoked" | "resume" = "interrupt";
+  let followupPlanner: ReturnType<typeof createSentinelModelPlanner>;
+  let workerRequests = 0;
+  let protectedResult: unknown;
+  let revokedDelivery = false;
+  let resumedResult: unknown;
+  followupProviders.register({
+    name: "protected-prerequisite-worker",
+    supportsStreaming: false,
+    complete(messages) {
+      const response = messages.findLast(({ role }) => role === "tool");
+      const usage = { inputTokens: 1, outputTokens: 1 };
+      if (response) {
+        const result = JSON.parse(String(response.content));
+        if (phase === "interrupt") {
+          protectedResult = result;
+          followupPlanner.stop();
+        } else if (phase === "revoked") {
+          revokedDelivery = true;
+        } else {
+          resumedResult = result;
+        }
+        return Promise.resolve({
+          content:
+            '{"summary":"Verified the exact protected prerequisite.","followUps":[]}',
+          usage,
+          toolCalls: [],
+        });
+      }
+      if (phase !== "interrupt") {
+        return Promise.resolve({
+          content:
+            '{"summary":"Stopped before protected source reuse.","followUps":[]}',
+          usage,
+          toolCalls: [],
+        });
+      }
+      workerRequests++;
+      return Promise.resolve({
+        content: "",
+        usage,
+        toolCalls: [{
+          type: "function",
+          id: "exact-protected-prerequisite",
+          function: {
+            name: provenanceTool,
+            arguments: JSON.stringify(selection),
+          },
+        }],
+      });
+    },
+  });
+  followupProviders.setDefault("protected-prerequisite-worker");
+  const coordinator = () =>
+    createSentinelModelPlanner(
+      path,
+      (latest, taskId, lease) =>
+        taskId === followup.id
+          ? createSentinelSubagent({
+            snapshotPath: path,
+            assessmentRevision: latest.revision,
+            assignedTaskId: taskId,
+            assignedTaskLeaseToken: lease,
+            sharedInventoryBaseDir: baseDir,
+            readRetainedWorkflow: reader,
+            providerRegistry: followupProviders,
+            allowModelAccess: true,
+            hookRunner: {
+              evaluateHook(hook, { input }) {
+                const allowed = policy(hook, input);
+                return Promise.resolve({
+                  allowed,
+                  action: allowed ? "ALLOW" : "BLOCK",
+                  duration: 0,
+                  ruleId: null,
+                });
+              },
+            },
+          })
+          : { execute: () => Promise.resolve(), clear() {} },
+    );
+  followupPlanner = coordinator();
+  try {
+    followupPlanner.advance(restored);
+    await waitForCondition(
+      () => protectedResult !== undefined && !followupPlanner.hasInFlightWork(),
+      () => {},
+    );
+    assertEquals(
+      (protectedResult as { node: { modelReview: { summary: string } } })
+        .node.modelReview.summary,
+      "Verified both retained sources.",
+    );
+    phase = "revoked";
+    assert((await credentials.deleteSecret("github-pat")).ok);
+    const beforeRevocation = credentialsRequested;
+    followupPlanner = coordinator();
+    followupPlanner.advance(restored);
+    await waitForCondition(
+      () =>
+        credentialsRequested > beforeRevocation &&
+        !followupPlanner.hasInFlightWork(),
+      () => {},
+    );
+    assertEquals(revokedDelivery, false);
+    followupPlanner.stop();
+    phase = "resume";
+    assert((await credentials.setSecret("github-pat", credential)).ok);
+    followupPlanner = coordinator();
+    await waitForCondition(
+      () => resumedResult !== undefined && !followupPlanner.hasInFlightWork(),
+      () => followupPlanner.advance(restored),
+      20_000,
+    );
+    assertEquals(resumedResult, protectedResult);
+    assertEquals(workerRequests, 1);
+  } finally {
+    followupPlanner.stop();
+  }
+  await gateway(async (turn) => {
+    assertEquals(
+      JSON.parse(await turn(protectedTrace)).result,
+      protectedResult,
+    );
+    blockHook = "PRE_TOOL_CALL";
+    try {
+      const before = credentialsRequested;
+      assertStringIncludes(await turn(protectedTrace), "unavailable");
+      assertEquals(credentialsRequested, before);
+    } finally {
+      blockHook = undefined;
+    }
+    assert((await credentials.deleteSecret("github-pat")).ok);
+    assertStringIncludes(await turn(protectedTrace), "unavailable");
   });
   assertEquals(resultFetches, 0);
 }

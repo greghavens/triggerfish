@@ -1458,13 +1458,42 @@ export function readProtectedSentinelReview(
   }
 }
 
+export function readProtectedSentinelPrerequisiteReview(
+  path: string,
+  revision: number,
+  task: AdaptiveTask,
+  sourceTaskId: string,
+) {
+  if (
+    !task.nodeId || task.id === sourceTaskId ||
+    !task.prerequisites.includes(sourceTaskId) ||
+    !taskWorkerSources(task).some(({ taskId, kind }) =>
+      taskId === sourceTaskId && kind === "model_review"
+    )
+  ) return;
+  const proof = readProtectedSentinelReview(path, revision, sourceTaskId);
+  return proof?.assetId === task.nodeId ? proof : undefined;
+}
+
+function hasProtectedReviewContext(
+  task: AdaptiveTask | undefined,
+  assignments: ReadonlyMap<string, AdaptiveTask>,
+) {
+  return !!task && (protectedAssignmentSources(task).length > 0 ||
+    taskWorkerSources(task).some(({ taskId, kind }) =>
+      kind === "model_review" && task.prerequisites.includes(taskId) &&
+      protectedAssignmentSources(assignments.get(taskId)).length > 0
+    ));
+}
+
 function projectReviewedFindingStep(
   step: SentinelReviewStep,
   protectedReview: boolean,
   includeReadResults = false,
 ) {
   return protectedReview && !includeReadResults &&
-      step.tool === "sentinel_worker_findings"
+      (step.tool === "sentinel_worker_findings" ||
+        step.tool === "sentinel_provenance_node")
     ? { tool: step.tool, outcome: step.outcome }
     : projectSentinelTraceMetadata(step, includeReadResults);
 }
@@ -1493,8 +1522,10 @@ export function readHistoricalAdaptiveSentinel(
     const assignments = new Map(tasks.map((task) => [task.id, task]));
     const modelReviews = mapping
       ? store.modelReviewNotes(mapping.revision).map((review) => {
-        const protectedReview =
-          protectedAssignmentSources(assignments.get(review.taskId)).length > 0;
+        const protectedReview = hasProtectedReviewContext(
+          assignments.get(review.taskId),
+          assignments,
+        );
         return {
           ...review,
           ...(protectedReview && !includeWorkerReadResults &&
@@ -2308,8 +2339,10 @@ export function readAdaptiveSentinel(
     const tasks = store.list(revision);
     const assignments = new Map(tasks.map((task) => [task.id, task]));
     const modelReviews = store.modelReviewNotes(revision).map((review) => {
-      const protectedReview =
-        protectedAssignmentSources(assignments.get(review.taskId)).length > 0;
+      const protectedReview = hasProtectedReviewContext(
+        assignments.get(review.taskId),
+        assignments,
+      );
       return {
         ...review,
         ...(protectedReview &&
@@ -4069,7 +4102,7 @@ function modelReviewStates(
         progressSteps: review.progressSteps.map((step) =>
           projectReviewedFindingStep(
             step,
-            protectedAssignmentSources(byId.get(review.taskId)).length > 0,
+            hasProtectedReviewContext(byId.get(review.taskId), byId),
             includeWorkerReadResults,
           )
         ),
@@ -6801,6 +6834,47 @@ export function createSentinelModelPlanner(
             : undefined;
         }
         if (!await authorizeSources()) return;
+        const openedPrerequisites = new Set(
+          steps.flatMap(({ tool, target, outcome }) => {
+            const source = tool === "sentinel_provenance_node" &&
+              outcome === "returned" &&
+              /^observation:adaptive:review:(adaptive:[a-f0-9]{64})$/.exec(
+                target ?? "",
+              )?.[1];
+            return source && readProtectedSentinelAssignmentSources(
+                snapshotPath,
+                state.revision,
+                source,
+              )?.sources.length
+              ? [source]
+              : [];
+          }),
+        );
+        for (const sourceTaskId of openedPrerequisites) {
+          const read = () =>
+            readProtectedSentinelPrerequisiteReview(
+              snapshotPath,
+              state.revision,
+              task,
+              sourceTaskId,
+            );
+          const proof = read();
+          if (!proof) return;
+          const current = () =>
+            currentSource() && isDeepStrictEqual(read(), proof);
+          for (const source of proof.sources) {
+            if (
+              !current() || !await worker.authorizeReviewedFindingSource?.(
+                proof.assetId,
+                source,
+                signal,
+                current,
+                sourceTaskId,
+              )
+            ) return;
+          }
+          if (!current()) return;
+        }
         const parsed = parseModelReview(
           state,
           task,
@@ -6819,7 +6893,7 @@ export function createSentinelModelPlanner(
             followUps: [],
           };
         }
-        return task.plannerRound?.stoppedRetry
+        return task.plannerRound?.stoppedRetry || openedPrerequisites.size
           ? { ...parsed, followUps: [] }
           : parsed;
       } finally {

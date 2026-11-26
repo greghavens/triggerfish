@@ -320,6 +320,7 @@ import {
   previewSentinelQueueControl,
   readHistoricalAdaptiveSentinel,
   readProtectedSentinelAssignmentSources,
+  readProtectedSentinelPrerequisiteReview,
   readProtectedSentinelReview,
   readRetainedSentinelAnalystObservation,
   readReviewedFindingExecutionProof,
@@ -8364,11 +8365,53 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
                   text,
                   task.id,
                 );
+              const sourceTaskId =
+                /^observation:adaptive:review:(adaptive:[a-f0-9]{64})$/.exec(
+                  page.args.node,
+                )?.[1];
+              const protectedSource = sourceTaskId &&
+                readProtectedSentinelAssignmentSources(
+                  path,
+                  ref.revision,
+                  sourceTaskId,
+                )?.sources.length;
+              const authorizeProtected = async () => {
+                if (!protectedSource || !sourceTaskId) return true;
+                const read = () =>
+                  readProtectedSentinelPrerequisiteReview(
+                    path,
+                    ref.revision!,
+                    task,
+                    sourceTaskId,
+                  );
+                const proof = read();
+                if (
+                  !proof || !text ||
+                  JSON.parse(text).node?.modelReview?.summary !== proof.summary
+                ) return false;
+                const current = () =>
+                  !!scoped() && isDeepStrictEqual(read(), proof);
+                for (const source of proof.sources) {
+                  if (
+                    !await authorizeReviewedFindingOperation(
+                      ref,
+                      path,
+                      proof.assetId,
+                      source,
+                      context,
+                      current,
+                    )
+                  ) return false;
+                }
+                return current();
+              };
               if (
                 !text || !scoped() ||
                 createHash("sha256").update(text).digest("hex") !==
                   page.sha256 ||
-                !await authorize(scope, step.tool, page.args, text) || !scoped()
+                !await authorizeProtected() ||
+                !await authorize(scope, step.tool, page.args, text) ||
+                !scoped() || !await authorizeProtected()
               ) return unavailable;
               const current = readHistoricalAdaptiveSentinel(
                 path,

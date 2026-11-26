@@ -248,6 +248,7 @@ import {
   readAssignedSentinelModelReview,
   readHistoricalAdaptiveSentinel,
   readProtectedSentinelAssignmentSources,
+  readProtectedSentinelPrerequisiteReview,
   readProtectedSentinelReview,
   readReviewedFindingExecutionProof,
   readSentinelAssetTrafficHints,
@@ -470,6 +471,7 @@ export interface SentinelAgent {
     source: ReviewedFindingSource,
     signal: AbortSignal,
     current: () => boolean,
+    prerequisiteTaskId?: string,
   ) => Promise<boolean>;
   readonly authorizeLinkedFinding?: (
     caseId: string,
@@ -3736,6 +3738,7 @@ function validateSavedProvenanceNode(
   revision: number,
   args: NonNullable<ReturnType<typeof sentinelProvenanceNodeArgs>>,
   result: string,
+  protectedSummary?: string,
 ) {
   if (
     result.length > MAX_TOOL_CHARS || redactCredentialText(result) !== result ||
@@ -3763,12 +3766,12 @@ function validateSavedProvenanceNode(
   if (!current || saved.totalConnections > current.connections.length) {
     return false;
   }
-  if (
-    !isDeepStrictEqual(
-      JSON.parse(serializeToolResult(current.node, true)),
-      saved.node,
-    )
-  ) return false;
+  const projected = JSON.parse(serializeToolResult(current.node, true));
+  if (protectedSummary !== undefined) {
+    if (!projected.modelReview) return false;
+    projected.modelReview.summary = protectedSummary;
+  }
+  if (!isDeepStrictEqual(projected, saved.node)) return false;
   const visible = new Set(
     current.connections.map((item) => serializeToolResult(item, true)),
   );
@@ -5295,13 +5298,13 @@ function createAgent(
         }
         if (
           result.allowed && name === "POST_TOOL_RESPONSE" &&
-          canReadPlannerCase &&
+          (canReadPlannerCase || turn?.requiresLiveAssignment) &&
           toolName === SENTINEL_PROVENANCE_NODE_READ && turn &&
           typeof context.input.tool_response === "string" &&
           context.input.tool_response.startsWith("{")
         ) {
           const page = JSON.parse(context.input.tool_response);
-          const selected = await protectedPlannerReview(turn, page.node?.id);
+          const selected = await authorizedProtectedReview(turn, page.node?.id);
           if (
             selected === false ||
             (selected && page.node?.modelReview?.summary !== selected.summary)
@@ -6802,9 +6805,12 @@ function createAgent(
           return "Error: The requested Sentinel evidence scope is unavailable.";
         }
         const text = inspectSentinelProvenance(options, args);
-        if (!canReadPlannerCase || !text.startsWith("{")) return text;
+        if (
+          (!canReadPlannerCase && !turn.requiresLiveAssignment) ||
+          !text.startsWith("{")
+        ) return text;
         const page = JSON.parse(text);
-        const selected = await protectedPlannerReview(turn, page.node?.id);
+        const selected = await authorizedProtectedReview(turn, page.node?.id);
         if (selected === false) {
           return "Error: The requested review evidence is unavailable.";
         }
@@ -7732,7 +7738,7 @@ function createAgent(
     return true;
   }
 
-  async function protectedPlannerReview(turn: ActiveTurn, node: unknown) {
+  async function authorizedProtectedReview(turn: ActiveTurn, node: unknown) {
     const taskId = typeof node === "string" &&
       /^observation:adaptive:review:(adaptive:[a-f0-9]{64})$/.exec(node)?.[1];
     const revision = options.assessmentRevision;
@@ -7744,18 +7750,30 @@ function createAgent(
         taskId,
       )?.sources.length
     ) return;
-    const proof = readProtectedSentinelReview(
-      options.snapshotPath,
-      revision,
-      taskId,
-    );
+    const read = () => {
+      if (canReadPlannerCase) {
+        return readProtectedSentinelReview(
+          options.snapshotPath,
+          revision,
+          taskId,
+        );
+      }
+      const task = readAssignedModelReview(options);
+      return task &&
+        readProtectedSentinelPrerequisiteReview(
+          options.snapshotPath,
+          revision,
+          task,
+          taskId,
+        );
+    };
+    const proof = read();
     if (!proof) return false;
     const current = () =>
-      currentPlannerReceiptScope(turn, proof.assetId) &&
-      isDeepStrictEqual(
-        readProtectedSentinelReview(options.snapshotPath, revision, taskId),
-        proof,
-      );
+      !turn.signal.aborted &&
+      (!canReadPlannerCase ||
+        currentPlannerReceiptScope(turn, proof.assetId)) &&
+      isDeepStrictEqual(read(), proof);
     for (const source of proof.sources) {
       if (
         !current() ||
@@ -7764,6 +7782,7 @@ function createAgent(
           source,
           turn.signal,
           current,
+          canReadPlannerCase ? undefined : taskId,
         )
       ) return false;
     }
@@ -7775,6 +7794,7 @@ function createAgent(
     source: ReviewedFindingSource,
     signal: AbortSignal,
     current = () => true,
+    prerequisiteTaskId?: string,
   ): Promise<boolean> {
     const {
       snapshotPath,
@@ -7791,13 +7811,19 @@ function createAgent(
     if (!proof) return false;
     const isCurrent = () => {
       const task = readAssignedModelReview(options);
+      const permitted = task && prerequisiteTaskId
+        ? readProtectedSentinelPrerequisiteReview(
+          snapshotPath,
+          source.evidenceRevision,
+          task,
+          prerequisiteTaskId,
+        )?.sources
+        : task?.plannerRound?.sourceEvidence;
       const validRole = canReadPlannerCase
         ? options.plannerExecutionEvidenceRunId === proof.runId &&
           options.assessmentRevision === source.evidenceRevision
         : task?.nodeId === assetId &&
-          !!task.plannerRound?.sourceEvidence?.some((entry) =>
-            isDeepStrictEqual(entry, source)
-          );
+          !!permitted?.some((entry) => isDeepStrictEqual(entry, source));
       return !signal.aborted && current() && validRole &&
         isDeepStrictEqual(
           readReviewedFindingExecutionProof(snapshotPath, assetId, source),
@@ -8427,13 +8453,19 @@ function createAgent(
                   }
                   if (call.name === SENTINEL_PROVENANCE_NODE_READ) {
                     const args = sentinelProvenanceNodeArgs(call.args);
+                    if (!args) return false;
+                    const selected = await authorizedProtectedReview(
+                      turn,
+                      args.node,
+                    );
                     if (
-                      !args ||
+                      selected === false ||
                       !validateSavedProvenanceNode(
                         options,
                         revision,
                         args,
                         saved,
+                        selected?.summary,
                       )
                     ) return false;
                     continue;

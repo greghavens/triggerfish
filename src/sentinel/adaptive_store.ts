@@ -1339,6 +1339,34 @@ export function taskWorkerSources(
     : []);
 }
 
+/** Exclude connector-backed reviewer text from generic history and planner inputs. */
+function protectedReviewSql(task: "t" | "task") {
+  return `(
+    EXISTS (
+      SELECT 1 FROM json_each(${task}.plannerRound, '$.sourceEvidence') AS source
+      WHERE json_type(source.value, '$.executionEvidenceId') = 'text'
+    ) OR EXISTS (
+      SELECT 1 FROM json_each(${task}.prerequisites) AS prerequisite
+      JOIN adaptive_tasks AS upstream ON upstream.id = prerequisite.value
+        AND upstream.revision = ${task}.revision
+      JOIN json_each(upstream.plannerRound, '$.sourceEvidence') AS source
+      WHERE json_type(source.value, '$.executionEvidenceId') = 'text'
+        AND (
+          EXISTS (
+            SELECT 1 FROM json_each(${task}.plannerRound, '$.workerSources') AS citation
+            WHERE json_extract(citation.value, '$.taskId') = upstream.id
+              AND json_extract(citation.value, '$.kind') = 'model_review'
+          ) OR (
+            json_type(${task}.plannerRound, '$.workerSources') IS NULL
+            AND ${task}.reviewedFrom = upstream.id
+            AND (${task}.plannerRound IS NULL
+              OR json_extract(${task}.plannerRound, '$.sourceKind') = 'model_review')
+          )
+        )
+    )
+  )`;
+}
+
 /** A single trace can only stand in for work whose cited evidence it covers. */
 export function canReuseCommittedTrace(
   task: Pick<AdaptiveTask, "plannerRound" | "reviewedFrom">,
@@ -7171,10 +7199,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
           : ""
       }
         WHERE t.revision = ? AND t.status = 'completed'
-          AND NOT EXISTS (
-            SELECT 1 FROM json_each(t.plannerRound, '$.sourceEvidence') source
-            WHERE json_type(source.value, '$.executionEvidenceId') = 'text'
-          )
+          AND NOT ${protectedReviewSql("t")}
           AND t.observation IS NOT NULL
           AND (? IS NULL OR t.id IN (SELECT value FROM json_each(?)))
       )
@@ -10903,10 +10928,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
       ).get();
       return db.prepare(`
         SELECT note.*, task.kind, task.nodeId,
-          EXISTS (
-            SELECT 1 FROM json_each(task.plannerRound, '$.sourceEvidence') AS source
-            WHERE json_type(source.value, '$.executionEvidenceId') = 'text'
-          ) AS protectedReview,
+          ${protectedReviewSql("task")} AS protectedReview,
           ${traced ? "trace.steps" : "NULL AS steps"}
         FROM adaptive_notes AS note
         LEFT JOIN adaptive_tasks AS task ON task.id = note.taskId
