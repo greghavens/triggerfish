@@ -4,6 +4,11 @@ import { createHash } from "node:crypto";
 import { join } from "@std/path";
 import { withVerifiedRunArchive } from "../core/run_archive.ts";
 import {
+  type ArchiveDependency,
+  orderedArchiveTargets,
+  readArchivedRunDependencies,
+} from "./operator_run_archive_batch.ts";
+import {
   lockRunArchiveAction,
   openRunArchiveActions,
   type RunArchivePurgeReceipt,
@@ -141,6 +146,7 @@ export async function executeOperatorArchivePurge(
       if (reviewed && reviewed.binding !== binding) return;
       if (batch && !reviewed) {
         const eligible = [];
+        const dependencies = new Map<string, readonly ArchiveDependency[]>();
         for (const target of targets) {
           const source = exactSource(target);
           if (
@@ -148,26 +154,45 @@ export async function executeOperatorArchivePurge(
             !journal.readPurge(target.archiveId) &&
             await authorized(target)
           ) {
-            eligible.push({ ...target, archiveDigest: source.archiveDigest });
+            const references = await readArchivedRunDependencies(
+              directory,
+              target,
+              source,
+            );
+            if (references && await authorized(target)) {
+              eligible.push({ ...target, archiveDigest: source.archiveDigest });
+              dependencies.set(target.archiveId, references);
+            }
           }
         }
         if (!eligible.length) return;
+        const ordered = orderedArchiveTargets(eligible, dependencies, false);
         if (
           !await confirm(
             `Permanently purge these exact Sentinel archive packages?\n${
-              JSON.stringify(eligible)
+              JSON.stringify(ordered)
             }`,
           )
         ) return { declined: true as const };
         if (!await authorize(group)) return;
-        const ids = eligible.map(({ archiveId }) => archiveId);
+        const ids = ordered.map(({ archiveId }) => archiveId);
         if (!journal.admitBatch(requestId, binding, ids)) return;
         reviewed = { binding, eligible: ids };
       }
 
       const outcomes: { target: Target; receipt?: RunArchivePurgeReceipt }[] =
         [];
-      for (const target of targets) {
+      const byId = new Map(targets.map((target) => [target.archiveId, target]));
+      const eligibleOrder = reviewed?.eligible;
+      const ordered = eligibleOrder
+        ? [
+          ...eligibleOrder.flatMap((id) => byId.get(id) ?? []),
+          ...targets.filter(({ archiveId }) =>
+            !eligibleOrder.includes(archiveId)
+          ),
+        ]
+        : targets;
+      for (const target of ordered) {
         const call = item(target);
         const { archiveId } = target;
         const outcome: typeof outcomes[number] = { target };

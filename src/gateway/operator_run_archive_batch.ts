@@ -76,29 +76,30 @@ function archiveRequestId(group: string, target: ArchiveTarget): string {
   ].join("-");
 }
 
-interface ArchiveDependency {
+export interface ArchiveDependency {
   readonly kind: string;
   readonly id: string;
   readonly revision?: number;
   readonly runId?: string;
 }
 
-function orderedTargets(
-  chosen: readonly ArchiveTarget[],
+export function orderedArchiveTargets<T extends ArchiveTarget>(
+  chosen: readonly T[],
   sources: ReadonlyMap<string, readonly ArchiveDependency[]>,
   restore: boolean,
-): ArchiveTarget[] {
+): T[] {
   const dependsOn = (dependent: ArchiveTarget, source: ArchiveTarget) =>
-    sources.get(dependent.id)?.some((ref) =>
+    sources.get(dependent.archiveId ?? dependent.id)?.some((ref) =>
       ref.kind === source.kind && ref.id === source.id &&
       ref.revision === source.revision &&
       (ref.runId === undefined || ref.runId === source.runId)
     );
   const visited = new Set<string>();
-  const ordered: ArchiveTarget[] = [];
-  const visit = (target: ArchiveTarget) => {
-    if (visited.has(target.id)) return;
-    visited.add(target.id);
+  const ordered: T[] = [];
+  const visit = (target: T) => {
+    const key = target.archiveId ?? target.id;
+    if (visited.has(key)) return;
+    visited.add(key);
     for (const other of chosen) {
       if (restore ? dependsOn(target, other) : dependsOn(other, target)) {
         visit(other);
@@ -110,7 +111,7 @@ function orderedTargets(
   return ordered;
 }
 
-async function archivedSources(
+export async function readArchivedRunDependencies(
   directory: string,
   target: ArchiveTarget,
   receipt: RunArchiveActionRecord | undefined,
@@ -220,7 +221,7 @@ export async function executeOperatorRunArchiveBatch(input: {
     const path = resolveSentinelCasePath(baseDir, target.id);
     if (restore) {
       if (await hasDestination(path)) return;
-      return archivedSources(
+      return readArchivedRunDependencies(
         directory,
         target,
         journal.readArchived(target.archiveId!),
@@ -245,9 +246,9 @@ export async function executeOperatorRunArchiveBatch(input: {
         const sources = await eligible(target);
         if (!sources) continue;
         ready.push(target);
-        dependencies.set(target.id, sources);
+        dependencies.set(target.archiveId ?? target.id, sources);
       }
-      const planned = orderedTargets(ready, dependencies, restore);
+      const planned = orderedArchiveTargets(ready, dependencies, restore);
       if (!planned.length) {
         return {
           requestId,

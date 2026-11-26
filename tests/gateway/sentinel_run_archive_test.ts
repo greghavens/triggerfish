@@ -6512,6 +6512,48 @@ Deno.test("Owner gateway reviews exact single and batch archive purge and resume
       }
     });
     const [one, two, recovering, current] = targets;
+    let child: typeof two | undefined;
+    await withGateway(baseDir, async (turn) => {
+      const archived = JSON.parse(
+        await turn({
+          action: "spawn",
+          kind: "sentinel",
+          id: two.id,
+          revision: two.revision,
+          targetKind: "sentinel",
+          targetId: "purge-dependent",
+          initialGraph: "empty",
+          requestId: crypto.randomUUID(),
+        }),
+      );
+      assertEquals(archived.run.status, "running");
+      const path = resolveSentinelCasePath(baseDir, "purge-dependent");
+      const state = readSentinelAssessment(path);
+      assert(state?.plan.runId);
+      assert(stopSentinelAssessment(path));
+      const childRef = {
+        kind: "sentinel",
+        id: "purge-dependent",
+        revision: state.revision,
+        runId: state.plan.runId,
+      };
+      const archiveId = crypto.randomUUID();
+      assertEquals(
+        JSON.parse(
+          await turn({
+            action: "archive",
+            ...childRef,
+            requestId: archiveId,
+          }),
+        ).receipt.status,
+        "succeeded",
+      );
+      const replacement = startSentinelAssessment(path);
+      assert(replacement.plan.runId !== childRef.runId);
+      child = { ...childRef, archiveId };
+    });
+    assert(child);
+    const childTarget = child;
     for (const target of [one, two, recovering]) {
       const state = startSentinelAssessment(
         resolveSentinelCasePath(baseDir, target.id),
@@ -6553,14 +6595,20 @@ Deno.test("Owner gateway reviews exact single and batch archive purge and resume
       const batch = {
         action: "purge_archives",
         requestId: crypto.randomUUID(),
-        runTargets: [two, current],
+        runTargets: [two, current, childTarget],
       };
       const result = JSON.parse(await turn(batch));
       assertEquals(
         result.outcomes.map((outcome: {
           receipt?: { status: string };
         }) => outcome.receipt?.status),
-        ["succeeded", undefined],
+        ["succeeded", "succeeded", undefined],
+      );
+      assertEquals(
+        result.outcomes.map(({ target }: { target: { id: string } }) =>
+          target.id
+        ),
+        [childTarget.id, two.id, current.id],
       );
       assertEquals(JSON.parse(await turn(batch)), result);
       assert(
