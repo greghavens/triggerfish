@@ -3988,7 +3988,8 @@ function createAgent(
           selectedCaseAction === "steer" ||
           selectedCaseAction === "hint_batch" ||
           selectedCaseAction === "assign_batch" ||
-          selectedCaseAction === "append_goals";
+          selectedCaseAction === "append_goals" ||
+          selectedCaseAction === "add_case_membership";
         const selectedCaseCall = selectedCaseAction === "constraints" ||
           selectedCaseWrite;
         const scoped = typeof toolName === "string" &&
@@ -4057,7 +4058,8 @@ function createAgent(
             ? {
               ...context,
               input: { ...context.input, ...metadata },
-              auditInput: plannerTodo || plannerControl
+              auditInput: plannerTodo || plannerControl ||
+                  selectedCaseAction === "add_case_membership"
                 ? metadata
                 : { ...context.auditInput, ...metadata },
             }

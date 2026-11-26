@@ -468,6 +468,7 @@ export const operatorRunTool: ToolDefinition = {
         "categorize_runs",
         "clear_run_categories",
         "set_case_membership",
+        "add_case_membership",
         "traces",
         "finding_groups",
         "finding_asset_tree",
@@ -1209,10 +1210,12 @@ export const sentinelOperatorCaseControlActions = [
   "hint_batch",
   "assign_batch",
   "append_goals",
+  "add_case_membership",
 ] as const;
 
 export const sentinelOperatorCaseControlParameters = [
   "adaptiveRevision",
+  "allowedAssetIds",
   "assignments",
   "hints",
   "goals",
@@ -5178,6 +5181,132 @@ ${
         const receipt = providers.sentinel.workerControl(ref, action, target);
         return receipt
           ? safeProjection({ run: ref, runId: target.runId, receipt })
+          : unavailable;
+      }
+      if (action === "add_case_membership") {
+        const {
+          runId,
+          allowedAssetIds,
+          organizationId,
+          expectedVersion,
+          requestId,
+          note,
+        } = args;
+        const selected = context?.authorizeSelectedSentinelCase;
+        if (
+          ref.kind !== "sentinel" || ref.revision === undefined ||
+          !context?.authenticatedOwnerSessionId ||
+          !context.authorizeOwnerRunCall ||
+          !canFlowTo("INTERNAL", context.ceiling ?? "PUBLIC") ||
+          typeof runId !== "string" || !digestPattern.test(runId) ||
+          typeof expectedVersion !== "number" ||
+          !Number.isSafeInteger(expectedVersion) ||
+          expectedVersion < 1 || expectedVersion >= 1024 ||
+          typeof requestId !== "string" || !digestPattern.test(requestId) ||
+          typeof note !== "string" || !note.trim() || note.trim() !== note ||
+          note.length > 512 || /[\p{Cc}\p{Cf}]/u.test(note) ||
+          redactCredentialText(note) !== note ||
+          (organizationId === undefined
+            ? !Array.isArray(allowedAssetIds) || allowedAssetIds.length === 0 ||
+              allowedAssetIds.some((id) => typeof id !== "string")
+            : typeof organizationId !== "string" ||
+              allowedAssetIds !== undefined) ||
+          Object.keys(args).some((key) =>
+            ![
+              "action",
+              "kind",
+              "id",
+              "revision",
+              "runId",
+              "allowedAssetIds",
+              "organizationId",
+              "expectedVersion",
+              "requestId",
+              "note",
+            ].includes(key)
+          ) ||
+          (selected && !selected()) || !await controller.inspect(ref)
+        ) return unavailable;
+        const path = resolveSentinelCasePath(options.baseDir, ref.id);
+        const id = runId.toLowerCase();
+        const revision = ref.revision;
+        const current = readSentinelAssessment(path);
+        if (
+          !current?.active || current.revision !== revision ||
+          current.plan.runId !== id ||
+          (selected && !selected())
+        ) return unavailable;
+        const baseline = readSentinelOperatingConstraintVersion(
+          path,
+          id,
+          expectedVersion,
+        );
+        const assetIds = baseline?.constraints.allowedAssetIds;
+        if (!baseline?.membership || !assetIds) return unavailable;
+        const membership = resolveSentinelCaseMembership(
+          current.result?.sharedGraph.snapshot,
+          {
+            caseId: ref.id,
+            evidenceRevision: revision,
+            selector: {
+              kind: "addition",
+              baselineAssetIds: assetIds,
+              addition: typeof organizationId === "string"
+                ? { kind: "organization", organizationId }
+                : { kind: "assets", assetIds: allowedAssetIds as string[] },
+              reason: note,
+            },
+          },
+        );
+        if (!membership) return unavailable;
+        const request = requestId.toLowerCase();
+        const result = (record: { version: number; digest: string }) =>
+          safeProjection({ run: ref, ...record, membership });
+        const latest = readSentinelOperatingConstraints(path, id);
+        if (latest?.version !== expectedVersion) {
+          const replay = readSentinelOperatingConstraintVersion(
+            path,
+            id,
+            expectedVersion + 1,
+          );
+          return replay?.requestId === request &&
+              replay.evidenceRevision === revision &&
+              isDeepStrictEqual(replay.membership, membership)
+            ? result({ version: replay.version, digest: replay.digest })
+            : unavailable;
+        }
+        if (
+          !await options.confirm(
+            `Approve adding these exact assets to Sentinel case membership?\n${
+              JSON.stringify({
+                run: ref,
+                runId: id,
+                expectedVersion,
+                requestId: request,
+                membership,
+              })
+            }`,
+          )
+        ) return "Error: The operator declined the run action.";
+        if (
+          (selected && !selected()) ||
+          !await context.authorizeOwnerRunCall(args) ||
+          (selected && !selected())
+        ) return unavailable;
+        const committed = recordSentinelOperatingConstraints(path, {
+          runId: id,
+          evidenceRevision: revision,
+          expectedVersion,
+          requestId: request,
+          operatorScope: "workspace-operator",
+          constraints: {
+            ...baseline.constraints,
+            allowedAssetIds: membership.assetIds,
+          },
+          membership,
+        });
+        return committed
+          ? result({ version: committed.version, digest: committed.digest })
           : unavailable;
       }
       if (action === "preview_membership" || action === "set_case_membership") {

@@ -393,7 +393,8 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
                   (action === "narrow_constraints" ||
                     action === "constraints" || action === "steer" ||
                     action === "hint_batch" || action === "assign_batch" ||
-                    action === "append_goals") &&
+                    action === "append_goals" ||
+                    action === "add_case_membership") &&
                   {
                     case_id: typeof call.args?.id === "string" &&
                         isSentinelCaseId(call.args.id)
@@ -410,7 +411,9 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
               return config.hookRunner.evaluateHook(hook, {
                 ...context,
                 input: { ...context.input, ...meta },
-                auditInput: { ...context.auditInput, ...meta },
+                auditInput: action === "add_case_membership"
+                  ? meta
+                  : { ...context.auditInput, ...meta },
               });
             }
           }

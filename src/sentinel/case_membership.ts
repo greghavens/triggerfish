@@ -1,14 +1,24 @@
 /** Resolve explicitly selected defensive case members from one saved inventory. */
 import { isDeepStrictEqual } from "node:util";
+import { redactCredentialText } from "../core/logger/redactor.ts";
 import { isSentinelCaseId } from "./cases.ts";
 import { loadSentinelGraph } from "./graph.ts";
 import { digestSentinelSnapshot } from "./shared_inventory.ts";
 
 const maxMembers = 128;
 
-export type SentinelCaseMembershipSelector =
+type ExactSentinelCaseMembershipSelector =
   | { readonly kind: "assets"; readonly assetIds: readonly string[] }
   | { readonly kind: "organization"; readonly organizationId: string };
+
+export type SentinelCaseMembershipSelector =
+  | ExactSentinelCaseMembershipSelector
+  | {
+    readonly kind: "addition";
+    readonly baselineAssetIds: readonly string[];
+    readonly addition: ExactSentinelCaseMembershipSelector;
+    readonly reason: string;
+  };
 
 export interface SentinelCaseMembershipScope {
   readonly caseId: string;
@@ -31,9 +41,9 @@ function exactId(value: unknown, limit: number): value is string {
     !value.includes("\0");
 }
 
-function normalizeSelector(
+function normalizeExactSelector(
   value: unknown,
-): SentinelCaseMembershipSelector | undefined {
+): ExactSentinelCaseMembershipSelector | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) return;
   const selector = value as Record<string, unknown>;
   if (Object.keys(selector).length !== 2) return;
@@ -55,6 +65,33 @@ function normalizeSelector(
   return;
 }
 
+function normalizeSelector(
+  value: unknown,
+): SentinelCaseMembershipSelector | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return;
+  const selector = value as Record<string, unknown>;
+  if (selector.kind !== "addition") return normalizeExactSelector(value);
+  const addition = normalizeExactSelector(selector.addition);
+  const baseline = normalizeExactSelector({
+    kind: "assets",
+    assetIds: selector.baselineAssetIds,
+  });
+  if (
+    Object.keys(selector).length !== 4 || !addition ||
+    baseline?.kind !== "assets" ||
+    !exactId(selector.reason, 512) ||
+    selector.reason.trim() !== selector.reason ||
+    /[\p{Cc}\p{Cf}]/u.test(selector.reason) ||
+    redactCredentialText(selector.reason) !== selector.reason
+  ) return;
+  return {
+    kind: "addition",
+    baselineAssetIds: baseline.assetIds,
+    addition,
+    reason: selector.reason,
+  };
+}
+
 /** Source entries are exact declarations beneath the proof's case and snapshot. */
 export function resolveSentinelCaseMembership(
   snapshot: unknown,
@@ -70,21 +107,32 @@ export function resolveSentinelCaseMembership(
   try {
     const graph = loadSentinelGraph(snapshot).snapshot();
     const assets = graph.nodes.filter((node) => node.kind === "asset");
-    const requested = new Set(
-      selector.kind === "assets" ? selector.assetIds : [],
+    const baseIds = selector.kind === "addition"
+      ? selector.baselineAssetIds
+      : [];
+    const requested = selector.kind === "addition"
+      ? selector.addition
+      : selector;
+    const requestedIds = new Set(
+      requested.kind === "assets" ? requested.assetIds : [],
     );
-    const selected = selector.kind === "organization"
+    const additions = requested.kind === "organization"
       ? assets.filter((asset) =>
-        asset.organization?.id === selector.organizationId
+        asset.organization?.id === requested.organizationId
       )
-      : assets.filter((asset) => requested.has(asset.id));
+      : assets.filter((asset) => requestedIds.has(asset.id));
     if (
-      (selector.kind === "assets"
-        ? selected.length !== requested.size
-        : !selected.length) ||
-      selected.length > maxMembers ||
+      requested.kind === "assets"
+        ? additions.length !== requestedIds.size
+        : !additions.length
+    ) return;
+    const selectedIds = new Set([...baseIds, ...additions.map(({ id }) => id)]);
+    const selected = assets.filter(({ id }) => selectedIds.has(id));
+    if (
+      selected.length !== selectedIds.size || selected.length > maxMembers ||
+      (selector.kind === "addition" && selected.length === baseIds.length) ||
       selected.some(({ id }) => !exactId(id, 512))
-    ) return undefined;
+    ) return;
     const sources = selected.map(({ id, organization }) => ({
       assetId: id,
       ...(organization && {

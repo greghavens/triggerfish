@@ -81,6 +81,10 @@ Deno.test("Authenticated Sentinel chat reads exact approved cross-case graph fin
   const constraintConfirmations: string[] = [];
   const hintConfirmations: string[] = [];
   const assignmentConfirmations: string[] = [];
+  const membershipConfirmations: string[] = [];
+  const additionNote = "Add the declared operator-reviewed organization.";
+  let acceptMembership = false;
+  let changeMembershipVersionDuringReview = false;
   let revokeAssignmentDuringConfirmation = false;
   let constraintsAllowed = true;
   let approveRestriction = false;
@@ -88,6 +92,23 @@ Deno.test("Authenticated Sentinel chat reads exact approved cross-case graph fin
   const operator = createOperatorRunToolExecutor({
     baseDir,
     confirm(message) {
+      if (message.startsWith("Approve adding these exact assets")) {
+        membershipConfirmations.push(message);
+        if (changeMembershipVersionDuringReview) {
+          const previous = readSentinelOperatingConstraints(approved.path);
+          assert(previous);
+          assert(recordSentinelOperatingConstraints(approved.path, {
+            runId: previous.runId,
+            evidenceRevision: approved.revision,
+            expectedVersion: previous.version,
+            operatorScope: "fixture-other-review",
+            requestId: crypto.randomUUID(),
+            constraints: previous.constraints,
+            membership: previous.membership,
+          }));
+        }
+        return Promise.resolve(acceptMembership);
+      }
       if (
         message.startsWith("Approve these exact Sentinel graph assignments?")
       ) {
@@ -103,7 +124,8 @@ Deno.test("Authenticated Sentinel chat reads exact approved cross-case graph fin
         message,
         "Approve these exact Sentinel task restrictions?",
       );
-      assertEquals(readSentinelOperatingConstraints(approved.path)?.version, 1);
+      const version = readSentinelOperatingConstraints(approved.path)?.version;
+      assert(version === 1 || version === 4);
       constraintConfirmations.push(message);
       if (revokeDuringConfirmation) constraintsAllowed = false;
       return Promise.resolve(approveRestriction);
@@ -186,6 +208,7 @@ Deno.test("Authenticated Sentinel chat reads exact approved cross-case graph fin
             "hint_batch",
             "assign_batch",
             "append_goals",
+            "add_case_membership",
           ],
         );
       } else if (!next) {
@@ -224,7 +247,7 @@ Deno.test("Authenticated Sentinel chat reads exact approved cross-case graph fin
         id === "approved" && constraintsAllowed ? approved.path : undefined,
       allowSentinelModelAccess: true,
       hookRunner: {
-        evaluateHook(hook, { input }) {
+        evaluateHook(hook, { input, auditInput }) {
           const selectsTool = input.tool_name === "operator_runs";
           if (selectsTool || hook === "PRE_OUTPUT") hooks.push(hook);
           if (
@@ -232,13 +255,18 @@ Deno.test("Authenticated Sentinel chat reads exact approved cross-case graph fin
             input.operation_type === "write"
           ) {
             constraintLabels.push(input);
+            const call = input.tool_call as
+              | { args?: { action?: string } }
+              | undefined;
+            if (call?.args?.action === "add_case_membership") {
+              assert(!JSON.stringify(auditInput).includes(additionNote));
+            }
           }
           const blocked = hook === reject &&
             (selectsTool || hook === "PRE_OUTPUT" &&
                 typeof input.content === "string" &&
-                [secretLabel, inventoryLabel, restrictionNote].some((label) =>
-                  String(input.content).includes(label)
-                ));
+                [secretLabel, inventoryLabel, restrictionNote, additionNote]
+                  .some((label) => String(input.content).includes(label)));
           return Promise.resolve({
             allowed: !blocked,
             action: blocked ? "BLOCK" : "ALLOW",
@@ -670,6 +698,126 @@ Deno.test("Authenticated Sentinel chat reads exact approved cross-case graph fin
     await turn("Reopen the exact assignment receipt", assignment);
     assertEquals(JSON.parse(result).receipt, receipt);
     assertEquals(assignmentConfirmations.length, 2);
+
+    const addition = {
+      action: "add_case_membership",
+      ...exact,
+      runId: narrow.runId,
+      expectedVersion: 2,
+      requestId: crypto.randomUUID(),
+      organizationId: "ops",
+      note: additionNote,
+    };
+    for (
+      const invalid of [
+        { ...addition, id: "main", runId: main.state.plan.runId },
+        { ...addition, revision: exact.revision + 1 },
+        { ...addition, organizationId: "unregistered" },
+      ]
+    ) {
+      await turn("Reject unrelated case membership additions", invalid);
+      assertStringIncludes(result, "unavailable");
+    }
+    reject = "PRE_TOOL_CALL";
+    await turn("Do not offer a membership change denied by policy", addition);
+    reject = undefined;
+    assertEquals(membershipConfirmations.length, 0);
+
+    await turn("Decline a proposed membership addition", addition);
+    assertStringIncludes(result, "operator declined");
+    assertEquals(
+      readSentinelOperatingConstraints(approved.path),
+      committedRestriction,
+    );
+
+    acceptMembership = true;
+    changeMembershipVersionDuringReview = true;
+    await turn(
+      "Reject a membership approval for the superseded version",
+      addition,
+    );
+    assertStringIncludes(result, "unavailable");
+    assertEquals(readSentinelOperatingConstraints(approved.path)?.version, 3);
+    assertEquals(
+      readSentinelOperatingConstraints(approved.path)?.membership,
+      membership,
+    );
+    changeMembershipVersionDuringReview = false;
+
+    const currentAddition = {
+      ...addition,
+      expectedVersion: 3,
+      requestId: crypto.randomUUID(),
+    };
+    reject = "POST_TOOL_RESPONSE";
+    await turn(
+      "Commit the approved exact membership with response blocked",
+      currentAddition,
+    );
+    assert(!result.includes(additionNote));
+    assert(hooks.includes("POST_TOOL_RESPONSE"));
+    reject = "PRE_OUTPUT";
+    const reviewedFrames = await turn(
+      "Inspect the exact saved membership receipt",
+      currentAddition,
+    );
+    const added = JSON.parse(result);
+    assertEquals(added.version, 4);
+    assertEquals(added.membership.selector, {
+      kind: "addition",
+      baselineAssetIds: ["asset-a", "asset-b"],
+      addition: { kind: "organization", organizationId: "ops" },
+      reason: additionNote,
+    });
+    assertEquals(added.membership.assetIds, ["asset-a", "asset-b", "asset-c"]);
+    assert(reviewedFrames.every((frame) => !frame.includes(additionNote)));
+    reject = undefined;
+    assertEquals(membershipConfirmations.length, 3);
+    const currentConstraints = readSentinelOperatingConstraints(approved.path);
+    assertEquals(currentConstraints?.constraints, {
+      ...committedRestriction!.constraints,
+      allowedAssetIds: added.membership.assetIds,
+    });
+    assertEquals(currentConstraints?.membership, added.membership);
+    await turn("Reject changing the reviewed reason in a retry", {
+      ...currentAddition,
+      note: "Replacement reason.",
+    });
+    assertStringIncludes(result, "unavailable");
+    assertEquals(membershipConfirmations.length, 3);
+    await turn(
+      "Read the newly enrolled asset through the same scoped inventory",
+      {
+        ...inventory,
+        assetId: "asset-c",
+      },
+    );
+    assertEquals(JSON.parse(result).page.assets[0].id, "asset-c");
+    assertEquals(JSON.parse(result).page.membership.version, 4);
+    await turn("Reject a coverage cursor from before the reviewed addition", {
+      ...coverage,
+      cursor: first.nextCursor,
+    });
+    assertStringIncludes(result, "unavailable");
+    await turn("Inspect the earlier approved membership", {
+      action: "constraints",
+      ...exact,
+      runId: narrow.runId,
+      version: 2,
+    });
+    assertEquals(JSON.parse(result).history[0].membership, membership);
+
+    await turn("Preserve the membership evidence when narrowing task kinds", {
+      ...narrow,
+      expectedVersion: 4,
+      requestId: crypto.randomUUID(),
+      deniedKinds: ["trace", "review_incident"],
+    });
+    assertEquals(JSON.parse(result).record.version, 5);
+    assertEquals(
+      readSentinelOperatingConstraints(approved.path)?.membership,
+      added.membership,
+    );
   } finally {
     socket.close();
     await gateway.stop();

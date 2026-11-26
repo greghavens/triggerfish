@@ -2506,6 +2506,25 @@ export function recordSentinelOperatingConstraints(
           return undefined;
         }
       }
+      if (membership?.selector.kind === "addition") {
+        const priorRow = db.prepare(
+          "SELECT record FROM sentinel_operating_constraints WHERE runId = ? AND version = ?",
+        ).get(runId, expectedVersion);
+        const prior = priorRow &&
+          decodeOperatingConstraint({ record: priorRow.record });
+        if (
+          !prior?.membership ||
+          (!isDeepStrictEqual(prior.membership, membership) &&
+            (!isDeepStrictEqual(
+              prior.constraints.allowedAssetIds,
+              membership.selector.baselineAssetIds,
+            ) ||
+              !isDeepStrictEqual(constraints, {
+                ...prior.constraints,
+                allowedAssetIds: membership.assetIds,
+              })))
+        ) return;
+      }
       const record = {
         runId,
         evidenceRevision,

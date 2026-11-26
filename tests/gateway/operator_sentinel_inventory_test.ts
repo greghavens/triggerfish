@@ -138,7 +138,8 @@ Deno.test("operator inventory binds exact historical graph, organization and rev
       revision: current.revision,
     }, { view: "coverage", assetId: "asset-a" });
     assert(
-      oldCoverage?.view === "coverage" && newCoverage?.view === "coverage",
+      oldCoverage?.view === "coverage" && "assets" in oldCoverage &&
+        newCoverage?.view === "coverage" && "assets" in newCoverage,
     );
     assertEquals(oldCoverage.assets[0].asset.label, "Original asset");
     assertEquals(
@@ -203,7 +204,7 @@ Deno.test("operator membership inventory uses the latest exact approved membersh
     };
     const first = approve(["asset-b"], 0);
     const coverage = read({ view: "coverage" });
-    assert(coverage?.view === "coverage");
+    assert(coverage?.view === "coverage" && "assets" in coverage);
     assertEquals(coverage.assets.map(({ asset }) => asset.id), ["asset-b"]);
     assertEquals(coverage.membership?.version, first.version);
     assertEquals(
@@ -218,7 +219,8 @@ Deno.test("operator membership inventory uses the latest exact approved membersh
     );
     const second = approve(["asset-a", "asset-b"], 1);
     const page = read({ limit: 1 });
-    assertExists(page?.nextCursor);
+    assert(page?.view === "assets");
+    assertExists(page.nextCursor);
     assertEquals(page.membership?.version, second.version);
     assertEquals(read({ scope: "case", cursor: page.nextCursor }), undefined);
     const later = read({ cursor: page.nextCursor });
