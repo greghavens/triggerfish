@@ -2438,6 +2438,80 @@ async function verifyOperatorNativeRecheck(options: {
     assertEquals(JSON.parse(result.results[0][0]).record.id, id);
     return result.results[1][0];
   };
+  const otherId = "recheck-inventory-empty";
+  let otherRevision: number | undefined;
+  if (options.goalSettlement) {
+    const otherPath = resolveSentinelCasePath(options.baseDir, otherId);
+    await Deno.mkdir(dirname(otherPath), { recursive: true, mode: 0o700 });
+    await Deno.writeTextFile(
+      otherPath,
+      JSON.stringify({
+        version: 1,
+        nodes: [{ id: "second", kind: "asset", label: "Second asset" }],
+        edges: [],
+      }),
+      { mode: 0o600 },
+    );
+    otherRevision = startSentinelAssessment(otherPath).revision;
+  }
+  const assertActiveCatalog = async (
+    status: string | null,
+    verifyDenial = false,
+  ) => {
+    assert(otherRevision);
+    const read = {
+      action: "active_finding_rechecks",
+      scopes: [
+        { id: caseId, revision: options.state.revision },
+        { id: otherId, revision: otherRevision },
+      ],
+      limit: 1,
+    };
+    let blockedSource = false;
+    await withFindingAssignmentGateway(
+      options.baseDir,
+      () => Promise.resolve(false),
+      async (turn) => {
+        const output = await turn(read);
+        assert(!output.startsWith("Error:"), output);
+        const groups = JSON.parse(output).groups;
+        assertEquals(groups.map(({ run }: { run: { id: string } }) => run.id), [
+          caseId,
+          otherId,
+        ]);
+        assertEquals(groups[1].entries, []);
+        assertEquals(
+          groups[0].entries.map((
+            { taskId, status }: { taskId: string; status: string },
+          ) => ({ taskId, status })),
+          status ? [{ taskId: assigned.taskId, status }] : [],
+        );
+        if (verifyDenial) {
+          blockedSource = true;
+          assertStringIncludes(await turn(read), "unavailable");
+          blockedSource = false;
+          assertStringIncludes(
+            await turn({
+              ...read,
+              scopes: [read.scopes[0], {
+                ...read.scopes[1],
+                revision: otherRevision! + 1,
+              }],
+            }),
+            "unavailable",
+          );
+        }
+      },
+      (hook, input) => {
+        const args =
+          (input.tool_call as { args?: Record<string, unknown> } | undefined)
+            ?.args;
+        return !(blockedSource && hook === "PRE_TOOL_CALL" &&
+          args?.action === "finding_recheck_attempts" && args.id === otherId);
+      },
+    );
+  };
+  if (options.goalSettlement) await assertActiveCatalog("queued", true);
   const queued = () => readAdaptiveSentinel(path, options.state)?.tasks ?? [];
   const recheckGate = () =>
     queued().find(({ plannerRound }) =>
@@ -2592,6 +2666,7 @@ async function verifyOperatorNativeRecheck(options: {
         }
         assert(taskId && leaseToken);
         workerRuns++;
+        if (options.goalSettlement) await assertActiveCatalog("running");
         const activeLifecycle = await readLifecycle();
         startedAt = activeLifecycle.startedAt;
         assert(startedAt);
@@ -2825,6 +2900,7 @@ async function verifyOperatorNativeRecheck(options: {
         readAdaptiveSentinel(path, options.state)?.modelReviewStates,
       ),
     );
+    if (options.goalSettlement) await assertActiveCatalog(null);
     assertEquals(workerRuns, 1);
     if (options.goalSettlement) {
       assert(verified);

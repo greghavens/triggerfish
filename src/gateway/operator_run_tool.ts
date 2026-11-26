@@ -493,6 +493,7 @@ export const operatorRunTool: ToolDefinition = {
         "case_execution_evidence",
         "finding_recheck_candidates",
         "finding_recheck_attempts",
+        "active_finding_rechecks",
         "finding_recheck_sources",
         "defense_coverage",
         "incident_alerts",
@@ -1363,7 +1364,7 @@ export const operatorRunTool: ToolDefinition = {
     scopes: {
       type: "array",
       description:
-        "Explicit Sentinel revisions, configured workflow runs, or delegated and scheduled runs. Use offset for Sentinel and cursor for other run types.",
+        "Explicit Sentinel revisions, configured workflow runs, or delegated and scheduled runs. Use offset for Sentinel and cursor for other run types. active_finding_rechecks uses a cursor for each Sentinel case.",
       items: {
         type: "object",
         additionalProperties: false,
@@ -3744,6 +3745,103 @@ ${
           findingIds,
         );
         return tree ? safeProjection({ tree }) : unavailable;
+      }
+      if (action === "active_finding_rechecks") {
+        const { scopes, limit = 2 } = args;
+        if (
+          !context?.authenticatedOwnerSessionId ||
+          !context.authorizeOwnerRunCall ||
+          !canFlowTo("INTERNAL", context.ceiling ?? "PUBLIC") ||
+          !Array.isArray(scopes) || scopes.length < 1 || scopes.length > 4 ||
+          typeof limit !== "number" || !Number.isSafeInteger(limit) ||
+          limit < 1 || limit > 3 ||
+          Object.keys(args).some((key) =>
+            !["action", "scopes", "limit"].includes(key)
+          )
+        ) return unavailable;
+        const selected = new Set<string>();
+        const groups = [];
+        const rechecks = [];
+        for (const scope of scopes) {
+          if (!scope || typeof scope !== "object" || Array.isArray(scope)) {
+            return unavailable;
+          }
+          const { id, kind = "sentinel", revision, cursor } = scope;
+          if (
+            kind !== "sentinel" || typeof id !== "string" ||
+            !isSentinelCaseId(id) ||
+            selected.has(id) || typeof revision !== "number" ||
+            !Number.isSafeInteger(revision) || revision < 1 ||
+            (cursor !== undefined &&
+              (typeof cursor !== "string" || cursor.length > 100)) ||
+            Object.keys(scope).some((key) =>
+              !["kind", "id", "revision", "cursor"].includes(key)
+            )
+          ) return unavailable;
+          selected.add(id);
+          const exact = { kind: "sentinel", id, revision } as const;
+          const sourceArgs = {
+            ...exact,
+            action: "finding_recheck_attempts",
+            activeOnly: true,
+            limit,
+            ...(cursor !== undefined && { cursor }),
+          };
+          if (
+            context.authorizeSentinelCaseRead?.(id, revision) === false ||
+            !await controller.inspect(exact) ||
+            !await context.authorizeOwnerRunCall(sourceArgs)
+          ) return unavailable;
+          const path = resolveSentinelCasePath(options.baseDir, id);
+          const state = readSentinelAssessment(path);
+          const runId = state?.plan.runId;
+          if (
+            !state?.active || state.revision !== revision ||
+            !state.result?.sharedGraph.snapshot || !runId
+          ) return unavailable;
+          const policy = readSentinelOperatingConstraints(path, runId);
+          const read = () => {
+            const current = readSentinelAssessment(path);
+            if (
+              !current?.active || current.revision !== revision ||
+              current.plan.runId !== runId ||
+              context.authorizeSentinelCaseRead?.(id, revision) === false ||
+              readSentinelOperatingConstraints(path, runId)?.digest !==
+                policy?.digest
+            ) return;
+            if (
+              !hasSentinelWorkerFindingJournal(path) && cursor === undefined
+            ) {
+              return {
+                runId,
+                evidenceRevision: revision,
+                entries: [],
+                nextCursor: null,
+              };
+            }
+            return readSentinelFindingRecheckAttempts(
+              path,
+              { caseId: id, revision, activeOnly: true },
+              limit,
+              cursor,
+            );
+          };
+          const page = read();
+          if (!page) return unavailable;
+          const group = { run: exact, ...page };
+          if (
+            !await context.authorizeSavedResponse(
+              operatorRunTool.name,
+              safeProjection(group),
+              "INTERNAL",
+            )
+          ) return unavailable;
+          groups.push(group);
+          rechecks.push(() => isDeepStrictEqual(read(), page));
+        }
+        return rechecks.every((check) => check())
+          ? safeProjection({ groups })
+          : unavailable;
       }
       if (action === "finding_groups") {
         const {

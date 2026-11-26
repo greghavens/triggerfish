@@ -384,6 +384,7 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
                       "case_execution_evidence",
                       "finding_recheck_candidates",
                       "finding_recheck_attempts",
+                      "active_finding_rechecks",
                       "finding_recheck_sources",
                       "defense_coverage",
                       "incident_alerts",
