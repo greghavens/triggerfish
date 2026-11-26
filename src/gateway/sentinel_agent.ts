@@ -2260,7 +2260,10 @@ async function validateSavedSharedAssetLinks(
   if (redactCredentialText(result) !== result) return false;
   const page = parseSharedAssetLinkPage(result, revision, args);
   const baseDir = options.sharedInventoryBaseDir;
-  if (!page || !baseDir) return false;
+  if (
+    !page || !baseDir ||
+    !allowsRetainedSentinelSharedTopology(options.snapshotPath, revision, page)
+  ) return false;
   const selected = args.includeFindings && linkedFindingSources(options);
   if (
     selected && (!readAssignedModelReview(options)?.nodeId ||
@@ -2390,7 +2393,8 @@ async function validateSavedSharedAssetLinks(
   }
   if (
     used.size !== sources.size || turn.signal.aborted ||
-    !readAssignedModelReview(options)
+    !readAssignedModelReview(options) ||
+    !allowsRetainedSentinelSharedTopology(options.snapshotPath, revision, page)
   ) return false;
   markSharedAssetFindings(turn, page, mappingSources);
   return true;
@@ -4024,6 +4028,61 @@ async function readScopedSentinelAssessment(
   }
 }
 
+function readSharedTopologyScope(
+  path: string,
+  revision: number,
+  snapshot: ReturnType<Graph["snapshot"]>,
+) {
+  const runId = readSentinelRunIdForRevision(path, revision);
+  if (!runId) return;
+  const policy = readSentinelOperatingConstraints(path, runId);
+  const local = new Set(
+    snapshot.nodes.filter(({ kind }) => kind === "asset").map(({ id }) => id),
+  );
+  const allowed = new Set(
+    [...local].filter((nodeId) =>
+      sentinelOperatingConstraintsAllow(policy?.constraints, {
+        kind: "review_evidence",
+        nodeId,
+      }, snapshot)
+    ),
+  );
+  return {
+    restricted: policy?.constraints.allowedAssetIds !== undefined,
+    digest: policy?.digest,
+    allowsAsset: (id: string) => allowed.has(id),
+    allowsLink: (from: string, to: string) =>
+      (!local.has(from) || allowed.has(from)) &&
+      (!local.has(to) || allowed.has(to)),
+    isCurrent: () => {
+      const current = readSentinelOperatingConstraints(path, runId);
+      return readSentinelRunIdForRevision(path, revision) === runId &&
+        current?.digest === policy?.digest &&
+        current?.version === policy?.version;
+    },
+  };
+}
+
+/** Reauthorize an immutable topology page without restoring hidden counts. */
+export function allowsRetainedSentinelSharedTopology(
+  path: string,
+  revision: number,
+  page: SharedAssetLinkPage,
+) {
+  const snapshot = readSentinelAssessmentRevision(path, revision)?.result
+    .sharedGraph.snapshot;
+  if (!snapshot) return false;
+  const scope = readSharedTopologyScope(path, revision, snapshot);
+  return !!scope?.allowsAsset(page.asset) &&
+    page.links.every((link) =>
+      typeof link?.from === "string" && typeof link.to === "string" &&
+      scope.allowsLink(link.from, link.to)
+    ) &&
+    (!scope.restricted || page.operatingConstraintsDigest === scope.digest ||
+      (page.offset === 0 && page.links.length === page.totalLinks &&
+        page.unavailableSourceCount === 0));
+}
+
 /** Resolve peer endpoints with full identity context, then filter before paging. */
 async function readScopedSentinelSharedTopology(
   path: string,
@@ -4039,21 +4098,11 @@ async function readScopedSentinelSharedTopology(
   const unavailable =
     "Error: The local asset or shared topology is unavailable.";
   const { asset, offset = 0, limit = 5, sourceCase } = request;
-  const runId = readSentinelRunIdForRevision(path, revision);
   const snapshot = readSentinelAssessmentRevision(path, revision)?.result
     .sharedGraph.snapshot;
-  if (!runId || !snapshot) return unavailable;
-  const policy = readSentinelOperatingConstraints(path, runId)?.constraints;
-  const localAssets = new Set(
-    snapshot.nodes.filter(({ kind }) => kind === "asset").map(({ id }) => id),
-  );
-  const allows = (nodeId: string) =>
-    sentinelOperatingConstraintsAllow(policy, {
-      kind: "review_evidence",
-      nodeId,
-    }, snapshot);
-  if (!localAssets.has(asset) || !allows(asset)) return unavailable;
-  const allowsEndpoint = (id: string) => !localAssets.has(id) || allows(id);
+  if (!snapshot) return unavailable;
+  const scope = readSharedTopologyScope(path, revision, snapshot);
+  if (!scope?.allowsAsset(asset)) return unavailable;
   try {
     const { unavailable: sources, ...links } =
       await readSharedSentinelAssetLinks(
@@ -4068,10 +4117,10 @@ async function readScopedSentinelSharedTopology(
           includeSourceDigests: true,
           excludedSnapshot: path,
           sourceCase,
-          allowsTopologyLink: (from, to) =>
-            allowsEndpoint(from) && allowsEndpoint(to),
+          allowsTopologyLink: scope.allowsLink,
         },
       );
+    if (!scope.isCurrent()) return unavailable;
     return boundResult({
       ...links,
       source: "live_published_inventory",
@@ -4884,6 +4933,7 @@ function createAgent(
         if (
           result.allowed && name === "POST_TOOL_RESPONSE" &&
           (provenanceRead || digestRead || inventoryGraphRead ||
+            toolName === SENTINEL_SHARED_ASSET_LINKS_READ ||
             toolName === SENTINEL_DEFENSE_READ ||
             toolName === SENTINEL_INCIDENT_ALERTS_READ) &&
           canReadPlannerCase && (!turn || !currentPlannerReceiptScope(turn))
@@ -4891,6 +4941,7 @@ function createAgent(
         if (
           result.allowed && name === "POST_TOOL_RESPONSE" &&
           (provenanceRead || inventoryGraphRead ||
+            toolName === SENTINEL_SHARED_ASSET_LINKS_READ ||
             toolName === SENTINEL_DEFENSE_READ ||
             toolName === SENTINEL_INCIDENT_ALERTS_READ) &&
           options.assignedTaskLeaseToken !== undefined
@@ -5948,7 +5999,19 @@ function createAgent(
             return "Error: The selected finding source is unavailable to this assignment.";
           }
           const local = (await turn.readGraph()).snapshot();
+          const leased = options.assignedTaskLeaseToken !== undefined;
+          const scoped = canReadPlannerCase || leased;
+          const topologyScope =
+            scoped && options.assessmentRevision !== undefined
+              ? readSharedTopologyScope(
+                options.snapshotPath,
+                options.assessmentRevision,
+                local,
+              )
+              : undefined;
           if (
+            (scoped && !topologyScope?.allowsAsset(asset)) ||
+            (leased && !readAssignedModelReview(options)) ||
             !local.nodes.some(({ id, kind }) =>
               id === asset && kind === "asset"
             )
@@ -5957,6 +6020,7 @@ function createAgent(
           }
           const current = () =>
             active === turn && !turn.signal.aborted &&
+            (!topologyScope || topologyScope.isCurrent()) &&
             (!turn.requiresLiveAssignment ||
               readAssignedModelReview(options)?.nodeId === asset) &&
             (!canReadPlannerCase || currentPlannerReceiptScope(turn, asset));
@@ -5977,6 +6041,7 @@ function createAgent(
                 includeSourceDigests: true,
                 retainSourceSnapshots: options.assessmentRevision !== undefined,
                 sourceCase,
+                allowsTopologyLink: topologyScope?.allowsLink,
                 ...(selected && {
                   selectedFindings: {
                     includesSource: (caseId) =>
@@ -6016,8 +6081,12 @@ function createAgent(
               },
             );
           turn.signal.throwIfAborted();
-          if (canReadPlannerCase && !currentPlannerReceiptScope(turn, asset)) {
-            return "Error: The local asset is unavailable to this planner.";
+          if (
+            (topologyScope && !topologyScope.isCurrent()) ||
+            (leased && !readAssignedModelReview(options)) ||
+            (canReadPlannerCase && !currentPlannerReceiptScope(turn, asset))
+          ) {
+            return "Error: The local asset is unavailable in the assigned case.";
           }
           if (
             selected && (!current() ||
@@ -6040,7 +6109,12 @@ function createAgent(
             ...result,
             source: "live_published_inventory",
             caseEvidenceRevision: options.assessmentRevision,
-            unavailableSourceCount: unavailable.length,
+            unavailableSourceCount:
+              topologyScope?.restricted && sourceCase === undefined
+                ? 0
+                : unavailable.length,
+            ...(topologyScope?.restricted && topologyScope.digest &&
+              { operatingConstraintsDigest: topologyScope.digest }),
           };
           if (!mappingSources) return boundResult(projection);
           const location = locateSentinelCase(options.snapshotPath);

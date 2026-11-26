@@ -17,6 +17,7 @@ export type SharedAssetLinkPage =
     caseEvidenceRevision: number;
     unavailableSourceCount: number;
     mappingProof?: string;
+    operatingConstraintsDigest?: string;
   };
 
 export function parseSharedAssetLinkPage(
@@ -48,8 +49,12 @@ export function parseSharedAssetLinkPage(
     (page.mappingProof !== undefined &&
       (typeof page.mappingProof !== "string" ||
         !/^[a-f0-9]{64}$/.test(page.mappingProof))) ||
+    (page.operatingConstraintsDigest !== undefined &&
+      (typeof page.operatingConstraintsDigest !== "string" ||
+        !/^[a-f0-9]{64}$/.test(page.operatingConstraintsDigest))) ||
     Object.keys(page).length !== (includeFindings ? 11 : 9) +
-        (page.mappingProof === undefined ? 0 : 1) ||
+        (page.mappingProof === undefined ? 0 : 1) +
+        (page.operatingConstraintsDigest === undefined ? 0 : 1) ||
     (includeFindings &&
       (!Array.isArray(page.findings) || page.findings.length > limit ||
         !Number.isSafeInteger(page.totalFindings) || page.totalFindings < 0))

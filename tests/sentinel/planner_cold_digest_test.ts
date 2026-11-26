@@ -33,6 +33,7 @@ import {
   assert,
   assertEquals,
   assertExists,
+  assertMatch,
   assertStringIncludes,
 } from "@std/assert";
 import { dirname, join } from "@std/path";
@@ -4519,6 +4520,258 @@ Deno.test("Scoped planner provenance hides forbidden graph records and retained 
           await read({ ...ref, action: "node", node: "asset:restricted" }),
         );
         assertEquals(forensic.page.node.label, "Out-of-scope bridge");
+      });
+    }
+  } finally {
+    planner.stop();
+    await Deno.remove(directory, { recursive: true });
+  }
+});
+
+Deno.test("Planner and leased worker reauthorize paginated shared topology through the archive", async () => {
+  const directory = await Deno.makeTempDir();
+  const caseId = "scoped-shared-topology";
+  const sourceCase = "topology-source";
+  const path = resolveSentinelCasePath(directory, caseId);
+  const sourcePath = resolveSentinelCasePath(directory, sourceCase);
+  const asset = "case-anchor";
+  const excluded = "restricted-endpoint";
+  const query = { asset, sourceCase, limit: 1 };
+  const tool = "sentinel_shared_asset_links";
+  let now = Date.now();
+  const leasedReads = new Map<string, string>();
+  const plannerReads: string[] = [];
+  const providers = createProviderRegistry();
+  providers.register({
+    name: "scoped-retained-topology",
+    supportsStreaming: false,
+    complete(messages) {
+      const prompt = String(
+        messages.find(({ role }) => role === "user")?.content,
+      );
+      const planner = prompt.startsWith("Plan a defensive investigation");
+      const binding = planner
+        ? {}
+        : JSON.parse(prompt.slice(prompt.lastIndexOf("\n") + 1));
+      const workerId =
+        binding.target === asset && typeof binding.assignment === "string"
+          ? binding.assignment
+          : "";
+      if (!planner && !workerId) {
+        return Promise.resolve(
+          completion(
+            '{"summary":"Other local defensive review.","followUps":[]}',
+          ),
+        );
+      }
+      const result = messages.findLast(({ role }) => role === "tool");
+      if (!result) return Promise.resolve(completion("", tool, query));
+      if (planner) plannerReads.push(String(result.content));
+      else leasedReads.set(workerId, String(result.content));
+      return Promise.resolve(
+        completion(
+          planner
+            ? "[]"
+            : '{"summary":"Reviewed exact retained published topology.","followUps":[]}',
+        ),
+      );
+    },
+  });
+  providers.setDefault("scoped-retained-topology");
+  const planner = createSentinelModelPlanner(
+    path,
+    (state, task, token) =>
+      createSentinelSubagent({
+        snapshotPath: path,
+        assessmentRevision: state.revision,
+        plannerExecutionEvidenceRunId: task ? undefined : state.plan.runId,
+        assignedTaskId: task,
+        assignedTaskLeaseToken: token,
+        sharedInventoryBaseDir: directory,
+        providerRegistry: providers,
+        hookRunner: allowHooks,
+        allowModelAccess: true,
+      }),
+    undefined,
+    () => now,
+  );
+  const assets = (ids: string[]) =>
+    ids.map((id) => ({ id, kind: "asset", label: id }));
+  try {
+    for (const file of [path, sourcePath]) {
+      await Deno.mkdir(dirname(file), { recursive: true, mode: 0o700 });
+    }
+    await Deno.writeTextFile(
+      path,
+      JSON.stringify({
+        version: 1,
+        nodes: assets([asset, excluded]),
+        edges: [],
+      }),
+      { mode: 0o600 },
+    );
+    await Deno.writeTextFile(
+      sourcePath,
+      JSON.stringify({
+        version: 1,
+        nodes: assets([
+          asset,
+          excluded,
+          "allowed-remote-a",
+          "allowed-remote-b",
+        ]),
+        edges: [excluded, "allowed-remote-a", "allowed-remote-b"].map((to) => ({
+          from: asset,
+          to,
+          relation: "depends_on",
+        })),
+      }),
+      { mode: 0o600 },
+    );
+    const state = startSentinelAssessment(path);
+    const runId = state.plan.runId;
+    assert(runId);
+    const ref = {
+      kind: "sentinel" as const,
+      id: caseId,
+      revision: state.revision,
+    };
+    const view = () =>
+      readAdaptiveSentinel(path, readSentinelAssessment(path)!);
+    const assertEventually = async (condition: () => boolean) => {
+      const deadline = Date.now() + 3500;
+      while (!condition() && Date.now() < deadline) {
+        planner.advance(readSentinelAssessment(path)!);
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      assert(condition());
+    };
+    advanceAdaptiveSentinel(path, state);
+    const planSelector = (index: number) => {
+      const sha256 = createHash("sha256").update(plannerReads[index]).digest(
+        "hex",
+      );
+      const matches = (
+        step: { tool: string; goalReceiptRead?: { sha256: string } },
+      ) => step.tool === tool && step.goalReceiptRead?.sha256 === sha256;
+      const settled = view()?.modelPlannerHistory.find(({ reads }) =>
+        reads?.some(matches)
+      );
+      assert(
+        settled,
+        "The exact planner topology result must have a durable receipt",
+      );
+      return {
+        ...ref,
+        action: "planner_reads",
+        plannerIdentity: settled.identity,
+        attempt: settled.attempt,
+        ordinal: settled.reads!.findIndex(matches) + 1,
+        includeResult: true,
+      };
+    };
+    const assign = async (depth: number) => {
+      const store = openSentinelAdaptiveStore(
+        join(dirname(path), "sentinel-adaptive.db"),
+      );
+      let id: string;
+      try {
+        const revision = view()!.revision;
+        const task = store.sync(revision, [{
+          kind: "trace",
+          nodeId: asset,
+          depth,
+          reason: MODEL_ASSIGNMENT_REASON,
+        }]).find((task) => task.kind === "trace" && task.depth === depth);
+        assert(task);
+        id = task.id;
+      } finally {
+        store.close();
+      }
+      advanceAdaptiveSentinel(path, readSentinelAssessment(path)!);
+      await assertEventually(() =>
+        view()?.modelReviews.some(({ taskId, steps }) =>
+          taskId === id && steps.some((step) => step.tool === tool)
+        ) === true
+      );
+      const review = view()!.modelReviews.find(({ taskId }) => taskId === id)!;
+      return {
+        ...ref,
+        action: "worker_trace_result",
+        taskId: id,
+        stepIndices: [review.steps.findIndex((step) => step.tool === tool)],
+      };
+    };
+    await assertEventually(() =>
+      view()?.modelPlannerHistory.some(({ reads }) =>
+        reads?.some((step) => step.tool === tool)
+      ) === true
+    );
+    const originalPlanner = planSelector(0);
+    const originalWorker = await assign(9);
+    const initial = [plannerReads[0], leasedReads.get(originalWorker.taskId)!];
+    for (const response of initial) {
+      const page = JSON.parse(response);
+      assertEquals(page.totalLinks, 3);
+      assertEquals(page.links[0].to, "allowed-remote-a");
+      assert(!response.includes(excluded));
+    }
+    await withArchivedPlannerRead(directory, async (read) => {
+      assertEquals(
+        JSON.parse(await read(originalPlanner)).result,
+        JSON.parse(initial[0]),
+      );
+      assertEquals(
+        JSON.parse(await read(originalWorker)).result,
+        JSON.parse(initial[1]),
+      );
+      const scoped = JSON.parse(
+        await read({
+          ...ref,
+          runId,
+          action: "narrow_constraints",
+          expectedVersion: 0,
+          requestId: crypto.randomUUID(),
+          deniedKinds: [],
+          allowedAssetIds: [asset],
+        }),
+      );
+      assertEquals(scoped.record.constraints.allowedAssetIds, [asset]);
+    });
+    now += 61_000;
+    await assertEventually(() =>
+      (view()?.modelPlannerHistory.filter(({ reads }) =>
+        reads?.some((step) => step.tool === tool)
+      ).length ?? 0) > 1
+    );
+    const restrictedPlanner = planSelector(1);
+    const restrictedWorker = await assign(10);
+    const limited = [
+      plannerReads[1],
+      leasedReads.get(restrictedWorker.taskId)!,
+    ];
+    for (const response of limited) {
+      const page = JSON.parse(response);
+      assertEquals(page.totalLinks, 2);
+      assertEquals(page.nextOffset, 1);
+      assertEquals(page.links[0].to, "allowed-remote-a");
+      assertMatch(page.operatingConstraintsDigest, /^[a-f0-9]{64}$/);
+    }
+    for (const archived of [false, true]) {
+      if (archived) {
+        await archiveAndRestoreDigestFixture(directory, path, ref, runId);
+      }
+      await withArchivedPlannerRead(directory, async (read) => {
+        assertStringIncludes(await read(originalPlanner), "unavailable");
+        assertStringIncludes(await read(originalWorker), "unavailable");
+        assertEquals(
+          JSON.parse(await read(restrictedPlanner)).result,
+          JSON.parse(limited[0]),
+        );
+        assertEquals(
+          JSON.parse(await read(restrictedWorker)).result,
+          JSON.parse(limited[1]),
+        );
       });
     }
   } finally {

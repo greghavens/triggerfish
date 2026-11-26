@@ -273,6 +273,7 @@ import {
 } from "../sentinel/operating_constraints.ts";
 import {
   allowsRetainedSentinelProvenancePage,
+  allowsRetainedSentinelSharedTopology,
   allowsSavedSentinelProvenancePath,
   inspectSentinelProvenance,
   inspectSentinelWorkerObservation,
@@ -1901,9 +1902,11 @@ async function reopenSentinelSourceResult(
   } else if (step.tool === "sentinel_shared_asset_links") {
     const args = sentinelSharedAssetLinksArgs(selector);
     const page = step.sharedAssetLinksPage;
+    const projection = args && page &&
+      parseSharedAssetLinkPage(page, revision, args);
     if (
-      args && args.asset === step.target && page &&
-      parseSharedAssetLinkPage(page, revision, args)
+      args && args.asset === step.target && page && projection &&
+      allowsRetainedSentinelSharedTopology(path, revision, projection)
     ) text = page;
   } else if (step.tool === "sentinel_path" && selector.graph === "provenance") {
     const args = sentinelGoalReceiptReadArguments(step.tool, selector);
@@ -7761,9 +7764,20 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
                 ref.revision!,
                 args,
               );
-              if (!result || !await authorize(scope, step.tool, args, text)) {
-                return unavailable;
-              }
+              if (
+                !result ||
+                !allowsRetainedSentinelSharedTopology(
+                  path,
+                  ref.revision,
+                  result,
+                ) ||
+                !await authorize(scope, step.tool, args, text) ||
+                !allowsRetainedSentinelSharedTopology(
+                  path,
+                  ref.revision,
+                  result,
+                )
+              ) return unavailable;
               const current = readHistoricalAdaptiveSentinel(
                 path,
                 ref.revision,
@@ -10176,6 +10190,7 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
               "graph" in selector ? selector : {},
             ) || [
               "sentinel_worker_observation",
+              "sentinel_shared_asset_links",
               "sentinel_defense",
               "sentinel_incident_alerts",
               "sentinel_provenance_node",
