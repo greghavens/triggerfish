@@ -1306,7 +1306,7 @@ export function readSentinelFindingRecheckAttempts(
       lastAttempt?: {
         outcome: "completed" | "failed" | "interrupted";
         at: string;
-        reason?: "missing_recheck_result";
+        reason?: "missing_recheck_result" | "authorization_wait";
       };
       lifecycle?:
         & ReturnType<
@@ -6952,6 +6952,7 @@ export function createSentinelModelPlanner(
       return "empty";
     }
     const { task, token } = claim;
+    let waitingForSourceAuthorization = false;
     const byId = new Map(queue.map((item) => [item.id, item]));
     const protectedGates = protectedGateAncestors(task, byId);
     const constraints = operatingConstraints(snapshotPath, current);
@@ -7068,15 +7069,15 @@ export function createSentinelModelPlanner(
             matchesConstraints(latest) &&
             decisionAllowsClaim(snapshotPath, latest.revision)(task);
         };
+        const currentLease = () =>
+          currentSource() && !!readAssignedSentinelModelReview(
+            snapshotPath,
+            state.revision,
+            task.id,
+            token,
+          );
         const authorizeGates = async () => {
           if (!protectedGates.length) return true;
-          const currentLease = () =>
-            currentSource() && !!readAssignedSentinelModelReview(
-              snapshotPath,
-              state.revision,
-              task.id,
-              token,
-            );
           for (const { gate, verdictId } of protectedGates) {
             if (!gate.nodeId || !runId) return false;
             const asset = gate.nodeId;
@@ -7108,21 +7109,24 @@ export function createSentinelModelPlanner(
           }
           return true;
         };
+        const visibility = task.plannerRound?.repositoryVisibility;
+        const authorizeVisibility = async () =>
+          !visibility || !!(task.nodeId && latest.plan.runId &&
+            currentLease() && await worker.authorizeRepositoryVisibility?.(
+              latest.plan.runId,
+              latest.revision,
+              task.nodeId,
+              visibility,
+              signal,
+              currentLease,
+            ) && currentLease());
+        const holdForAuthorization = () => {
+          if (currentLease()) waitingForSourceAuthorization = true;
+        };
         const authorizeSources = async () => {
-          if (!await authorizeGates()) return false;
-          const visibility = task.plannerRound?.repositoryVisibility;
-          if (
-            visibility &&
-            (!task.nodeId || !latest.plan.runId || !currentSource() ||
-              !await worker.authorizeRepositoryVisibility?.(
-                latest.plan.runId,
-                latest.revision,
-                task.nodeId,
-                visibility,
-                signal,
-                currentSource,
-              ))
-          ) return false;
+          if (!await authorizeGates() || !await authorizeVisibility()) {
+            return false;
+          }
           for (const source of contextualSources) {
             if (!task.nodeId || !latest.plan.runId || !currentSource()) {
               return false;
@@ -7161,7 +7165,10 @@ export function createSentinelModelPlanner(
           }
           return true;
         };
-        if (!await authorizeSources()) return;
+        if (!await authorizeSources()) {
+          holdForAuthorization();
+          return;
+        }
         const sourceTaskId = task.plannerRound?.workerSources
           ? undefined
           : task.reviewedFrom;
@@ -7421,7 +7428,11 @@ export function createSentinelModelPlanner(
                 digest: constraints.digest,
               },
               workerBoundary: async (phase) => {
-                if (protectedGates.length && !await authorizeGates()) {
+                if (
+                  (protectedGates.length || visibility?.verdictId) &&
+                  (!await authorizeGates() || !await authorizeVisibility())
+                ) {
+                  holdForAuthorization();
                   return { stop: true };
                 }
                 const current = readSentinelAssessment(snapshotPath);
@@ -7813,7 +7824,10 @@ export function createSentinelModelPlanner(
             }
             : undefined;
         }
-        if (!await authorizeSources()) return;
+        if (!await authorizeSources()) {
+          holdForAuthorization();
+          return;
+        }
         if (task.plannerRound?.findingFollowup?.nativeRepositoryVisibility) {
           const result = committedDedicatedRecheckResult(
             snapshotPath,
@@ -7955,7 +7969,8 @@ export function createSentinelModelPlanner(
               token,
             );
             const eligibleReview =
-              review && assignmentCurrent && !stopped && !interrupted &&
+              review && !waitingForSourceAuthorization && assignmentCurrent &&
+                !stopped && !interrupted &&
                 !signal.aborted
                 ? review
                 : undefined;
@@ -7982,6 +7997,8 @@ export function createSentinelModelPlanner(
               token,
               interrupted || stopped || !assignmentCurrent
                 ? "interrupted"
+                : waitingForSourceAuthorization
+                ? "authorization_wait"
                 : acceptedReview
                 ? {
                   ...acceptedReview,

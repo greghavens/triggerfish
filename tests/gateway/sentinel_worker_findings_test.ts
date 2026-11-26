@@ -9639,6 +9639,7 @@ for (
         },
       });
       workerRegistry.setDefault("native-repository-verdict-followup");
+      let activePermits = 0;
       const startPeer = () =>
         createSentinelModelPlanner(
           path,
@@ -9691,13 +9692,19 @@ for (
               },
             };
           },
-          () => () => {},
+          () => {
+            activePermits++;
+            return () => {
+              activePermits--;
+            };
+          },
         );
       coordinator = startPeer();
       if (goalPolicy === "worker") {
-        const progress = () =>
+        const reviewState = () =>
           readAdaptiveSentinel(path, state, "revision")?.modelReviewStates
-            .find(({ taskId }) => taskId === followupId)?.progressSteps;
+            .find(({ taskId }) => taskId === followupId);
+        const progress = () => reviewState()?.progressSteps;
         try {
           await waitForCondition(
             () =>
@@ -9720,18 +9727,29 @@ for (
             () => {},
           );
           const savedProgress = progress();
+          const attempts = reviewState()?.attempts;
           availableCredential = false;
           coordinator = startPeer();
-          const isDenied = () =>
-            !!readAdaptiveSentinel(path, state, "revision")?.history.some(
+          const deferred = () =>
+            readAdaptiveSentinel(path, state, "revision")?.history.filter(
               ({ taskId, event }) =>
-                taskId === followupId && event === "model_review_failed",
-            );
+                taskId === followupId &&
+                event === "model_review_authorization_wait",
+            ) ?? [];
           await waitForCondition(
-            isDenied,
+            () => deferred().length >= 3 && !coordinator?.hasInFlightWork(),
             () => coordinator?.advance(state),
-            10_000,
+            12_000,
           );
+          const waiting = reviewState();
+          assertEquals(waiting?.attempts, attempts);
+          assertEquals(waiting?.status, "retry_pending");
+          assert(waiting?.authorizationWaitAt && waiting.authorizationRetryAt);
+          assert(
+            Date.parse(waiting.authorizationRetryAt) >
+              Date.parse(waiting.authorizationWaitAt),
+          );
+          assertEquals(activePermits, 0);
           assertEquals(peerCalls, before);
           assertEquals(progress(), savedProgress);
           availableCredential = true;

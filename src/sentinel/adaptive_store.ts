@@ -3192,7 +3192,7 @@ function readDedicatedRecheckSettlements(
           WHERE settlement.revision = task.revision AND settlement.taskId = task.id
             AND settlement.event IN ('model_review_completed', 'model_review_failed',
               'model_review_interrupted', 'model_review_lease_expired', 'model_review_stopped',
-              'model_review_paused')
+              'model_review_paused', 'model_review_authorization_wait')
           ORDER BY settlement.rowid DESC LIMIT 1
         ) AS settlement
       FROM adaptive_tasks AS task
@@ -10731,7 +10731,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
           AND attempt = ? AND rowid > ?
           AND event IN ('model_review_completed', 'model_review_failed',
             'model_review_interrupted', 'model_review_lease_expired',
-            'model_review_stopped', 'model_review_paused')
+            'model_review_stopped', 'model_review_paused', 'model_review_authorization_wait')
         ORDER BY rowid DESC LIMIT 1
       `).get(key, target, claim.attempt, claim.eventOrder);
       return {
@@ -10751,7 +10751,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
           SELECT MAX(rowid) FROM adaptive_events
           WHERE revision = ? AND event IN (
             'model_review_completed', 'model_review_failed',
-            'model_review_interrupted', 'model_review_lease_expired'
+            'model_review_interrupted', 'model_review_lease_expired', 'model_review_authorization_wait'
           ) GROUP BY taskId
         )
       `).all(revisionKey(revision));
@@ -10764,6 +10764,8 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
             ? "failed" as const
             : "interrupted" as const,
           at: new Date(Number(row.at)).toISOString(),
+          ...(row.event === "model_review_authorization_wait" &&
+            { reason: "authorization_wait" as const }),
           ...(row.event === "model_review_failed" &&
             row.note === "missing_recheck_result" &&
             { reason: "missing_recheck_result" as const }),
@@ -10786,6 +10788,13 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
               AND control.action = 'stop'
             LIMIT 1
           ) AS stoppedAt,
+          (
+            SELECT CASE WHEN activity.event = 'model_review_authorization_wait' THEN activity.at END
+            FROM adaptive_events AS activity
+            WHERE activity.revision = task.revision AND activity.taskId = task.id
+              AND activity.event IN ('model_review_claimed', 'model_review_authorization_wait')
+            ORDER BY activity.rowid DESC LIMIT 1
+          ) AS authorizationWaitAt,
           steering.id AS steeringId, steering.requestId AS steeringRequestId,
           steering.note AS steeringNote, steering.requestedAt AS steeringRequestedAt,
           steering.appliedAt AS steeringAppliedAt,
@@ -10843,6 +10852,13 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
             pausedAttempt: attempts + 1,
           }),
           retryable: status === "exhausted" && row.operatorRetry === 0,
+          ...(status === "retry_pending" &&
+            typeof row.authorizationWaitAt === "number" && {
+            authorizationWaitAt: new Date(row.authorizationWaitAt)
+              .toISOString(),
+            authorizationRetryAt: new Date(Number(row.availableAt))
+              .toISOString(),
+          }),
           ...(outcomeUncertain && { outcomeUncertain: true }),
           ...(typeof row.stoppedAt === "number" &&
             { stoppedAt: new Date(row.stoppedAt).toISOString() }),
@@ -11682,6 +11698,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
           followUps?: readonly AdaptiveTaskRequest[];
           operatingConstraints?: AdaptivePlannerConstraintProof;
         }
+        | "authorization_wait"
         | "interrupted"
         | "failed",
       reason?: "missing_recheck_result",
@@ -11779,11 +11796,19 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
           !assignmentLeases.release(
             target,
             token,
-            outcome === "interrupted" ? attempts - 1 : attempts,
-            outcome === "failed" ? time + 15_000 : time,
+            outcome === "interrupted" || outcome === "authorization_wait"
+              ? attempts - 1
+              : attempts,
+            outcome === "failed"
+              ? time + 15_000
+              : outcome === "authorization_wait"
+              ? time + 2_000
+              : time,
           )
         ) throw new Error("The assignment lease changed before settlement.");
-        const status = outcome === "interrupted"
+        const status = outcome === "authorization_wait"
+          ? "model_review_authorization_wait"
+          : outcome === "interrupted"
           ? "model_review_interrupted"
           : outcome === "failed"
           ? "model_review_failed"
