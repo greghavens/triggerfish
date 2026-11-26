@@ -11,7 +11,10 @@ import { createHash } from "node:crypto";
 import { dirname, join, resolve } from "@std/path";
 import { GoalCompletionStore } from "../core/goal_completion.ts";
 import { adaptiveRevision } from "../sentinel/adaptive_planner.ts";
-import { readSentinelCompletedGoalTask } from "../sentinel/adaptive_store.ts";
+import {
+  readSentinelCompletedGoalTask,
+  readSentinelDedicatedRecheckSettlements,
+} from "../sentinel/adaptive_store.ts";
 import { locateSentinelCase } from "../sentinel/cases.ts";
 import { loadSentinelGraph } from "../sentinel/graph.ts";
 import { verifyWorkerFindingRecheck } from "../sentinel/worker_finding_evidence.ts";
@@ -463,11 +466,15 @@ function goalEvidenceVerifier(
         .digest("hex"),
     };
   };
+  const runId = state.plan.runId;
+  let recheckSettlements:
+    | ReturnType<typeof readSentinelDedicatedRecheckSettlements>
+    | undefined;
   const verifyRecheck = (rule: string, reference: string, target?: string) => {
     const location = locateSentinelCase(snapshotPath);
     if (
       !/^worker-recheck:[a-f0-9]{64}$/.test(reference) ||
-      !location || !state.plan.runId || !state.result?.sharedGraph.snapshot ||
+      !location || !runId || !state.result?.sharedGraph.snapshot ||
       !hasSentinelWorkerFindingJournal(snapshotPath)
     ) return false;
     const store = openSentinelWorkerFindingStore(snapshotPath);
@@ -480,6 +487,17 @@ function goalEvidenceVerifier(
         recheck.evidenceRevision !== state.revision ||
         (target !== undefined && target !== recheck.targetId) ||
         rule !== requirement("finding_recheck", `pass:${recheck.findingId}`)
+      ) return false;
+      recheckSettlements ??= readSentinelDedicatedRecheckSettlements(
+        join(dirname(snapshotPath), "sentinel-adaptive.db"),
+        runId,
+        state.revision,
+      );
+      const settlement = recheckSettlements.get(recheck.taskId);
+      if (
+        settlement && (!settlement.completed ||
+          settlement.findingId !== recheck.findingId ||
+          settlement.evidenceId !== recheck.evidenceId)
       ) return false;
       const original = store.readFinding(recheck.findingId);
       if (

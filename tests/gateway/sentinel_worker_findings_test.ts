@@ -2002,6 +2002,7 @@ async function verifyOperatorNativeRecheck(options: {
   inconclusive?: boolean;
   noResult?: boolean;
   stopAfterResult?: boolean;
+  goalSettlement?: boolean;
   alternate?: { nodeId: string; resultSha256: string };
   state: State;
   findingId: string;
@@ -2411,6 +2412,21 @@ async function verifyOperatorNativeRecheck(options: {
     },
   );
   let verified: { id: string } | undefined;
+  let goalWorker: ReturnType<typeof assignedLease> | undefined;
+  const reportGoal = async (id: string) => {
+    assert(goalWorker);
+    const result = await workerTurn(path, goalWorker, [
+      [tool(findings, { receiptId: id })],
+      [tool("sentinel_prove_goal", {
+        goalId: "controls",
+        criterionId: "remediated",
+        source: "finding_recheck",
+        evidenceId: id,
+      })],
+    ]);
+    assertEquals(JSON.parse(result.results[0][0]).record.id, id);
+    return result.results[1][0];
+  };
   const rationale =
     "The retained control evidence did not resolve the operator’s requested comparison.";
   const rationaleRequest = crypto.randomUUID();
@@ -2564,6 +2580,14 @@ async function verifyOperatorNativeRecheck(options: {
           assertEquals(JSON.parse(repeated.results[1][1]).record, record);
           assertStringIncludes(repeated.results[1][2], "Error:");
         }
+        if (options.goalSettlement) {
+          goalWorker = assignedLease(path, state, "impact");
+          assertStringIncludes(await reportGoal(record.id), "Error:");
+          assertEquals(
+            readSentinelGoalCompletionAtRevision(path, state.revision)?.status,
+            "open",
+          );
+        }
         verified = record;
         if (options.stopAfterResult) {
           try {
@@ -2628,6 +2652,25 @@ async function verifyOperatorNativeRecheck(options: {
       ),
     );
     assertEquals(workerRuns, 1);
+    if (options.goalSettlement) {
+      assert(verified);
+      const proof = await reportGoal(verified.id);
+      if (options.stopAfterResult) {
+        assertStringIncludes(proof, "Error:");
+        assertEquals(
+          readSentinelGoalCompletionAtRevision(path, options.state.revision)
+            ?.status,
+          "open",
+        );
+      } else {
+        assertEquals(JSON.parse(proof).status, "awaiting_confirmation");
+        assertEquals(
+          readSentinelGoalCompletionAtRevision(path, options.state.revision)
+            ?.status,
+          "awaiting_confirmation",
+        );
+      }
+    }
     showRemediation = true;
     await run("Review the saved remediation status.");
     assertEquals(
@@ -3869,7 +3912,13 @@ async function verifyReceiptFamily(
     | "workflow result with repeated run"
     | "workflow result with older run"
     | "native workflow result",
-  manual: boolean | "inconclusive" | "no-result" | "stop-after-result" = false,
+  manual:
+    | boolean
+    | "inconclusive"
+    | "no-result"
+    | "stop-after-result"
+    | "goal-pass"
+    | "goal-stop" = false,
 ) {
   const baseDir = await Deno.makeTempDir();
   const caseId = manual ? "native-remediation" : "main";
@@ -4540,7 +4589,8 @@ async function verifyReceiptFamily(
     const foreignNode = native
       ? "native-workflow-evidence:" + nativeSources[2].resultSha256
       : evidenceId(finding.runId, foreignSource, true);
-    const alternateSource = nativeSources[3];
+    const goalSettlement = manual === "goal-pass" || manual === "goal-stop";
+    const alternateSource = goalSettlement ? undefined : nativeSources[3];
     const alternateNode = alternateSource &&
       "native-workflow-evidence:" + alternateSource.resultSha256;
     const snapshot = state.result?.sharedGraph.snapshot;
@@ -4591,7 +4641,9 @@ async function verifyReceiptFamily(
             relation: "verifies",
           },
           { from: passingNode, to: "app", relation: "observed_on" },
-          { from: foreignNode, to: "control", relation: "verifies" },
+          ...(!goalSettlement
+            ? [{ from: foreignNode, to: "control", relation: "verifies" }]
+            : []),
           { from: foreignNode, to: "app", relation: "observed_on" },
         ],
       }),
@@ -4615,7 +4667,28 @@ async function verifyReceiptFamily(
       ]),
       { mode: 0o600 },
     );
-    const updated = refreshSentinelAssessment(path);
+    const goals: SentinelFormalGoal[] = [{
+      id: "controls",
+      title: "Verify settled remediation",
+      policy: "operator",
+      criteria: [{
+        id: "remediated",
+        description:
+          "Confirm a passing settled retest of the reported control.",
+        source: "finding_recheck",
+        reference: `pass:${finding.id}`,
+      }],
+    }];
+    const updated = goalSettlement
+      ? applySentinelFormalGoals(path, {
+        mode: "append",
+        requestId: crypto.randomUUID(),
+        expectedRevision: state.revision,
+        expectedRunId: state.plan.runId,
+        proposalDigest: digestSentinelGoalProposal(goals),
+        goals,
+      }).state
+      : refreshSentinelAssessment(path);
     assert(updated && updated.revision > state.revision);
     receiptTargets = [passingNode, foreignNode];
     advanceAdaptiveSentinel(path, updated);
@@ -4625,7 +4698,9 @@ async function verifyReceiptFamily(
         caseId,
         inconclusive: manual === "inconclusive",
         noResult: manual === "no-result",
-        stopAfterResult: manual === "stop-after-result",
+        stopAfterResult: manual === "stop-after-result" ||
+          manual === "goal-stop",
+        goalSettlement,
         ...(alternateNode &&
           {
             alternate: {
@@ -6987,3 +7062,9 @@ Deno.test("Sentinel recovers approved traffic hint provenance for a singular ini
 
 Deno.test("Sentinel preserves a reviewed ordered traffic hint set through initial finding recovery", () =>
   testScopedReporterRestart(true, false, "resume", "set"));
+
+Deno.test("A dedicated recheck can prove a formal goal only after successful settlement", () =>
+  verifyReceiptFamily("native workflow result", "goal-pass"));
+
+Deno.test("A stopped dedicated recheck cannot prove a formal goal using its staged passing receipt", () =>
+  verifyReceiptFamily("native workflow result", "goal-stop"));
