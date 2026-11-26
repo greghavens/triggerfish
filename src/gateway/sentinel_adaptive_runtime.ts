@@ -103,6 +103,7 @@ import {
   readSentinelAssessmentRevision,
   readSentinelFindingReviews,
   readSentinelIncidentReviews,
+  readSentinelLinkedStartSeed,
   readSentinelOperatingConstraints,
   type SentinelGitHubWorkflowReadReceipt,
   type SentinelReviewStep,
@@ -3058,13 +3059,30 @@ export function advanceAdaptiveSentinel(snapshotPath: string, state: State) {
         shouldPlan(task) &&
         !queuedIds.has(sentinelAdaptiveTaskId(revision, task))
       );
+    const seed = state.plan.runId
+      ? readSentinelLinkedStartSeed(snapshotPath, state.revision)
+      : undefined;
+    const seedTask =
+      seed && !store.readOperatorAssignmentIntent(seed.requestId) &&
+        shouldPlan(seed.task) &&
+        inventory.nodes.some(({ id, kind }) =>
+          id === seed.task.nodeId && kind === "asset"
+        )
+        ? { ...seed.task, depth: 1, reason: OPERATOR_ASSIGNMENT_REASON }
+        : undefined;
+    const seedId = seedTask && sentinelAdaptiveTaskId(revision, seedTask);
+    const seedSlots = Number(!!seedId && !existingIds.has(seedId));
     const requests = [
       ...retainedById.values(),
       ...reporterRequests,
       ...eligiblePlannedTasks(planned, retainedById.keys()).filter((task) =>
         !retainedById.has(sentinelAdaptiveTaskId(revision, task))
       ).map(withPriorEvidence),
-    ].slice(0, MAX_ADAPTIVE_TASKS - tasks.length).map(verifyCarriedPeers);
+    ].filter((task) =>
+      !seedId || sentinelAdaptiveTaskId(revision, task) !== seedId
+    )
+      .slice(0, Math.max(0, MAX_ADAPTIVE_TASKS - tasks.length - seedSlots))
+      .map(verifyCarriedPeers);
     const synced = withSentinelAssessmentWriteLock(snapshotPath, (latest) => {
       if (
         !latest?.active || latest.paused ||
@@ -3090,6 +3108,21 @@ export function advanceAdaptiveSentinel(snapshotPath: string, state: State) {
           verificationSources,
           expectedQueueWatermark,
         );
+        if (
+          seed && seedTask && latest.plan.runId &&
+          caseOperatingScope(snapshotPath, latest.revision)(seedTask)
+        ) {
+          const receipt = store.recordOperatorAssignmentIntent({
+            requestId: seed.requestId,
+            runId: latest.plan.runId,
+            evidenceRevision: latest.revision,
+            adaptiveRevision: revision,
+            task: seedTask,
+            reason: OPERATOR_ASSIGNMENT_REASON,
+            prioritize: true,
+          });
+          if (!receipt) return false;
+        }
       } catch (error) {
         if (error instanceof SentinelAdaptiveQueueChanged) return false;
         throw error;
@@ -4997,14 +5030,21 @@ export function createSentinelModelPlanner(
       try {
         const store = openSentinelAdaptiveStore(storePath(snapshotPath), now);
         try {
+          const seed = readSentinelLinkedStartSeed(
+            snapshotPath,
+            state.revision,
+          );
+          const seedId = seed &&
+            store.readOperatorAssignmentIntent(seed.requestId)?.taskId;
           existing = store.list(revisionForStore(state, store))
             .filter(({ nodeId, status }) =>
               (nodeId?.length ?? 0) <= 100 &&
               ["queued", "running", "completed"].includes(status)
             )
             .sort((a, b) =>
+              Number(b.id === seedId) - Number(a.id === seedId) ||
               Number(b.status === "queued" && !!b.plannerRound) -
-              Number(a.status === "queued" && !!a.plannerRound)
+                Number(a.status === "queued" && !!a.plannerRound)
             )
             .slice(0, 30)
             .map((

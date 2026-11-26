@@ -2860,6 +2860,7 @@ export interface AdaptiveOperatorAssignmentIntentInput {
   readonly task: AdaptiveTaskRequest;
   readonly reason: string;
   readonly takeOverQueued?: boolean;
+  readonly prioritize?: true;
 }
 
 export interface AdaptiveOperatorAssignmentIntentReceipt {
@@ -6673,6 +6674,16 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
             [],
             time,
           );
+          if (input.prioritize) {
+            event.run(
+              adaptiveRevision,
+              task.id,
+              "prioritized",
+              0,
+              time,
+              "Operator approved this as the first investigation.",
+            );
+          }
           disposition = "enqueued";
         }
 

@@ -1,3 +1,4 @@
+import type { SentinelLinkedSeedTask } from "../sentinel/linked_seed_task.ts";
 import type { SentinelLinkedCaseSource } from "../sentinel/linked_case_sources.ts";
 /** Exact Sentinel case adapter for authenticated operator run control. */
 import type { SelectedModelProfile } from "../core/model_profile_selection.ts";
@@ -19,6 +20,7 @@ import {
   readSentinelAssessmentRevision,
   readSentinelCaseStatus,
   readSentinelLinkedSourcesForRevision,
+  readSentinelLinkedStartSeed,
   readSentinelModelProfileForRevision,
   readSentinelPlannerHeartbeatForRevision,
   readSentinelRunTimeoutForRevision,
@@ -49,6 +51,7 @@ export function createOperatorSentinelRuns(
   linkedCaseSources(
     ref: OperatorRunRef,
   ): readonly SentinelLinkedCaseSource[] | undefined;
+  startSeed(ref: OperatorRunRef): SentinelLinkedSeedTask | undefined;
   matchesStartGoal(ref: OperatorRunRef, goal?: string): boolean;
   matchesStartTimeout(ref: OperatorRunRef, timeoutSeconds?: number): boolean;
   startLinked(
@@ -58,6 +61,7 @@ export function createOperatorSentinelRuns(
       input: Omit<OperatorRunLinkInput, "right">;
       graphDigest: string;
       childGoal?: string;
+      seedTask?: SentinelLinkedSeedTask;
       timeoutSeconds?: number;
       modelProfile?: SelectedModelProfile;
       plannerHeartbeatSeconds?: number;
@@ -250,6 +254,12 @@ export function createOperatorSentinelRuns(
       const path = pathFor(ref);
       return path && ref.revision !== undefined
         ? readSentinelModelProfileForRevision(path, ref.revision)
+        : undefined;
+    },
+    startSeed(ref) {
+      const path = pathFor(ref);
+      return path && ref.revision !== undefined
+        ? readSentinelLinkedStartSeed(path, ref.revision)?.task
         : undefined;
     },
     matchesStartGoal(ref, goal) {

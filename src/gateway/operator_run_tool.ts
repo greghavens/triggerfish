@@ -1,3 +1,4 @@
+import { parseSentinelLinkedSeedTask } from "../sentinel/linked_seed_task.ts";
 import {
   parseSentinelLinkedCaseSources,
   type SentinelLinkedCaseSource,
@@ -646,6 +647,11 @@ export const operatorRunTool: ToolDefinition = {
     childGoal: {
       type: "string",
       description: "Optional objective for a linked Sentinel assessment start.",
+    },
+    seedTask: {
+      type: "object",
+      description:
+        "Optional first linked Sentinel investigation with kind (trace or impact) and nodeId (an exact asset ID from the published child graph).",
     },
     timeoutSeconds: {
       type: "integer",
@@ -7876,11 +7882,13 @@ export function createOperatorRunToolExecutor(options: {
           targetId,
           requestId,
           childGoal,
+          seedTask: rawSeedTask,
           timeoutSeconds,
           modelProfile: namedProfile,
           plannerHeartbeatSeconds,
           sourceCases,
         } = args;
+        const seedTask = parseSentinelLinkedSeedTask(rawSeedTask);
         const workflows = options.workflows;
         const ceiling = context?.ceiling ?? "INTERNAL";
         if (
@@ -7898,6 +7906,7 @@ export function createOperatorRunToolExecutor(options: {
               "targetId",
               "requestId",
               "childGoal",
+              "seedTask",
               "timeoutSeconds",
               "modelProfile",
               "plannerHeartbeatSeconds",
@@ -7907,6 +7916,8 @@ export function createOperatorRunToolExecutor(options: {
           (sourceCases !== undefined &&
             (targetKind !== "sentinel" || !Array.isArray(sourceCases) ||
               !sourceCases.length || sourceCases.length > 4)) ||
+          (rawSeedTask !== undefined &&
+            (targetKind !== "sentinel" || !seedTask)) ||
           (childGoal !== undefined &&
             (targetKind !== "sentinel" || typeof childGoal !== "string" ||
               !childGoal.trim() || childGoal.length > 500)) ||
@@ -8006,6 +8017,10 @@ export function createOperatorRunToolExecutor(options: {
               link.origin !== "spawn" || link.requestId !== request ||
               other.id !== targetId || other.revision === undefined ||
               !providers.sentinel.matchesStartGoal(other, childGoal) ||
+              !isDeepStrictEqual(
+                providers.sentinel.startSeed(other),
+                seedTask,
+              ) ||
               !providers.sentinel.matchesStartTimeout(other, timeoutSeconds) ||
               !isDeepStrictEqual(
                 providers.sentinel.linkedCaseSources(other),
@@ -8045,6 +8060,7 @@ export function createOperatorRunToolExecutor(options: {
                 requestId: request,
                 ...(graphDigest && { graphDigest }),
                 ...(childGoal !== undefined && { childGoal }),
+                ...(seedTask && { seedTask }),
                 ...(timeoutSeconds !== undefined && { timeoutSeconds }),
                 ...(modelProfile && { modelProfile }),
                 ...(linkedCaseSources && { linkedCaseSources }),
@@ -8079,6 +8095,7 @@ export function createOperatorRunToolExecutor(options: {
               ...link,
               graphDigest,
               childGoal,
+              seedTask,
               timeoutSeconds,
               modelProfile,
               plannerHeartbeatSeconds,

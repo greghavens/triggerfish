@@ -65,6 +65,10 @@ Pass `childGoal` to review and set the linked assessment's initial
 objective. The planner uses that objective on its first round. Retrying
 the same request requires the original objective, including its omission
 if the first request did not set one.
+Pass a `seedTask` with `kind` set to `trace` or `impact` and `nodeId`
+set to an asset in the published child graph to run a depth-one investigation
+before model planning. The approval includes the exact task, and retrying
+the same linked start reuses the saved assignment.
 To make an existing provider selectable for linked assessments, list its
 name in `sentinel.model_profile_allowlists.INTERNAL` (for example,
 `INTERNAL: [ollama]`). The owner tool lists permitted choices with

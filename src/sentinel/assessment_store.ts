@@ -1,4 +1,8 @@
 import {
+  parseSentinelLinkedSeedTask,
+  type SentinelLinkedSeedTask,
+} from "./linked_seed_task.ts";
+import {
   parseSentinelLinkedCaseSources,
   type SentinelLinkedCaseSource,
 } from "./linked_case_sources.ts";
@@ -1134,6 +1138,7 @@ function refresh(
   evaluatedAt = new Date().toISOString(),
   forceEvidenceRevision = false,
   expectedGraphDigest?: string,
+  expectedSeed?: SentinelLinkedSeedTask,
 ): StoredAssessment {
   if (row.active !== 1) return readState(db, row);
   const { graph, topology, traffic, native, dns, alertData, fingerprint } =
@@ -1156,11 +1161,23 @@ function refresh(
     throw new Error("Published Sentinel alerts must be a JSON array");
   }
   const plan: AssessmentPlan = JSON.parse(row.plan);
-  const inventory = graph === undefined
+  const publishedInventory = graph === undefined
     ? undefined
-    : topology === undefined
-    ? JSON.parse(graph)
-    : applySharedSentinelTopology(JSON.parse(graph), JSON.parse(topology));
+    : JSON.parse(graph);
+  if (
+    expectedSeed &&
+    (!Array.isArray(publishedInventory?.nodes) ||
+      !publishedInventory.nodes.some((node: { id?: unknown; kind?: unknown }) =>
+        node?.id === expectedSeed.nodeId && node.kind === "asset"
+      ))
+  ) {
+    throw new Error(
+      "The linked seed target must be an asset in the approved graph",
+    );
+  }
+  const inventory = graph === undefined || topology === undefined
+    ? publishedInventory
+    : applySharedSentinelTopology(publishedInventory, JSON.parse(topology));
   const assessment = runSentinelAssessment({
     ...plan,
     snapshot: traffic === undefined && native === undefined && dns === undefined
@@ -1291,6 +1308,7 @@ export function startSentinelAssessment(
     input: Omit<OperatorRunLinkInput, "right">;
     caseId: string;
     graphDigest: string;
+    seedTask?: SentinelLinkedSeedTask;
     timeoutSeconds?: number;
     modelProfile?: SelectedModelProfile;
     plannerHeartbeatSeconds?: number;
@@ -1330,6 +1348,10 @@ export function startSentinelAssessment(
     (!Number.isSafeInteger(timeoutSeconds) || timeoutSeconds < 1 ||
       timeoutSeconds > MAX_SENTINEL_RUN_TIMEOUT_SECONDS)
   ) throw new Error("Invalid Sentinel assessment timeout");
+  const seedTask = parseSentinelLinkedSeedTask(linkedStart?.seedTask);
+  if (linkedStart?.seedTask !== undefined && !seedTask) {
+    throw new Error("Invalid linked Sentinel seed task");
+  }
   const db = openStore(path, true)!;
   try {
     return withOperatorRunLinks(
@@ -1388,6 +1410,7 @@ export function startSentinelAssessment(
             undefined,
             false,
             linkedStart?.graphDigest,
+            seedTask,
           );
           if (linkedStart) {
             if (plan.goal !== undefined) {
@@ -1402,6 +1425,25 @@ export function startSentinelAssessment(
               db.prepare(
                 "UPDATE assessment_run_revisions SET linkedStartGoalDigest = ? WHERE revision = ?",
               ).run(hashGoal(plan.goal), started.revision);
+            }
+            if (seedTask) {
+              if (
+                !db.prepare("PRAGMA table_info(assessment_run_revisions)").all()
+                  .some(({ name }) => name === "linkedStartSeed")
+              ) {
+                db.exec(
+                  "ALTER TABLE assessment_run_revisions ADD COLUMN linkedStartSeed TEXT",
+                );
+              }
+              db.prepare(
+                "UPDATE assessment_run_revisions SET linkedStartSeed = ? WHERE revision = ?",
+              ).run(
+                JSON.stringify({
+                  task: seedTask,
+                  requestId: crypto.randomUUID(),
+                }),
+                started.revision,
+              );
             }
             recordOperatorRunLink(db, {
               ...linkedStart.input,
@@ -2206,6 +2248,36 @@ export function readSentinelOperatingConstraintVersion(
 ): SentinelOperatingConstraintRecord | undefined {
   if (!Number.isSafeInteger(version) || version < 1) return undefined;
   return operatingConstraintRecords(path, runId, 1, undefined, version)[0];
+}
+
+/** Reopen the approved first assignment and its durable request identity. */
+export function readSentinelLinkedStartSeed(
+  path: string,
+  revision: number,
+): { requestId: string; task: SentinelLinkedSeedTask } | undefined {
+  const db = openStore(path, false);
+  if (!db) return;
+  try {
+    if (
+      !hasTable(db, "assessment_run_revisions") ||
+      !db.prepare("PRAGMA table_info(assessment_run_revisions)").all()
+        .some(({ name }) => name === "linkedStartSeed")
+    ) return;
+    const saved = db.prepare(
+      "SELECT linkedStartSeed FROM assessment_run_revisions WHERE revision = ?",
+    ).get(revision)?.linkedStartSeed;
+    if (saved == null) return;
+    const { requestId, task: raw } = JSON.parse(String(saved));
+    const task = parseSentinelLinkedSeedTask(raw);
+    if (
+      typeof requestId !== "string" || !constraintUuid.test(requestId) || !task
+    ) {
+      throw new Error("Invalid saved Sentinel seed task");
+    }
+    return { requestId, task };
+  } finally {
+    db.close();
+  }
 }
 
 function hashGoal(goal: string): string {

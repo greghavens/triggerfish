@@ -3052,22 +3052,34 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
       };
       await Deno.writeTextFile(childPath, JSON.stringify(childGraph));
       const childGoal = "Verify logging coverage on the child asset.";
+      const seedTask = { kind: "trace", nodeId: "child-asset" };
       const sentinelSpawn = {
         ...spawn,
         childGoal,
+        seedTask,
         targetKind: "sentinel",
         targetId: childCase,
         requestId: crypto.randomUUID(),
       };
       const beforeChildGoalApproval = confirmations.length;
-      for (const invalid of [
-        { ...spawn, childGoal },
-        { ...sentinelSpawn, childGoal: " " },
-        { ...sentinelSpawn, childGoal: "x".repeat(501) },
-      ]) {
+      for (
+        const invalid of [
+          { ...spawn, childGoal },
+          { ...spawn, seedTask },
+          { ...sentinelSpawn, seedTask: { ...seedTask, kind: "run_command" } },
+          { ...sentinelSpawn, seedTask: { ...seedTask, command: "fixture" } },
+          { ...sentinelSpawn, childGoal: " " },
+          { ...sentinelSpawn, childGoal: "x".repeat(501) },
+        ]
+      ) {
         assertStringIncludes((await turn(invalid)).result, "unavailable");
       }
       assertEquals(confirmations.length, beforeChildGoalApproval);
+      denied = "PRE_TOOL_CALL";
+      await turn(sentinelSpawn);
+      assertEquals(confirmations.length, beforeChildGoalApproval);
+      assertEquals(readSentinelAssessment(childPath), undefined);
+      denied = undefined;
       approved = false;
       assertStringIncludes(
         (await turn(sentinelSpawn)).result,
@@ -3075,6 +3087,14 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
       );
       assertEquals(readSentinelAssessment(childPath), undefined);
       approved = true;
+      assertStringIncludes(
+        (await turn({
+          ...sentinelSpawn,
+          seedTask: { ...seedTask, nodeId: "asset-outside-child-case" },
+        })).result,
+        "unavailable",
+      );
+      assertEquals(readSentinelAssessment(childPath), undefined);
       duringConfirmation = () => {
         Deno.writeTextFileSync(
           childPath,
@@ -3132,22 +3152,36 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
       assertEquals(linkedSentinel.link.origin, "spawn");
       assertEquals(linkedSentinel.link.left, linkedSentinel.run.ref);
       assertEquals(linkedSentinel.link.right, exact);
-      assertEquals(
-        JSON.parse(confirmations.at(-1)!.split("\n").at(-1)!).childGoal,
-        childGoal,
+      const childApproval = JSON.parse(
+        confirmations.at(-1)!.split("\n").at(-1)!,
       );
+      assertEquals(childApproval.childGoal, childGoal);
+      assertEquals(childApproval.seedTask, seedTask);
       const childState = readSentinelAssessment(childPath);
       assert(childState);
       assertEquals(childState.plan.goal, childGoal);
       assert(readSentinelAssessment(path)?.plan.goal !== childGoal);
+      const readSeed = () =>
+        readAdaptiveSentinel(childPath, childState)?.tasks.filter(
+          (task) =>
+            task.kind === seedTask.kind && task.nodeId === seedTask.nodeId,
+        );
+      const [committedSeed, ...duplicateSeeds] = readSeed() ?? [];
+      assert(committedSeed);
+      assertEquals(duplicateSeeds, []);
+      assertEquals(committedSeed.status, "completed");
+      assertEquals(committedSeed.attempts, 1);
       let plannerObjective: string | undefined;
+      let initialInvestigations: unknown;
       const childPlanner = createSentinelModelPlanner(
         childPath,
         (_state, taskId) => ({
           execute(message, send) {
             if (!taskId) {
               assert(typeof message === "string");
-              plannerObjective = JSON.parse(message.split("\n").at(-1)!).goal;
+              const initialPlan = JSON.parse(message.split("\n").at(-1)!);
+              plannerObjective = initialPlan.goal;
+              initialInvestigations = initialPlan.currentInvestigations;
             }
             send({
               type: "response",
@@ -3165,6 +3199,12 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
         childPlanner.advance(childState);
         await until(() => plannerObjective !== undefined);
         assertEquals(plannerObjective, childGoal);
+        assert(Array.isArray(initialInvestigations));
+        assert(
+          initialInvestigations.some(({ id, status }) =>
+            id === committedSeed.id && status === "completed"
+          ),
+        );
         await until(() => !childPlanner.hasInFlightWork());
       } finally {
         childPlanner.stop();
@@ -3177,16 +3217,22 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
           reopened.run.details.runId,
           linkedSentinel.run.details.runId,
         );
-        for (const different of [
-          { ...sentinelSpawn, childGoal: "Check a different control." },
-          { ...sentinelSpawn, childGoal: undefined },
-        ]) {
+        for (
+          const different of [
+            { ...sentinelSpawn, childGoal: "Check a different control." },
+            { ...sentinelSpawn, childGoal: undefined },
+            { ...sentinelSpawn, seedTask: undefined },
+            { ...sentinelSpawn, seedTask: { ...seedTask, kind: "impact" } },
+          ]
+        ) {
           assertStringIncludes(
             (await reopenTurn(different)).result,
             "unavailable",
           );
         }
         assertEquals(confirmations.length, lastApproval);
+        advanceAdaptiveSentinel(childPath, childState);
+        assertEquals(readSeed(), [committedSeed]);
         assertStringIncludes(
           (await reopenTurn({
             ...sentinelSpawn,
