@@ -1147,13 +1147,13 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
         /^\/sentinel-recheck(?:\s|$)/.test(content)
       ) {
         const args =
-          /^\/sentinel-recheck ([a-zA-Z0-9_-]+) ([1-9][0-9]*) (worker-finding:[a-f0-9]{64})(?: ([0-9]+)| queue ((?:execution-evidence|native-workflow-evidence):[a-f0-9]{64}) ([a-f0-9-]{36}) ([a-f0-9]{64}) ([a-f0-9-]{36}))?$/
+          /^\/sentinel-recheck ([a-zA-Z0-9_-]+) ([1-9][0-9]*) (worker-finding:[a-f0-9]{64})(?: ([0-9]+)| queue ((?:execution-evidence|native-workflow-evidence):[a-f0-9]{64}) ([a-f0-9-]{36}) ([a-f0-9]{64}) ([a-f0-9-]{36})(?: (.{1,1000}))?)?$/
             .exec(content);
         if (!args || !config.operatorRunExecutor) {
           sendEvent({
             type: "error",
             message:
-              "Use /sentinel-recheck <case> <revision> <finding ID> [offset | queue <evidence ID> <run ID> <adaptive revision> <request ID>].",
+              "Use /sentinel-recheck <case> <revision> <finding ID> [offset | queue <evidence ID> <run ID> <adaptive revision> <request ID> [note]].",
           });
           return;
         }
@@ -1170,6 +1170,7 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
             runId,
             adaptiveRevision,
             requestId,
+            note,
           ] = args;
           const scope = { kind: "sentinel", id, revision: Number(revision) };
           const result = await orchestrator.executeOperatorTool({
@@ -1184,6 +1185,7 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
                 adaptiveRevision,
                 requestId,
                 recheckFindingId: finding,
+                ...(note !== undefined && { note }),
               }
               : {
                 ...scope,
@@ -1197,18 +1199,21 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
             signal,
           });
           if (signal?.aborted) return;
+          const command = note === undefined
+            ? content
+            : content.slice(0, -note.length - 1);
           if (result.ok) {
             sendEvent({
               type: "response",
               text: result.value,
-              sentinelRecheckCommand: content,
+              sentinelRecheckCommand: command,
               taint: getSessionTaint(),
             });
           } else {
             sendEvent({
               type: "error",
               message: result.error,
-              sentinelRecheckCommand: content,
+              sentinelRecheckCommand: command,
             });
           }
         } finally {

@@ -172,6 +172,7 @@ import {
 import {
   isSentinelFindingMutation,
   lookupSentinelFindingMutation,
+  normalizeSentinelRecheckNote,
   SENTINEL_RECHECK_CONTEXT_TOOL,
 } from "../sentinel/worker_finding_recovery.ts";
 import {
@@ -2031,6 +2032,7 @@ export function submitSentinelAssignmentIntent(
     readonly prioritizeNext?: true;
     readonly priorityRank?: number;
     readonly recheckFindingId?: string;
+    readonly recheckNote?: string;
     readonly passingRecheckForFindingId?: string;
     readonly graphRelationship?: SentinelGraphFactRequirement;
     readonly findingFollowup?:
@@ -2044,6 +2046,11 @@ export function submitSentinelAssignmentIntent(
       !state?.active || state.plan.runId !== input.runId ||
       state.revision !== input.evidenceRevision
     ) return undefined;
+    if (
+      input.recheckNote !== undefined &&
+      (!input.recheckFindingId ||
+        normalizeSentinelRecheckNote(input.recheckNote) !== input.recheckNote)
+    ) return;
     const followup = input.findingFollowup;
     if (
       followup && (input.kind !== "trace" || input.graphRelationship ||
@@ -2087,6 +2094,7 @@ export function submitSentinelAssignmentIntent(
             ) &&
             isDeepStrictEqual(prior.findingFollowup, followup) &&
             prior.recheckFindingId === input.recheckFindingId &&
+            prior.recheckNote === input.recheckNote &&
             prior.passingRecheckForFindingId === passing &&
             prior.prioritizeNext === input.prioritizeNext &&
             prior.priorityRank === input.priorityRank
@@ -2145,6 +2153,7 @@ export function submitSentinelAssignmentIntent(
             identity: `operator:${input.requestId}`,
             attempt: 1,
             recheckFindingId: input.recheckFindingId,
+            ...(input.recheckNote && { recheckNote: input.recheckNote }),
           },
         };
       }
@@ -5090,6 +5099,7 @@ export function createSentinelModelPlanner(
           workerSources: task.plannerRound?.workerSources,
           graphFactId: task.plannerRound?.graphFactId,
           recheckFindingId: task.plannerRound?.recheckFindingId,
+          recheckNote: task.plannerRound?.recheckNote,
           findingFollowup: task.plannerRound?.findingFollowup,
           committedObservation: task.plannerRound?.committedObservation,
           peerFindingCitations: task.plannerRound?.peerFindingCitations?.map(

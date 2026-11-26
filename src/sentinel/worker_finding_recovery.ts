@@ -1,9 +1,20 @@
 /** Canonical input and output for finding writes verified by their journal. */
+import { redactCredentialText } from "../core/logger/redactor.ts";
 import { readSentinelWorkerFindingWriteReceipt } from "./worker_finding_store.ts";
 
 export const MAX_SENTINEL_FINDING_RESULT_CHARS = 6000;
 
 export const SENTINEL_RECHECK_CONTEXT_TOOL = "sentinel_finding_recheck_context";
+
+export function normalizeSentinelRecheckNote(
+  value: unknown,
+): string | undefined {
+  if (
+    typeof value !== "string" || !value.trim() || value.length > 1000 ||
+    /[\p{Cc}\p{Cf}]/u.test(value) || redactCredentialText(value) !== value
+  ) return;
+  return value.trim();
+}
 
 export function sentinelRecheckContextArgs(input: unknown) {
   if (!input || typeof input !== "object" || Object.keys(input).length !== 1) {

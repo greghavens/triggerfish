@@ -1,3 +1,4 @@
+import { normalizeSentinelRecheckNote } from "../sentinel/worker_finding_recovery.ts";
 import { createSentinelFindingRemediationReader } from "../sentinel/finding_remediation.ts";
 import { reopenSentinelPeerCoverage } from "./sentinel_peer_coverage.ts";
 import { discoverSentinelFindingNodeTraffic } from "./sentinel_finding_traffic_tool.ts";
@@ -5226,9 +5227,22 @@ ${
           typeof node !== "string" || !node.trim() || node.length > 4096 ||
           node.includes("\0")
         ) return unavailable;
+        const hasRecheckNote = recheckFindingId !== undefined &&
+          note !== undefined;
+        const recheckNote = hasRecheckNote
+          ? normalizeSentinelRecheckNote(note)
+          : undefined;
+        if (
+          hasRecheckNote && (!recheckNote || receiptId !== undefined ||
+            !canFlowTo(
+              context?.inputClassification ?? "INTERNAL",
+              "INTERNAL",
+            ) ||
+            !canFlowTo("INTERNAL", context?.ceiling ?? "INTERNAL"))
+        ) return unavailable;
         const finding = parseReviewedFindingFollowup(receiptId, note, context);
         if (
-          (receiptId !== undefined || note !== undefined) &&
+          (receiptId !== undefined || note !== undefined && !hasRecheckNote) &&
           (!finding || taskKind !== "trace" || recheckFindingId !== undefined ||
             passingRecheckForFindingId !== undefined ||
             graphRelationship !== undefined)
@@ -5328,6 +5342,7 @@ ${
             { priorityRank: priorityRank || 5 }),
           ...(relationship && { graphRelationship: relationship }),
           ...(typeof recheckFindingId === "string" && { recheckFindingId }),
+          ...(recheckNote && { recheckNote }),
           ...(typeof passingRecheckForFindingId === "string" &&
             { passingRecheckForFindingId }),
         };

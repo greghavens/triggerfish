@@ -11,6 +11,7 @@ import {
   readSentinelOperatingConstraints,
 } from "../sentinel/assessment_store.ts";
 import { parseSentinelGraphFactRequirement } from "../sentinel/worker_graph_facts.ts";
+import { normalizeSentinelRecheckNote } from "../sentinel/worker_finding_recovery.ts";
 import { sentinelOperatingConstraintsAllow } from "../sentinel/operating_constraints.ts";
 import { submitSentinelAssignmentIntent } from "./sentinel_adaptive_runtime.ts";
 
@@ -47,12 +48,13 @@ export function withSentinelAssignmentRecovery(
       node,
       graphRelationship,
       recheckFindingId,
+      note,
       passingRecheckForFindingId,
     } = args;
     if (
       Object.keys(args).length !==
         9 + Number(graphRelationship !== undefined) +
-          Number(recheckFindingId !== undefined) +
+          Number(recheckFindingId !== undefined) + Number(note !== undefined) +
           Number(passingRecheckForFindingId !== undefined) ||
       action !== "assign" ||
       kind !== "sentinel" || typeof id !== "string" ||
@@ -89,6 +91,12 @@ export function withSentinelAssignmentRecovery(
         )
         : recheckFindingId !== undefined
     ) return;
+    const recheckNote = note === undefined
+      ? undefined
+      : normalizeSentinelRecheckNote(note);
+    if (
+      note !== undefined && (!recheckNote || taskKind !== "review_evidence")
+    ) return;
     if (
       passingRecheckForFindingId !== undefined && (
         taskKind !== "trace" || relationship ||
@@ -108,6 +116,7 @@ export function withSentinelAssignmentRecovery(
       node,
       ...(relationship && { graphRelationship: relationship }),
       ...(typeof recheckFindingId === "string" && { recheckFindingId }),
+      ...(recheckNote && { note: recheckNote }),
       ...(typeof passingRecheckForFindingId === "string" &&
         { passingRecheckForFindingId }),
     } as const;
@@ -153,6 +162,7 @@ export function withSentinelAssignmentRecovery(
         nodeId: request.node,
         ...(request.recheckFindingId &&
           { recheckFindingId: request.recheckFindingId }),
+        ...(request.note && { recheckNote: request.note }),
         ...(request.graphRelationship &&
           { graphRelationship: request.graphRelationship }),
         ...(request.passingRecheckForFindingId &&

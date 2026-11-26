@@ -399,6 +399,9 @@ export function executeSentinelWorkerFindingTool(
               _classification: "INTERNAL",
               finding,
               originalOutcome: "fail",
+              ...(selectedFinding === finding.id &&
+                task?.plannerRound?.recheckNote &&
+                { recheckNote: task.plannerRound.recheckNote }),
               ...(report && { reportVersion: report.version }),
               current: check ?? null,
               rechecks: store.list().filter((item) =>

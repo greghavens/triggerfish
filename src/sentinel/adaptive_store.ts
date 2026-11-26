@@ -81,6 +81,7 @@ import {
 } from "../core/config_types.ts";
 import {
   isSentinelFindingMutation,
+  normalizeSentinelRecheckNote,
   SENTINEL_RECHECK_CONTEXT_TOOL,
   sentinelFindingMutationArguments,
   sentinelRecheckContextArgs,
@@ -751,6 +752,7 @@ export interface AdaptivePlannerRound {
   readonly passingRecheckId?: string;
   readonly passingRecheckForFindingId?: string;
   readonly recheckFindingId?: string;
+  readonly recheckNote?: string;
   readonly graphFactId?: string;
   readonly graphFactOnly?: true;
   readonly graphRelationship?: SentinelGraphFactRequirement;
@@ -2092,6 +2094,7 @@ function normalizePlannerRound(round: AdaptivePlannerRound | undefined) {
     upstreamCitations,
     workerSources,
     recheckFindingId,
+    recheckNote,
     passingRecheckId,
     passingRecheckForFindingId,
     graphFactId,
@@ -2107,6 +2110,13 @@ function normalizePlannerRound(round: AdaptivePlannerRound | undefined) {
     findingFollowup,
     stoppedRetry,
   } = round;
+  if (
+    recheckNote !== undefined && (!recheckFindingId ||
+      typeof identity !== "string" || !identity.startsWith("operator:") ||
+      normalizeSentinelRecheckNote(recheckNote) !== recheckNote)
+  ) {
+    throw new Error("Invalid Sentinel recheck guidance");
+  }
   if (
     stoppedRetry !== undefined && (
       !/^operator:[a-f0-9-]{36}$/.test(identity) || attempt !== 1 ||
@@ -2279,6 +2289,7 @@ function normalizePlannerRound(round: AdaptivePlannerRound | undefined) {
     ...(passingRecheckId && { passingRecheckId }),
     ...(passingRecheckForFindingId && { passingRecheckForFindingId }),
     ...(recheckFindingId && { recheckFindingId }),
+    ...(recheckNote && { recheckNote }),
     ...(graphFactId && { graphFactId }),
     ...(graphFactOnly === true && (graphFactId || requiredRelationship) &&
       { graphFactOnly }),
@@ -3143,6 +3154,7 @@ export interface AdaptiveOperatorAssignmentIntentReceipt {
   readonly nodeId?: string;
   readonly depth?: number;
   readonly recheckFindingId?: string;
+  readonly recheckNote?: string;
   readonly passingRecheckForFindingId?: string;
   readonly findingFollowup?: AdaptiveFindingFollowup;
   readonly graphRelationship?: SentinelGraphFactRequirement;
@@ -4404,6 +4416,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
           prior.evidenceRevision === input.evidenceRevision &&
           prior.adaptiveRevision === adaptiveRevision &&
           prior.taskId === task.id &&
+          prior.recheckNote === task.plannerRound?.recheckNote &&
           prior.prioritizeNext === input.prioritize &&
           prior.priorityRank === rank
         ? prior
@@ -4417,7 +4430,12 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
       return undefined;
     }
     const existing = lookup.get(task.id);
-    if (existing && existing.revision !== adaptiveRevision) {
+    if (
+      existing && (existing.revision !== adaptiveRevision ||
+        (task.plannerRound?.recheckFindingId !== undefined &&
+          decodeTask(existing).plannerRound?.recheckNote !==
+            task.plannerRound.recheckNote))
+    ) {
       return undefined;
     }
 
@@ -4490,6 +4508,8 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
       }),
       ...(task.plannerRound?.recheckFindingId &&
         { recheckFindingId: task.plannerRound.recheckFindingId }),
+      ...(task.plannerRound?.recheckNote &&
+        { recheckNote: task.plannerRound.recheckNote }),
       ...(task.plannerRound?.passingRecheckForFindingId && {
         passingRecheckForFindingId:
           task.plannerRound.passingRecheckForFindingId,

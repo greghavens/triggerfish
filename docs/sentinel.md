@@ -346,6 +346,11 @@ finding and note. It records a read-only review of the saved graph and
 keeps the assessment completed. This review does not perform a new control
 check.
 
+An operator can add an optional `note` to the exact, approved recheck
+assignment, or append it after the request ID in `/sentinel-recheck … queue`.
+The same note is retained in the approval receipt and exposed to the
+assigned worker when it opens the recheck context.
+
 Use `operator_runs finding_recheck_attempts` with the exact case, evidence
 revision, and original finding's `receiptId` to review recheck work.
 `activeOnly: true` limits the view to pending and running work in the

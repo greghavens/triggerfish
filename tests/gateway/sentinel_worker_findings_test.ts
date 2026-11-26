@@ -1995,6 +1995,7 @@ async function verifyOperatorNativeRecheck(options: {
   let revokeOnConfirm = false;
   let modelResult: string | undefined;
   let showRemediation = false;
+  let correlation: string | undefined;
   const registry = createProviderRegistry();
   registry.register({
     name: "operator-evidence-fixture",
@@ -2073,6 +2074,7 @@ async function verifyOperatorNativeRecheck(options: {
     await gateway.executeAgentTurn(command, (event) => events.push(event));
     const last = events.at(-1);
     assert(last?.type === "response", JSON.stringify(events));
+    correlation = last.sentinelRecheckCommand;
     return last.text;
   };
   const command =
@@ -2104,18 +2106,31 @@ async function verifyOperatorNativeRecheck(options: {
   }]);
   assertEquals(discovered.runId, options.state.plan.runId);
   const requestId = crypto.randomUUID();
+  const recheckNote =
+    "Review the retained control result and cite the latest workflow receipt.";
   const queue =
-    `${command} queue ${options.evidenceId} ${discovered.runId} ${discovered.adaptiveRevision} ${requestId}`;
+    `${command} queue ${options.evidenceId} ${discovered.runId} ${discovered.adaptiveRevision} ${requestId} ${recheckNote}`;
+  const credentialShape = `Bearer ${"z".repeat(30)}`;
+  const rejected = await run(queue.replace(recheckNote, credentialShape));
+  assertStringIncludes(rejected, "unavailable");
+  assert(!String(correlation).includes(credentialShape));
+  assertEquals(confirmations.length, 0);
   revokeOnConfirm = true;
   assertStringIncludes(await run(queue), "unavailable");
   assertEquals(confirmations.length, 1);
   assertStringIncludes(confirmations[0], options.digest);
+  assertStringIncludes(confirmations[0], recheckNote);
   blocked = false;
   revokeOnConfirm = false;
   const assigned = JSON.parse(await run(queue)).receipt;
   assertEquals(assigned.recheckFindingId, options.findingId);
+  assertEquals(assigned.recheckNote, recheckNote);
   assertEquals(assigned.nodeId, options.evidenceId);
   assertEquals(JSON.parse(await run(queue)).receipt, assigned);
+  assertStringIncludes(
+    await run(queue.replace(recheckNote, "Changed note.")),
+    "unavailable",
+  );
   assertEquals(confirmations.length, 2);
 
   let permitConnector = true;
@@ -2153,6 +2168,7 @@ async function verifyOperatorNativeRecheck(options: {
     taskKind: "review_evidence",
     node: options.evidenceId,
     recheckFindingId: options.findingId,
+    note: recheckNote,
   };
   const recoveryCommand =
     `/recover ${crypto.randomUUID()} Queue the native workflow recheck.`;
@@ -2272,6 +2288,7 @@ async function verifyOperatorNativeRecheck(options: {
         const input = JSON.parse(String(message).split("\n").at(-1)!);
         assertEquals(input.assignment, assigned.taskId);
         assertEquals(input.recheckFindingId, options.findingId);
+        assertEquals(input.recheckNote, recheckNote);
         assertEquals(input.target, options.evidenceId);
         const reviewed = await workerTurn(
           path,
@@ -2307,6 +2324,10 @@ async function verifyOperatorNativeRecheck(options: {
         assertEquals(
           JSON.parse(reviewed.results[1][0]).current.evidenceId,
           options.evidenceId,
+        );
+        assertEquals(
+          JSON.parse(reviewed.results[1][0]).recheckNote,
+          recheckNote,
         );
         assertEquals(reviewed.reportPre, 1);
         assertEquals(reviewed.reportPost, 1);
