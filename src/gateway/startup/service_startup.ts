@@ -99,6 +99,11 @@ export function buildMainChatSession(
     bootstrap.config,
     toolInfra.mainKeychain,
   );
+  const readLiveWorkflow = configuredSentinelWorkflowReader(
+    bootstrap.config,
+    bootstrap.baseDir,
+    createKeychain,
+  );
   const workflows = createOperatorWorkflowRuns(
     toolInfra.workflowRunRegistry,
     bootstrap.config.operator_workflows ?? [],
@@ -106,6 +111,8 @@ export function buildMainChatSession(
     createWorkflowObservationVerifier(
       bootstrap.baseDir,
       authorizeExecutionEvidence,
+      Date.now,
+      readLiveWorkflow,
     ),
   );
   workflows.recoverWaiting();
@@ -124,11 +131,7 @@ export function buildMainChatSession(
       baseDir: bootstrap.baseDir,
       resumeScheduledExecution: coreInfra.schedulerService
         ?.resumeScheduledExecution,
-      readLiveWorkflow: configuredSentinelWorkflowReader(
-        bootstrap.config,
-        bootstrap.baseDir,
-        createKeychain,
-      ),
+      readLiveWorkflow,
       sentinelModelAccess:
         bootstrap.config.sentinel?.allow_model_access === true,
       sentinelGatewayWorkerLimit:

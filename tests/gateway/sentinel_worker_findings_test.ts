@@ -455,8 +455,9 @@ async function withTidepool(
 async function waitForCondition(
   condition: () => boolean,
   advance: () => void,
+  timeoutMs = 2_000,
 ): Promise<void> {
-  const end = Date.now() + 2_000;
+  const end = Date.now() + timeoutMs;
   while (!condition() && Date.now() < end) {
     advance();
     await new Promise((resolve) => setTimeout(resolve, 10));
@@ -2495,6 +2496,9 @@ async function verifyOperatorNativeRecheck(options: {
   const workerStopped = Promise.withResolvers<void>();
   let workflows: ReturnType<typeof createOperatorWorkflowRuns> | undefined;
   const workflowRunIds: string[] = [];
+  let workflowProofAuthorized = false;
+  let workflowAccessChecks = 0;
+  const checkedWorkflowAccess = Promise.withResolvers<void>();
   async function startEvidenceWaits(receiptId: string) {
     const proof = {
       case: caseId,
@@ -2513,7 +2517,16 @@ async function verifyOperatorNativeRecheck(options: {
     }));
     const checked = Promise.withResolvers<void>();
     const probed = new Set<string>();
-    const verify = createWorkflowObservationVerifier(options.baseDir);
+    const verify = createWorkflowObservationVerifier(
+      options.baseDir,
+      undefined,
+      Date.now,
+      nativeWorkflowReader(() => {
+        workflowAccessChecks++;
+        if (!workflowProofAuthorized) checkedWorkflowAccess.resolve();
+        return workflowProofAuthorized;
+      }, caseId),
+    );
     workflows = createOperatorWorkflowRuns(
       createWorkflowRunRegistry(),
       plans,
@@ -2541,6 +2554,7 @@ async function verifyOperatorNativeRecheck(options: {
           workflowRunIds.push(started.run.ref.id);
         }
         await checked.promise;
+        assertEquals(workflowAccessChecks, 0);
         for (const id of workflowRunIds) {
           assertEquals(
             workflows?.inspect(id)?.steps.map(({ status }) => status),
@@ -2837,6 +2851,7 @@ async function verifyOperatorNativeRecheck(options: {
         assertEquals(recheckDependent()?.status, "completed");
       }
       if (options.stopAfterResult) {
+        assertEquals(workflowAccessChecks, 0);
         for (const id of workflowRunIds) {
           assertEquals(
             workflows?.inspect(id)?.steps.map(({ status }) => status),
@@ -2844,12 +2859,21 @@ async function verifyOperatorNativeRecheck(options: {
           );
         }
       } else {
+        await checkedWorkflowAccess.promise;
+        for (const id of workflowRunIds) {
+          assertEquals(
+            workflows?.inspect(id)?.steps.map(({ status }) => status),
+            ["pending", "pending"],
+          );
+        }
+        workflowProofAuthorized = true;
         await waitForCondition(
           () =>
             workflowRunIds.every((id) =>
               workflows?.inspect(id)?.status === "completed"
             ),
           () => {},
+          4_500,
         );
         await withFindingAssignmentGateway(
           options.baseDir,
@@ -5123,6 +5147,44 @@ async function verifyReceiptFamily(
     assertEquals(saved.evidenceId, passingNode);
     assertEquals(saved.evidenceRevision, updated.revision);
     assertEquals(JSON.parse(verification.results[3][2]).record, saved);
+    if (family === "branch protection") {
+      const runId = updated.plan.runId;
+      assert(runId);
+      let allowSource = false;
+      let checkCount = 0;
+      let expireDuringAuthorization = false;
+      let proofClock = Date.now();
+      const verify = createWorkflowObservationVerifier(
+        baseDir,
+        (payload, classification) => {
+          checkCount++;
+          assertEquals(payload.kind, "github_branch_protection");
+          assertEquals(payload.repositoryId, 42);
+          assertEquals(classification, "INTERNAL");
+          if (expireDuringAuthorization) {
+            proofClock = Date.parse(saved.validUntil);
+          }
+          return Promise.resolve(allowSource);
+        },
+        () => proofClock,
+      );
+      const requirement = {
+        case: "main",
+        run_id: runId,
+        revision: updated.revision,
+        finding_recheck_id: saved.id,
+      };
+      assertEquals(await verify(requirement), undefined);
+      assertEquals(checkCount, 1);
+      allowSource = true;
+      const proof = await verify(requirement);
+      assert(proof && "findingRecheckId" in proof);
+      assertEquals(proof.findingRecheckId, saved.id);
+      assertEquals(checkCount, 2);
+      expireDuringAuthorization = true;
+      assertEquals(await verify(requirement), undefined);
+      assertEquals(checkCount, 3);
+    }
     if (family === "branch protection") {
       await verifyImportedFindingGrant(baseDir, finding, saved);
       const attempts = {

@@ -588,6 +588,7 @@ export function createWorkflowObservationVerifier(
   baseDir: string,
   authorize?: Authorize,
   now = Date.now,
+  readNativeWorkflow?: ReturnType<typeof createSentinelLiveWorkflowReader>,
 ) {
   return async (requirement: WorkflowEvidenceRequirement) => {
     const { case: caseId, run_id: runId, revision } = requirement;
@@ -648,21 +649,108 @@ export function createWorkflowObservationVerifier(
         runId,
         revision,
       );
+      const isCurrent = () =>
+        !!current() &&
+        readSentinelOperatingConstraints(path, runId)?.digest ===
+          constraints?.digest;
       let receipt;
       for (const candidateId of candidateIds) {
-        const exact = readVerifiedPassingFindingRecheck(
-          path,
-          snapshot,
-          scope,
+        const exact = readSentinelCaseFindingReceipts(path, [candidateId]).get(
           candidateId,
         );
-        if (!exact) continue;
+        if (
+          exact?.kind !== "recheck" || exact.outcome !== "pass" ||
+          exact.caseId !== caseId || exact.runId !== runId ||
+          exact.targetId !== scope.targetId ||
+          exact.evidenceRevision !== revision
+        ) continue;
+        const receiptIsCurrent = () =>
+          isCurrent() &&
+          Date.parse(exact.validUntil) > now();
         const settlement = settlements.get(exact.taskId);
         if (
           settlement && (!settlement.completed ||
             settlement.findingId !== exact.findingId ||
             settlement.evidenceId !== exact.evidenceId)
         ) continue;
+        const control = {
+          snapshot,
+          record: exact,
+          evaluatedAt: controlCheckedAt,
+        };
+        const checked = prepareControlReceipt(control);
+        if (!checked) continue;
+        if (checked.backend) {
+          const original = readSentinelCaseFindingReceipts(path, [
+            exact.findingId,
+          ]).get(exact.findingId);
+          if (
+            original?.kind !== "finding" || original.caseId !== caseId ||
+            original.runId !== runId || original.evidenceRevision > revision ||
+            original.targetId !== exact.targetId ||
+            original.controlId !== exact.controlId ||
+            original.graphFindingId !== exact.graphFindingId
+          ) continue;
+          if (checked.backend === "native") {
+            if (!readNativeWorkflow) continue;
+            const citation = readNativeWorkflowGraphEvidence(
+              path,
+              revision,
+              exact.evidenceId,
+              exact.targetId,
+            );
+            if (
+              !citation || !receiptIsCurrent() ||
+              citation.candidate.payload.kind !== "github_actions_status"
+            ) continue;
+            const saved = await readNativeWorkflow({
+              caseId,
+              assetId: exact.targetId,
+              evidenceRevision: citation.source.revision,
+              signal: new AbortController().signal,
+              isCurrent: receiptIsCurrent,
+              resumeOnly: true,
+              loadSaved: () => citation.saved,
+              authorize: (destination) =>
+                Promise.resolve(
+                  receiptIsCurrent() &&
+                    destination.caseId === caseId &&
+                    destination.repository === citation.saved.repository &&
+                    destination.workflowId === citation.saved.workflowId,
+                ),
+            });
+            if (
+              !isDeepStrictEqual(saved, citation.saved) ||
+              !receiptIsCurrent() ||
+              !verifyFindingControl(
+                path,
+                control,
+                original,
+                citation.candidate.payload,
+              )
+            ) continue;
+          } else {
+            if (!authorize) continue;
+            const saved = await readCaseExecutionEvidence(
+              baseDir,
+              path,
+              revision,
+              exact.evidenceId,
+              exact.targetId,
+            );
+            const payload = saved && executionControlReceipt(saved.payload);
+            if (
+              !saved || !payload || !receiptIsCurrent() ||
+              !canFlowTo(saved.classification, "INTERNAL") ||
+              !await authorize(payload, saved.classification) ||
+              !receiptIsCurrent() ||
+              !verifyFindingControl(path, control, original, payload)
+            ) continue;
+          }
+        } else if (
+          !readVerifiedPassingFindingRecheck(path, snapshot, scope, candidateId)
+        ) continue;
+        if (!receiptIsCurrent()) continue;
         receipt = exact;
         break;
       }
