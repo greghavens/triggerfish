@@ -1244,9 +1244,11 @@ async function verifyPausedGraphWorker(
         assessmentRevision: state.revision,
         assignedTaskId: taskId,
         assignedTaskLeaseToken: token,
-        ...(workflowCheckpoint && { readRetainedWorkflow }),
-        ...(liveWorkflowCheckpoint && {
+        ...(workflowCheckpoint && {
+          readRetainedWorkflow,
           futureWorkflowScopes: workflowScopes,
+        }),
+        ...(liveWorkflowCheckpoint && {
           readLiveWorkflowStatus: (
             { task, evidenceRevision, signal, authorize, resumeOnly },
           ) => {
@@ -1904,7 +1906,7 @@ async function verifyPausedGraphWorker(
       assertEquals(sourceCalls.get(heldAsset), 1);
       assertEquals(sourceMetadataChecks, priorMetadataChecks);
       assertEquals(credentialReads, priorCredentialReads);
-      assertEquals(repeatedResultFetches, 1);
+      assertEquals(repeatedResultFetches, liveWorkflowCheckpoint ? 1 : 0);
       return;
     }
     if (denySavedRead && workflowCheckpoint) {
@@ -2109,6 +2111,18 @@ Deno.test("Portable Sentinel worker restores an approved original live workflow 
     "live-workflow",
   );
 });
+
+Deno.test("Reviewed Sentinel destination block revokes a follow-up worker saved workflow receipt", () =>
+  verifyPausedGraphWorker(
+    true,
+    false,
+    undefined,
+    true,
+    "approved",
+    false,
+    "workflow",
+    true,
+  ));
 
 Deno.test("Reviewed Sentinel destination block revokes a live workflow checkpoint before connector access", () =>
   verifyPausedGraphWorker(

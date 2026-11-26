@@ -2375,43 +2375,87 @@ async function authorizeRetainedWorkflowObservation(
   const reader = options.readRetainedWorkflow;
   const location = locateSentinelCase(options.snapshotPath);
   if (!reader || !location || !current()) return false;
+  const { caseId } = location;
+  const scope = assignedWorkflowDestination(options, caseId, assetId);
+  const sourcePlan = () => {
+    const active = readSentinelAssessment(options.snapshotPath);
+    return active?.revision === revision
+      ? active.plan
+      : readSentinelAssessmentRevision(options.snapshotPath, revision)?.plan;
+  };
+  let checked: SentinelLiveWorkflowDestination | undefined;
+  async function authorize(destination: SentinelLiveWorkflowDestination) {
+    if (
+      !current() || destination.caseId !== caseId ||
+      (scope && (destination.url !== scope.metadataUrl ||
+        destination.repository !== scope.repository ||
+        destination.workflowId !== scope.workflowId))
+    ) return false;
+    const plan = scope ? sourcePlan() : undefined;
+    const pinned = plan?.assessmentTemplate?.interceptRules?.filter((rule) =>
+      rule.destinationHost !== undefined
+    );
+    const runId = plan?.runId;
+    if (scope && !runId) return false;
+    const hooks = pinned?.length && runId
+      ? withPinnedReviewedToolRules(options.hookRunner, () => ({
+        runId,
+        rules: pinned.map((rule) => ({
+          ...rule,
+          runId,
+          caseId,
+        })),
+      }))
+      : options.hookRunner;
+    const { allowed } = await hooks.evaluateHook(
+      "PRE_TOOL_CALL",
+      {
+        session,
+        input: {
+          tool_name: liveWorkflowStatusTool.name,
+          tool_call: {
+            name: liveWorkflowStatusTool.name,
+            args: { url: destination.url },
+          },
+          operation_type: "read",
+          resource_classification: "INTERNAL",
+          is_outbound_request: true,
+          is_owner: true,
+          url: destination.url,
+          ...(scope && {
+            reviewed_destination_host: reviewedDestinationHostname(
+              new URL(scope.metadataUrl).hostname,
+            ),
+            case_id: caseId,
+            run_id: runId,
+            asset_id: assetId,
+          }),
+          sentinel_case_id: caseId,
+          sentinel_evidence_revision: revision,
+          sentinel_task_id: taskId,
+          repository: destination.repository,
+          workflow_id: destination.workflowId,
+        },
+      },
+    );
+    if (!allowed || !current() || (scope && sourcePlan()?.runId !== runId)) {
+      return false;
+    }
+    checked = destination;
+    return true;
+  }
   const saved = await reader({
-    caseId: location.caseId,
+    caseId,
     assetId,
     evidenceRevision: revision,
     signal: turn.signal,
     isCurrent: current,
     resumeOnly: true,
     loadSaved: () => retained,
-    async authorize(destination) {
-      if (!current() || destination.caseId !== location.caseId) return false;
-      const { allowed } = await options.hookRunner.evaluateHook(
-        "PRE_TOOL_CALL",
-        {
-          session,
-          input: {
-            tool_name: liveWorkflowStatusTool.name,
-            tool_call: {
-              name: liveWorkflowStatusTool.name,
-              args: { url: destination.url },
-            },
-            operation_type: "read",
-            resource_classification: "INTERNAL",
-            is_outbound_request: true,
-            is_owner: true,
-            url: destination.url,
-            sentinel_case_id: location.caseId,
-            sentinel_evidence_revision: revision,
-            sentinel_task_id: taskId,
-            repository: destination.repository,
-            workflow_id: destination.workflowId,
-          },
-        },
-      );
-      return allowed && current();
-    },
+    authorize,
   });
-  return isDeepStrictEqual(saved, retained) && current();
+  return isDeepStrictEqual(saved, retained) && current() &&
+    (!scope || (checked !== undefined && await authorize(checked)));
 }
 
 async function reopenPlannerWorkflowObservation(
