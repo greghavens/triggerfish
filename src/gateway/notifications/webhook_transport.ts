@@ -1,3 +1,4 @@
+import type { ManagedNotificationChannel } from "../../core/managed_notification_channels.ts";
 import type { SecretStore } from "../../core/secrets/backends/secret_store.ts";
 import { fetchPinnedTarget } from "../../core/security/pinned_fetch.ts";
 import { resolveAndCheck } from "../../core/security/ssrf.ts";
@@ -11,49 +12,76 @@ export function createNotificationWebhookTransport(
   domainPolicy: DomainPolicy,
   resolve = resolveAndCheck,
   fetchPinned = fetchPinnedTarget,
-): OperatorNotificationChannels["sendWebhook"] {
-  return async (channel, body, authorize) => {
+): Pick<
+  OperatorNotificationChannels,
+  "bindWebhookDestination" | "sendWebhook"
+> {
+  async function destination(channel: ManagedNotificationChannel) {
     if (
       !domainPolicy.isAllowed(channel.destinationOrigin) ||
       !canFlowTo(
         channel.classification,
         domainPolicy.getClassification(channel.destinationOrigin),
-      ) || !await authorize()
-    ) return "blocked";
-
+      )
+    ) return;
     const secret = await secrets.getSecret(channel.endpointRef);
-    if (!secret.ok) return "blocked";
+    if (!secret.ok) return;
     let target: URL;
     try {
       target = new URL(secret.value);
     } catch {
-      return "blocked";
+      return;
     }
     if (
       target.origin !== channel.destinationOrigin || target.username ||
       target.password || target.hash
-    ) return "blocked";
-    const address = await resolve(target.hostname);
-    if (
-      !address.ok || !domainPolicy.isAllowed(target.href) ||
-      !await authorize()
-    ) return "blocked";
+    ) return;
+    const hashed = await crypto.subtle.digest(
+      "SHA-256",
+      new TextEncoder().encode(
+        `triggerfish-notification-destination:\0${channel.id}\0${target.href}`,
+      ),
+    );
+    const fingerprint = Array.from(
+      new Uint8Array(hashed),
+      (byte) => byte.toString(16).padStart(2, "0"),
+    ).join("");
+    return { target, fingerprint };
+  }
 
-    try {
-      const response = await fetchPinned(
-        { url: target.href, address: address.value },
-        {
-          method: "POST",
-          redirect: "manual",
-          headers: { "Content-Type": "application/json" },
-          body,
-          signal: AbortSignal.timeout(10_000),
-        },
-      );
-      await response.body?.cancel().catch(() => {});
-      return response.ok ? "delivered" : "uncertain";
-    } catch {
-      return "uncertain";
-    }
+  return {
+    async bindWebhookDestination(channel) {
+      return (await destination(channel))?.fingerprint;
+    },
+    async sendWebhook(channel, body, authorize) {
+      if (!channel.endpointFingerprint || !await authorize()) return "blocked";
+      const selected = await destination(channel);
+      if (selected?.fingerprint !== channel.endpointFingerprint) {
+        return "blocked";
+      }
+      const { target } = selected;
+      const address = await resolve(target.hostname);
+      if (
+        !address.ok || !domainPolicy.isAllowed(target.href) ||
+        !await authorize()
+      ) return "blocked";
+
+      try {
+        const response = await fetchPinned(
+          { url: target.href, address: address.value },
+          {
+            method: "POST",
+            redirect: "manual",
+            headers: { "Content-Type": "application/json" },
+            body,
+            signal: AbortSignal.timeout(10_000),
+          },
+        );
+        await response.body?.cancel().catch(() => {});
+        return response.ok ? "delivered" : "uncertain";
+      } catch {
+        return "uncertain";
+      }
+    },
   };
 }

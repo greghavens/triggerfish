@@ -21,6 +21,7 @@ export interface ManagedNotificationChannel {
   readonly provider: "webhook";
   readonly destinationOrigin: string;
   readonly endpointRef: string;
+  readonly endpointFingerprint?: string;
   readonly classification: ClassificationLevel;
   readonly enabled: boolean;
   readonly retired?: true;

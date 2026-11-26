@@ -48,6 +48,7 @@ Deno.test("gateway reviews notification subscriptions and durably deduplicates s
   let outputDenied = false;
   let denyIncident = true;
   let responseLost = false;
+  let rotateDuringReview = false;
   let classified = 0;
   let calls = 0;
   const payloads: Record<string, unknown>[] = [];
@@ -119,7 +120,7 @@ Deno.test("gateway reviews notification subscriptions and durably deduplicates s
 
       readSentinelIncidentScope: (caseId) =>
         readSentinelIncidentScope(baseDir, caseId),
-      sendWebhook: createNotificationWebhookTransport(
+      ...createNotificationWebhookTransport(
         {
           getSecret(name) {
             assertEquals(name, "notification_fixture");
@@ -156,7 +157,12 @@ Deno.test("gateway reviews notification subscriptions and durably deduplicates s
         hookRunner: hooks,
         operatorRunExecutor: createOperatorRunToolExecutor({
           baseDir,
-          confirm: () => Promise.resolve(true),
+          confirm: () => {
+            if (rotateDuringReview) {
+              endpoint = origin + "/changed-during-review";
+            }
+            return Promise.resolve(true);
+          },
           notificationChannels: channels,
         }),
       }),
@@ -284,9 +290,15 @@ Deno.test("gateway reviews notification subscriptions and durably deduplicates s
       action: "notification_deliveries",
       notificationChannelId: selector.notificationChannelId,
     };
+    rotateDuringReview = true;
+    assertStringIncludes(await turn(mutation), "unavailable");
+    rotateDuringReview = false;
+    endpoint = origin + privatePath;
+    assertEquals(JSON.parse(await turn(list)).channels, []);
     const create = await turn(mutation);
     assertStringIncludes(create, "channel");
     assertEquals(JSON.parse(create).channel.version, 1);
+    assert(!create.includes("endpointFingerprint"));
     assertEquals(JSON.parse(create)._classification, "INTERNAL");
     assertEquals(JSON.parse(await turn(list)).channels.length, 1);
     preDenied = true;
@@ -302,6 +314,12 @@ Deno.test("gateway reviews notification subscriptions and durably deduplicates s
     assertEquals(
       JSON.parse(await turn({ ...probe, requestId: "changed-origin" })).delivery
         .state,
+      "blocked",
+    );
+    endpoint = origin + "/same-origin-different-recipient";
+    assertEquals(
+      JSON.parse(await turn({ ...probe, requestId: "changed-recipient" }))
+        .delivery.state,
       "blocked",
     );
     endpoint = origin + privatePath;
@@ -334,7 +352,7 @@ Deno.test("gateway reviews notification subscriptions and durably deduplicates s
     };
     assertStringIncludes(await turn(retryUnknown), "unavailable");
     const records = await turn(history);
-    assertEquals(JSON.parse(records).deliveries.length, 4);
+    assertEquals(JSON.parse(records).deliveries.length, 5);
     assert(!records.includes(privatePath));
     for (const key of await storage.list()) {
       assert(!(await storage.get(key))?.includes(privatePath));

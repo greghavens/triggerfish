@@ -31,6 +31,9 @@ export interface OperatorNotificationChannels {
   readonly isCurrentSentinelIncident?: (
     source: ManagedSentinelIncidentSource,
   ) => boolean;
+  readonly bindWebhookDestination: (
+    channel: ManagedNotificationChannel,
+  ) => Promise<string | undefined>;
   readonly sendWebhook: (
     channel: ManagedNotificationChannel,
     body: string,
@@ -96,6 +99,11 @@ function parseChannelSettings(raw: unknown) {
   } as const;
 }
 
+function publicChannel(channel: ManagedNotificationChannel) {
+  const { endpointFingerprint: _endpointFingerprint, ...visible } = channel;
+  return visible;
+}
+
 export async function executeOperatorNotificationChannel(
   config: OperatorNotificationChannels,
   confirm: (question: string) => Promise<boolean>,
@@ -141,7 +149,7 @@ export async function executeOperatorNotificationChannel(
   ) return;
   const store = config.store;
   if (action === "notification_channels") {
-    return { channels: await store.channels() };
+    return { channels: (await store.channels()).map(publicChannel) };
   }
   const { notificationChannelId: id, expectedVersion, requestId } = args;
   if (typeof id !== "string" || !idPattern.test(id)) return;
@@ -263,22 +271,41 @@ export async function executeOperatorNotificationChannel(
       retired: true,
     };
   }
-  if (JSON.stringify(current) === JSON.stringify(channel)) return { channel };
+  const visible = publicChannel(channel);
   if (
-    current?.retired || (current?.version ?? 0) !== expectedVersion ||
-    !await confirm(`Approve ${action} ${JSON.stringify(channel)}?`) ||
-    !await authorize(args)
-  ) return;
-  if (action === "set_notification_channel" && channel.sentinelIncidents) {
-    const scope = channel.sentinelIncidents;
+    current &&
+    JSON.stringify(publicChannel(current)) === JSON.stringify(visible)
+  ) {
+    return { channel: visible };
+  }
+  if (current?.retired || (current?.version ?? 0) !== expectedVersion) return;
+  const scopeCurrent = () => {
+    const scope = action === "set_notification_channel"
+      ? channel.sentinelIncidents
+      : undefined;
+    if (!scope) return true;
     const observed = config.readSentinelIncidentScope?.(scope.caseId);
+    return observed?.runId === scope.runId &&
+      observed.afterRevision === scope.afterRevision &&
+      context.authorizeSentinelCaseRead?.(scope.caseId, scope.afterRevision) !==
+        false;
+  };
+  if (!scopeCurrent()) return;
+  const fingerprint = channel.enabled
+    ? await config.bindWebhookDestination(channel)
+    : undefined;
+  if (channel.enabled && !fingerprint) return;
+  if (
+    !await confirm(`Approve ${action} ${JSON.stringify(visible)}?`) ||
+    !await authorize(args) || !scopeCurrent()
+  ) return;
+  if (fingerprint) {
     if (
-      !observed || observed.runId !== scope.runId ||
-      observed.afterRevision !== scope.afterRevision ||
-      context.authorizeSentinelCaseRead?.(scope.caseId, scope.afterRevision) ===
-        false
+      await config.bindWebhookDestination(channel) !== fingerprint ||
+      !await authorize(args) || !scopeCurrent()
     ) return;
+    channel = { ...channel, endpointFingerprint: fingerprint };
   }
   const updated = await store.amend(channel, expectedVersion);
-  return updated ? { channel: updated } : undefined;
+  return updated ? { channel: publicChannel(updated) } : undefined;
 }

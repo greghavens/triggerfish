@@ -100,7 +100,7 @@ function configuredNotificationChannels(
     bootstrap.config.sentinel?.notify_incident_increases === true;
   return {
     store: createManagedNotificationChannels(coreInfra.storage),
-    sendWebhook: createNotificationWebhookTransport(
+    ...createNotificationWebhookTransport(
       toolInfra.mainKeychain,
       createDomainPolicy(buildDomainSecurityConfig(bootstrap.config)),
     ),
