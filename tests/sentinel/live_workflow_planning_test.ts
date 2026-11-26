@@ -49,6 +49,15 @@ Deno.test("An approved live workflow read drives another defensive planning roun
       return Promise.resolve("fixture-token");
     },
     ssrfChecker: () => Promise.resolve({ ok: true, value: "192.0.2.1" }),
+    verifyAccess: (target, { token }) => {
+      assertEquals(target, {
+        owner: "owner",
+        repo: "pipeline",
+        workflowId: 17,
+      });
+      assertEquals(token, "fixture-token");
+      return Promise.resolve(true);
+    },
     readRuns: (target, { token }) => {
       connectorCalls++;
       assertEquals(target, {
@@ -164,6 +173,7 @@ Deno.test("An approved live workflow read drives another defensive planning roun
         hookRunner,
         providerRegistry: registry,
         allowModelAccess: true,
+        readRetainedWorkflow: reader,
         readLiveWorkflowStatus: (
           { task, evidenceRevision, signal, authorize },
         ) =>
