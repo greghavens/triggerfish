@@ -170,6 +170,7 @@ async function withOwnerControl(
         assert(actions.includes("steer"));
         assert(!actions.includes("stop"));
         assert(!actions.includes("hint"));
+        assert(actions.includes("hint_batch"));
       }
       next = undefined;
       if (!args) {

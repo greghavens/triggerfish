@@ -391,7 +391,8 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
                   : "write",
                 ...(call.args?.kind === "sentinel" &&
                   (action === "narrow_constraints" ||
-                    action === "constraints" || action === "steer") &&
+                    action === "constraints" || action === "steer" ||
+                    action === "hint_batch") &&
                   {
                     case_id: typeof call.args?.id === "string" &&
                         isSentinelCaseId(call.args.id)
@@ -802,7 +803,7 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
       definition: {
         ...operatorRunTool,
         description:
-          "Read saved Sentinel evidence. In the selected active case, inspect restrictions or request reviewed task-kind restrictions and targeted worker guidance.",
+          "Read saved Sentinel evidence. In the selected active case, inspect restrictions or request reviewed task-kind restrictions, planner hints, or targeted worker guidance.",
         parameters: {
           ...Object.fromEntries(
             [

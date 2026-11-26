@@ -1205,10 +1205,12 @@ export const sentinelOperatorCaseControlActions = [
   "constraints",
   "narrow_constraints",
   "steer",
+  "hint_batch",
 ] as const;
 
 export const sentinelOperatorCaseControlParameters = [
   "adaptiveRevision",
+  "hints",
   "version",
   "expectedVersion",
   "requestId",

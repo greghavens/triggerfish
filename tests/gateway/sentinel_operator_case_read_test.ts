@@ -4,6 +4,8 @@ import { createProviderRegistry } from "../../src/agent/llm.ts";
 import { createSession } from "../../src/core/types/session.ts";
 import type { ChannelId, UserId } from "../../src/core/types/session.ts";
 import { createChatSession } from "../../src/gateway/chat.ts";
+import { subscribeCommittedEvidence } from "../../src/core/evidence_task_progression.ts";
+import { readSentinelCaseHints } from "../../src/gateway/sentinel_adaptive_runtime.ts";
 import { createOperatorRunToolExecutor } from "../../src/gateway/operator_run_tool.ts";
 import { createGatewayServer } from "../../src/gateway/server/server.ts";
 import {
@@ -73,12 +75,17 @@ Deno.test("Authenticated Sentinel chat reads exact approved cross-case graph fin
   assert(approvedScope);
   const restrictionNote = "Reviewed additional task-kind restriction";
   const constraintConfirmations: string[] = [];
+  const hintConfirmations: string[] = [];
   let constraintsAllowed = true;
   let approveRestriction = false;
   let revokeDuringConfirmation = false;
   const operator = createOperatorRunToolExecutor({
     baseDir,
     confirm(message) {
+      if (message.startsWith("Approve these exact Sentinel planner hints?")) {
+        hintConfirmations.push(message);
+        return Promise.resolve(true);
+      }
       assertStringIncludes(
         message,
         "Approve these exact Sentinel task restrictions?",
@@ -163,6 +170,7 @@ Deno.test("Authenticated Sentinel chat reads exact approved cross-case graph fin
             "constraints",
             "narrow_constraints",
             "steer",
+            "hint_batch",
           ],
         );
       } else if (!next) {
@@ -538,6 +546,55 @@ Deno.test("Authenticated Sentinel chat reads exact approved cross-case graph fin
       readSentinelOperatingConstraints(approved.path),
       committedRestriction,
     );
+    const guidance = {
+      action: "hint_batch",
+      ...exact,
+      runId: narrow.runId,
+      requestId: crypto.randomUUID(),
+      hints: [
+        { note: "Review the case summary." },
+        {
+          note: "Check the selected asset's existing review.",
+          assetIds: ["asset-a"],
+        },
+      ],
+    };
+    const wakes: string[] = [];
+    const unsubscribe = subscribeCommittedEvidence(
+      exact.id,
+      ({ observation_id }) => {
+        wakes.push(observation_id);
+      },
+    );
+    try {
+      await turn("Reject other-case guidance", {
+        ...guidance,
+        id: "main",
+        runId: main.state.plan.runId,
+      });
+      assertStringIncludes(result, "unavailable");
+      reject = "PRE_TOOL_CALL";
+      await turn("Deny unreviewed planner guidance", guidance);
+      reject = undefined;
+      assertEquals(hintConfirmations.length, 0);
+      assertEquals(readSentinelCaseHints(approved.path, 10), []);
+      await turn("Review the exact case guidance", guidance);
+      const receipt = JSON.parse(result).receipt;
+      assertEquals(receipt.requestId, guidance.requestId);
+      assertEquals(hintConfirmations.length, 1);
+      const saved = readSentinelCaseHints(approved.path, 10);
+      assertEquals(saved.map(({ id }) => id).reverse(), receipt.hintIds);
+      assertEquals(
+        saved.map(({ text }) => text).reverse(),
+        guidance.hints.map(({ note }) => note),
+      );
+      await turn("Reopen the exact planner hint receipt", guidance);
+      assertEquals(JSON.parse(result).receipt, receipt);
+      assertEquals(hintConfirmations.length, 1);
+      assertEquals(wakes, [`operator-hint-batch:${guidance.requestId}`]);
+    } finally {
+      unsubscribe();
+    }
   } finally {
     socket.close();
     await gateway.stop();
