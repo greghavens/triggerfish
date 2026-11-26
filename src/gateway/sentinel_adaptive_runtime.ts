@@ -209,6 +209,7 @@ import {
 import {
   assessSentinelDefenseCoverage,
   matchesSentinelUpstreamCheck,
+  projectSentinelExactCaseAlert,
   sentinelTelemetryAssetResolver,
   sentinelUpstreamChecks,
 } from "../sentinel/defense_coverage.ts";
@@ -9440,6 +9441,18 @@ export function createSentinelModelPlanner(
           >,
         ) => {
           if (!location || !runId || !checkpointCurrent()) return;
+          if (exchange.name === "sentinel_defense") {
+            const allowAsset = sentinelTelemetryAssetResolver(
+              snapshot,
+              constraints?.constraints,
+            );
+            return projectSentinelExactCaseAlert(
+              readSentinelAssessmentAlerts(snapshotPath, state.revision),
+              state.revision,
+              exchange.args.alertId,
+              (alert) => !!allowAsset(alert),
+            );
+          }
           if (exchange.name === "sentinel_graph_facts") {
             return projectGraphFact(exchange.args.id);
           }
@@ -9933,8 +9946,10 @@ export function createSentinelModelPlanner(
                       "Sentinel planner checkpoint is incomplete",
                     );
                   }
-                  const target = exchange.name === "sentinel_graph_facts" ||
-                      exchange.name === SENTINEL_INTERMEDIATE_WORKFLOW_READ
+                  const target = exchange.name === "sentinel_defense"
+                    ? exchange.args.alertId
+                    : exchange.name === "sentinel_graph_facts" ||
+                        exchange.name === SENTINEL_INTERMEDIATE_WORKFLOW_READ
                     ? exchange.args.id
                     : exchange.name === SENTINEL_GOAL_RECHECK_READ
                     ? exchange.args.receiptId
@@ -9963,6 +9978,9 @@ export function createSentinelModelPlanner(
                           sha256: exchange.resultSha256,
                         },
                       }),
+                      ...(exchange.name === "sentinel_defense" && {
+                        plannerDefenseContainment: null,
+                      }),
                       ...(workflow &&
                         { intermediateWorkflowObservation: workflow }),
                       resultSha256: exchange.resultSha256,
@@ -9983,7 +10001,9 @@ export function createSentinelModelPlanner(
                     workflow
                   ) {
                     openedCommitted.set(workflow.observationId, workflow);
-                  } else {
+                  } else if (
+                    exchange.name === SENTINEL_SAVED_REPOSITORY_VISIBILITY
+                  ) {
                     rememberVisibility(projection);
                   }
                   recordedReads++;

@@ -892,6 +892,199 @@ Deno.test("Gateway traces a follow-up to an exact retained incident-member alert
   }
 });
 
+Deno.test("Planner and leased worker reopen an uncorrelated retained alert under scope", async () => {
+  const base = await Deno.makeTempDir();
+  const caseId = "isolated-alert";
+  const path = resolveSentinelCasePath(base, caseId);
+  const alert = {
+    type: "network_security_alert" as const,
+    asset: "service",
+    severity: "high" as const,
+    subject: "Retained normalized alert",
+    observedAt: "2026-01-01T00:00:00.000Z",
+    evidenceIds: ["passive-source"],
+  };
+  const neighbor = { ...alert, asset: "neighbor", subject: "Other alert" };
+  const alertId = sentinelAlertReference(alert);
+  const neighborId = sentinelAlertReference(neighbor);
+  const observed = new Map<string, string>();
+  const classified = new Set<string>();
+  let deniedPreCall = false;
+  const providers = createProviderRegistry();
+  providers.register({
+    name: "isolated-alert-fixture",
+    supportsStreaming: false,
+    complete(messages) {
+      const prompt = String(
+        messages.find(({ role }) => role === "user")?.content,
+      );
+      const isPlanner = prompt.startsWith("Plan a defensive investigation");
+      if (!isPlanner && !prompt.includes('"target":"service"')) {
+        return Promise.resolve(
+          completion('{"summary":"Other worker.","followUps":[]}'),
+        );
+      }
+      const reads = messages.filter(({ role }) => role === "tool");
+      if (reads.length === 0) {
+        return Promise.resolve(
+          completion("", "sentinel_defense", { alertId: neighborId }),
+        );
+      }
+      if (reads.length === 1) {
+        assert(!String(reads[0].content).includes(neighbor.subject));
+        return Promise.resolve(completion("", "sentinel_defense", { alertId }));
+      }
+      const text = String(reads.at(-1)?.content);
+      assertEquals(JSON.parse(text), { revision: 1, alertId, alert });
+      observed.set(isPlanner ? "planner" : "worker", text);
+      return Promise.resolve(
+        completion(
+          isPlanner
+            ? "[]"
+            : '{"summary":"Reviewed exact source.","followUps":[]}',
+        ),
+      );
+    },
+  });
+  providers.setDefault("isolated-alert-fixture");
+  const planner = createSentinelModelPlanner(
+    path,
+    (state, task, token) =>
+      createSentinelSubagent({
+        snapshotPath: path,
+        assessmentRevision: state.revision,
+        plannerExecutionEvidenceRunId: task ? undefined : state.plan.runId,
+        assignedTaskId: task,
+        assignedTaskLeaseToken: token,
+        providerRegistry: providers,
+        allowModelAccess: true,
+        hookRunner: {
+          evaluateHook(hook, { input }) {
+            const call = input.tool_call as
+              | { args?: { alertId?: string } }
+              | undefined;
+            const denied = !task && hook === "PRE_TOOL_CALL" &&
+              call?.args?.alertId === neighborId;
+            if (denied) deniedPreCall = true;
+            if (
+              hook === "POST_TOOL_RESPONSE" &&
+              input.tool_name === "sentinel_defense" &&
+              String(input.tool_response).includes(alertId)
+            ) {
+              classified.add(task ? "worker" : "planner");
+            }
+            return Promise.resolve({
+              allowed: !denied,
+              action: denied ? "BLOCK" : "ALLOW",
+              duration: 0,
+              ruleId: null,
+            });
+          },
+        },
+      }),
+  );
+  try {
+    await Deno.mkdir(dirname(path), { recursive: true, mode: 0o700 });
+    await Deno.writeTextFile(
+      path,
+      JSON.stringify({
+        version: 1,
+        nodes: [alert.asset, neighbor.asset].map((id) => ({
+          id,
+          kind: "asset",
+          label: id,
+        })),
+        edges: [],
+      }),
+    );
+    await Deno.writeTextFile(
+      sentinelAlertsPath(path),
+      JSON.stringify([alert, neighbor]),
+    );
+    const state = startSentinelAssessment(path);
+    const runId = state.plan.runId;
+    assert(runId);
+    advanceAdaptiveSentinel(path, state);
+    const store = openSentinelAdaptiveStore(
+      join(dirname(path), "sentinel-adaptive.db"),
+    );
+    try {
+      store.sync(adaptiveRevision(state), [{
+        kind: "trace",
+        nodeId: alert.asset,
+        depth: 4,
+        reason: MODEL_ASSIGNMENT_REASON,
+      }], store.activeRevision());
+    } finally {
+      store.close();
+    }
+    const deadline = Date.now() + 5_000;
+    const history = () => {
+      const saved = readAdaptiveSentinel(path, state);
+      const round = saved?.modelPlannerHistory.find(({ reads, outcome }) =>
+        outcome !== "running" && reads?.some(({ target }) => target === alertId)
+      );
+      const worker = saved?.modelReviews.find(({ summary }) =>
+        summary === "Reviewed exact source."
+      );
+      return { round, worker };
+    };
+    while (Date.now() < deadline && (!history().round || !history().worker)) {
+      advanceAdaptiveSentinel(path, state);
+      planner.advance(state);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    const { round, worker } = history();
+    assert(round && worker);
+    assert(deniedPreCall);
+    assertEquals(classified, new Set(["planner", "worker"]));
+    assertEquals(observed.get("planner"), observed.get("worker"));
+    const ordinal = round.reads!.findIndex(({ target }) => target === alertId) +
+      1;
+    const step = worker.steps.findIndex(({ target }) => target === alertId);
+    assert(ordinal > 0 && step >= 0);
+    const ref = {
+      kind: "sentinel" as const,
+      id: caseId,
+      revision: state.revision,
+    };
+    const reads = [{
+      ...ref,
+      action: "planner_reads",
+      plannerIdentity: round.identity,
+      attempt: round.attempt,
+      ordinal,
+      includeResult: true,
+    }, {
+      ...ref,
+      action: "worker_trace_result",
+      taskId: worker.taskId,
+      stepIndices: [step],
+    }];
+    const expected = JSON.parse(observed.get("planner")!);
+    await archiveAndRestoreDigestFixture(base, path, ref, runId);
+    await withArchivedPlannerRead(base, async (read) => {
+      for (const request of reads) {
+        assertEquals(JSON.parse(await read(request)).result, expected);
+      }
+      assert(recordSentinelOperatingConstraints(path, {
+        runId,
+        evidenceRevision: state.revision,
+        expectedVersion: 0,
+        operatorScope: "isolated-alert-fixture",
+        requestId: crypto.randomUUID(),
+        constraints: { deniedKinds: [], allowedAssetIds: [neighbor.asset] },
+      }));
+      for (const request of reads) {
+        assertStringIncludes(await read(request), "unavailable");
+      }
+    });
+  } finally {
+    planner.stop();
+    await Deno.remove(base, { recursive: true });
+  }
+});
+
 Deno.test("adaptive planner archives omitted inventory in exact evidence digests and records the presented IDs", async () => {
   const directory = await Deno.makeTempDir();
   const caseId = "cold-inventory";

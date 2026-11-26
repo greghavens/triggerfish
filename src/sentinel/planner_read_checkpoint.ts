@@ -4,9 +4,11 @@ import { SENTINEL_SAVED_REPOSITORY_VISIBILITY } from "./github_repository_visibi
 import { isModelRouteIdentity } from "../core/model_route_identity.ts";
 import type { AgentTurnCheckpoint } from "../core/types/orchestrator.ts";
 import {
+  SENTINEL_DEFENSE_READ,
   SENTINEL_GOAL_GRAPH_FACT_READ,
   SENTINEL_GOAL_RECHECK_READ,
   SENTINEL_INTERMEDIATE_WORKFLOW_READ,
+  sentinelDefenseReadArgs,
   sentinelGoalReceiptReadArguments,
 } from "./worker_goal_recovery.ts";
 
@@ -16,6 +18,11 @@ const SHA256 = /^[a-f0-9]{64}$/;
 export function plannerCheckpointReadSelector(name: string, input: unknown) {
   if (!input || typeof input !== "object" || Array.isArray(input)) return;
   const args = input as Record<string, unknown>;
+  if (name === SENTINEL_DEFENSE_READ) {
+    const exact = sentinelDefenseReadArgs(args);
+    if (Object.keys(args).length !== 1 || !exact?.alertId) return;
+    return { name, args: { alertId: exact.alertId } } as const;
+  }
   if (name === SENTINEL_GOAL_GRAPH_FACT_READ) {
     if (
       Object.keys(args).length !== 1 || typeof args.id !== "string" ||

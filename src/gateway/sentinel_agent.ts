@@ -261,6 +261,7 @@ import {
 } from "../sentinel/case_report.ts";
 import {
   assessSentinelDefenseCoverage,
+  projectSentinelExactCaseAlert,
   projectSentinelExactUpstreamAlert,
   sentinelTelemetryAssetResolver,
 } from "../sentinel/defense_coverage.ts";
@@ -692,7 +693,7 @@ const graphTools: readonly ToolDefinition[] = [
       alertId: {
         type: "string",
         description:
-          "Exact saved alert ID paired with an upstream check. Omit pagination.",
+          "Exact saved alert ID in this evidence revision. Add an upstream check only to verify a check match. Omit pagination.",
       },
       offset: {
         type: "integer",
@@ -1440,7 +1441,7 @@ export async function readDefenseCoverage(
 ): Promise<string> {
   const request = sentinelDefenseReadArgs(args);
   if (!request) {
-    return "Error: Supply a behavior ID or an upstream check ID with optional pagination.";
+    return "Error: Supply a behavior ID, an exact alert ID, or an upstream check ID with optional pagination.";
   }
   const { behavior, upstreamCheck, alertId, offset = 0, limit = 10 } = request;
   let alerts: readonly unknown[] | undefined;
@@ -1509,6 +1510,17 @@ export async function readDefenseCoverage(
     const allowAlert = (alert: TelemetryAlert) =>
       (!allowAsset || allowAsset(alert)) &&
       (!members || members.has(sentinelAlertReference(alert)));
+    if (alertId !== undefined && upstreamCheck === undefined) {
+      return revision === undefined
+        ? "Error: Exact alert reads require a saved Sentinel revision."
+        : projectSentinelExactCaseAlert(
+          alerts,
+          revision,
+          alertId,
+          allowAlert,
+        ) ??
+          "Error: The requested Sentinel alert is unavailable.";
+    }
     if (upstreamCheck !== undefined && alertId !== undefined) {
       const exact = projectSentinelExactUpstreamAlert(
         alerts,
@@ -8756,7 +8768,7 @@ function createAgent(
         : !failed && name === SENTINEL_INCIDENT_ALERTS_READ
         ? args.incidentId
         : !failed && name === SENTINEL_DEFENSE_READ
-        ? args.upstreamCheck ?? args.behavior
+        ? args.upstreamCheck ?? args.alertId ?? args.behavior
         : !failed && name === sharedAssetTool.name
         ? args.asset
         : !failed && name === sharedTopologySourceTool.name
@@ -10504,53 +10516,54 @@ function createAgent(
                     call.args,
                   );
                   if (!selector || !checkpointCurrent()) return false;
-                  const reopened =
-                    selector.name === SENTINEL_GOAL_GRAPH_FACT_READ
-                      ? readSentinelPlannerGraphFacts(
-                        options.snapshotPath,
-                        location.caseId,
+                  const reopened = selector.name === SENTINEL_DEFENSE_READ
+                    ? await readDefenseCoverage(options, selector.args, {})
+                    : selector.name === SENTINEL_GOAL_GRAPH_FACT_READ
+                    ? readSentinelPlannerGraphFacts(
+                      options.snapshotPath,
+                      location.caseId,
+                      runId,
+                      revision,
+                      selector.args,
+                      (id) => currentPlannerReceiptScope(turn, id),
+                      undefined,
+                      operatingConstraints,
+                    )
+                    : selector.name === SENTINEL_GOAL_RECHECK_READ
+                    ? reopenSentinelPlannerLocalFinding(
+                      options.snapshotPath,
+                      {
+                        caseId: location.caseId,
                         runId,
-                        revision,
-                        selector.args,
-                        (id) => currentPlannerReceiptScope(turn, id),
-                        undefined,
-                        operatingConstraints,
-                      )
-                      : selector.name === SENTINEL_GOAL_RECHECK_READ
-                      ? reopenSentinelPlannerLocalFinding(
-                        options.snapshotPath,
-                        {
-                          caseId: location.caseId,
-                          runId,
-                          evidenceRevision: revision,
-                        },
-                        selector.args,
-                        (id) => currentPlannerReceiptScope(turn, id),
-                      )
-                      : selector.name === SENTINEL_INTERMEDIATE_WORKFLOW_READ
-                      ? await reopenPlannerWorkflowObservation(
-                        options,
-                        turn,
-                        session,
-                        config,
-                        runId,
-                        revision,
-                        selector.args.id,
-                        (assetId) =>
-                          checkpointCurrent() &&
-                          currentPlannerReceiptScope(turn, assetId),
-                      )
-                      : await reopenRepositoryVisibilityVerdict(
-                        runId,
-                        revision,
-                        selector.args.taskId,
-                        selector.args.asset,
-                        selector.args.recheckId,
-                        signal,
-                        () =>
-                          checkpointCurrent() &&
-                          currentPlannerReceiptScope(turn, selector.args.asset),
-                      ).then((result) => result && boundResult(result));
+                        evidenceRevision: revision,
+                      },
+                      selector.args,
+                      (id) => currentPlannerReceiptScope(turn, id),
+                    )
+                    : selector.name === SENTINEL_INTERMEDIATE_WORKFLOW_READ
+                    ? await reopenPlannerWorkflowObservation(
+                      options,
+                      turn,
+                      session,
+                      config,
+                      runId,
+                      revision,
+                      selector.args.id,
+                      (assetId) =>
+                        checkpointCurrent() &&
+                        currentPlannerReceiptScope(turn, assetId),
+                    )
+                    : await reopenRepositoryVisibilityVerdict(
+                      runId,
+                      revision,
+                      selector.args.taskId,
+                      selector.args.asset,
+                      selector.args.recheckId,
+                      signal,
+                      () =>
+                        checkpointCurrent() &&
+                        currentPlannerReceiptScope(turn, selector.args.asset),
+                    ).then((result) => result && boundResult(result));
                   if (
                     reopened !== retained[index].content || !checkpointCurrent()
                   ) return false;

@@ -276,7 +276,7 @@ export function sentinelDefenseReadArgs(args: Record<string, unknown>) {
     (alertId !== undefined &&
       (typeof alertId !== "string" ||
         !/^case-alert:[a-f0-9]{64}$/.test(alertId) ||
-        upstreamCheck === undefined || args.offset !== undefined ||
+        behavior !== undefined || args.offset !== undefined ||
         args.limit !== undefined)) ||
     typeof offset !== "number" || !Number.isSafeInteger(offset) || offset < 0 ||
     typeof limit !== "number" || !Number.isSafeInteger(limit) || limit < 1 ||

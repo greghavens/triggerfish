@@ -1,3 +1,4 @@
+import { redactCredentialText } from "../core/logger/redactor.ts";
 /** Assess defensive visibility by behavior, using imported Sentinel alert evidence. */
 
 import { parseSentinelTelemetryAlert } from "./case_report.ts";
@@ -781,6 +782,27 @@ export function matchesSentinelUpstreamCheck(
 ): boolean {
   return alert.type === check.type && alert.triggeringAction !== undefined &&
     check.actions.includes(alert.triggeringAction);
+}
+
+/** Reopen one normalized alert by retained identity, independently of built-in checks. */
+export function projectSentinelExactCaseAlert(
+  alerts: readonly unknown[] | undefined,
+  revision: number,
+  alertId: string,
+  allowAlert: (alert: TelemetryAlert) => boolean,
+): string | undefined {
+  let match: TelemetryAlert | undefined;
+  for (const [index, raw] of (alerts ?? []).entries()) {
+    const alert = parseSentinelTelemetryAlert(raw, index + 1);
+    if (sentinelAlertReference(alert) !== alertId) continue;
+    if (match || !allowAlert(alert)) return;
+    match = alert;
+  }
+  if (!match) return;
+  const result = JSON.stringify({ revision, alertId, alert: match });
+  return result.length <= 7_000 && redactCredentialText(result) === result
+    ? result
+    : undefined;
 }
 
 /** Canonical exact alert response for a retained upstream check. */
