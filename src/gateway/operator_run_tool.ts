@@ -1157,6 +1157,11 @@ export const operatorRunTool: ToolDefinition = {
       description:
         "Include exact in-scope counts by asset type for inventory coverage.",
     },
+    includeProgress: {
+      type: "boolean",
+      description:
+        "Include exact authorized Sentinel goal and running worker counts in run discovery.",
+    },
     includeFrontier: {
       type: "boolean",
       description:
@@ -2575,6 +2580,15 @@ export function createOperatorRunToolExecutor(options: {
         args.trafficOffset !== undefined) && action !== "node"
     ) return unavailable;
     if (
+      args.includeProgress !== undefined &&
+      (action !== "list" || args.includeProgress !== true ||
+        Object.keys(args).some((field) =>
+          !["action", "kind", "includeProgress"].includes(field)
+        ) ||
+        !context?.authenticatedOwnerSessionId ||
+        !canFlowTo("INTERNAL", context.ceiling ?? "PUBLIC"))
+    ) return unavailable;
+    if (
       args.includeFrontier !== undefined &&
       (action !== "graph_overview" || args.includeFrontier !== true ||
         !canFlowTo("INTERNAL", context?.ceiling ?? "PUBLIC"))
@@ -3342,7 +3356,10 @@ ${
           if (!canFlowTo(run.classification ?? "PUBLIC", ceiling)) return run;
           const { kind, id, revision } = run.ref;
           const discovery = kind === "sentinel"
-            ? providers.sentinel.discovery(run.ref)
+            ? providers.sentinel.discovery(
+              run.ref,
+              args.includeProgress === true,
+            )
             : undefined;
           const runId = kind === "workflow" && digestPattern.test(id)
             ? id
@@ -3411,6 +3428,7 @@ ${
                   : null,
               }),
               ...(visibleParent && { parent: visibleParent }),
+              ...(discovery?.progress && { progress: discovery.progress }),
               ...(discovery?.elapsedThrough &&
                 { elapsedThrough: discovery.elapsedThrough }),
               ...(typeof elapsedSeconds === "number" &&

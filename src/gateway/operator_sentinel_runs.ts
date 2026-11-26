@@ -59,6 +59,7 @@ import {
   advanceAdaptiveSentinel,
   readAdaptiveSentinel,
   readHistoricalAdaptiveSentinel,
+  readSentinelInvestigationFrontier,
   recordOperatorSentinelRunHint,
   requestSentinelWorkerControl,
 } from "./sentinel_adaptive_runtime.ts";
@@ -69,9 +70,11 @@ export function createOperatorSentinelRuns(
 ): OperatorRunProvider & {
   discovery(
     ref: OperatorRunRef,
+    includeProgress?: boolean,
   ):
     | (NonNullable<ReturnType<typeof readSentinelCaseStatus>>["discovery"] & {
       status: NonNullable<ReturnType<typeof readSentinelCaseStatus>>["status"];
+      progress?: { goalsTotal: number; goalsMet: number; inFlight: number };
     })
     | undefined;
   cancelExact(
@@ -326,12 +329,36 @@ export function createOperatorSentinelRuns(
         )
       ),
     inspect,
-    discovery(ref) {
+    discovery(ref, includeProgress) {
       const path = pathFor(ref);
       if (!path || ref.revision === undefined) return;
       const status = readSentinelCaseStatus(path, true);
       if (status?.revision !== ref.revision || !status.discovery) return;
-      return { ...status.discovery, status: status.status };
+      const discovery = { ...status.discovery, status: status.status };
+      if (!includeProgress) return discovery;
+      const state = readSentinelAssessment(path);
+      if (
+        state?.revision !== ref.revision ||
+        state.plan.runId !== discovery.runId
+      ) return;
+      const met = new Set(state.plan.completedFormalGoalIds);
+      const tracked = new Set([
+        ...met,
+        ...(state.plan.activeFormalGoalIds ?? []),
+      ]);
+      const queue = state.active && !state.paused
+        ? readSentinelInvestigationFrontier(path, state.revision)
+        : undefined;
+      return {
+        ...discovery,
+        progress: {
+          goalsTotal: tracked.size,
+          goalsMet: met.size,
+          inFlight: queue && queue.runId === state.plan.runId
+            ? queue.runningWorkerCount
+            : 0,
+        },
+      };
     },
     cancelExact(ref, runId) {
       const path = pathFor(ref);

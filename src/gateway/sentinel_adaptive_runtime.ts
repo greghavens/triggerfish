@@ -841,6 +841,10 @@ export function readSentinelInvestigationFrontier(
       )
     );
     const activeIds = new Set(tasks.map(({ id }) => id));
+    const runningWorkers = store.modelReviewStates(mapping.revision)
+      .filter(({ status, taskId }) =>
+        status === "running" && activeIds.has(taskId)
+      );
     const project = ({ id, nodeId, kind, status }: AdaptiveTask) => ({
       id,
       ...(nodeId && { nodeId }),
@@ -864,14 +868,13 @@ export function readSentinelInvestigationFrontier(
       recentFinished: tasks.filter(({ status }) =>
         status !== "queued" && status !== "running"
       ).slice(-5).reverse().map(project),
-      runningWorkers: store.modelReviewStates(mapping.revision)
-        .filter(({ status, taskId }) =>
-          status === "running" && activeIds.has(taskId)
-        )
-        .slice(0, 5).map(({ taskId, attempts }) => ({
-          taskId,
-          attempt: attempts,
-        })),
+      runningWorkerCount: runningWorkers.length,
+      runningWorkers: runningWorkers.slice(0, 5).map((
+        { taskId, attempts },
+      ) => ({
+        taskId,
+        attempt: attempts,
+      })),
     };
   } finally {
     store.close();

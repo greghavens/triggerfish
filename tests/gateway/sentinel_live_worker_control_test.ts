@@ -1829,6 +1829,40 @@ async function verifyInteractiveCaseControl(manual = false) {
     if (manual) {
       assert(backgroundSignal && backgroundTaskId && stoppedTurnId);
       assertFalse(backgroundSignal.aborted);
+      await withOwnerControl(baseDir, async (request) => {
+        const list = {
+          action: "list",
+          kind: "sentinel",
+          includeProgress: true,
+        };
+        const runs = JSON.parse(await request(list)).runs;
+        assertEquals(
+          runs.find(({ ref }: { ref: { id: string } }) =>
+            ref.id === "interactive-first"
+          )?.details.progress,
+          { goalsTotal: 0, goalsMet: 0, inFlight: 1 },
+        );
+        assertEquals(
+          JSON.parse(await request({ action: "list", kind: "sentinel" })).runs
+            .some(({ details }: { details?: Record<string, unknown> }) =>
+              details?.progress !== undefined
+            ),
+          false,
+        );
+      });
+      await withOwnerControl(
+        baseDir,
+        async (request) => {
+          const denied = await request({
+            action: "list",
+            kind: "sentinel",
+            includeProgress: true,
+          });
+          assertFalse(denied.includes('"inFlight"'));
+        },
+        undefined,
+        () => false,
+      );
       assertEquals(
         readAdaptiveSentinel(firstPath, state)?.modelReviewStates.find((
           { taskId },

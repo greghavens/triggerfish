@@ -125,9 +125,13 @@ Deno.test("authenticated Sentinel chat drafts, approves and extends independentl
           const actions = operator?.function?.parameters?.properties?.action
             ?.enum;
           assert(actions);
-          assert(actions.includes("append_goals"));
-          assert(!actions.includes("revise_goals"));
           const args = nextOperatorCall;
+          if (args.action === "list") {
+            assert(actions.includes("list"));
+          } else {
+            assert(actions.includes("append_goals"));
+            assert(!actions.includes("revise_goals"));
+          }
           nextOperatorCall = undefined;
           showOperatorResult = true;
           return Promise.resolve({
@@ -421,7 +425,7 @@ Deno.test("authenticated Sentinel chat drafts, approves and extends independentl
     let modelRevision = 0;
     let withdrawalRevision = 0;
     let pausedWithdrawal: Record<string, unknown> | undefined;
-    await withGateway(async (turn, tick) => {
+    await withGateway(async (turn, tick, operator) => {
       const proposal = JSON.parse(
         await turn(
           `assessment goals propose ${
@@ -510,7 +514,29 @@ Deno.test("authenticated Sentinel chat drafts, approves and extends independentl
         workflows.inspect(admitted.runId)?.steps[1].status,
         "pending",
       );
+      await turn("/sentinel off");
+      const listProgress = {
+        action: "list",
+        kind: "sentinel",
+        includeProgress: true,
+      };
+      const findProgress = (reply: string) =>
+        JSON.parse(reply).runs.find(({ ref }: { ref: { id: string } }) =>
+          ref.id === "local-service"
+        )?.details.progress;
+      assertEquals(findProgress(await operator(listProgress)), {
+        goalsTotal: 2,
+        goalsMet: 0,
+        inFlight: 0,
+      });
       await tick();
+      assertEquals(findProgress(await operator(listProgress)), {
+        goalsTotal: 2,
+        goalsMet: 2,
+        inFlight: 0,
+      });
+      await turn("/sentinel on");
+      await turn("/sentinel case local-service");
       const first = JSON.parse(await turn(status));
       assertEquals(first.active, false, JSON.stringify({ first, rounds }));
       assertEquals(first.completedFormalGoalIds, ["inventory", "coverage"]);
