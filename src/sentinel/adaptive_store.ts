@@ -1014,6 +1014,8 @@ export interface AdaptiveFindingFollowup {
   readonly note: string;
   readonly nativeRepositoryVisibility?:
     SentinelRepositoryVisibilityRecheckBinding;
+  /** Exact completion and constraints reviewed for an assignment-only admission. */
+  readonly completedAssessmentSha256?: string;
 }
 
 export interface SentinelQueuedCancellation {
@@ -2686,6 +2688,9 @@ function normalizePlannerRound(round: AdaptivePlannerRound | undefined) {
         !repositoryVisibilityRecheckBinding(
           findingFollowup.nativeRepositoryVisibility,
         )) ||
+      (findingFollowup.completedAssessmentSha256 !== undefined &&
+        (!/^[a-f0-9]{64}$/.test(findingFollowup.completedAssessmentSha256) ||
+          findingFollowup.nativeRepositoryVisibility !== undefined)) ||
       !findingFollowup.note?.trim() || findingFollowup.note.length > 1000 ||
       /[\p{Cc}\p{Cf}]/u.test(findingFollowup.note) ||
       redactCredentialText(findingFollowup.note) !== findingFollowup.note
@@ -2849,6 +2854,9 @@ function normalizePlannerRound(round: AdaptivePlannerRound | undefined) {
         snapshotDigest: findingFollowup.snapshotDigest,
         reportVersion: findingFollowup.reportVersion,
         note: findingFollowup.note,
+        ...(findingFollowup.completedAssessmentSha256 && {
+          completedAssessmentSha256: findingFollowup.completedAssessmentSha256,
+        }),
         ...(findingFollowup.nativeRepositoryVisibility && {
           nativeRepositoryVisibility: repositoryVisibilityRecheckBinding(
             findingFollowup.nativeRepositoryVisibility,
@@ -5585,6 +5593,35 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
       return undefined;
     }
     const existing = lookup.get(task.id);
+    const followup = task.plannerRound?.findingFollowup;
+    // From a completed case, the exact retained finding is the initial
+    // observation. Record it with the authorization and queue entry so only
+    // the model review of this assignment remains after a restart.
+    const retainedFinding = followup?.completedAssessmentSha256
+      ? observationJson({
+        findingId: followup.findingId,
+        evidenceId: followup.evidenceId,
+        sourceRevision: followup.sourceRevision,
+        reportVersion: followup.reportVersion,
+      })
+      : undefined;
+    if (retainedFinding) {
+      if (
+        existing || input.takeOverQueued || input.prioritize ||
+        rank !== undefined
+      ) {
+        return;
+      }
+      const stored = db.prepare(
+        "SELECT COALESCE(SUM(length(CAST(observation AS BLOB))), 0) AS bytes FROM adaptive_tasks WHERE revision = ?",
+      ).get(adaptiveRevision);
+      if (
+        Number(stored?.bytes) + retainedFinding.bytes >
+          MAX_REVISION_OBSERVATION_BYTES
+      ) {
+        return;
+      }
+    }
     if (
       existing && (existing.revision !== adaptiveRevision ||
         (task.plannerRound?.recheckFindingId !== undefined &&
@@ -5632,6 +5669,19 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
         [],
         time,
       );
+      if (retainedFinding) {
+        updateStatus.run("completed", task.id);
+        db.prepare("UPDATE adaptive_tasks SET observation = ? WHERE id = ?")
+          .run(retainedFinding.encoded, task.id);
+        event.run(
+          adaptiveRevision,
+          task.id,
+          "completed",
+          0,
+          time,
+          "Retained the exact finding for assignment-only review.",
+        );
+      }
       disposition = "enqueued";
     }
     if (input.prioritize) {

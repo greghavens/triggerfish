@@ -7532,10 +7532,16 @@ ${request}`)
             !/^worker-finding:[a-f0-9]{64}$/.test(passingRecheckForFindingId))
         ) return unavailable;
         const before = await controller.inspect(ref);
+        const completedAssignment = before?.status === "completed" &&
+          options.sentinelModelAccess === true && !!finding &&
+          nativeRepositoryVisibilityRecheck === undefined &&
+          nativeBranchProtectionRecheck === undefined &&
+          prioritizeNext !== true && priorityRank === undefined;
         if (
           !before || before.details?.runId !== runId.toLowerCase() ||
           before.details.adaptiveRevision !== adaptiveRevision ||
-          (before.status !== "running" && before.status !== "paused")
+          (before.status !== "running" && before.status !== "paused" &&
+            !completedAssignment)
         ) return unavailable;
         const path = resolveSentinelCasePath(options.baseDir, ref.id);
         const evidenceRevision = ref.revision;
@@ -7586,6 +7592,8 @@ ${request}`)
             node,
             finding.findingId,
             finding.note,
+            undefined,
+            completedAssignment,
           )
           : undefined;
         if (finding && !baseFindingFollowup) return unavailable;
@@ -7664,26 +7672,27 @@ ${request}`)
           ...baseFindingFollowup,
           ...(nativeRepositoryVisibility && { nativeRepositoryVisibility }),
         };
-        const authorizeAnalyst = async () =>
-          !findingFollowup?.sourceAnalystSha256 || (
-            await authorize({
-              ...ref,
-              action: "finding_receipt",
-              receiptId: findingFollowup.findingId,
-            }) &&
-            await authorize({
-              ...ref,
-              action: "node",
-              node: `evidence:${findingFollowup.evidenceId}`,
-              revision: findingFollowup.sourceRevision,
-            }) &&
-            await context.authorizeSavedResponse(
-              operatorRunTool.name,
-              safeProjection({ ...findingFollowup }),
-              "INTERNAL",
-            )
-          );
-        if (!await authorizeAnalyst()) return unavailable;
+        const authorizeFindingSource = async () =>
+          (!findingFollowup?.sourceAnalystSha256 &&
+            !findingFollowup?.completedAssessmentSha256) || (
+              await authorize({
+                ...ref,
+                action: "finding_receipt",
+                receiptId: findingFollowup.findingId,
+              }) &&
+              await authorize({
+                ...ref,
+                action: "node",
+                node: `evidence:${findingFollowup.evidenceId}`,
+                revision: findingFollowup.sourceRevision,
+              }) &&
+              await context.authorizeSavedResponse(
+                operatorRunTool.name,
+                safeProjection({ ...findingFollowup }),
+                "INTERNAL",
+              )
+            );
+        if (!await authorizeFindingSource()) return unavailable;
         const intent = {
           requestId: requestId.toLowerCase(),
           runId: runId.toLowerCase(),
@@ -7735,7 +7744,9 @@ ${request}`)
         }
         if (
           !await options.confirm(
-            `Approve this exact Sentinel investigation?\n${
+            `Approve this exact Sentinel investigation${
+              completedAssignment ? " on the completed assessment" : ""
+            }?\n${
               JSON.stringify({
                 ref,
                 ...intent,
@@ -7750,7 +7761,7 @@ ${request}`)
           return unavailable;
         }
         if (
-          !await authorize(args) || !await authorizeAnalyst() ||
+          !await authorize(args) || !await authorizeFindingSource() ||
           (nativeRepositoryVisibility &&
             !isDeepStrictEqual(
               await nativeSource(),

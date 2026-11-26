@@ -62,6 +62,7 @@ import {
   advanceAdaptiveSentinel,
   createSentinelModelPlanner,
   createSentinelWorkerPool,
+  hasSentinelCompletedFindingWork,
   readAssignedSentinelModelReview,
   readSentinelModelSettings,
   recordSentinelModelUsage,
@@ -828,6 +829,8 @@ export async function startServicesAndChannels(
           ).effectiveLimit
         : undefined,
       isActiveCase: needsSentinelAssessmentCoordinator,
+      ...(workerFactory &&
+        { hasCompletedCaseWork: hasSentinelCompletedFindingWork }),
     },
   );
   caseManagerRef.current = caseManager;

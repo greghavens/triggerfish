@@ -12,6 +12,7 @@ import {
   refreshSentinelAssessment,
   type SentinelReviewStep,
 } from "../sentinel/assessment_store.ts";
+import { hasSentinelCompletedFindingWork } from "./sentinel_adaptive_runtime.ts";
 import type { SentinelAgent } from "./sentinel_agent.ts";
 import { reconcileSentinelAutomaticGoal } from "./sentinel_goal_completion.ts";
 
@@ -256,8 +257,15 @@ export function startSentinelAssessmentCoordinator(
       lastPollError = undefined;
       scheduleDeadline(state?.active ? state.plan.deadlineAt : undefined);
       if (!state?.active || state.paused || !state.result) {
-        options.stopAdaptive?.();
         active?.cancel.abort();
+        if (
+          state?.completion && options.createWorker &&
+          hasSentinelCompletedFindingWork(options.snapshotPath, state)
+        ) {
+          options.advanceAdaptive?.(state);
+        } else {
+          options.stopAdaptive?.();
+        }
         return;
       }
       const notificationRevision = claimSentinelIncidentNotification(
@@ -409,7 +417,12 @@ export function startSentinelAssessmentCoordinator(
           if (stopped) return;
           const current = readSentinelAssessment(options.snapshotPath);
           if (
-            current?.active && !current.paused &&
+            current && !current.paused &&
+            (current.active || (options.createWorker &&
+              hasSentinelCompletedFindingWork(
+                options.snapshotPath,
+                current,
+              ))) &&
             scheduled.has(
               JSON.stringify([current.plan.runId, current.revision]),
             )

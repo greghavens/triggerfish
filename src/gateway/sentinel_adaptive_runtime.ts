@@ -2939,6 +2939,7 @@ export function readSentinelFindingFollowup(
   findingId: string,
   note: string,
   nativeRepositoryVisibility?: SentinelRepositoryVisibilityRecheckBinding,
+  completedAssignment = false,
 ): import("../sentinel/adaptive_store.ts").AdaptiveFindingFollowup | undefined {
   const snapshot = state.result?.sharedGraph.snapshot;
   const caseId = locateSentinelCase(path)?.caseId;
@@ -2946,6 +2947,16 @@ export function readSentinelFindingFollowup(
     !caseId || !snapshot || !state.plan.runId ||
     !hasSentinelWorkerFindingJournal(path)
   ) return;
+  const completedAssessmentSha256 = completedAssignment &&
+      !state.active && state.completion && !nativeRepositoryVisibility
+    ? createHash("sha256").update(JSON.stringify([
+      state.plan.runId,
+      state.revision,
+      state.completion,
+      readSentinelOperatingConstraints(path, state.plan.runId)?.digest ?? null,
+    ])).digest("hex")
+    : undefined;
+  if (completedAssignment && !completedAssessmentSha256) return;
   const allowed = caseOperatingScope(path, state.revision);
   if (
     !allowed({ kind: "trace", nodeId }) ||
@@ -3021,6 +3032,7 @@ export function readSentinelFindingFollowup(
       reportVersion: report.version,
       note,
       ...(nativeRepositoryVisibility && { nativeRepositoryVisibility }),
+      ...(completedAssessmentSha256 && { completedAssessmentSha256 }),
     };
   } finally {
     journal.close();
@@ -3079,8 +3091,14 @@ export function submitSentinelAssignmentIntent(
   replayOnly = false,
 ) {
   const committed = withSentinelAssessmentWriteLock(snapshotPath, (state) => {
+    const completedAssignment = !!input.findingFollowup
+      ?.completedAssessmentSha256;
     if (
-      !state?.active || state.plan.runId !== input.runId ||
+      !state ||
+      (completedAssignment
+        ? !state.completion || state.active
+        : !state.active) ||
+      state.plan.runId !== input.runId ||
       state.revision !== input.evidenceRevision
     ) return undefined;
     if (
@@ -3101,6 +3119,7 @@ export function submitSentinelAssignmentIntent(
             followup.findingId,
             followup.note,
             followup.nativeRepositoryVisibility,
+            completedAssignment,
           ),
         ))
     ) return;
@@ -3247,7 +3266,19 @@ export function submitSentinelAssignmentIntent(
     }
   });
   if (committed && !committed.replay) {
-    advanceAdaptiveSentinel(snapshotPath, committed.state);
+    if (committed.receipt.findingFollowup?.completedAssessmentSha256) {
+      const caseId = locateSentinelCase(snapshotPath)?.caseId;
+      if (caseId) {
+        notifyCommittedEvidence({
+          case: caseId,
+          run_id: input.runId,
+          revision: input.evidenceRevision,
+          observation_id: committed.receipt.taskId,
+        });
+      }
+    } else {
+      advanceAdaptiveSentinel(snapshotPath, committed.state);
+    }
   }
   return committed?.receipt;
 }
@@ -4392,6 +4423,52 @@ function currentLinkedWorkerReview(
   );
 }
 
+/** A completed case only admits a reviewed retained finding assignment. */
+function permitsAssignmentLifecycle(state: State, task: AdaptiveTask) {
+  if (state.paused) return false;
+  if (task.plannerRound?.findingFollowup?.completedAssessmentSha256) {
+    return !state.active && !!state.completion &&
+      task.reason === OPERATOR_ASSIGNMENT_REASON;
+  }
+  return state.active;
+}
+
+/** Keep the normal case coordinator available for the exact pending review only. */
+export function hasSentinelCompletedFindingWork(
+  snapshotPath: string,
+  current?: State,
+) {
+  const state = current ?? readSentinelAssessment(snapshotPath);
+  if (!state?.completion || state.active) return false;
+  const path = storePath(snapshotPath);
+  try {
+    Deno.lstatSync(path);
+  } catch (error) {
+    if (error instanceof Deno.errors.NotFound) return false;
+    throw error;
+  }
+  const store = openSentinelAdaptiveStore(path);
+  try {
+    const revision = revisionForStore(state, store);
+    const allowed = decisionAllowsClaim(snapshotPath, state.revision);
+    const reviews = new Map(
+      store.modelReviewStates(revision).map((
+        { taskId, status },
+      ) => [taskId, status]),
+    );
+    return store.list(revision).some((task) => {
+      const status = reviews.get(task.id);
+      return task.status === "completed" &&
+        permitsAssignmentLifecycle(state, task) &&
+        (status === undefined || status === "running" ||
+          status === "retry_pending") &&
+        allowed(task);
+    });
+  } finally {
+    store.close();
+  }
+}
+
 function decisionAllowsClaim(snapshotPath: string, revision: number) {
   const decisionHold = decisionHoldScope(snapshotPath, revision);
   const allowed = caseOperatingScope(snapshotPath, revision);
@@ -4439,6 +4516,7 @@ function decisionAllowsClaim(snapshotPath: string, revision: number) {
             source.findingId,
             source.note,
             source.nativeRepositoryVisibility,
+            !!source.completedAssessmentSha256,
           ),
         );
     })());
@@ -4596,7 +4674,7 @@ export function readAssignedSentinelModelReview(
   token: string,
 ) {
   const state = readSentinelAssessment(snapshotPath);
-  if (!state?.active || state.paused || state.revision !== evidenceRevision) {
+  if (!state || state.paused || state.revision !== evidenceRevision) {
     return undefined;
   }
   const path = storePath(snapshotPath);
@@ -4615,7 +4693,8 @@ export function readAssignedSentinelModelReview(
       mapping.goal.id !== goal.id || mapping.goal.label !== goal.label
     ) return undefined;
     const task = store.activeModelReviewTask(mapping.revision, taskId, token);
-    return task && decisionAllowsClaim(snapshotPath, evidenceRevision)(task)
+    return task && permitsAssignmentLifecycle(state, task) &&
+        decisionAllowsClaim(snapshotPath, evidenceRevision)(task)
       ? task
       : undefined;
   } finally {
@@ -6455,7 +6534,7 @@ export function createSentinelModelPlanner(
     if (!reserve && activeReviews.size) return "blocked";
     const current = readSentinelAssessment(snapshotPath);
     if (
-      !current?.active || current.paused ||
+      !current || (!current.active && !current.completion) || current.paused ||
       adaptiveRevision(current) !== identity ||
       !allowsSentinelAdaptiveWork(snapshotPath, current.plan.admissionAt)
     ) {
@@ -7010,7 +7089,8 @@ export function createSentinelModelPlanner(
       const mayReport = !reporterAdmission || reporterAdmission.enabled &&
           (reporterCount ?? 0) < reporterAdmission.maxConcurrent;
       const currentTask = (task: AdaptiveTask) =>
-        !reviewing.has(task.id) && allowed(task) &&
+        !reviewing.has(task.id) && permitsAssignmentLifecycle(current, task) &&
+        allowed(task) &&
         (protectedTransition
           ? protectedTransition.taskId === task.id
           : protectedGateAncestors(task, byId).length === 0);
@@ -7087,7 +7167,8 @@ export function createSentinelModelPlanner(
     void Promise.resolve().then(async () => {
       const latest = readSentinelAssessment(snapshotPath);
       if (
-        signal.aborted || !latest?.active || latest.paused ||
+        signal.aborted || !latest ||
+        !permitsAssignmentLifecycle(latest, task) ||
         adaptiveRevision(latest) !== identity || !matchesConstraints(latest) ||
         !decisionAllowsClaim(snapshotPath, latest.revision)(task)
       ) {
@@ -7182,7 +7263,8 @@ export function createSentinelModelPlanner(
         ) ?? [];
         const currentSource = () => {
           const latest = readSentinelAssessment(snapshotPath);
-          return !signal.aborted && !!latest?.active && !latest.paused &&
+          return !signal.aborted && !!latest &&
+            permitsAssignmentLifecycle(latest, task) &&
             adaptiveRevision(latest) === identity &&
             matchesConstraints(latest) &&
             decisionAllowsClaim(snapshotPath, latest.revision)(task);
@@ -7572,7 +7654,8 @@ export function createSentinelModelPlanner(
                 }
                 const current = readSentinelAssessment(snapshotPath);
                 if (
-                  !current?.active || current.paused || signal.aborted ||
+                  signal.aborted || !current ||
+                  !permitsAssignmentLifecycle(current, task) ||
                   adaptiveRevision(current) !== identity ||
                   !matchesConstraints(current) ||
                   !decisionAllowsClaim(snapshotPath, current.revision)(task) ||
@@ -8086,6 +8169,15 @@ export function createSentinelModelPlanner(
           }
           if (!current()) return;
         }
+        const completedFinding = task.plannerRound?.findingFollowup;
+        if (
+          completedFinding?.completedAssessmentSha256 &&
+          !steps.some(({ tool, target, outcome, goalReceiptRead }) =>
+            tool === SENTINEL_GOAL_RECHECK_READ &&
+            outcome === "returned" && target === completedFinding.findingId &&
+            goalReceiptRead !== undefined
+          )
+        ) return;
         const parsed = parseModelReview(
           state,
           task,
@@ -8114,8 +8206,9 @@ export function createSentinelModelPlanner(
       const outcome = withSentinelAssessmentWriteLock(
         snapshotPath,
         (latest) => {
-          const interrupted = controller.signal.aborted || !latest?.active ||
-            latest.paused || adaptiveRevision(latest) !== identity ||
+          const interrupted = controller.signal.aborted || !latest ||
+            !permitsAssignmentLifecycle(latest, task) ||
+            adaptiveRevision(latest) !== identity ||
             !allowsSentinelAdaptiveWork(
               snapshotPath,
               latest.plan.admissionAt,
@@ -8378,7 +8471,7 @@ export function createSentinelModelPlanner(
       permitPlannerWake = true;
       const snapshot = state.result?.sharedGraph.snapshot;
       if (
-        !state.active || state.paused || !snapshot ||
+        (!state.active && !state.completion) || state.paused || !snapshot ||
         !allowsSentinelAdaptiveWork(snapshotPath, state.plan.admissionAt)
       ) {
         planningGate.clear();
@@ -8386,6 +8479,22 @@ export function createSentinelModelPlanner(
         return;
       }
       const identity = adaptiveRevision(state);
+      if (!state.active) {
+        planningGate.clear();
+        activePlan?.controller.abort(superseded);
+        if (activeProtectedCheck) activeProtectedCheck.abort(superseded);
+        if (activeFutureCheck) activeFutureCheck.abort(superseded);
+        const allowed = decisionAllowsClaim(snapshotPath, state.revision);
+        for (const [controller, review] of activeReviews) {
+          if (
+            review.identity !== identity ||
+            !permitsAssignmentLifecycle(state, review.task) ||
+            !allowed(review.task)
+          ) controller.abort(superseded);
+        }
+        fillReviews(state, identity);
+        return;
+      }
       authorizeFutureWorkflowGates(state, identity);
       authorizeProtectedGates(state, identity);
       const hints = readHints(state, 3);

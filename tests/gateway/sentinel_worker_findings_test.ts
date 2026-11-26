@@ -19,6 +19,8 @@ import { createFindingEvidenceDownload } from "../../tidepool-ui/src/screens/Sen
 import { createTrafficDownload } from "../../tidepool-ui/src/screens/Sentinel/traffic_download.ts";
 import type { ChatSession } from "../../src/gateway/chat_session_interface.ts";
 import { createFindingDownload } from "../../tidepool-ui/src/screens/Sentinel/finding_download.ts";
+import { bindSentinelCaseAdmission } from "../../src/gateway/sentinel_case_admission.ts";
+import { startSentinelCaseManager } from "../../src/gateway/sentinel_case_manager.ts";
 import { startSentinelAssessmentCoordinator } from "../../src/gateway/sentinel_assessment_service.ts";
 import { createMemorySecretStore } from "../../src/core/secrets/mod.ts";
 import { buildWorkflowRecoveryExecutor } from "../../src/gateway/startup/factory/agent_recovery.ts";
@@ -58,6 +60,7 @@ import {
   addSentinelCaseHint,
   advanceAdaptiveSentinel,
   createSentinelModelPlanner,
+  hasSentinelCompletedFindingWork,
   readAdaptiveSentinel,
   readSentinelCaseHints,
 } from "../../src/gateway/sentinel_adaptive_runtime.ts";
@@ -83,6 +86,7 @@ import { openSentinelAdaptiveStore } from "../../src/sentinel/adaptive_store.ts"
 import {
   applySentinelFormalGoals,
   completeSentinelAssessmentGoal,
+  needsSentinelAssessmentCoordinator,
   pauseSentinelAssessment,
   readSentinelAssessment,
   readSentinelOperatingConstraintDigest,
@@ -362,6 +366,7 @@ async function withTidepool(
     ) => Promise<SentinelWorkerFindingJournalRecord[]>,
     provenance: (
       revision: number,
+      caseId?: string,
     ) => Promise<
       {
         workerFindings: NonNullable<
@@ -459,13 +464,14 @@ async function withTidepool(
       assertEquals(response.evidenceRevision, revision ?? null);
       assert(Array.isArray(response.records));
       return response.records;
-    }, async (revision) => {
+    }, async (revision, caseId = "main") => {
       const response = await request("export", {
         format: "provenance",
         revision,
+        caseId,
       });
       assertEquals(response.type, "export");
-      assertEquals(response.caseId, "main");
+      assertEquals(response.caseId, caseId);
       assertEquals(response.revision, revision);
       assert(typeof response.content === "string");
       const result = JSON.parse(response.content);
@@ -573,6 +579,7 @@ async function withFindingAssignmentGateway(
       readLiveWorkflow,
       authorizeExecutionTracePayload,
       readRepositoryVisibility,
+      sentinelModelAccess: true,
     }),
     hookRunner: {
       evaluateHook(hook, { input }) {
@@ -11967,8 +11974,11 @@ Deno.test("Finding download assembly shrinks oversized pages and rejects oversiz
 
 Deno.test("Reviewed Sentinel finding follow-up preserves the originating report and runs within its read scope", async () => {
   const baseDir = await Deno.makeTempDir();
-  const path = resolveSentinelCasePath(baseDir);
+  const caseId = "retained-finding";
+  const path = resolveSentinelCasePath(baseDir, caseId);
   let planner: ReturnType<typeof createSentinelModelPlanner> | undefined;
+  let caseManager: ReturnType<typeof startSentinelCaseManager> | undefined;
+  let releaseAdmission: (() => void) | undefined;
   try {
     const time = Date.now();
     await Deno.mkdir(dirname(path), { recursive: true });
@@ -12017,7 +12027,7 @@ Deno.test("Reviewed Sentinel finding follow-up preserves the originating report 
     const input = {
       action: "assign",
       kind: "sentinel",
-      id: "main",
+      id: caseId,
       revision: state.revision,
       runId: state.plan.runId,
       adaptiveRevision: adaptiveRevision(state),
@@ -12184,7 +12194,7 @@ Deno.test("Reviewed Sentinel finding follow-up preserves the originating report 
     );
     assertEquals(task?.plannerRound?.findingFollowup, saved.findingFollowup);
     await withTidepool(baseDir, async (_list, provenance) => {
-      const graph = (await provenance(state.revision)).provenance;
+      const graph = (await provenance(state.revision, caseId)).provenance;
       const original = graph.nodes.find((node) =>
         "findingFollowupOrigin" in node && node.sourceId === record.id
       );
@@ -12243,6 +12253,7 @@ Deno.test("Reviewed Sentinel finding follow-up preserves the originating report 
     planner.stop();
     const finalState = readSentinelAssessment(path);
     assert(finalState?.active);
+    advanceAdaptiveSentinel(path, finalState);
     assert(completeSentinelAssessmentGoal(
       path,
       finalState.revision,
@@ -12255,7 +12266,7 @@ Deno.test("Reviewed Sentinel finding follow-up preserves the originating report 
     const terminal = {
       action: "completed_graph_followup",
       kind: "sentinel",
-      id: "main",
+      id: caseId,
       revision: completed.revision,
       runId: completed.plan.runId,
       requestId: crypto.randomUUID(),
@@ -12302,20 +12313,207 @@ Deno.test("Reviewed Sentinel finding follow-up preserves the originating report 
         await turn({
           action: "inspect",
           kind: "sentinel",
-          id: "main",
+          id: caseId,
           revision: completed.revision,
         }),
       ).run;
       assertEquals(status.status, "completed");
     });
+    const exact = {
+      ...terminal,
+      action: "assign",
+      adaptiveRevision: adaptiveRevision(completed),
+      requestId: crypto.randomUUID(),
+      note: "Explain the saved control failure after goal completion.",
+    };
+    let approval = false;
+    let assignmentId: string | undefined;
+    await withFindingAssignmentGateway(
+      baseDir,
+      () => Promise.resolve(approval),
+      async (turn) => {
+        assertStringIncludes(
+          await turn({ ...exact, receiptId: undefined, note: undefined }),
+          "unavailable",
+        );
+        assertStringIncludes(await turn(exact), "declined");
+        approval = true;
+        const receipt = JSON.parse(await turn(exact)).receipt;
+        assertEquals(receipt.findingFollowup.findingId, record.id);
+        assertEquals(receipt.findingFollowup.sourceRevision, state.revision);
+        assertEquals(
+          receipt.findingFollowup.assignedRevision,
+          completed.revision,
+        );
+        assert(/^[a-f0-9]{64}$/.test(
+          receipt.findingFollowup.completedAssessmentSha256,
+        ));
+        assignmentId = receipt.taskId;
+      },
+    );
+    assert(assignmentId);
+    await withFindingAssignmentGateway(baseDir, () => {
+      throw new Error(
+        "Assignment-only review replay must use the existing receipt",
+      );
+    }, async (turn) => {
+      assertEquals(JSON.parse(await turn(exact)).receipt.taskId, assignmentId);
+    });
+    let followupModels = 0;
+    let unrelatedModels = 0;
+    const followupRegistry = createProviderRegistry();
+    followupRegistry.register({
+      name: "completed-finding-followup",
+      supportsStreaming: false,
+      complete(messages, definitions) {
+        const prompt = messages.find(({ role }) => role === "user")?.content;
+        const response = messages.filter(({ role }) => role === "tool").at(-1);
+        if (!String(prompt).includes(exact.note)) {
+          unrelatedModels++;
+          return Promise.resolve({
+            content: '{"summary":"Unexpected turn","followUps":[]}',
+            usage: { inputTokens: 1, outputTokens: 1 },
+            toolCalls: [],
+          });
+        }
+        followupModels++;
+        assertEquals(
+          (definitions ?? []).map((definition) =>
+            (definition as { function?: { name?: string } }).function?.name
+          ).sort(),
+          [assigned, findings].sort(),
+        );
+        if (response) {
+          assertEquals(JSON.parse(String(response.content)).record, record);
+        }
+        return Promise.resolve({
+          content: response
+            ? '{"summary":"Reviewed the exact completed-case finding.","followUps":[]}'
+            : "",
+          usage: { inputTokens: 1, outputTokens: 1 },
+          toolCalls: response ? [] : [{
+            id: "completed-finding-read",
+            type: "function",
+            function: {
+              name: findings,
+              arguments: JSON.stringify({ receiptId: record.id }),
+            },
+          }],
+        });
+      },
+    });
+    followupRegistry.setDefault("completed-finding-followup");
+    const createWorker: Parameters<typeof createSentinelModelPlanner>[1] = (
+      current,
+      taskId,
+      token,
+    ) =>
+      createSentinelSubagent({
+        snapshotPath: path,
+        assessmentRevision: current.revision,
+        assignedTaskId: taskId,
+        assignedTaskLeaseToken: token,
+        providerRegistry: followupRegistry,
+        allowModelAccess: true,
+        hookRunner: {
+          evaluateHook(hook, { input }) {
+            if (
+              input.tool_name === findings ||
+              (input.tool_call as { name?: string } | undefined)?.name ===
+                findings
+            ) {
+              hooks.push(`completed:${hook}`);
+            }
+            return Promise.resolve({
+              allowed: true,
+              action: "ALLOW",
+              ruleId: null,
+              duration: 0,
+            });
+          },
+        },
+      });
+    // Recreate the named case scheduler after the gateway owner sessions close.
+    caseManager = startSentinelCaseManager(baseDir, (path, id) => {
+      assertEquals(id, caseId);
+      planner = createSentinelModelPlanner(path, createWorker);
+      const coordinator = startSentinelAssessmentCoordinator({
+        snapshotPath: path,
+        createWorker,
+        advanceAdaptive(current) {
+          advanceAdaptiveSentinel(path, current);
+          planner?.advance(current);
+        },
+        stopAdaptive: () => planner?.stop(),
+      });
+      return {
+        stop() {
+          coordinator.stop();
+          planner?.stop();
+        },
+      };
+    }, {
+      concurrency: 1,
+      isActiveCase: needsSentinelAssessmentCoordinator,
+      hasCompletedCaseWork: hasSentinelCompletedFindingWork,
+    });
+    releaseAdmission = bindSentinelCaseAdmission(
+      baseDir,
+      caseManager.isAdmitted,
+    );
+    assertEquals(caseManager.coordinatorState(caseId), "scheduled");
+    const deadline = Date.now() + 3000;
+    while (
+      !readAdaptiveSentinel(path, completed)?.modelReviews.some(({ taskId }) =>
+        taskId === assignmentId
+      ) &&
+      Date.now() < deadline
+    ) await new Promise((resolve) => setTimeout(resolve, 10));
+    assertEquals(followupModels, 2);
+    assertEquals(unrelatedModels, 0);
+    assert(hooks.includes("completed:PRE_TOOL_CALL"));
+    assert(hooks.includes("completed:POST_TOOL_RESPONSE"));
+    assertEquals(
+      readAdaptiveSentinel(path, completed)?.modelReviews.find(({ taskId }) =>
+        taskId === assignmentId
+      )?.summary,
+      "Reviewed the exact completed-case finding.",
+    );
     assertEquals(readSentinelAssessment(path), completed);
-    await withTidepool(baseDir, async (list) => {
+    caseManager.refresh();
+    assertEquals(caseManager.coordinatorState(caseId), undefined);
+    await withTidepool(baseDir, async (list, _provenance, request) => {
       assertEquals(
-        (await list(state.revision)).filter(({ id }) => id === record.id),
+        (await list(state.revision, caseId)).filter(({ id }) =>
+          id === record.id
+        ),
         [record],
+      );
+      const exported = await request("export", {
+        format: "provenance",
+        revision: completed.revision,
+        caseId,
+      });
+      assertEquals(exported.type, "export");
+      assertEquals(exported.caseId, caseId);
+      assert(typeof exported.content === "string");
+      const { provenance: graph } = JSON.parse(exported.content) as {
+        provenance: Awaited<ReturnType<typeof _provenance>>["provenance"];
+      };
+      const origin = graph.nodes.find((node) =>
+        "findingFollowupOrigin" in node && node.sourceId === record.id
+      );
+      const task = graph.nodes.find((node) => node.sourceId === assignmentId);
+      assert(origin && task);
+      assert(
+        graph.edges.some(({ from, to, relation }) =>
+          from === origin.id && to === task.id && relation === "prompted"
+        ),
       );
     });
   } finally {
+    caseManager?.stop();
+    releaseAdmission?.();
     planner?.stop();
     await Deno.remove(baseDir, { recursive: true });
   }

@@ -30,6 +30,8 @@ interface SentinelCaseManagerOptions {
   readonly readConcurrency?: () => number;
   /** Return false to release a coordinator slot for a paused or stopped assessment. */
   readonly isActiveCase?: (path: string) => boolean;
+  /** Whether a completed case has an exact reviewed assignment awaiting execution. */
+  readonly hasCompletedCaseWork?: (path: string) => boolean;
   readonly onError?: (error: unknown) => void;
 }
 
@@ -116,14 +118,20 @@ export function startSentinelCaseManager(
         continue;
       }
       try {
-        if (options.isActiveCase?.(path) !== false) {
+        const active = options.isActiveCase?.(path) !== false;
+        const completedCaseWork = !active &&
+          options.hasCompletedCaseWork?.(path);
+        if (active || completedCaseWork) {
           if (ordered) {
             const status = readSentinelCaseStatus(path)?.status;
             // Deadline settlement uses committed records only and occupies no planner slot.
             if (status === "settling_timeout") {
               reconcileSentinelDeadlineGoal(path);
             }
-            if (status !== "running") continue;
+            if (
+              status !== "running" &&
+              !(status === "completed" && completedCaseWork)
+            ) continue;
           }
           const admission = ordered
             ? readSentinelAssessmentAdmission(path)
