@@ -20,7 +20,7 @@ import { redactCredentialText } from "../../core/logger/redactor.ts";
 import type { ClassificationLevel } from "../../core/types/classification.ts";
 import { parseClassification } from "../../core/types/classification.ts";
 import type { SkillSource } from "../../core/types/skills.ts";
-import { computeSkillHash } from "./integrity.ts";
+import { computeSkillBytesHash, computeSkillHash } from "./integrity.ts";
 import { enforceSkillName } from "./registry_types.ts";
 import type {
   SkillCreationReceipt,
@@ -34,6 +34,7 @@ import {
   type SkillCreateOptions,
 } from "./author.ts";
 import { parseSkillReferences } from "./reference_documents.ts";
+import { maxSkillZipBytes, readSkillZip } from "./skill_zip.ts";
 
 const log = createLogger("skills");
 const frontmatterPattern = /^---\n([\s\S]*?)(?:\n---|\n\.\.\.)(?=\n|$)/;
@@ -92,7 +93,7 @@ export interface SkillDraftRevision {
 
 export interface SkillCreationProposal {
   readonly input: SkillCreateOptions;
-  readonly source: string;
+  readonly source: string | Uint8Array<ArrayBuffer>;
   readonly markdown: string;
   readonly proposalDigest: string;
   readonly draftDigest: string;
@@ -278,18 +279,37 @@ function readWorkspaceSkillText(
   }
 }
 
-function readProposalText(workspace: string, name: string): string | undefined {
+function readProposalSource(
+  workspace: string,
+  name: string,
+): SkillCreationProposal["source"] | undefined {
   // The selector is a skill name. The caller cannot nominate a filesystem path.
   if (name.length > 128 || !enforceSkillName(name).ok) return;
   const proposals = join(workspace, ".proposals");
-  const path = join(proposals, `${name}.md`);
+  const markdown = join(proposals, `${name}.md`);
+  const archive = join(proposals, `${name}.zip`);
   try {
+    const isArchive = existingPath(archive);
+    if (isArchive && existingPath(markdown)) return;
+    const path = isArchive ? archive : markdown;
+    const limit = isArchive ? maxSkillZipBytes : maxDraftBytes;
     const file = Deno.lstatSync(path);
     if (
       !Deno.lstatSync(workspace).isDirectory ||
       !Deno.lstatSync(proposals).isDirectory || !file.isFile ||
-      file.size > maxDraftBytes || !isRealPathWithinJail(path, workspace)
+      file.size > limit || !isRealPathWithinJail(path, workspace)
     ) return;
+    if (isArchive) {
+      using opened = Deno.openSync(path, { read: true });
+      const bytes = new Uint8Array(limit + 1);
+      let length = 0;
+      while (length < bytes.length) {
+        const count = opened.readSync(bytes.subarray(length));
+        if (count === null) break;
+        length += count;
+      }
+      return length <= limit ? bytes.subarray(0, length) : undefined;
+    }
     const content = Deno.readTextFileSync(path);
     return new TextEncoder().encode(content).length <= maxDraftBytes
       ? content
@@ -298,6 +318,16 @@ function readProposalText(workspace: string, name: string): string | undefined {
     if (error instanceof Deno.errors.NotFound) return undefined;
     throw error;
   }
+}
+
+function sameProposalSource(
+  a: SkillCreationProposal["source"] | undefined,
+  b: SkillCreationProposal["source"],
+): boolean {
+  return typeof b === "string"
+    ? a === b
+    : a instanceof Uint8Array && a.length === b.length &&
+      a.every((byte, index) => byte === b[index]);
 }
 
 function boundedSelectors(
@@ -376,14 +406,22 @@ async function inspectExactCreation(
   name: string,
   registry: SkillDraftApprovals,
 ): Promise<SkillCreationProposal | undefined> {
-  const source = readProposalText(workspace, name);
+  const source = readProposalSource(workspace, name);
   if (source === undefined) return;
-  const input = parseCreationOptions(name, source);
-  if (!input) return;
+  const archive = typeof source === "string"
+    ? undefined
+    : await readSkillZip(source, name);
+  const text = typeof source === "string" ? source : archive?.markdown;
+  if (text === undefined) return;
+  const proposed = parseCreationOptions(name, text);
+  if (!proposed || (archive && proposed.files !== undefined)) return;
+  const input = archive ? { ...proposed, files: archive.files } : proposed;
   const markdown = buildPendingSkillMarkdown(input);
   if (new TextEncoder().encode(markdown).length > maxDraftBytes) return;
   const [proposalDigest, draftDigest] = await Promise.all([
-    computeSkillHash(source),
+    typeof source === "string"
+      ? computeSkillHash(source)
+      : computeSkillBytesHash(source),
     computeSkillHash(markdown),
   ]);
   const receipt = registry.creation(workspace, name);
@@ -721,7 +759,10 @@ export function createSkillLoader(options: SkillLoaderOptions): SkillLoader {
         const result = await author.create(proposal.input, () => {
           if (
             !isCurrentOwner() ||
-            readProposalText(approvals.workspace, name) !== proposal.source
+            !sameProposalSource(
+              readProposalSource(approvals.workspace, name),
+              proposal.source,
+            )
           ) return false;
           receipt = approvals.registry.reserveCreation(
             approvals.workspace,

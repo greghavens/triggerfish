@@ -5,6 +5,8 @@ import {
   assertStringIncludes,
 } from "@std/assert";
 import { join } from "@std/path";
+import { Buffer } from "node:buffer";
+import { deflateRawSync } from "node:zlib";
 import { createProviderRegistry } from "../../src/agent/llm.ts";
 import type { HookType } from "../../src/core/policy/rules.ts";
 import {
@@ -16,13 +18,17 @@ import { createChatSession } from "../../src/gateway/chat.ts";
 import { createGatewayServer } from "../../src/gateway/server/server.ts";
 import { discoverSkills } from "../../src/gateway/startup/infra/subsystems.ts";
 import { resolveToolsForProfile } from "../../src/gateway/tools/defs/tool_profile_defs.ts";
-import { computeSkillHash } from "../../src/tools/skills/integrity.ts";
+import {
+  computeSkillBytesHash,
+  computeSkillHash,
+} from "../../src/tools/skills/integrity.ts";
 import {
   createSkillAuthor,
   createSkillContextTracker,
   createSkillScanner,
   createSkillToolExecutor,
 } from "../../src/tools/skills/mod.ts";
+import { skillZipChecksum } from "../../src/tools/skills/skill_zip.ts";
 
 type OwnerTurn = (
   name: string,
@@ -1232,6 +1238,192 @@ Deno.test("Approved skill package documents bind exact content without extractin
         false,
       );
     });
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+/** Construct a small deflated fixture without relying on the host's ZIP CLI. */
+function skillZipFixture(
+  files: readonly {
+    path: string;
+    text: string;
+    mode?: number;
+    checksum?: number;
+  }[],
+) {
+  const body: Buffer[] = [];
+  const directory: Buffer[] = [];
+  let offset = 0;
+  for (const { path, text, mode = 0o100644, checksum } of files) {
+    const name = Buffer.from(path);
+    const original = Buffer.from(text);
+    const compressed = deflateRawSync(original);
+    const crc = checksum ?? skillZipChecksum(original);
+    const local = Buffer.alloc(30);
+    local.writeUInt32LE(0x04034b50, 0);
+    local.writeUInt16LE(20, 4);
+    local.writeUInt16LE(8, 8);
+    local.writeUInt32LE(crc, 14);
+    local.writeUInt32LE(compressed.length, 18);
+    local.writeUInt32LE(original.length, 22);
+    local.writeUInt16LE(name.length, 26);
+    const central = Buffer.alloc(46);
+    central.writeUInt32LE(0x02014b50, 0);
+    central.writeUInt16LE(0x0314, 4);
+    central.writeUInt16LE(20, 6);
+    central.writeUInt16LE(8, 10);
+    central.writeUInt32LE(crc, 16);
+    central.writeUInt32LE(compressed.length, 20);
+    central.writeUInt32LE(original.length, 24);
+    central.writeUInt16LE(name.length, 28);
+    central.writeUInt32LE((mode << 16) >>> 0, 38);
+    central.writeUInt32LE(offset, 42);
+    body.push(local, name, compressed);
+    directory.push(central, name);
+    offset += local.length + name.length + compressed.length;
+  }
+  const index = Buffer.concat(directory);
+  const footer = Buffer.alloc(22);
+  footer.writeUInt32LE(0x06054b50, 0);
+  footer.writeUInt16LE(files.length, 8);
+  footer.writeUInt16LE(files.length, 10);
+  footer.writeUInt32LE(index.length, 12);
+  footer.writeUInt32LE(offset, 16);
+  return Buffer.concat([...body, index, footer]);
+}
+
+Deno.test("Owner stages a bounded ZIP as an exact pending skill through the gateway", async () => {
+  assertEquals(skillZipChecksum(Buffer.from("123456789")), 0xcbf4_3926);
+  const dir = await Deno.makeTempDir();
+  const workspace = join(dir, "workspaces", "main", "skills");
+  const name = "fixture-zip-package";
+  const archive = join(workspace, ".proposals", name + ".zip");
+  const selector = { skill_name: name };
+  const read = { ...selector, type: "USER_PROVIDED" };
+  const file = "references/status.txt";
+  const main = {
+    path: name + "/SKILL.md",
+    text: [
+      "---",
+      "name: " + name,
+      "description: Verified ZIP fixture",
+      "classification_ceiling: INTERNAL",
+      "---",
+      "Review retained status evidence.",
+    ].join("\n"),
+  };
+  const reference = {
+    path: name + "/" + file,
+    text: "Exact package checkpoint.",
+  };
+  const valid = skillZipFixture([main, reference]);
+  const modified = skillZipFixture([main, {
+    ...reference,
+    text: "Changed checkpoint.",
+  }]);
+  let replaceOnConfirm = false;
+  let hook: HookType | undefined;
+  let savedArgs: Record<string, unknown> = {};
+  let approvedReceiptId = "";
+  try {
+    await Deno.mkdir(join(workspace, ".proposals"), { recursive: true });
+    await withGateway(
+      dir,
+      async () => {
+        if (replaceOnConfirm) await Deno.writeFile(archive, modified);
+        return true;
+      },
+      () => hook,
+      async (turn) => {
+        for (
+          const invalid of [
+            { ...reference, path: name + "/references/../../escape.txt" },
+            { ...reference, path: name + "/references/executable.sh" },
+            { ...reference, mode: 0o100755 },
+            { ...reference, mode: 0o120777 },
+            { ...reference, checksum: 0 },
+            { ...reference, text: "x".repeat(8193) },
+          ]
+        ) {
+          await Deno.writeFile(archive, skillZipFixture([main, invalid]));
+          assertStringIncludes(
+            (await turn("inspect_skill_creation", selector)).result,
+            "proposal or destination is unavailable",
+          );
+        }
+        await Deno.writeFile(archive, valid);
+        hook = "POST_TOOL_RESPONSE";
+        assertEquals(
+          (await turn("inspect_skill_creation", selector)).result,
+          "Tool response withheld by policy.",
+        );
+        hook = undefined;
+        const prepared = JSON.parse(
+          (await turn("inspect_skill_creation", selector)).result,
+        );
+        assertEquals(
+          prepared.proposal_digest,
+          await computeSkillBytesHash(new Uint8Array(valid)),
+        );
+        assertEquals(prepared.reviewable, true);
+        savedArgs = {
+          ...selector,
+          proposal_digest: prepared.proposal_digest,
+          draft_digest: prepared.draft_digest,
+        };
+        replaceOnConfirm = true;
+        assertStringIncludes(
+          (await turn("create_skill", savedArgs)).result,
+          "changed before creation",
+        );
+        replaceOnConfirm = false;
+        await Deno.writeFile(archive, valid);
+        const staged = JSON.parse(
+          (await turn("create_skill", savedArgs)).result,
+        );
+        assertEquals(staged.initial_status, "PENDING_APPROVAL");
+        const inactive = JSON.parse((await turn("read_skill", read)).result);
+        assertEquals(inactive.found, false);
+        const approved = JSON.parse(
+          (await turn("approve_skill", {
+            ...selector,
+            digest: prepared.draft_digest,
+          })).result,
+        );
+        approvedReceiptId = approved.approval.receiptId;
+        assertEquals(
+          JSON.parse((await turn("read_skill", read)).result)
+            .approval_receipt_id,
+          approvedReceiptId,
+        );
+        const names = [];
+        for await (const entry of Deno.readDir(join(workspace, name))) {
+          names.push(entry.name);
+        }
+        assertEquals(names, ["SKILL.md"]);
+      },
+    );
+    await withGateway(
+      dir,
+      () => Promise.resolve(true),
+      () => undefined,
+      async (turn) => {
+        const duplicate = JSON.parse(
+          (await turn("create_skill", savedArgs)).result,
+        );
+        assertEquals(
+          duplicate.creation.proposalDigest,
+          savedArgs.proposal_digest,
+        );
+        const saved = JSON.parse(
+          (await turn("inspect_skill_document", { ...read, file })).result,
+        );
+        assertEquals(saved.approval_receipt_id, approvedReceiptId);
+        assertEquals(saved.file_digest, await computeSkillHash(reference.text));
+        assertStringIncludes(saved.content, reference.text);
+      },
+    );
   } finally {
     await Deno.remove(dir, { recursive: true });
   }

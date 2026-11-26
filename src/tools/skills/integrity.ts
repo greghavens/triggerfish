@@ -32,8 +32,13 @@ export interface SkillHashRecord {
  * Uses the Web Crypto API for consistent cross-platform hashing.
  */
 export async function computeSkillHash(content: string): Promise<string> {
-  const encoder = new TextEncoder();
-  const data = encoder.encode(content);
+  return await computeSkillBytesHash(new TextEncoder().encode(content));
+}
+
+/** Compute an exact digest for a binary proposal without text normalization. */
+export async function computeSkillBytesHash(
+  data: Uint8Array<ArrayBuffer>,
+): Promise<string> {
   const hashBuffer = await crypto.subtle.digest("SHA-256", data);
   const hashArray = new Uint8Array(hashBuffer);
   return Array.from(hashArray)

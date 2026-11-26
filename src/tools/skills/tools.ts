@@ -226,7 +226,7 @@ export function buildSkillAdministrationToolDefinitions(): readonly ToolDefiniti
   }, {
     name: "inspect_skill_creation",
     description:
-      "Read metadata and digests for one named skill creation proposal. An owner prepares .proposals/<skill_name>.md inside the configured workspace skills directory, with name, description, classification_ceiling, optional requires_tools and network_domains, and a Markdown body. Review the proposal file before requesting creation.",
+      "Read metadata and digests for one named skill creation proposal. Prepare either .proposals/<skill_name>.md or .proposals/<skill_name>.zip under the configured workspace skills directory. ZIP packages contain SKILL.md and optional text documents under references/. Review the proposal before requesting creation.",
     parameters: {
       skill_name: {
         type: "string",

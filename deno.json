@@ -33,6 +33,7 @@
     "gpt-tokenizer": "npm:gpt-tokenizer@^2",
     "qrcode": "npm:qrcode@^1.5.4",
     "re2js": "npm:re2js@2.10.0",
+    "yauzl": "npm:yauzl@3.4.0",
     "pyodide": "https://cdn.jsdelivr.net/pyodide/v0.27.0/full/pyodide.mjs"
   },
   "exclude": [
