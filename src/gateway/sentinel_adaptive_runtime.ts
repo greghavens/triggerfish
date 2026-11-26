@@ -1,3 +1,4 @@
+import { notifyCommittedEvidence } from "../core/evidence_task_progression.ts";
 import { readLinkedFindingProof } from "./sentinel_linked_findings.ts";
 import { reopenSentinelAssignedInventory } from "./sentinel_inventory_tool.ts";
 import { createEvidencePlanningGate } from "../core/evidence_task_progression.ts";
@@ -583,7 +584,13 @@ function supersedeStalePlanProposals(
   revision: string,
 ) {
   const decisions = plannerDecisions(snapshotPath, state.revision);
-  const hintId = store.caseHints(1, undefined, state.revision)[0]?.id;
+  const hintId = store.caseHints(
+    1,
+    undefined,
+    state.revision,
+    false,
+    state.plan.runId,
+  )[0]?.id;
   store.supersedeStaleDependencyChanges(
     revision,
     modelRoundIdentity(
@@ -1224,6 +1231,23 @@ export function addSentinelCaseHint(snapshotPath: string, text: string) {
   }
 }
 
+export function sentinelHintAssetsInScope(
+  path: string,
+  state: State,
+  assetIds: readonly string[],
+): boolean {
+  const members = operatingConstraints(path, state)?.constraints
+    .allowedAssetIds;
+  const published = new Set(
+    state.result?.sharedGraph.snapshot?.nodes.flatMap(({ kind, id }) =>
+      kind === "asset" ? [id] : []
+    ),
+  );
+  return assetIds.every((id) =>
+    published.has(id) && (!members || members.includes(id))
+  );
+}
+
 /** Save owner guidance against the exact current evidence revision. */
 export function recordOperatorSentinelRunHint(
   snapshotPath: string,
@@ -1231,22 +1255,62 @@ export function recordOperatorSentinelRunHint(
   requestId: string,
   note: string,
   operatorScope = "owner",
+  assetIds?: readonly string[],
 ) {
-  return withSentinelAssessmentWriteLock(snapshotPath, (state) => {
-    if (!state?.active || state.revision !== revision) return undefined;
+  const saved = withSentinelAssessmentWriteLock(snapshotPath, (state) => {
+    if (
+      !state?.active || state.revision !== revision ||
+      (assetIds && !sentinelHintAssetsInScope(snapshotPath, state, assetIds))
+    ) return;
+    const runId = state.plan.runId ?? "sentinel-assessment";
     const store = openSentinelAdaptiveStore(storePath(snapshotPath));
     try {
-      return store.addOperatorCaseHint(
+      const receipt = store.addOperatorCaseHint(
         note,
         revision,
         requestId,
         operatorScope,
-        state.plan.runId ?? "sentinel-assessment",
+        runId,
+        assetIds,
       );
+      return receipt && { receipt, runId };
     } finally {
       store.close();
     }
   });
+  const caseId = assetIds && locateSentinelCase(snapshotPath)?.caseId;
+  if (saved && caseId) {
+    notifyCommittedEvidence({
+      case: caseId,
+      revision,
+      run_id: saved.runId,
+      observation_id: `operator-hint:${saved.receipt.id}`,
+    });
+  }
+  return saved?.receipt;
+}
+
+/** Reopen an exact recorded asset hint before requesting approval again. */
+export function readSentinelOperatorAssetHint(
+  path: string,
+  state: State,
+  requestId: string,
+  text: string,
+  assetIds: readonly string[],
+) {
+  const store = openSentinelAdaptiveStore(storePath(path));
+  try {
+    return store.readOperatorCaseHint(
+      text,
+      state.revision,
+      requestId,
+      "owner",
+      state.plan.runId ?? "sentinel-assessment",
+      assetIds,
+    );
+  } finally {
+    store.close();
+  }
 }
 
 export function readSentinelCaseHints(
@@ -1254,6 +1318,8 @@ export function readSentinelCaseHints(
   limit: number,
   before?: number,
   revision?: number,
+  caseWideOnly = false,
+  anchorRunId?: string,
 ) {
   const path = storePath(snapshotPath);
   try {
@@ -1264,7 +1330,7 @@ export function readSentinelCaseHints(
   }
   const store = openSentinelAdaptiveStore(path);
   try {
-    return store.caseHints(limit, before, revision);
+    return store.caseHints(limit, before, revision, caseWideOnly, anchorRunId);
   } finally {
     store.close();
   }
@@ -1394,7 +1460,13 @@ export function readAdaptiveSentinel(
       modelPlanner: store.modelPlanStatus(
         modelRoundIdentity(
           adaptiveRevision(state),
-          store.caseHints(1, undefined, state.revision)[0]?.id,
+          store.caseHints(
+            1,
+            undefined,
+            state.revision,
+            false,
+            state.plan.runId,
+          )[0]?.id,
           plannerDecisions(snapshotPath, state.revision),
           [
             ...store.plannerObservations(revision),
@@ -3800,6 +3872,8 @@ export function createSentinelModelPlanner(
       limit,
       undefined,
       state.revision,
+      false,
+      state.plan.runId,
     );
   }
 
@@ -5363,6 +5437,11 @@ export function createSentinelModelPlanner(
         const observedCriteria = new Set(
           goalCompletion?.observations.map(({ criterionId }) => criterionId),
         );
+        const assetHints = hints.flatMap(({ id, text, assetIds }) =>
+          assetIds && sentinelHintAssetsInScope(snapshotPath, state, assetIds)
+            ? [{ id, text, assetIds }]
+            : []
+        );
         const inputs = {
           ...(heartbeat && { wakeReason: "idle_planner_check" }),
           ...(state.plan.linkedCaseSources && {
@@ -5395,7 +5474,10 @@ export function createSentinelModelPlanner(
             digest: constraints.digest,
             restrictions: constraints.constraints,
           },
-          operatorHints: hints.map(({ text }) => text),
+          operatorHints: hints.filter(({ assetIds }) => !assetIds).map((
+            { text },
+          ) => text),
+          ...(assetHints.length && { operatorAssetHints: assetHints }),
           operatorDecisions: {
             findings: findingInputs.map((
               { findingId, disposition },
@@ -5490,7 +5572,11 @@ export function createSentinelModelPlanner(
               1,
             );
           } else if (inputs.operatorHints.length) inputs.operatorHints.pop();
-          else if (inputs.operatorDecisions.findings.length) {
+          else if (
+            inputs.operatorAssetHints && inputs.operatorAssetHints.length > 1
+          ) {
+            inputs.operatorAssetHints.pop();
+          } else if (inputs.operatorDecisions.findings.length) {
             inputs.operatorDecisions.findings.pop();
           } else if (inputs.operatorDecisions.incidents.length) {
             inputs.operatorDecisions.incidents.pop();
@@ -5667,9 +5753,11 @@ export function createSentinelModelPlanner(
                   digest: constraints.digest,
                 },
               }),
-              hintIds: hints.slice(0, inputs.operatorHints.length).map(
-                ({ id }) => id,
-              ),
+              hintIds: [
+                ...hints.filter(({ assetIds }) => !assetIds)
+                  .slice(0, inputs.operatorHints.length).map(({ id }) => id),
+                ...inputs.operatorAssetHints?.map(({ id }) => id) ?? [],
+              ],
               findingReviewIds: findingInputs.slice(
                 0,
                 inputs.operatorDecisions.findings.length,

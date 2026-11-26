@@ -1,3 +1,4 @@
+import { normalizeSentinelHintAssets } from "../sentinel/adaptive_store.ts";
 import { applyOperatorRunBatch } from "./operator_run_batch_control.ts";
 import {
   isSentinelModelRole,
@@ -251,9 +252,11 @@ import {
   readSentinelAdaptiveEvidenceMapping,
   readSentinelIntermediateWorkflowObservations,
   readSentinelModelSettings,
+  readSentinelOperatorAssetHint,
   readSentinelTaskQueue,
   readSentinelWorkflowPublicationStep,
   reviewSentinelGraphRetries,
+  sentinelHintAssetsInScope,
   submitSentinelAssignmentIntent,
   updateSentinelWorkerLimit,
 } from "./sentinel_adaptive_runtime.ts";
@@ -835,6 +838,12 @@ export const operatorRunTool: ToolDefinition = {
     factId: {
       type: "string",
       description: "Exact retained Sentinel graph fact ID",
+    },
+    assetIds: {
+      type: "array",
+      items: { type: "string" },
+      description:
+        "Up to four exact local asset IDs to anchor a Sentinel planner hint.",
     },
     taskIds: {
       type: "array",
@@ -8814,9 +8823,34 @@ ${
           typeof args.requestId !== "string" ||
           !digestPattern.test(args.requestId)
         ) return unavailable;
+        const assetIds = normalizeSentinelHintAssets(args.assetIds);
+        if (args.assetIds !== undefined) {
+          if (
+            !assetIds || ref.revision === undefined ||
+            !canFlowTo("INTERNAL", context?.ceiling ?? "INTERNAL")
+          ) return unavailable;
+          const run = await controller.inspect(ref);
+          if (!run) return unavailable;
+          const path = resolveSentinelCasePath(options.baseDir, ref.id);
+          const current = readSentinelAssessment(path);
+          if (
+            !current?.active || current.revision !== ref.revision ||
+            !sentinelHintAssetsInScope(path, current, assetIds)
+          ) return unavailable;
+          const prior = readSentinelOperatorAssetHint(
+            path,
+            current,
+            args.requestId.toLowerCase(),
+            args.note.trim(),
+            assetIds,
+          );
+          if (prior === null) return unavailable;
+          if (prior) return safeProjection({ run });
+        }
         control = {
           note: args.note.trim(),
           requestId: args.requestId.toLowerCase(),
+          ...(assetIds && { assetIds }),
         };
       }
       if (

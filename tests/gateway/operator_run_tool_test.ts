@@ -3306,6 +3306,49 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
       assertEquals(initialPolicy?.membership, childApproval.membership);
       assertEquals(initialPolicy?.version, 1);
       assert(readSentinelAssessment(path)?.plan.goal !== childGoal);
+      const anchoredHint = {
+        action: "hint",
+        ...linkedSentinel.run.ref,
+        requestId: crypto.randomUUID(),
+        note: "Review logging on this asset first.",
+        assetIds: ["child-asset"],
+      };
+      const noAnchorApproval = confirmations.length;
+      for (const id of ["other-child-asset", "asset-from-another-case"]) {
+        assertStringIncludes(
+          (await turn({ ...anchoredHint, assetIds: [id] })).result,
+          "unavailable",
+        );
+      }
+      assertEquals(confirmations.length, noAnchorApproval);
+      approved = false;
+      assertStringIncludes(
+        (await turn(anchoredHint)).result,
+        "operator declined",
+      );
+      approved = true;
+      assertEquals(readSentinelCaseHints(childPath, 10), []);
+      assertEquals(
+        JSON.parse((await turn(anchoredHint)).result).run.ref,
+        linkedSentinel.run.ref,
+      );
+      const [savedAnchor] = readSentinelCaseHints(childPath, 10);
+      assertEquals(savedAnchor.assetIds, anchoredHint.assetIds);
+      assertEquals(
+        readSentinelCaseHints(
+          childPath,
+          10,
+          undefined,
+          childState.revision,
+          true,
+        ),
+        [],
+      );
+      assertEquals(
+        JSON.parse(confirmations.at(-1)!.split("\n").at(-1)!).assetIds,
+        anchoredHint.assetIds,
+      );
+
       const readSeed = () =>
         readAdaptiveSentinel(childPath, childState)?.tasks.filter(
           (task) =>
@@ -3320,6 +3363,7 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
       let initialInvestigations: unknown;
       let initialGoalCompletion: unknown;
       let initialPlannerRestrictions: unknown;
+      let initialAssetHints: unknown;
       const childPlanner = createSentinelModelPlanner(
         childPath,
         (_state, taskId) => ({
@@ -3330,6 +3374,7 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
               plannerObjective = initialPlan.goal;
               initialInvestigations = initialPlan.currentInvestigations;
               initialGoalCompletion = initialPlan.goalCompletion;
+              initialAssetHints = initialPlan.operatorAssetHints;
               initialPlannerRestrictions = initialPlan.operatingConstraints
                 ?.restrictions;
             }
@@ -3350,6 +3395,11 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
         await until(() => plannerObjective !== undefined);
         assertEquals(plannerObjective, childGoal);
         assertEquals(initialPlannerRestrictions, initialPolicy?.constraints);
+        assertEquals(initialAssetHints, [{
+          id: savedAnchor.id,
+          text: anchoredHint.note,
+          assetIds: anchoredHint.assetIds,
+        }]);
         assert(
           JSON.stringify(initialGoalCompletion).includes(
             childCriterion.reference,
@@ -3365,6 +3415,13 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
       } finally {
         childPlanner.stop();
       }
+      const linkedProvenance = JSON.parse(renderSentinelProvenanceJson(
+        childCase,
+        childState,
+        readAdaptiveSentinel(childPath, childState, "revision") ?? undefined,
+        childPath,
+      ));
+      assertEquals(linkedProvenance.planningHints, [savedAnchor]);
       const lastApproval = confirmations.length;
       await withGateway(async (reopenTurn) => {
         const reopened = JSON.parse((await reopenTurn(sentinelSpawn)).result);
@@ -3401,7 +3458,16 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
             "unavailable",
           );
         }
+        assertEquals(
+          JSON.parse((await reopenTurn(anchoredHint)).result).run.ref,
+          linkedSentinel.run.ref,
+        );
+        assertStringIncludes(
+          (await reopenTurn({ ...anchoredHint, note: "Changed hint." })).result,
+          "unavailable",
+        );
         assertEquals(confirmations.length, lastApproval);
+        assertEquals(readSentinelCaseHints(childPath, 10), [savedAnchor]);
         advanceAdaptiveSentinel(childPath, childState);
         assertEquals(readSeed(), [committedSeed]);
         assertEquals(

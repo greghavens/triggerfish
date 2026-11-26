@@ -2642,7 +2642,7 @@ export function projectCaseHints(
   before?: number,
   revision?: number,
 ) {
-  const hints = readSentinelCaseHints(path, limit + 1, before, revision);
+  const hints = readSentinelCaseHints(path, limit + 1, before, revision, true);
   const page = hints.slice(0, limit);
   return boundResult({
     hints: page,

@@ -860,6 +860,21 @@ export interface AdaptiveTask extends AdaptiveTaskRequest {
   readonly leaseExpiresAt?: string;
 }
 
+/** Normalize asset references carried by a reviewed operator hint. */
+export function normalizeSentinelHintAssets(
+  value: unknown,
+): string[] | undefined {
+  if (
+    !Array.isArray(value) || !value.length || value.length > 4 ||
+    new Set(value).size !== value.length ||
+    value.some((id) =>
+      typeof id !== "string" || !id.trim() ||
+      id.length > 100 || id.includes("\0")
+    )
+  ) return;
+  return [...value].sort();
+}
+
 export interface AdaptiveGraphRetryScope {
   readonly requestId: string;
   readonly runId: string;
@@ -3069,8 +3084,16 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
       id INTEGER PRIMARY KEY,
       evidenceRevision INTEGER NOT NULL,
       at INTEGER NOT NULL,
-      text TEXT NOT NULL
+      text TEXT NOT NULL,
+      assetIds TEXT
     )`);
+    if (
+      !db.prepare("PRAGMA table_info(adaptive_case_hints)").all().some((
+        { name },
+      ) => name === "assetIds")
+    ) {
+      db.exec("ALTER TABLE adaptive_case_hints ADD COLUMN assetIds TEXT");
+    }
     db.exec(`CREATE TABLE IF NOT EXISTS adaptive_operator_case_hint_requests (
       requestId TEXT PRIMARY KEY,
       operatorScope TEXT NOT NULL,
@@ -3122,14 +3145,64 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
     const active = getActive.get()?.revision;
     return typeof active === "string" ? active : null;
   };
+  function hintAssets(
+    row: { assetIds?: unknown },
+  ): { assetIds?: readonly string[] } {
+    if (row.assetIds == null) return {};
+    const assetIds = normalizeSentinelHintAssets(
+      JSON.parse(String(row.assetIds)),
+    );
+    if (!assetIds) {
+      throw new Error("Invalid saved Sentinel hint asset references");
+    }
+    return { assetIds };
+  }
+
+  function readOperatorCaseHint(
+    hint: string,
+    revision: number,
+    requestId: string,
+    operatorScope: string,
+    runId: string,
+    anchors?: readonly string[],
+  ) {
+    const existing = db.prepare(`
+      SELECT hint.id, hint.evidenceRevision, hint.at, hint.text, hint.assetIds, request.runId, request.operatorScope
+      FROM adaptive_operator_case_hint_requests AS request
+      JOIN adaptive_case_hints AS hint ON hint.id = request.hintId
+      WHERE request.requestId = ?
+    `).get(requestId);
+    if (existing) {
+      if (
+        existing.evidenceRevision !== revision || existing.text !== hint ||
+        existing.runId !== runId ||
+        existing.operatorScope !== operatorScope ||
+        !isDeepStrictEqual(hintAssets(existing).assetIds, anchors)
+      ) return null;
+      return {
+        id: Number(existing.id),
+        revision,
+        at: new Date(Number(existing.at)).toISOString(),
+        text: hint,
+        ...(anchors && { assetIds: anchors }),
+      };
+    }
+  }
+
   function appendCaseHint(
     hint: string,
     evidenceRevision: number,
     time: number,
+    assetIds?: readonly string[],
   ) {
     const result = db.prepare(
-      "INSERT INTO adaptive_case_hints (evidenceRevision, at, text) VALUES (?, ?, ?)",
-    ).run(evidenceRevision, time, hint);
+      "INSERT INTO adaptive_case_hints (evidenceRevision, at, text, assetIds) VALUES (?, ?, ?, ?)",
+    ).run(
+      evidenceRevision,
+      time,
+      hint,
+      assetIds ? JSON.stringify(assetIds) : null,
+    );
     const revision = activeRevision();
     if (revision) {
       const affected = db.prepare(`SELECT id, attempts FROM adaptive_tasks
@@ -7967,6 +8040,8 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
       );
     },
 
+    readOperatorCaseHint,
+
     /** The trusted gateway holds the assessment revision lock around this write. */
     addOperatorCaseHint(
       text: string,
@@ -7974,7 +8049,10 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
       requestId: string,
       operatorScope: string,
       runId: string,
+      assetIds?: readonly string[],
     ) {
+      const anchors = normalizeSentinelHintAssets(assetIds);
+      if (assetIds !== undefined && !anchors) return;
       const hint = boundedText(text, "case hint", 1000);
       operatorScope = boundedText(operatorScope, "operator scope", 256);
       runId = boundedText(runId, "case hint run ID", 256);
@@ -7984,26 +8062,22 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
         !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(requestId)
       ) return undefined;
       return transaction(db, () => {
-        const existing = db.prepare(`
-          SELECT hint.id, hint.evidenceRevision, hint.at, hint.text, request.runId, request.operatorScope
-          FROM adaptive_operator_case_hint_requests AS request
-          JOIN adaptive_case_hints AS hint ON hint.id = request.hintId
-          WHERE request.requestId = ?
-        `).get(requestId);
-        if (existing) {
-          if (
-            existing.evidenceRevision !== revision || existing.text !== hint ||
-            existing.runId !== runId || existing.operatorScope !== operatorScope
-          ) return undefined;
-          return {
-            id: Number(existing.id),
-            revision,
-            at: new Date(Number(existing.at)).toISOString(),
-            text: hint,
-          };
-        }
+        const existing = readOperatorCaseHint(
+          hint,
+          revision,
+          requestId,
+          operatorScope,
+          runId,
+          anchors,
+        );
+        if (existing !== undefined) return existing ?? undefined;
         const time = now();
-        const { lastInsertRowid } = appendCaseHint(hint, revision, time);
+        const { lastInsertRowid } = appendCaseHint(
+          hint,
+          revision,
+          time,
+          anchors,
+        );
         db.prepare(
           "INSERT INTO adaptive_operator_case_hint_requests VALUES (?, ?, ?, ?)",
         ).run(
@@ -8017,6 +8091,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
           revision,
           at: new Date(time).toISOString(),
           text: hint,
+          ...(anchors && { assetIds: anchors }),
         };
       });
     },
@@ -8024,7 +8099,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
     caseHintsById(ids: readonly number[]) {
       if (!ids.length) return [];
       return db.prepare(`
-        SELECT id, evidenceRevision, at, text FROM adaptive_case_hints
+        SELECT id, evidenceRevision, at, text, assetIds FROM adaptive_case_hints
         WHERE id IN (SELECT value FROM json_each(?))
         ORDER BY id
       `).all(JSON.stringify(ids)).map((row) => ({
@@ -8032,19 +8107,34 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
         revision: Number(row.evidenceRevision) || null,
         at: new Date(Number(row.at)).toISOString(),
         text: String(row.text),
+        ...hintAssets(row),
       }));
     },
 
-    caseHints(limit: number, before?: number, revision?: number) {
+    caseHints(
+      limit: number,
+      before?: number,
+      revision?: number,
+      caseWideOnly = false,
+      anchorRunId?: string,
+    ) {
       return db.prepare(`
-        SELECT * FROM adaptive_case_hints
-        WHERE (? IS NULL OR id < ?) AND (? IS NULL OR evidenceRevision <= ?)
-        ORDER BY id DESC LIMIT ?
+        SELECT hint.* FROM adaptive_case_hints AS hint
+        WHERE (? IS NULL OR hint.id < ?) AND (? IS NULL OR hint.evidenceRevision <= ?)
+          AND (? = 0 OR hint.assetIds IS NULL)
+          AND (? IS NULL OR hint.assetIds IS NULL OR EXISTS (
+            SELECT 1 FROM adaptive_operator_case_hint_requests AS request
+            WHERE request.hintId = hint.id AND request.runId = ?
+          ))
+        ORDER BY hint.id DESC LIMIT ?
       `).all(
         before ?? null,
         before ?? null,
         revision ?? null,
         revision ?? null,
+        Number(caseWideOnly),
+        anchorRunId ?? null,
+        anchorRunId ?? null,
         limit,
       )
         .map((row) => ({
@@ -8052,6 +8142,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
           revision: Number(row.evidenceRevision) || null,
           at: new Date(Number(row.at)).toISOString(),
           text: String(row.text),
+          ...hintAssets(row),
         }));
     },
 

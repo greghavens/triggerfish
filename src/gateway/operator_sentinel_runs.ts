@@ -513,6 +513,8 @@ export function createOperatorSentinelRuns(
             ref.revision,
             context.requestId,
             context.note,
+            undefined,
+            context.assetIds,
           )
           ? inspect(ref)
           : undefined;

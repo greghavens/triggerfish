@@ -64,6 +64,7 @@ export interface OperatorRunMutationContext {
   readonly note?: string;
   readonly taskId?: string;
   readonly expectedRunId?: string;
+  readonly assetIds?: readonly string[];
 }
 
 export interface OperatorRunProvider {
@@ -721,12 +722,17 @@ export class OperatorRunController {
     if (!await this.options.authorize(action, ref)) return undefined;
     const mutate = this.options.providers[ref.kind]?.mutations?.[action];
     if (!mutate) return undefined;
-    const { requestId, note, taskId, expectedRunId } = context ?? {};
+    const { requestId, note, taskId, expectedRunId, assetIds } = context ?? {};
     if (
       (requestId !== undefined && !bounded(requestId, 128)) ||
       (note !== undefined && !bounded(note, 4096)) ||
       (taskId !== undefined && !bounded(taskId, 256)) ||
-      (expectedRunId !== undefined && !bounded(expectedRunId, 128))
+      (expectedRunId !== undefined && !bounded(expectedRunId, 128)) ||
+      (assetIds !== undefined &&
+        (action !== "hint" || !Array.isArray(assetIds) ||
+          !assetIds.length || assetIds.length > 4 ||
+          new Set(assetIds).size !== assetIds.length ||
+          assetIds.some((id) => !bounded(id, 100))))
     ) throw new Error("Invalid operator run mutation context");
     // Starts target a configured plan ID. All other actions target an existing run.
     const exact = action === "start" ? ref : (await this.inspect(ref))?.ref;
@@ -742,6 +748,7 @@ export class OperatorRunController {
         note,
         taskId,
         ...(expectedRunId !== undefined && { expectedRunId }),
+        ...(assetIds && { assetIds }),
       },
     );
     if (!result) return undefined;
