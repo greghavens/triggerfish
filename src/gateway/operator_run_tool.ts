@@ -1199,6 +1199,11 @@ export const operatorRunTool: ToolDefinition = {
       type: "integer",
       description: "Number of UTC days to report.",
     },
+    includeRetainedTopology: {
+      type: "boolean",
+      description:
+        "Include currently authorized linked topology receipts in the exact case tool usage report.",
+    },
     toolUsageAfter: {
       type: "string",
       description: "Cursor from the prior retained tool usage totals page.",
@@ -1798,6 +1803,9 @@ export function sentinelOperatorCaseReadParameterAllowed(
   action: unknown,
   parameter: string,
 ): boolean {
+  if (parameter === "includeRetainedTopology") {
+    return action === "case_local_tool_usage";
+  }
   if (parameter === "findingId" || parameter === "before") {
     return action === "decision_history";
   }
@@ -8993,20 +9001,42 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
         return page ? safeProjection({ run: ref, page }) : unavailable;
       }
       if (action === "case_local_tool_usage") {
+        const includeTopology = args.includeRetainedTopology;
         if (
           ref.kind !== "sentinel" || ref.revision === undefined ||
           typeof args.runId !== "string" || !digestPattern.test(args.runId) ||
+          (includeTopology !== undefined &&
+            typeof includeTopology !== "boolean") ||
           Object.keys(args).some((key) =>
-            !["action", "kind", "id", "revision", "runId"].includes(key)
+            ![
+              "action",
+              "kind",
+              "id",
+              "revision",
+              "runId",
+              "includeRetainedTopology",
+            ].includes(key)
           ) ||
           !await controller.inspect(ref)
         ) return unavailable;
+        const path = resolveSentinelCasePath(options.baseDir, ref.id);
+        const revision = ref.revision;
         const usage = await readAuthorizedSentinelLocalToolUsage(
-          resolveSentinelCasePath(options.baseDir, ref.id),
+          path,
           ref.id,
-          ref.revision,
+          revision,
           args,
           context,
+          includeTopology === true
+            ? (step) =>
+              reopenSentinelSourceResult(
+                options.baseDir,
+                path,
+                revision,
+                step,
+                step.goalReceiptRead.args,
+              )
+            : undefined,
         );
         return usage?.runId === args.runId
           ? safeProjection({ run: ref, ...usage })

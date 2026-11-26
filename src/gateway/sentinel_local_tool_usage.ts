@@ -1,6 +1,9 @@
 import { isDeepStrictEqual } from "node:util";
 import { canFlowTo } from "../core/types/classification.ts";
-import { readSentinelLocalUsageSteps } from "../sentinel/local_tool_usage.ts";
+import {
+  readSentinelLocalUsageSteps,
+  type SentinelLocalUsageStep,
+} from "../sentinel/local_tool_usage.ts";
 import type { OperatorRunToolContext } from "./operator_run_tool.ts";
 import { readSentinelFindingReceiptScope } from "./sentinel_worker_findings.ts";
 
@@ -11,6 +14,12 @@ export async function readAuthorizedSentinelLocalToolUsage(
   revision: number,
   args: Record<string, unknown>,
   context: OperatorRunToolContext | undefined,
+  reopenTopology?: (
+    step: Extract<
+      SentinelLocalUsageStep,
+      { tool: "sentinel_shared_topology_source" }
+    >,
+  ) => Promise<string | undefined>,
 ) {
   const owner = context?.authorizeOwnerRunCall;
   const authorizeTrace = context?.authorizeSentinelTraceRead;
@@ -25,10 +34,18 @@ export async function readAuthorizedSentinelLocalToolUsage(
     if (!currentCase()) return;
     const scope = readSentinelFindingReceiptScope(path, revision);
     if (!scope || scope.runId !== args.runId) return;
-    const rows = readSentinelLocalUsageSteps(path, revision, scope.runId);
+    const rows = readSentinelLocalUsageSteps(
+      path,
+      revision,
+      scope.runId,
+      reopenTopology !== undefined,
+    );
     if (
       !rows ||
-      rows.some((step) => "target" in step && !scope.allows(step.target))
+      rows.some((step) =>
+        ("target" in step && !scope.allows(step.target)) ||
+        ("assignedTarget" in step && !scope.allows(step.assignedTarget))
+      )
     ) return;
     return { runId: scope.runId, rows };
   };
@@ -49,7 +66,11 @@ export async function readAuthorizedSentinelLocalToolUsage(
         plannerIdentity: step.plannerIdentity,
         attempt: step.attempt,
       };
-    const selector = "taskId" in step ? {} : { revision };
+    const selector = "goalReceiptRead" in step
+      ? step.goalReceiptRead.args
+      : "taskId" in step
+      ? {}
+      : { revision };
     const metadata = JSON.stringify({
       _classification: "INTERNAL",
       tool: step.tool,
@@ -58,9 +79,18 @@ export async function readAuthorizedSentinelLocalToolUsage(
     });
     if (
       !currentCase() || !await authorizeTrace(scope, step.tool, selector) ||
-      !currentCase() ||
-      !await authorizeTrace(scope, step.tool, selector, metadata) ||
       !currentCase()
+    ) return;
+    const text = "goalReceiptRead" in step
+      ? await reopenTopology?.(step)
+      : metadata;
+    if (
+      !text || !currentCase() ||
+      !await authorizeTrace(scope, step.tool, selector, text) || !currentCase()
+    ) return;
+    if (
+      "goalReceiptRead" in step && (text !== await reopenTopology?.(step) ||
+        !currentCase())
     ) return;
     const role = "taskId" in step ? "worker" : "planner";
     const group = groups.get(step.tool) ??

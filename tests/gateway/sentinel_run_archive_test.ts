@@ -184,6 +184,7 @@ async function withGateway(
       denySharedAssetLinks: boolean;
       denyWorkerSourceBefore: boolean;
       denyWorkerSourceAfter: boolean;
+      denyTopologySourceHook?: string;
       workerSourceHooks: string[];
       afterWorkerObservation?: () => void;
       workflowMetadataCalls: number;
@@ -210,6 +211,7 @@ async function withGateway(
     denySharedAssetLinks: false,
     denyWorkerSourceBefore: false,
     denyWorkerSourceAfter: false,
+    denyTopologySourceHook: undefined as string | undefined,
     workerSourceHooks: [] as string[],
     afterWorkerObservation: undefined as (() => void) | undefined,
     workflowMetadataCalls: 0,
@@ -260,6 +262,8 @@ async function withGateway(
       }
 
       const allowed = (visibility?.allowsHook(hook, input) ?? true) &&
+        !(input.tool_name === "sentinel_shared_topology_source" &&
+          hook === policy.denyTopologySourceHook) &&
         !(policy.denyArchive && hook === "PRE_TOOL_CALL" &&
           ["archive", "purge_archive", "purge_archives"].includes(
             String(call?.args?.action),
@@ -2989,6 +2993,11 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
       runId: state.plan.runId,
     };
     let localUsage: unknown;
+    const topologyUsageQuery = {
+      ...localUsageQuery,
+      includeRetainedTopology: true,
+    };
+    let topologyUsage: unknown;
     await withGateway(baseDir, async (turn, approvals, policy) => {
       policy.denyArchive = true;
       assert((await turn(request)).length);
@@ -3021,6 +3030,22 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
         ),
       );
       assert(!usage.includes("sentinel_finding_traffic_links"));
+      const linked = await turn(topologyUsageQuery);
+      assert(linked.startsWith("{"), linked);
+      topologyUsage = JSON.parse(linked);
+      assertEquals(
+        JSON.parse(linked).totals.find(({ tool }: { tool: string }) =>
+          tool === "sentinel_shared_topology_source"
+        ),
+        {
+          role: "worker",
+          tool: "sentinel_shared_topology_source",
+          calls: 1,
+          failed: 0,
+        },
+      );
+      assert(!linked.includes(sourceCase));
+      assert(!linked.includes(topologyArgs.evidenceId));
       archiveReceipt = JSON.parse(await turn(request)).receipt;
       assertEquals((archiveReceipt as { status: string }).status, "succeeded");
       assertEquals(JSON.parse(await turn(request)).receipt, archiveReceipt);
@@ -3919,6 +3944,14 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
         revision: exact.revision,
       };
       assertEquals(JSON.parse(await turn(localUsageQuery)), localUsage);
+      assertEquals(JSON.parse(await turn(topologyUsageQuery)), topologyUsage);
+      for (const hook of ["PRE_TOOL_CALL", "POST_TOOL_RESPONSE"]) {
+        policy.denyTopologySourceHook = hook;
+        const denied = await turn(topologyUsageQuery);
+        assertStringIncludes(denied, "unavailable");
+        assert(!denied.includes("totals"));
+      }
+      policy.denyTopologySourceHook = undefined;
       policy.denyWorkerSourceBefore = true;
       assertStringIncludes(await turn(localUsageQuery), "unavailable");
       policy.denyWorkerSourceBefore = false;

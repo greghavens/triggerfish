@@ -21,12 +21,26 @@ export type SentinelLocalUsageStep =
       readonly taskId: string;
       readonly target: string;
     }
+    | {
+      readonly tool: "sentinel_shared_topology_source";
+      readonly taskId: string;
+      readonly target: string;
+      readonly assignedTarget: string;
+      readonly goalReceiptRead: {
+        readonly args: {
+          readonly evidenceId: string;
+          readonly sourceCase: string;
+        };
+        readonly sha256: string;
+      };
+    }
   );
 
 export function readSentinelLocalUsageSteps(
   snapshotPath: string,
   revision: number,
   runId: string,
+  includeRetainedTopology = false,
 ): readonly SentinelLocalUsageStep[] | undefined {
   const path = join(dirname(snapshotPath), "sentinel-adaptive.db");
   try {
@@ -127,21 +141,50 @@ export function readSentinelLocalUsageSteps(
         FROM batches
       )
       SELECT selected.id, selected.nodeId, step.key AS ordinal,
+        json_extract(step.value, '$.tool') AS tool,
         json_extract(step.value, '$.target') AS target,
-        json_extract(step.value, '$.outcome') AS outcome
+        json_extract(step.value, '$.outcome') AS outcome,
+        json_extract(step.value, '$.goalReceiptRead.args.evidenceId') AS evidence,
+        json_extract(step.value, '$.goalReceiptRead.args.sourceCase') AS source,
+        json_extract(step.value, '$.goalReceiptRead.sha256') AS digest
       FROM selected JOIN json_each(selected.steps) step
       WHERE selected.rank = 1
-        AND json_extract(step.value, '$.tool') = 'sentinel_assigned_target'
+        AND (json_extract(step.value, '$.tool') = 'sentinel_assigned_target'
+          OR (? AND json_extract(step.value, '$.tool') = 'sentinel_shared_topology_source'
+            AND json_extract(step.value, '$.outcome') = 'returned'))
       ORDER BY selected.id, ordinal LIMIT ?
-    `).all(key, budget + 1 - retained.length);
+    `).all(key, Number(includeRetainedTopology), budget + 1 - retained.length);
     for (const row of rows) {
       if (
         typeof row.id !== "string" || !/^adaptive:[a-f0-9]{64}$/.test(row.id) ||
         typeof row.nodeId !== "string" || !row.nodeId ||
-        (row.target != null && row.target !== row.nodeId) ||
         typeof row.ordinal !== "number" || !Number.isSafeInteger(row.ordinal) ||
         (row.outcome !== "returned" && row.outcome !== "error")
       ) return;
+      if (row.tool === "sentinel_shared_topology_source") {
+        if (
+          typeof row.target !== "string" ||
+          !/^shared-topology:[a-f0-9]{64}$/.test(row.target) ||
+          row.evidence !== row.target ||
+          typeof row.source !== "string" ||
+          !/^[a-z0-9](?:[a-z0-9-]{0,46}[a-z0-9])?$/.test(row.source) ||
+          typeof row.digest !== "string" || !/^[a-f0-9]{64}$/.test(row.digest)
+        ) return;
+        retained.push({
+          tool: row.tool,
+          taskId: row.id,
+          target: row.target,
+          assignedTarget: row.nodeId,
+          ordinal: row.ordinal,
+          outcome: row.outcome,
+          goalReceiptRead: {
+            args: { evidenceId: row.target, sourceCase: row.source },
+            sha256: row.digest,
+          },
+        });
+        continue;
+      }
+      if (row.target != null && row.target !== row.nodeId) return;
       retained.push({
         tool: "sentinel_assigned_target",
         taskId: row.id,
