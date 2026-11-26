@@ -31,6 +31,7 @@ import {
   isAgentProfileAction,
 } from "./operator_agent_profiles.ts";
 import {
+  changeSentinelCompanyScopeRule,
   parseSentinelCompanyScopeUpdate,
   readSentinelCompanyAtVersion,
   readSentinelCompanyScopes,
@@ -573,6 +574,8 @@ export const operatorRunTool: ToolDefinition = {
         "company_scope",
         "delete_company",
         "set_company_scope",
+        "add_company_scope_rule",
+        "delete_company_scope_rule",
         "company_assets",
         ...modelMonitoringActions,
         ...namedModelProfileActions,
@@ -1073,7 +1076,7 @@ export const operatorRunTool: ToolDefinition = {
       type: "array",
       items: { type: "object" },
       description:
-        "Reviewed membership rules for preview_membership or set_case_membership. Entries use {kind,value} with domain, url, ip, cidr, registrationId, or keyword. Optional organizationId selects company rules; provide note.",
+        "Reviewed membership rules for preview_membership or set_case_membership. Pass exactly one rule to add_company_scope_rule or delete_company_scope_rule. Entries use {kind,value} with domain, url, ip, cidr, registrationId, or keyword. Optional organizationId selects company rules; provide note.",
     },
     allowedAssetIds: {
       type: "array",
@@ -4189,12 +4192,20 @@ ${JSON.stringify(mutation)}`,
     }
     if (
       action === "company_scope" || action === "set_company_scope" ||
+      action === "add_company_scope_rule" ||
+      action === "delete_company_scope_rule" ||
       action === "company_assets" || action === "list_companies" ||
       action === "delete_company"
     ) {
       const deleting = action === "delete_company";
       const listing = action === "list_companies";
-      const writing = action === "set_company_scope" || deleting;
+      const ruleOperation = action === "add_company_scope_rule"
+        ? "add"
+        : action === "delete_company_scope_rule"
+        ? "delete"
+        : undefined;
+      const writing = action === "set_company_scope" || deleting ||
+        ruleOperation !== undefined;
       const catalog = action === "company_assets";
       const authorize = context?.authorizeOwnerRunCall;
       const {
@@ -4218,7 +4229,11 @@ ${JSON.stringify(mutation)}`,
           ![
             "action",
             "organizationId",
-            ...(deleting ? ["note", "requestId", "expectedVersion"] : writing
+            ...(deleting
+              ? ["note", "requestId", "expectedVersion"]
+              : ruleOperation
+              ? ["scopeRules", "note", "requestId", "expectedVersion"]
+              : writing
               ? [
                 "companyName",
                 "companyLogoUrl",
@@ -4284,7 +4299,7 @@ ${JSON.stringify(mutation)}`,
             company: company ?? null,
           });
         }
-        const deletedCompany = deleting &&
+        const original = (deleting || ruleOperation) &&
           typeof expectedVersion === "number" &&
           Number.isSafeInteger(expectedVersion) && expectedVersion >= 0 &&
           readSentinelCompanyAtVersion(
@@ -4292,16 +4307,22 @@ ${JSON.stringify(mutation)}`,
             organizationId as string,
             expectedVersion,
           );
-        if (deleting && !deletedCompany) return unavailable;
+        if ((deleting || ruleOperation) && !original) return unavailable;
+        const ruleUpdate = ruleOperation && original &&
+          Array.isArray(scopeRules) && scopeRules.length === 1 &&
+          changeSentinelCompanyScopeRule(original.rules, {
+            operation: ruleOperation,
+            rule: scopeRules[0],
+          });
+        if (ruleOperation && !ruleUpdate) return unavailable;
         const update = parseSentinelCompanyScopeUpdate({
           organizationId,
-          organizationName: deletedCompany
-            ? deletedCompany.organizationName
-            : companyName,
-          logoUrl: deletedCompany ? deletedCompany.logoUrl : companyLogoUrl,
-          ...(deletedCompany && { deleted: true }),
+          organizationName: original ? original.organizationName : companyName,
+          logoUrl: original ? original.logoUrl : companyLogoUrl,
+          ...(deleting && { deleted: true }),
           reason: note,
-          rules: deleting ? [] : scopeRules,
+          rules: deleting ? [] : ruleUpdate ? ruleUpdate.rules : scopeRules,
+          ...(ruleUpdate && { ruleChange: ruleUpdate.ruleChange }),
           requestId,
           expectedVersion,
         });

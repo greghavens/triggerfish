@@ -15942,6 +15942,7 @@ Deno.test("Owner reviews shared company scope and attribution never grants case 
     ...read,
     action: "set_company_scope",
     companyName: "Example Company",
+    companyLogoUrl: "https://company.example/images/logo.png",
     note: "Reviewed local ownership records.",
     scopeRules: [
       { kind: "domain", value: "company.example" },
@@ -16079,12 +16080,118 @@ Deno.test("Owner reviews shared company scope and attribution never grants case 
         );
       },
     );
+    const addition = {
+      ...read,
+      action: "add_company_scope_rule",
+      expectedVersion: 3,
+      requestId: crypto.randomUUID(),
+      note: "Review one application attribution rule.",
+      scopeRules: [{ kind: "registrationId", value: "ATTESTED" }],
+    };
+    const removal = {
+      ...read,
+      action: "delete_company_scope_rule",
+      expectedVersion: 4,
+      requestId: crypto.randomUUID(),
+      note: "Withdraw the retired IP attribution rule.",
+      scopeRules: [{ kind: "ip", value: "192.0.2.23" }],
+    };
+    let permitRule = true;
+    let approveRule = false;
+    let ruleReviews = 0;
+    await withFindingAssignmentGateway(
+      baseDir,
+      () => {
+        ruleReviews++;
+        return Promise.resolve(approveRule);
+      },
+      async (turn) => {
+        assertEquals(JSON.parse(await turn(read)).version, 3);
+        assertEquals(JSON.parse(await turn(read)).company.version, 1);
+        assertStringIncludes(await turn(addition), "declined");
+        assertEquals(JSON.parse(await turn(read)).version, 3);
+        approveRule = true;
+        permitRule = false;
+        assertStringIncludes(await turn(addition), "policy");
+        permitRule = true;
+        const added = JSON.parse(await turn(addition)).edit;
+        assertEquals(added.version, 4);
+        assertEquals(added.organizationName, update.companyName);
+        assertEquals(added.logoUrl, update.companyLogoUrl);
+        assertEquals(added.ruleChange, {
+          operation: "add",
+          rule: { kind: "registrationId", value: "attested" },
+        });
+        assertEquals(added.rules.length, update.scopeRules.length + 1);
+        assertEquals(JSON.parse(await turn(addition)).edit, added);
+        assertStringIncludes(
+          await turn({ ...addition, requestId: crypto.randomUUID() }),
+          "unavailable",
+        );
+        assertStringIncludes(
+          await turn({
+            ...addition,
+            expectedVersion: 4,
+            requestId: crypto.randomUUID(),
+          }),
+          "unavailable",
+        );
+        const removed = JSON.parse(await turn(removal)).edit;
+        assertEquals(removed.version, 5);
+        assertEquals(removed.logoUrl, added.logoUrl);
+        assertEquals(removed.organizationName, added.organizationName);
+        assertEquals(removed.ruleChange, {
+          operation: "delete",
+          rule: removal.scopeRules[0],
+        });
+        assertEquals(
+          removed.rules,
+          added.rules.filter(({ kind }: { kind: string }) => kind !== "ip"),
+        );
+        assertEquals(
+          JSON.parse(await turn(catalog)).inventory.assets.map(
+            ({ id }: { id: string }) => id,
+          ),
+          ["first.company.example", "second.company.example"],
+        );
+        assertEquals(
+          JSON.parse(
+            await turn({
+              action: "constraints",
+              kind: "sentinel",
+              id: "first",
+              revision: initial.revision,
+              runId: initial.plan.runId,
+            }),
+          ).history,
+          [],
+        );
+        assertEquals(ruleReviews, 3);
+      },
+      (hook, input) =>
+        permitRule || hook !== "PRE_TOOL_CALL" ||
+        (input.tool_call as { args?: Record<string, unknown> } | undefined)
+            ?.args
+            ?.action !== "add_company_scope_rule",
+    );
     await withFindingAssignmentGateway(
       baseDir,
       () => Promise.resolve(false),
       async (turn) => {
-        assertEquals(JSON.parse(await turn(read)).version, 3);
-        assertEquals(JSON.parse(await turn(read)).company.version, 1);
+        const current = JSON.parse(await turn(read)).company;
+        assertEquals(current.version, 5);
+        assertEquals(JSON.parse(await turn(removal)).edit, current);
+        assertEquals(JSON.parse(await turn(addition)).edit.version, 4);
+        assertStringIncludes(
+          await turn({
+            ...removal,
+            action: "set_company_scope",
+            companyName: update.companyName,
+            companyLogoUrl: update.companyLogoUrl,
+            scopeRules: current.rules,
+          }),
+          "unavailable",
+        );
       },
     );
   } finally {

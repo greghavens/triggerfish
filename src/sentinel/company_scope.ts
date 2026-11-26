@@ -16,6 +16,38 @@ import {
 const requestIdPattern = /^[a-f\d]{8}(?:-[a-f\d]{4}){3}-[a-f\d]{12}$/;
 const maxCompanies = 128;
 
+interface CompanyScopeRuleChange {
+  readonly operation: "add" | "delete";
+  readonly rule: SentinelScopeRule;
+}
+
+function parseRuleChange(input: unknown): CompanyScopeRuleChange | undefined {
+  if (!input || typeof input !== "object" || Object.keys(input).length !== 2) {
+    return;
+  }
+  const { operation, rule } = input as Record<string, unknown>;
+  if (operation !== "add" && operation !== "delete") return;
+  const exact = parseSentinelScopeRules([rule])?.[0];
+  return exact && { operation, rule: exact };
+}
+
+export function changeSentinelCompanyScopeRule(
+  rules: readonly SentinelScopeRule[],
+  input: unknown,
+) {
+  const ruleChange = parseRuleChange(input);
+  if (!ruleChange) return;
+  const { operation, rule } = ruleChange;
+  const matches = (entry: SentinelScopeRule) =>
+    entry.kind === rule.kind && entry.value === rule.value;
+  if (rules.some(matches) === (operation === "add")) return;
+  const next = operation === "add"
+    ? [...rules, rule]
+    : rules.filter((entry) => !matches(entry));
+  const canonical = next.length ? parseSentinelScopeRules(next) : [];
+  return canonical && { rules: canonical, ruleChange };
+}
+
 interface CompanyScope {
   readonly organizationId: string;
   readonly organizationName: string;
@@ -23,6 +55,7 @@ interface CompanyScope {
   readonly deleted?: true;
   readonly reason: string;
   readonly rules: readonly SentinelScopeRule[];
+  readonly ruleChange?: CompanyScopeRuleChange;
 }
 interface CompanyScopeEdit extends CompanyScope {
   readonly version: number;
@@ -78,12 +111,14 @@ function parseScope(
   const rules = Array.isArray(raw.rules) && !raw.rules.length
     ? []
     : parseSentinelScopeRules(raw.rules);
+  const ruleChange = parseRuleChange(raw.ruleChange);
   const logo = assetText(raw.logoUrl);
   const href = logo && canonicalAssetUrl(logo);
   const logoUrl = href && href.length <= 384 ? href : undefined;
   if (
     organizationId && organizationName && reason && rules &&
     (raw.logoUrl === undefined || logoUrl) &&
+    (raw.ruleChange === undefined || ruleChange && raw.deleted === undefined) &&
     (raw.deleted === undefined || (raw.deleted === true && rules.length === 0))
   ) {
     return {
@@ -93,6 +128,7 @@ function parseScope(
       rules,
       ...(logoUrl && { logoUrl }),
       ...(raw.deleted === true && { deleted: true as const }),
+      ...(ruleChange && { ruleChange }),
     };
   }
 }
@@ -220,9 +256,15 @@ export function recordSentinelCompanyScope(
         const priorCompany = before.companies.find(
           ({ organizationId }) => organizationId === scope.organizationId,
         );
+        const changed = scope.ruleChange && priorCompany &&
+          changeSentinelCompanyScopeRule(priorCompany.rules, scope.ruleChange);
         const nameKey = scope.organizationName.toLowerCase();
         if (
           before.version === expectedVersion &&
+          (!scope.ruleChange || changed &&
+              JSON.stringify(changed.rules) === JSON.stringify(scope.rules) &&
+              priorCompany?.organizationName === scope.organizationName &&
+              priorCompany?.logoUrl === scope.logoUrl) &&
           (scope.deleted
             ? priorCompany?.organizationName === scope.organizationName &&
               priorCompany.logoUrl === scope.logoUrl
