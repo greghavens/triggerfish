@@ -8073,6 +8073,17 @@ function createAgent(
       if (turn?.requiresLiveAssignment && !assignedReview) return;
       const failed = result.startsWith("Error:");
       if (
+        canRequestWorkerControl && turn && !failed &&
+        name === SENTINEL_PROVENANCE_NODE_READ &&
+        currentPlannerReceiptScope(turn) && result.startsWith("{")
+      ) {
+        const evidence = JSON.parse(result).node;
+        if (
+          evidence?.kind === "evidence" && typeof evidence.id === "string" &&
+          evidence.id === args.node
+        ) turn.plannerFindingEvidence.set(evidence.id, result);
+      }
+      if (
         !failed && turn && assignedReview &&
         isSentinelLiveRepositoryRead(name) &&
         options.assessmentRevision && options.assignedTaskLeaseToken

@@ -852,7 +852,7 @@ for (
     );
     let first: Awaited<ReturnType<typeof connect>> | undefined;
     let reconnect: Awaited<ReturnType<typeof connect>> | undefined;
-    const deadline = setTimeout(
+    const deadline = outcome === "approved" ? undefined : setTimeout(
       () => done.reject(new Error("No planner finding response")),
       4000,
     );
@@ -925,21 +925,35 @@ for (
         approved: outcome !== "denied",
       };
       assertEquals((await reconnect.request(decision)).ok, true);
-      const output = await done.promise;
-      const records = readSentinelWorkerFindingHistory(path, state.revision);
       if (outcome !== "approved") {
+        const output = await done.promise;
         assertStringIncludes(
           output,
-          outcome === "revoked-source" ? "unavailable" : "approval",
+          outcome === "revoked-source"
+            ? "unavailable"
+            : outcome === "stale"
+            ? "policy"
+            : "approval",
         );
-        assertEquals(records, []);
+        assertEquals(
+          readSentinelWorkerFindingHistory(path, state.revision),
+          [],
+        );
         return;
       }
-      assert(
-        output.startsWith("{"),
-        JSON.stringify({ output, findHooks, sourceHooks, records }),
-      );
-      const approved = JSON.parse(output).receipt;
+      // The committed finding can supersede the current planner turn before its
+      // model sees a reply. The journals establish the actual dispatch outcome.
+      const readDecision = () =>
+        inbox.list().records.find(({ id }) => id === pending.id);
+      const settledBy = Date.now() + 4000;
+      while (readDecision()?.status !== "completed" && Date.now() < settledBy) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      assertEquals(readDecision()?.dispatchOutcome, "returned");
+      const records = readSentinelWorkerFindingHistory(path, state.revision);
+      const [approved] = records;
+      assert(approved?.kind === "finding" && "analyst" in approved);
+      assert(approved.analyst.planner);
       assertEquals(approved.taskId, undefined);
       assertEquals(approved.requestId, selected.requestId);
       assertEquals(approved.analyst.operatorScope, "owner");
