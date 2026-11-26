@@ -8162,6 +8162,49 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
                   : undefined;
               const goalState = step.tool === "sentinel_goal_state" &&
                 readSentinelGoalStateProjection(step.goalStateProjection);
+              const authorizeSavedWorkflow = async (text: string) => {
+                const assetId = task.nodeId;
+                const source = task.plannerRound?.githubWorkflowCitation;
+                const evidenceRevision = ref.revision;
+                const reader = options.readLiveWorkflow;
+                const allowDestination = context.authorizeWorkflowDestination;
+                if (
+                  !assetId || !source || !evidenceRevision || !reader ||
+                  !allowDestination
+                ) return false;
+                const receipt = readSentinelGitHubWorkflowReadReceipt(
+                  JSON.parse(text).receipt,
+                  evidenceRevision,
+                );
+                if (!receipt) return false;
+                const isCurrent = () =>
+                  readSentinelPrerequisiteWorkflowReceipt(
+                    path,
+                    evidenceRevision,
+                    task,
+                  ) === text;
+                const reopened = await reader({
+                  caseId: ref.id,
+                  assetId,
+                  evidenceRevision,
+                  signal: new AbortController().signal,
+                  isCurrent,
+                  resumeOnly: true,
+                  loadSaved: () => receipt,
+                  authorize: (destination) =>
+                    allowDestination(
+                      destination,
+                      evidenceRevision,
+                      source.sourceTaskId,
+                    ),
+                });
+                return isDeepStrictEqual(reopened, receipt) &&
+                  await context.authorizeSavedResponse(
+                    "sentinel_live_workflow_status",
+                    JSON.stringify({ targetId: assetId, ...receipt }),
+                    "INTERNAL",
+                  ) && isCurrent();
+              };
               const text = step.tool === "sentinel_incident_alerts"
                 ? queryIncidentAlerts(
                   readOptions,
@@ -8217,7 +8260,11 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
                 !text || text.startsWith("Error:") ||
                 createHash("sha256").update(text).digest("hex") !==
                   citation.sha256 ||
+                (step.tool === "sentinel_saved_workflow_receipt" &&
+                  !await authorizeSavedWorkflow(text)) ||
                 !await authorize(scope, step.tool, args, text) ||
+                (step.tool === "sentinel_saved_workflow_receipt" &&
+                  !await authorizeSavedWorkflow(text)) ||
                 (step.tool === "sentinel_prior_assigned_evidence" &&
                   (!carriedSnapshot || readSentinelCarriedEvidence(
                         path,

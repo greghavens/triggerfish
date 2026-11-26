@@ -1,3 +1,4 @@
+import { maxClassification } from "../core/types/classification.ts";
 import { readSentinelWorkerEvidenceScope } from "./sentinel_worker_evidence_scope.ts";
 import { INCONCLUSIVE_RECHECK_TOOL } from "../sentinel/recheck_inconclusive.ts";
 import {
@@ -2064,10 +2065,24 @@ export function readSentinelPrerequisiteWorkflowReceipt(
       taskId === citation.sourceTaskId && kind === "model_review"
     )
   ) return;
+  const runId = readSentinelRunIdForRevision(path, revision);
+  const snapshot = readSentinelAssessmentRevision(path, revision)?.result
+    .sharedGraph.snapshot;
+  if (
+    !runId || !snapshot || !sentinelOperatingConstraintsAllow(
+      readSentinelOperatingConstraints(path, runId)?.constraints,
+      { kind: "review_evidence", nodeId: task.nodeId },
+      snapshot,
+    )
+  ) return;
   const store = openSentinelAdaptiveStore(
     join(dirname(path), "sentinel-adaptive.db"),
   );
   try {
+    const mapping = store.forEvidence(revision);
+    if (mapping?.goal.id !== runId || mapping.revision !== task.revision) {
+      return;
+    }
     const proof = store.readSavedGitHubWorkflowReceipt(
       task.revision,
       citation.sourceTaskId,
@@ -2085,6 +2100,7 @@ async function readSavedWorkflowReceipt(
   options: SentinelAgentOptions,
   turn: ActiveTurn,
   args: Record<string, unknown>,
+  session: SessionState,
 ): Promise<string> {
   if (Object.keys(args).length) {
     return "Error: The saved workflow receipt tool takes no arguments.";
@@ -2106,7 +2122,57 @@ async function readSavedWorkflowReceipt(
       revision,
       task,
     );
-    return proof && readAssignedModelReview(options) ? proof : unavailable;
+    const retained = proof && readSentinelGitHubWorkflowReadReceipt(
+      JSON.parse(proof).receipt,
+      revision,
+    );
+    const source = task.plannerRound?.githubWorkflowCitation;
+    const isCurrent = () =>
+      !!readAssignedModelReview(options) &&
+      readSentinelPrerequisiteWorkflowReceipt(
+          options.snapshotPath,
+          revision,
+          task,
+        ) === proof;
+    if (
+      !proof || !retained || !source ||
+      !await authorizeRetainedWorkflowObservation(
+        options,
+        turn,
+        session,
+        task.nodeId,
+        source.sourceTaskId,
+        revision,
+        retained,
+        isCurrent,
+      )
+    ) return unavailable;
+    const taint = maxClassification(session.taint, "INTERNAL");
+    const metadata = {
+      tool_name: liveWorkflowStatusTool.name,
+      session_taint: taint,
+      case_id: locateSentinelCase(options.snapshotPath)?.caseId,
+      assignment_id: source.sourceTaskId,
+      evidence_revision: revision,
+    };
+    const response = await options.hookRunner.evaluateHook(
+      "POST_TOOL_RESPONSE",
+      {
+        session: {
+          ...session,
+          taint,
+        },
+        input: {
+          ...metadata,
+          tool_response: JSON.stringify({ targetId: task.nodeId, ...retained }),
+        },
+        auditInput: metadata,
+      },
+    );
+    return response.allowed && response.action === "ALLOW" &&
+        !turn.signal.aborted && isCurrent()
+      ? proof
+      : unavailable;
   } catch {
     return unavailable;
   }
@@ -5162,6 +5228,15 @@ function createAgent(
         }
         if (
           result.allowed && name === "POST_TOOL_RESPONSE" &&
+          toolName === SENTINEL_SAVED_WORKFLOW_READ &&
+          typeof context.input.tool_response === "string" &&
+          context.input.tool_response.startsWith("{") &&
+          (!turn ||
+            await readSavedWorkflowReceipt(options, turn, {}, session) !==
+              context.input.tool_response)
+        ) return { ...result, allowed: false, action: "BLOCK" };
+        if (
+          result.allowed && name === "POST_TOOL_RESPONSE" &&
           toolName === SENTINEL_PRIOR_ASSIGNED_EVIDENCE_READ &&
           typeof context.input.tool_response === "string" &&
           context.input.tool_response.startsWith("{")
@@ -5956,7 +6031,7 @@ function createAgent(
         return await readLiveWorkflowStatus(options, turn, args, session);
       }
       if (name === savedWorkflowReceiptTool.name) {
-        return await readSavedWorkflowReceipt(options, turn, args);
+        return await readSavedWorkflowReceipt(options, turn, args, session);
       }
       if (name === SENTINEL_INTERMEDIATE_WORKFLOW_READ && canReadPlannerCase) {
         const request = sentinelIntermediateWorkflowReadArgs(

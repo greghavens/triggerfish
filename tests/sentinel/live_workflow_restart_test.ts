@@ -1,3 +1,4 @@
+import { createSentinelLiveWorkflowReader } from "../../src/gateway/sentinel_live_workflow.ts";
 import { createGatewayServer } from "../../src/gateway/server/server.ts";
 import { createChatSession } from "../../src/gateway/chat.ts";
 import { createOperatorRunToolExecutor } from "../../src/gateway/operator_run_tool.ts";
@@ -90,7 +91,7 @@ async function verifyHistoricalWorkerReads(
   assessment: ReturnType<typeof startSentinelAssessment>,
   summary: string,
   indices: readonly number[],
-  revokeScopeAtPost = false,
+  revokeAtPost: false | "asset" | "connector" = false,
 ) {
   const review = readAdaptiveSentinel(path, assessment)?.modelReviews
     .find(
@@ -101,6 +102,8 @@ async function verifyHistoricalWorkerReads(
   let denied = false;
   let revoke = false;
   let revoked = false;
+  let metadataChecks = 0;
+  let listingCalls = 0;
   let response = "";
   const registry = createProviderRegistry();
   registry.register({
@@ -142,26 +145,52 @@ async function verifyHistoricalWorkerReads(
     operatorRunExecutor: createOperatorRunToolExecutor({
       baseDir: dir,
       confirm: () => Promise.resolve(false),
+      ...(revokeAtPost === "connector" && {
+        readLiveWorkflow: createSentinelLiveWorkflowReader({
+          scopes: [{
+            case: "main",
+            asset: "delivery",
+            owner: "owner",
+            repo: "pipeline",
+            workflow_id: 17,
+          }],
+          resolveToken: () =>
+            Promise.resolve(revoked ? undefined : "fixture-token"),
+          ssrfChecker: () => Promise.resolve({ ok: true, value: "192.0.2.1" }),
+          verifyAccess: () => {
+            metadataChecks++;
+            return Promise.resolve(true);
+          },
+          readRuns: () => {
+            listingCalls++;
+            throw new Error(
+              "The saved prerequisite must not list workflow runs.",
+            );
+          },
+        }),
+      }),
     }),
     hookRunner: {
       evaluateHook(hook, { input }) {
         if (
           revoke && hook === "POST_TOOL_RESPONSE" &&
-          input.tool_name === "sentinel_prior_assigned_evidence"
+          input.tool_name === review.steps[selected].tool
         ) {
           revoke = false;
-          assert(assessment.plan.runId);
-          assert(recordSentinelOperatingConstraints(path, {
-            runId: assessment.plan.runId,
-            evidenceRevision: assessment.revision,
-            expectedVersion: 0,
-            requestId: crypto.randomUUID(),
-            operatorScope: "prior-assignment-policy-test",
-            constraints: {
-              deniedKinds: [],
-              allowedAssetIds: ["additional-asset"],
-            },
-          }));
+          if (revokeAtPost === "asset") {
+            assert(assessment.plan.runId);
+            assert(recordSentinelOperatingConstraints(path, {
+              runId: assessment.plan.runId,
+              evidenceRevision: assessment.revision,
+              expectedVersion: 0,
+              requestId: crypto.randomUUID(),
+              operatorScope: "prior-assignment-policy-test",
+              constraints: {
+                deniedKinds: [],
+                allowedAssetIds: ["additional-asset"],
+              },
+            }));
+          }
           revoked = true;
         }
         const allowed = !(denied && hook === "POST_TOOL_RESPONSE" &&
@@ -194,7 +223,7 @@ async function verifyHistoricalWorkerReads(
     () => {},
   );
   assert(response.includes("unavailable"));
-  if (!revokeScopeAtPost) return;
+  if (!revokeAtPost) return;
   denied = false;
   const token = crypto.randomUUID();
   const gateway = createGatewayServer({ port: 0, token, chatSession: chat });
@@ -223,7 +252,14 @@ async function verifyHistoricalWorkerReads(
       await done;
     }
     await send("Reopen the authorized historical step.");
-    assert(JSON.parse(response).result.citations.length > 0);
+    const result = JSON.parse(response).result;
+    if (revokeAtPost === "connector") {
+      assertEquals(result.receipt.runs[0].id, 51);
+      assert(metadataChecks > 0);
+      assertEquals(listingCalls, 0);
+    } else {
+      assert(result.citations.length > 0);
+    }
     revoke = true;
     await send("Reopen the historical step during scope withdrawal.");
     assert(revoked);
@@ -2906,19 +2942,23 @@ for (
         }
         if (savedWorkflow) {
           assertEquals(
-            hooks.filter((line) => line.startsWith("resume_saved_workflow:"))
+            hooks.filter((line) =>
+              /^resume_saved_workflow:prior_(pre|post)$/.test(line)
+            )
               .slice(0, 2),
             [
               "resume_saved_workflow:prior_pre",
               "resume_saved_workflow:prior_post",
             ],
           );
+          assert(hooks.includes("resume_saved_workflow:probe_metadata"));
           await verifyHistoricalWorkerReads(
             dir,
             path,
             assessment,
             "Recovered the exact historical evidence.",
             [0],
+            "connector",
           );
           return;
         }
@@ -2939,7 +2979,7 @@ for (
             assessment,
             "Recovered the exact historical evidence.",
             [0],
-            true,
+            "asset",
           );
           return;
         }
