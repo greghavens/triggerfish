@@ -4541,6 +4541,8 @@ export const sentinelScopedGraphReadActions = [
   "linked_worker_review",
   "linked_findings",
   "linked_finding",
+  "finding_report",
+  "finding_report_history",
   "graph_overview",
   "graph",
   "findings",

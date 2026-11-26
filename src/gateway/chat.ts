@@ -939,6 +939,8 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
           : linkedFinding?.sourceCase;
         const linkedRead = linkedReview || action === "linked_findings" ||
           action === "linked_finding";
+        const selectedReport = action === "finding_report" ||
+          action === "finding_report_history";
         const selectedControl = sentinelOperatorCaseControlActions.some((
           allowed,
         ) => allowed === action);
@@ -975,7 +977,7 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
           ) return false;
           const casePath = resolveCase();
           if (!selectedControl) {
-            return directRead || linkedRead
+            return directRead || linkedRead || selectedReport
               ? casePath === selectedPath
               : !!casePath;
           }
@@ -1106,7 +1108,7 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
                 { resultText: text, blocked: false },
               );
               if (approved.blocked || !sourceIsCurrent()) return false;
-              if (linkedRead) {
+              if (linkedRead || selectedReport) {
                 return await read() === text && sourceIsCurrent();
               }
               if (source.name !== SENTINEL_SHARED_ASSET_LINKS_READ) return true;

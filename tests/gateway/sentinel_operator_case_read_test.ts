@@ -363,6 +363,8 @@ Deno.test("Authenticated Sentinel chat reads exact approved cross-case graph fin
             "facts",
             "finding_receipts",
             "finding_receipt",
+            "finding_report",
+            "finding_report_history",
             "incidents",
             "incident_alerts",
             "case_alert",
