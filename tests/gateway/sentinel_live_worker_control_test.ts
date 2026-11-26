@@ -3352,6 +3352,7 @@ Deno.test("A reviewed model route replacement preserves the running response and
       activeModelProfile: "secondary",
     };
     let permitCall = false;
+    let revokeRouteDuringReview = true;
     await withOwnerControl(
       baseDir,
       async (request, approvals) => {
@@ -3371,6 +3372,16 @@ Deno.test("A reviewed model route replacement preserves the running response and
             .startsWith("Error:"),
         );
         assertEquals(approvals.length, 0);
+        assert((await request(change)).includes("unavailable"));
+        assertEquals(approvals.length, 1);
+        revokeRouteDuringReview = false;
+        permitCall = true;
+        assertEquals(
+          JSON.parse(await request({ ...ref, action: "model_route" })).version,
+          0,
+        );
+        assertEquals(calls, ["default"]);
+        assertEquals(committedTool, 0);
         const edited = JSON.parse(await request(change));
         assertEquals(edited.edit.before, { activeIndex: 0 });
         assertEquals(edited.edit.after, {
@@ -3383,7 +3394,7 @@ Deno.test("A reviewed model route replacement preserves the running response and
           (await request({ ...change, requestId: crypto.randomUUID() }))
             .startsWith("Error:"),
         );
-        assertEquals(approvals.length, 1);
+        assertEquals(approvals.length, 2);
         releaseCall.resolve();
         await running;
         assertEquals(calls, ["default", "secondary"]);
@@ -3436,6 +3447,11 @@ Deno.test("A reviewed model route replacement preserves the running response and
       },
       routing.list,
       () => permitCall,
+      {
+        onConfirm() {
+          if (revokeRouteDuringReview) permitCall = false;
+        },
+      },
     );
   } finally {
     releaseCall.resolve();

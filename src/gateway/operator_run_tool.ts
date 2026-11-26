@@ -4939,7 +4939,9 @@ ${JSON.stringify({ run: ref, runId: exactRunId, turn: selected })}`,
         } = args;
         const editing = action !== "model_route";
         const roleEdit = action === "set_model_role";
+        const authorize = context?.authorizeOwnerRunCall;
         if (
+          (editing && (!authorize || !context?.authenticatedOwnerSessionId)) ||
           ref.kind !== "sentinel" || ref.revision === undefined ||
           !canFlowTo("INTERNAL", context?.ceiling ?? "INTERNAL") ||
           typeof runId !== "string" || !digestPattern.test(runId) ||
@@ -5092,7 +5094,8 @@ ${
           )
         ) return "Error: The operator declined the run action.";
         if (
-          !await controller.inspect(ref) || !isDeepStrictEqual(select(), after)
+          !await authorize?.(args) || !await controller.inspect(ref) ||
+          !isDeepStrictEqual(select(), after)
         ) return unavailable;
         const edit = replaceSentinelModelRoute(path, scope, {
           requestId: request,
