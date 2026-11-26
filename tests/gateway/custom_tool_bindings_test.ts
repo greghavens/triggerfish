@@ -14,6 +14,11 @@ import {
 } from "../../src/core/types/session.ts";
 import { createChatSession } from "../../src/gateway/chat.ts";
 import { createGatewayServer } from "../../src/gateway/server/server.ts";
+import { createOrchestratorFactory } from "../../src/gateway/startup/factory/orchestrator_factory.ts";
+import { type TriggerFishConfig } from "../../src/core/config.ts";
+import { createToolFloorRegistry } from "../../src/core/security/tool_floors.ts";
+import { createCronManager } from "../../src/scheduler/cron/cron.ts";
+import { tickCronJobs } from "../../src/scheduler/service_cron.ts";
 import {
   buildHealthcheckToolDefinitions,
   createHealthcheckToolExecutor,
@@ -28,10 +33,14 @@ Deno.test("Owner publishes and revises one local diagnostic alias through exact 
   const proposals = join(dir, "custom-tool-proposals");
   await Deno.mkdir(proposals, { mode: 0o700 });
   const proposal = join(proposals, alias + ".json");
-  const stage = (component: string) =>
-    Deno.writeTextFile(proposal, JSON.stringify({ name: alias, component }), {
-      mode: 0o600,
-    });
+  const stage = (component: string, cronJobId?: string) =>
+    Deno.writeTextFile(
+      proposal,
+      JSON.stringify({ name: alias, component, cronJobId }),
+      {
+        mode: 0o600,
+      },
+    );
   await stage("providers");
   const owner = createSession({
     userId: "owner" as UserId,
@@ -415,6 +424,172 @@ Deno.test("Owner publishes and revises one local diagnostic alias through exact 
       "config",
     );
 
+    const jobs = createCronManager();
+    const matching = jobs.create({
+      expression: "* * * * *",
+      task: "Run local diagnostic: matching job.",
+      classificationCeiling: "INTERNAL",
+    });
+    const neighbor = jobs.create({
+      expression: "* * * * *",
+      task: "Run local diagnostic: neighboring job.",
+      classificationCeiling: "INTERNAL",
+    });
+    assert(matching.ok && neighbor.ok);
+    const matchedJob = matching.value.id;
+    await stage("config", matchedJob);
+    const observedProposal = await inspect();
+    assertEquals(observedProposal.binding.cronJobId, matchedJob);
+    const grant = apply(observedProposal.revision);
+    await gateway.approve(true);
+    assertEquals(JSON.parse((await grant).text).binding.cronJobId, matchedJob);
+    await gateway.stop();
+    gateway = await launch();
+    assertStringIncludes(
+      (await gateway.turn(alias)).text,
+      "Configuration loaded",
+    );
+
+    const runCron = async (
+      beforeCall?: () => Promise<void>,
+    ) => {
+      const results = new Map<
+        string,
+        { advertised: boolean; result: string }
+      >();
+      const offered = new Map<string, boolean>();
+      const response = Promise.withResolvers<void>();
+      const model = Deno.serve({
+        hostname: "127.0.0.1",
+        port: 0,
+        onListen() {},
+      }, async (request) => {
+        try {
+          if (new URL(request.url).pathname !== "/v1/chat/completions") {
+            return new Response(null, { status: 404 });
+          }
+          const body = await request.json();
+          const subject: string = body.messages.find((
+            { role }: { role: string },
+          ) => role === "user")?.content;
+          const id = subject.includes("matching job") ? "matching" : "neighbor";
+          const tool = body.messages.findLast(({ role }: { role: string }) =>
+            role === "tool"
+          );
+          const available = body.tools.some((
+            { function: definition }: { function: { name: string } },
+          ) => definition.name === alias);
+          if (tool) {
+            results.set(id, {
+              advertised: offered.get(id)!,
+              result: String(tool.content),
+            });
+          } else {
+            offered.set(id, available);
+            if (id === "matching") await beforeCall?.();
+          }
+          const message = tool
+            ? { role: "assistant", content: "Checked local diagnostics." }
+            : {
+              role: "assistant",
+              content: "",
+              tool_calls: [{
+                id: crypto.randomUUID(),
+                type: "function",
+                function: { name: alias, arguments: "{}" },
+              }],
+            };
+          if (results.size === 2) response.resolve();
+          if (body.stream) {
+            return new Response(
+              `data: ${JSON.stringify({ choices: [{ delta: message }] })}\n\n` +
+                'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n',
+              { headers: { "content-type": "text/event-stream" } },
+            );
+          }
+          return Response.json({
+            choices: [{ message }],
+            usage: { prompt_tokens: 1, completion_tokens: 1 },
+          });
+        } catch (error) {
+          response.reject(error);
+          return new Response(null, { status: 500 });
+        }
+      });
+      const ollama = {
+        model: "fixture",
+        endpoint: `http://127.0.0.1:${model.addr.port}`,
+      };
+      const config: TriggerFishConfig = {
+        models: {
+          primary: { provider: "ollama", model: "fixture" },
+          providers: { ollama },
+        },
+        channels: {},
+        classification: { mode: "strict" },
+      };
+      const factory = createOrchestratorFactory(
+        config,
+        dir,
+        jobs,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        createToolFloorRegistry(),
+      );
+      const timeout = setTimeout(
+        () => response.reject(new Error("Cron diagnostic test timed out")),
+        5000,
+      );
+      try {
+        tickCronJobs({
+          orchestratorFactory: factory,
+          triggerMdPath: join(dir, "TRIGGER.md"),
+          webhooks: { enabled: false, sources: {} },
+          trigger: {
+            enabled: false,
+            intervalMinutes: 1,
+            classificationCeiling: "INTERNAL",
+          },
+        }, jobs);
+        await response.promise;
+        return results;
+      } finally {
+        clearTimeout(timeout);
+        await model.shutdown();
+      }
+    };
+
+    const offeredWithGrant = await runCron();
+    const native = offeredWithGrant.get("matching");
+    assert(native?.advertised);
+    assertEquals(JSON.parse(native.result)._classification, "INTERNAL");
+    assertStringIncludes(
+      JSON.parse(native.result).diagnostic,
+      "Configuration loaded",
+    );
+    const deniedNeighbor = offeredWithGrant.get("neighbor");
+    assertEquals(deniedNeighbor?.advertised, false);
+    assert(!deniedNeighbor?.result.includes("Configuration loaded"));
+    const oldGrant = await status();
+    const inFlight = await runCron(async () => {
+      const removing = retire(oldGrant.revision);
+      await gateway.approve(true, "retire");
+      assertEquals(JSON.parse((await removing).text).retired, true);
+    });
+    assertEquals(inFlight.get("matching")?.advertised, true);
+    assert(!inFlight.get("matching")?.result.includes("Configuration loaded"));
+    assertStringIncludes((await gateway.turn(alias)).text, "unavailable");
+    await stage("config");
+    const unscoped = await inspect();
+    const restoreAlias = apply(unscoped.revision);
+    await gateway.approve(true);
+    assertEquals(
+      JSON.parse((await restoreAlias).text).binding.cronJobId,
+      undefined,
+    );
+    assertEquals((await runCron()).get("matching")?.advertised, false);
     const invoked = actual.length;
     await gateway.stop();
     gateway = await launch(false);

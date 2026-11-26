@@ -1,3 +1,5 @@
+import { isCustomToolName } from "../../../core/custom_tool_intent.ts";
+import { createCustomToolBindings } from "../../custom_tool_bindings.ts";
 import { buildManagedDelegatedObservationGrant } from "./managed_delegated_observation_grant.ts";
 import { managedObservationGrantDigest } from "./managed_scheduled_observation_grant.ts";
 import { readRecoveredGoalState } from "./recovered_goal_state.ts";
@@ -26,7 +28,10 @@ import { join } from "@std/path";
 import type { TriggerFishConfig } from "../../../core/config.ts";
 import { sentinelLocalObservationKind } from "../../../core/config_types.ts";
 import type { ClassificationLevel } from "../../../core/types/classification.ts";
-import { canFlowTo } from "../../../core/types/classification.ts";
+import {
+  canFlowTo,
+  maxClassification,
+} from "../../../core/types/classification.ts";
 import {
   createSession,
   OWNER_MEMORY_AGENT_ID,
@@ -109,6 +114,7 @@ export function createOrchestratorFactory(
   scheduledGoals?: SchedulerGoalController,
 ): OrchestratorFactory {
   const infra = initializeFactoryInfra(config, baseDir);
+  const diagnostics = createCustomToolBindings(baseDir);
   const delegatedGoals = buildDelegatedGoalCompletion(
     baseDir,
     config.delegated_goal_completion,
@@ -345,6 +351,57 @@ export function createOrchestratorFactory(
           ? [scheduledGoalReportTool]
           : []),
       ];
+      const cronDiagnosticJobId = !delegated && !isTrigger &&
+          ceiling && canFlowTo("INTERNAL", ceiling) &&
+          tools.some(({ name }) => name === "healthcheck")
+        ? options?.cronJobId
+        : undefined;
+      const diagnosticBinding = (name: string) =>
+        cronDiagnosticJobId && !tools.some((tool) => tool.name === name)
+          ? diagnostics.read(name, cronDiagnosticJobId)
+          : undefined;
+      const diagnosticDefinitions = () =>
+        cronDiagnosticJobId
+          ? diagnostics.definitions(cronDiagnosticJobId).filter(({ name }) =>
+            !tools.some((tool) => tool.name === name)
+          )
+          : [];
+      const executeDiagnostic = async (
+        name: string,
+        input: Record<string, unknown>,
+      ) => {
+        const approved = Object.keys(input).length === 0 &&
+          diagnosticBinding(name);
+        const unavailable =
+          "Error: The custom diagnostic binding is unavailable.";
+        if (!approved || !ceiling) return unavailable;
+        const current = () =>
+          diagnosticBinding(name)?.revision === approved.revision;
+        let observed: string | undefined;
+        const diagnostic = createOrchestrator({
+          ...orchestratorConfig,
+          toolExecutor: async (tool, args, context) => {
+            if (tool !== "healthcheck" || !current()) return unavailable;
+            observed = await toolExecutor(tool, args, context);
+            return observed;
+          },
+        });
+        const result = await diagnostic.executeOperatorTool({
+          name: "healthcheck",
+          args: { components: [approved.component] },
+        }, {
+          session,
+          targetClassification: ceiling,
+          suppressToolEvents: true,
+        });
+        return result.ok && current() && result.value === observed
+          ? JSON.stringify({
+            _classification: "INTERNAL",
+            diagnostic: result.value,
+            revision: approved.revision,
+          })
+          : unavailable;
+      };
       const delegatedTools = delegated &&
         new Set(tools.map(({ name }) => name));
       const scopedToolExecutor: typeof toolExecutor = (
@@ -352,6 +409,11 @@ export function createOrchestratorFactory(
         input,
         context,
       ) => {
+        if (
+          isCustomToolName(name) && !tools.some((tool) => tool.name === name)
+        ) {
+          return executeDiagnostic(name, input);
+        }
         if (delegatedTools && !delegatedTools.has(name)) {
           return Promise.resolve("Error: Tool is outside the delegated role.");
         }
@@ -430,12 +492,38 @@ export function createOrchestratorFactory(
             }),
           },
         }),
-        hookRunner: infra.hookRunner,
+        hookRunner: cronDiagnosticJobId
+          ? {
+            ...infra.hookRunner,
+            async evaluateHook(hook, context) {
+              const name = context.input.tool_name;
+              const response = context.input.tool_response;
+              const scoped = isCustomToolName(name) &&
+                !tools.some((tool) => tool.name === name);
+              if (
+                !scoped || hook !== "POST_TOOL_RESPONSE" ||
+                typeof response !== "string" || !response.startsWith("{")
+              ) {
+                return await infra.hookRunner.evaluateHook(hook, context);
+              }
+              const revision: unknown = JSON.parse(response).revision;
+              const decision = await infra.hookRunner.evaluateHook(
+                hook,
+                context,
+              );
+              return typeof revision === "string" &&
+                  diagnosticBinding(name)?.revision === revision
+                ? decision
+                : { ...decision, allowed: false, action: "BLOCK" };
+            },
+          }
+          : infra.hookRunner,
         providerRegistry: infra.registry,
         spinePath: infra.spinePath,
         maxIterations: options?.maxIterations,
         maxToolResponseChars: isTrigger ? 8_000 : undefined,
         tools,
+        ...(cronDiagnosticJobId && { getExtraTools: diagnosticDefinitions }),
         toolExecutor: scopedToolExecutor,
         messageStore: factoryMessageStore,
         lineageStore: factoryLineageStore,
@@ -474,7 +562,21 @@ export function createOrchestratorFactory(
         getWorkspacePath: () =>
           resolveWorkspacePathForTaint(session.taint, workspacePaths),
         domainClassifier: infra.domainClassifier,
-        toolFloorRegistry: schedulerToolFloorRegistry,
+        toolFloorRegistry: cronDiagnosticJobId
+          ? {
+            getFloor(name) {
+              const previous = schedulerToolFloorRegistry?.getFloor(name) ??
+                null;
+              return diagnosticBinding(name)
+                ? maxClassification(previous ?? "PUBLIC", "INTERNAL")
+                : previous;
+            },
+            canInvoke(name, taint) {
+              const floor = this.getFloor(name);
+              return floor === null || canFlowTo(floor, taint);
+            },
+          }
+          : schedulerToolFloorRegistry,
         getActiveSkillContext: () => skillContextTracker.getActive(),
         // Any session created with a ceiling is a non-owner machine session:
         // the ceiling is an enforced read/tool gate, not just an output gate.

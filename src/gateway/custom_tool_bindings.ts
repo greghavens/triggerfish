@@ -18,6 +18,7 @@ import type {
 interface Binding {
   readonly name: string;
   readonly component: "providers" | "config";
+  readonly cronJobId?: string;
 }
 
 export const customToolManage: ToolDefinition = {
@@ -41,17 +42,28 @@ export const customToolManage: ToolDefinition = {
 };
 
 function parseBinding(raw: unknown): Binding | undefined {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return;
+  const { name, component, cronJobId } = raw as Record<string, unknown>;
   if (
-    !raw || typeof raw !== "object" || Array.isArray(raw) ||
-    Object.keys(raw).length !== 2
-  ) return;
-  const { name, component } = raw as Record<string, unknown>;
-  if (
+    Object.keys(raw).length === (cronJobId === undefined ? 2 : 3) &&
     isCustomToolName(name) &&
-    (component === "providers" || component === "config")
+    (component === "providers" || component === "config") &&
+    (cronJobId === undefined ||
+      (typeof cronJobId === "string" &&
+        /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/.test(cronJobId)))
   ) {
-    return { name, component };
+    return { name, component, ...(cronJobId && { cronJobId }) };
   }
+}
+
+function storedBinding(row: Record<string, unknown> | undefined) {
+  if (!row) return;
+  const { name, component, cronJobId } = row;
+  return parseBinding({
+    name,
+    component,
+    ...(cronJobId !== null && { cronJobId }),
+  });
 }
 
 function privateFile(path: string) {
@@ -106,6 +118,9 @@ export function createCustomToolBindings(baseDir: string) {
       db.exec(
         "CREATE TABLE IF NOT EXISTS retired_custom_tools (name TEXT PRIMARY KEY, revision TEXT NOT NULL, approval_id TEXT NOT NULL)",
       );
+      db.exec(
+        "CREATE TABLE IF NOT EXISTS custom_tool_cron_grants (name TEXT PRIMARY KEY, job_id TEXT NOT NULL)",
+      );
       return action(db);
     } finally {
       db.close();
@@ -143,27 +158,38 @@ export function createCustomToolBindings(baseDir: string) {
     };
   }
 
-  function active() {
+  const bindingQuery = `
+    SELECT tool.name, tool.component, tool.revision, grant.job_id AS cronJobId
+    FROM custom_tools AS tool
+    LEFT JOIN custom_tool_cron_grants AS grant ON grant.name = tool.name
+  `;
+
+  function active(cronJobId?: string) {
     return withStore((db) =>
-      db.prepare(
-        "SELECT name, component FROM custom_tools ORDER BY name LIMIT 64",
-      ).all()
+      db.prepare(bindingQuery + " ORDER BY tool.name LIMIT 64").all()
         .flatMap((row) => {
-          const binding = parseBinding(row);
-          return binding ? [binding] : [];
+          const binding = storedBinding(row);
+          return binding &&
+              (cronJobId === undefined || binding.cronJobId === cronJobId)
+            ? [binding]
+            : [];
         })
     );
   }
 
-  function read(name: string) {
+  function read(name: string, cronJobId?: string) {
     if (!isCustomToolName(name)) return;
     try {
       if (!privateFile(databasePath)) return;
       const row = withStore((db) =>
-        db.prepare("SELECT name, component FROM custom_tools WHERE name = ?")
-          .get(name)
+        db.prepare(bindingQuery + " WHERE tool.name = ?").get(name)
       );
-      return parseBinding(row);
+      const binding = storedBinding(row);
+      if (
+        !binding || !row || typeof row.revision !== "string" ||
+        (cronJobId !== undefined && binding.cronJobId !== cronJobId)
+      ) return;
+      return { ...binding, revision: row.revision };
     } catch {
       return undefined;
     }
@@ -187,10 +213,10 @@ export function createCustomToolBindings(baseDir: string) {
         return;
       }
     },
-    definitions(): ToolDefinition[] {
+    definitions(cronJobId?: string): ToolDefinition[] {
       try {
         if (!privateFile(databasePath)) return [];
-        return active().map(({ name, component }) => ({
+        return active(cronJobId).map(({ name, component }) => ({
           name,
           description:
             `Read the approved Triggerfish ${component} health diagnostic.`,
@@ -260,6 +286,8 @@ export function createCustomToolBindings(baseDir: string) {
               db.prepare("DELETE FROM custom_tools WHERE name = ?").run(
                 mutation.name,
               );
+              db.prepare("DELETE FROM custom_tool_cron_grants WHERE name = ?")
+                .run(mutation.name);
               db.exec("COMMIT");
               committed = true;
               return JSON.stringify({
@@ -294,6 +322,15 @@ export function createCustomToolBindings(baseDir: string) {
               selected.revision,
               approval,
             );
+            if (selected.binding.cronJobId) {
+              db.prepare(`
+                INSERT INTO custom_tool_cron_grants VALUES (?, ?)
+                ON CONFLICT(name) DO UPDATE SET job_id=excluded.job_id
+              `).run(mutation.name, selected.binding.cronJobId);
+            } else {
+              db.prepare("DELETE FROM custom_tool_cron_grants WHERE name = ?")
+                .run(mutation.name);
+            }
             if (current?.retired) {
               db.prepare("DELETE FROM retired_custom_tools WHERE name = ?").run(
                 mutation.name,
