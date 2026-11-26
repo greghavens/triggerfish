@@ -1,4 +1,8 @@
 import { sentinelRoleModelSelection } from "./sentinel_model_routing.ts";
+import {
+  executeNamedRecordAction,
+  namedRecordActions,
+} from "./operator_named_records.ts";
 import { executeAgentEventAction } from "./operator_agent_events.ts";
 import {
   executeAgentProfileAction,
@@ -576,6 +580,7 @@ export const operatorRunTool: ToolDefinition = {
         "model_route",
         "agent_event_subscriptions",
         "set_agent_event_subscription",
+        ...namedRecordActions,
         "agent_profiles",
         "agent_profile",
         "agent_profile_history",
@@ -1308,6 +1313,16 @@ export const operatorRunTool: ToolDefinition = {
       type: "object",
       description:
         "Exact reviewed event subscription with id, agent, kinds, optional caseId/tool/intervalMs, merge, maxConcurrent and enabled.",
+    },
+    displayName: {
+      type: "string",
+      description: "Independent list display name.",
+    },
+    conversationTargets: {
+      type: "array",
+      items: { type: "object" },
+      description:
+        "Exact id and expectedVersion of each previously named conversation.",
     },
     profileSettings: {
       type: "object",
@@ -3206,6 +3221,14 @@ export function createOperatorRunToolExecutor(options: {
           canFlowTo(classification, context?.ceiling ?? "PUBLIC"));
     }
     const action = args.action;
+    if (namedRecordActions.some((name) => name === action)) {
+      return await executeNamedRecordAction(
+        options.baseDir,
+        args,
+        context,
+        options.confirm,
+      );
+    }
     if (
       action === "agent_event_subscriptions" ||
       action === "set_agent_event_subscription"

@@ -1,0 +1,215 @@
+import { assertEquals, assertStringIncludes } from "@std/assert";
+import { createProviderRegistry } from "../../src/agent/llm.ts";
+import { createMessageStore } from "../../src/core/conversation/mod.ts";
+import { createSqliteStorage } from "../../src/core/storage/sqlite.ts";
+import { join } from "@std/path";
+import {
+  type ChannelId,
+  createSession,
+  type UserId,
+} from "../../src/core/types/session.ts";
+import { createChatSession } from "../../src/gateway/chat.ts";
+import { createOperatorRunToolExecutor } from "../../src/gateway/operator_run_tool.ts";
+import { createGatewayServer } from "../../src/gateway/server/server.ts";
+
+Deno.test("Named conversations retain isolated turns and reviewed lifecycle across gateway restart", async () => {
+  const baseDir = await Deno.makeTempDir();
+  const token = crypto.randomUUID();
+  let args: Record<string, unknown> | undefined;
+  let toolResult = "";
+  let allow = true;
+  let reviews = 0;
+  const registry = createProviderRegistry();
+  registry.register({
+    name: "named-conversation-fixture",
+    supportsStreaming: false,
+    complete(history) {
+      const usage = { inputTokens: 1, outputTokens: 1 };
+      const last = history.at(-1);
+      if (last?.role === "tool") {
+        toolResult = String(last.content);
+        return Promise.resolve({ content: "Updated.", usage, toolCalls: [] });
+      }
+      if (args) {
+        return Promise.resolve({
+          content: "",
+          usage,
+          toolCalls: [{
+            id: crypto.randomUUID(),
+            type: "function",
+            function: {
+              name: "operator_runs",
+              arguments: JSON.stringify(args),
+            },
+          }],
+        });
+      }
+      const content = history.filter(({ role }) => role === "user").map(
+        ({ content }) => String(content),
+      ).join(" | ");
+      return Promise.resolve({ content, usage, toolCalls: [] });
+    },
+  });
+  registry.setDefault("named-conversation-fixture");
+  const open = (messages: ReturnType<typeof createMessageStore>) =>
+    createGatewayServer({
+      token,
+      port: 0,
+      chatSession: createChatSession({
+        session: createSession({
+          userId: "owner" as UserId,
+          channelId: "named-conversations-fixture" as ChannelId,
+        }),
+        customToolsBaseDir: baseDir,
+        providerRegistry: registry,
+        messageStore: messages,
+        hookRunner: {
+          evaluateHook: () =>
+            Promise.resolve({
+              allowed: true,
+              action: "ALLOW",
+              ruleId: null,
+              duration: 0,
+            }),
+        },
+        operatorRunExecutor: createOperatorRunToolExecutor({
+          baseDir,
+          confirm: () => {
+            reviews++;
+            return Promise.resolve(allow);
+          },
+        }),
+      }),
+    });
+  async function withGateway<T>(
+    exercise: (
+      turn: (text: string) => Promise<{ text: string; tool: string }>,
+      manage: (action: Record<string, unknown>) => Promise<string>,
+    ) => Promise<T>,
+  ) {
+    const storage = createSqliteStorage(join(baseDir, "messages.db"));
+    const gateway = open(createMessageStore(storage));
+    const { port } = await gateway.start();
+    const socket = new WebSocket(`ws://127.0.0.1:${port}/chat?token=${token}`);
+    try {
+      await new Promise<void>((resolve, reject) => {
+        socket.addEventListener("open", () => resolve(), { once: true });
+        socket.addEventListener("error", reject, { once: true });
+      });
+      const turn = (content: string) =>
+        new Promise<{ text: string; tool: string }>((resolve, reject) => {
+          toolResult = "";
+          let text = "";
+          const listener = ({ data }: MessageEvent) => {
+            const frame = JSON.parse(String(data));
+            if (frame.type === "response") text = frame.text;
+            if (frame.type === "error") text = frame.message;
+            if (frame.type !== "turn_end") return;
+            clearTimeout(timer);
+            socket.removeEventListener("message", listener);
+            resolve({ text, tool: toolResult });
+          };
+          const timer = setTimeout(() => {
+            socket.removeEventListener("message", listener);
+            reject(new Error("Named conversation turn did not finish"));
+          }, 5000);
+          socket.addEventListener("message", listener);
+          socket.send(JSON.stringify({ type: "message", content }));
+        });
+      return await exercise(turn, async (action) => {
+        args = action;
+        try {
+          return (await turn("Manage the selected conversation.")).tool;
+        } finally {
+          args = undefined;
+        }
+      });
+    } finally {
+      socket.close();
+      await gateway.stop();
+      await storage.close();
+    }
+  }
+
+  const first = crypto.randomUUID();
+  const second = crypto.randomUUID();
+  const create = (id: string, displayName: string) => ({
+    action: "set_named_conversation",
+    id,
+    displayName,
+    expectedVersion: 0,
+    requestId: crypto.randomUUID(),
+  });
+  try {
+    await withGateway(async (turn, manage) => {
+      const add = create(first, "First");
+      assertEquals(JSON.parse(await manage(add)).records[0].version, 1);
+      assertEquals(JSON.parse(await manage(add)).records[0].version, 1);
+      assertEquals(reviews, 1);
+      await manage(create(second, "Second"));
+      const pin = {
+        ...create(first, "Pinned first"),
+        expectedVersion: 1,
+        pinned: true,
+      };
+      assertEquals(
+        JSON.parse(await manage(pin)).records[0].name,
+        "Pinned first",
+      );
+      assertStringIncludes(
+        await manage({ ...pin, requestId: crypto.randomUUID() }),
+        "unavailable",
+      );
+      assertEquals(
+        (await turn(`/conversation ${first} First private context.`)).text,
+        "First private context.",
+      );
+      assertEquals(
+        (await turn(`/conversation ${second} Second isolated context.`)).text,
+        "Second isolated context.",
+      );
+    });
+
+    await withGateway(async (turn, manage) => {
+      const { conversations } = JSON.parse(
+        await manage({ action: "named_conversations" }),
+      );
+      assertEquals(conversations.map(({ id }: { id: string }) => id), [
+        first,
+        second,
+      ]);
+      assertEquals(
+        (await turn(`/conversation ${first} Continue first.`)).text,
+        "First private context. | Continue first.",
+      );
+      const remove = {
+        action: "delete_named_conversations",
+        requestId: crypto.randomUUID(),
+        conversationTargets: [
+          { id: first, expectedVersion: 2 },
+          { id: second, expectedVersion: 1 },
+        ],
+      };
+      allow = false;
+      assertStringIncludes(await manage(remove), "declined");
+      allow = true;
+      assertEquals(
+        JSON.parse(await manage(remove)).records.map((
+          { deleted }: { deleted: boolean },
+        ) => deleted),
+        [true, true],
+      );
+      assertEquals(
+        JSON.parse(await manage({ action: "named_conversations" }))
+          .conversations,
+        [],
+      );
+      assertStringIncludes(
+        (await turn(`/conversation ${first} Reopen.`)).text,
+        "unavailable",
+      );
+    });
+  } finally {
+    await Deno.remove(baseDir, { recursive: true });
+  }
+});

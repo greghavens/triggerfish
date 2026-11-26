@@ -1,3 +1,5 @@
+import { namedConversations } from "../core/named_records.ts";
+import { namedRecordActions } from "./operator_named_records.ts";
 import { readAgentProfile } from "../core/agent_profiles.ts";
 import { withAgentProfileRuntime } from "../agent/orchestrator/agent_profile_runtime.ts";
 import { isAgentProfileAction } from "./operator_agent_profiles.ts";
@@ -58,7 +60,7 @@ import {
 import { createLogger } from "../core/logger/mod.ts";
 import { normalizeApprovedPayload } from "../core/execution_traces.ts";
 import { createOrchestrator } from "../agent/orchestrator/orchestrator.ts";
-import type { SessionState } from "../core/types/session.ts";
+import { restoreSession, type SessionState } from "../core/types/session.ts";
 import {
   canFlowTo,
   type ClassificationLevel,
@@ -362,6 +364,7 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
                       "list",
                       "profiles",
                       "model_route",
+                      "named_conversations",
                       "agent_profiles",
                       "agent_profile",
                       "agent_profile_history",
@@ -465,6 +468,7 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
                 ...context,
                 input: { ...context.input, ...meta },
                 auditInput: action === "set_agent_event_subscription" ||
+                    namedRecordActions.some((name) => name === action) ||
                     isAgentProfileAction(action) ||
                     action === "set_sentinel_tool_configuration" ||
                     action === "reset_sentinel_tool_configuration" ||
@@ -1696,6 +1700,71 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
       }
     },
     async executeAgentTurn(content, sendEvent, signal) {
+      if (
+        typeof content === "string" && /^\/conversation(?:\s|$)/.test(content)
+      ) {
+        const release = await acquireTurnMutex(state);
+        const unavailable = () =>
+          sendEvent({
+            type: "error",
+            message: "The named conversation is unavailable.",
+          });
+        try {
+          const selected =
+            /^\/conversation ([a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}) ([\s\S]+)$/
+              .exec(content);
+          if (
+            signal?.aborted || !selected || !selected[2].trim() ||
+            !config.customToolsBaseDir || !config.messageStore ||
+            state.activeSessionId !== state.ownerSessionId
+          ) return unavailable();
+          const [, id, prompt] = selected;
+          const store = namedConversations(config.customToolsBaseDir);
+          const isCurrent = () => {
+            const record = store.read(id);
+            return !!record && !record.deleted && !signal?.aborted;
+          };
+          const taint = maxClassification("INTERNAL", getSessionTaint());
+          if (!isCurrent() || !canFlowTo(taint, ownerTargetClassification)) {
+            return unavailable();
+          }
+          const owner = getSession();
+          const conversation = restoreSession({
+            id: `named-conversation-${id}` as SessionState["id"],
+            userId: owner.userId,
+            channelId: owner.channelId,
+          });
+          const child = createChatSession({
+            session: { ...conversation, taint },
+            getSessionTaint: () => taint,
+            targetClassification: ownerTargetClassification,
+            providerRegistry: config.providerRegistry,
+            messageStore: config.messageStore,
+            enableStreaming: false,
+            hookRunner: {
+              ...config.hookRunner,
+              async evaluateHook(hook, context) {
+                const decision = await config.hookRunner.evaluateHook(
+                  hook,
+                  context,
+                );
+                return isCurrent()
+                  ? decision
+                  : { ...decision, allowed: false, action: "BLOCK" };
+              },
+            },
+          });
+          await child.executeAgentTurn(prompt, (event) => {
+            if (isCurrent()) sendEvent(event);
+          }, signal);
+        } catch {
+          unavailable();
+        } finally {
+          release();
+        }
+        return;
+      }
+
       if (
         typeof content === "string" && /^\/agent-profile(?:\s|$)/.test(content)
       ) {
