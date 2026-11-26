@@ -821,16 +821,21 @@ Deno.test("Leased trace search exposes completed peers only on the exact assigne
       );
       const alphaReview = `observation:adaptive:review:${idFor("alpha")}`;
       const betaReview = `observation:adaptive:review:${idFor("beta")}`;
+      const provenanceQueries = [
+        { node: alphaReview },
+        { node: betaReview },
+        { node: `goal:adaptive:${state.plan.runId}` },
+      ];
+      const policyProof = {
+        version: constraints.version,
+        digest: constraints.digest,
+      };
       const workerNodes = await query(
         main,
-        [
-          { node: alphaReview },
-          { node: betaReview },
-          { node: `goal:adaptive:${state.plan.runId}` },
-        ],
+        provenanceQueries,
         undefined,
         lease,
-        undefined,
+        { operatingConstraints: policyProof },
         "sentinel_provenance_node",
       );
       assertEquals(
@@ -841,6 +846,25 @@ Deno.test("Leased trace search exposes completed peers only on the exact assigne
       const scopedGoal = JSON.parse(workerNodes.resultFrames[2]);
       assertEquals(scopedGoal.node.kind, "goal");
       assert(!workerNodes.resultFrames[2].includes(idFor("beta")));
+      for (
+        const operatingConstraints of [
+          undefined,
+          { ...policyProof, digest: "0".repeat(64) },
+        ]
+      ) {
+        const withheld = await query(
+          main,
+          [provenanceQueries[0]],
+          undefined,
+          lease,
+          { operatingConstraints },
+          "sentinel_provenance_node",
+        );
+        assertEquals(
+          withheld.resultFrames,
+          ["Tool response withheld by policy."],
+        );
+      }
       const plannerEvidence = await query(
         main,
         [
