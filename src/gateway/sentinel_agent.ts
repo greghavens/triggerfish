@@ -246,6 +246,7 @@ import {
   validateSavedAssignedCoverage,
 } from "./sentinel_inventory_tool.ts";
 import {
+  allowsSentinelGraphFindingTrafficPage,
   approvedSentinelTrafficAttachmentKey,
   executeSentinelFindingTrafficTool,
   reopenSentinelLinkedTrafficPayload,
@@ -6598,6 +6599,16 @@ function createAgent(
                     page._classification !== "INTERNAL" ||
                     !Array.isArray(page.links) ||
                     page.links.length > (args.limit ?? 5)
+                  ) return false;
+                  if (
+                    !allowsSentinelGraphFindingTrafficPage(
+                      options.snapshotPath,
+                      caseId,
+                      revision,
+                      args.graphFindingId,
+                      page.links,
+                      task.nodeId,
+                    )
                   ) return false;
                   for (const link of page.links) {
                     if (

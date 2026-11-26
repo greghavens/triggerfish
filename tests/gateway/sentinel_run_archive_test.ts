@@ -875,6 +875,24 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
       plan: { goal: "Review source evidence" },
     });
     const published = JSON.parse(await Deno.readTextFile(path));
+    const findingTrafficAsset = readSentinelTrafficReceiptPage(
+      path,
+      initial.revision,
+      { origin: "https://app.example" },
+    )?.receipts[0]?.assetIds[0];
+    assert(findingTrafficAsset);
+    const assetNode = initial.result?.sharedGraph.snapshot?.nodes.find(
+      ({ id, kind }) => id === findingTrafficAsset && kind === "asset",
+    );
+    assert(assetNode);
+    published.nodes.push(assetNode);
+
+    published.edges.push({
+      from: findingId,
+      to: findingTrafficAsset,
+      relation: "affects",
+    });
+
     published.nodes.push({
       id: "later-record",
       kind: "evidence",
@@ -1690,13 +1708,17 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
     let resumeAccepted = false;
     let denyLinkedResume = false;
     let resumedPostChecks = 0;
+    let workerNodeTrafficPage: string | undefined;
     linkedRegistry.register({
       name: "linked-payload-fixture",
       supportsStreaming: false,
       complete(messages) {
-        const result = messages.findLast(({ role }) => role === "tool");
-        if (result) linkedWorkerResult = String(result.content);
-        else linkedDispatches++;
+        const results = messages.filter(({ role }) => role === "tool");
+        const result = results.at(0);
+        if (result) {
+          linkedWorkerResult = String(result.content);
+          workerNodeTrafficPage = results.at(1)?.content as string | undefined;
+        } else linkedDispatches++;
         return Promise.resolve({
           content: result ? "Reviewed the retained response." : "",
           usage: { inputTokens: 1, outputTokens: 1 },
@@ -1710,6 +1732,16 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
                 findingId: workerFinding.id,
                 trafficLinkId,
                 payloadPart: "response",
+              }),
+            },
+          }, {
+            id: "node-links",
+            type: "function",
+            function: {
+              name: "sentinel_finding_traffic_links",
+              arguments: JSON.stringify({
+                revision: state.revision,
+                graphFindingId: workerFinding.graphFindingId,
               }),
             },
           }],
@@ -1733,6 +1765,9 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
           sha256,
         },
       };
+      const steps: Parameters<
+        typeof linkedJournal.recordModelReviewProgress
+      >[3][number][] = [initialStep];
       const createLinkedWorker = () =>
         createSentinelSubagent({
           providerRegistry: linkedRegistry,
@@ -1764,13 +1799,14 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
         () => {},
         interruptLinked.signal,
         (step) => {
-          assert(step.linkedTrafficPayload);
+          assert(step.linkedTrafficPayload || step.trafficLinks);
+          steps.push(step);
           assert(!JSON.stringify(step).includes("🙂"));
           assert(linkedJournal.recordModelReviewProgress(
             revision,
             trafficTaskId,
             trafficReviewToken,
-            [initialStep, step],
+            steps,
           ));
         },
         true,
@@ -1856,11 +1892,15 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
           options,
         );
         assert(resumeAccepted);
-        assertEquals(resumedPostChecks, 2);
+        assertEquals(resumedPostChecks, 3);
         assertEquals(linkedDispatches, 1);
       } finally {
         restarted.close();
       }
+      assertEquals(
+        JSON.parse(workerNodeTrafficPage!).links[0].id,
+        trafficLinkId,
+      );
       assertEquals(
         JSON.parse(linkedWorkerResult!).payload.text,
         "x".repeat(511) + "🙂",
@@ -1937,7 +1977,8 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
     assertEquals(overviewHooks, ["PRE_TOOL_CALL", "POST_TOOL_RESPONSE"]);
     const trafficLinkSelector = {
       revision: state.revision,
-      findingId: workerFinding.id,
+      graphFindingId: workerFinding.graphFindingId,
+      assetId: workerFinding.targetId,
       limit: 1,
     };
     let plannerFindingResults: string[] = [];

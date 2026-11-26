@@ -648,6 +648,21 @@ Deno.test("Leased workers attach only exact saved traffic and authenticated Tide
     assert(attached.events.some(({ type }) => type === "error"));
     assert(!attached.events.some(({ type }) => type === "response"));
 
+    const nodeLinks = { revision, graphFindingId: "case-finding" };
+    const workerNodeRead = await runWorker(path, lease, [[
+      call(links, nodeLinks),
+      call(links, { ...nodeLinks, graphFindingId: "case-control" }),
+      call(links, { ...nodeLinks, revision: revision + 1 }),
+      call(links, { ...nodeLinks, findingId }),
+    ]]);
+    assertEquals(JSON.parse(workerNodeRead.responses[0][0]).links, [record]);
+    assert(!workerNodeRead.responses[0][0].includes(reviewedBody));
+    assert(workerNodeRead.checks.includes(`PRE_TOOL_CALL:${links}`));
+    assert(workerNodeRead.checks.includes(`POST_TOOL_RESPONSE:${links}`));
+    for (const deniedRead of workerNodeRead.responses[0].slice(1)) {
+      assert(deniedRead.startsWith("Error:"));
+    }
+
     const linkedPayload = {
       revision,
       findingId,
@@ -698,9 +713,11 @@ Deno.test("Leased workers attach only exact saved traffic and authenticated Tide
     const otherAsset = await runWorker(
       path,
       createLease(path, state, observations[1].assetId),
-      [[call(links, linkedPayload)]],
+      [[call(links, linkedPayload), call(links, nodeLinks)]],
     );
-    assert(otherAsset.responses[0][0].startsWith("Error:"));
+    assert(
+      otherAsset.responses[0].every((result) => result.startsWith("Error:")),
+    );
 
     const evidenceVersion = JSON.parse(attached.responses[2][2])
       .evidenceVersion;

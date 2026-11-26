@@ -36,6 +36,7 @@ import {
 import {
   hasSentinelWorkerFindingJournal,
   openSentinelWorkerFindingStore,
+  readSentinelCaseFindingReceipts,
 } from "../sentinel/worker_finding_store.ts";
 import {
   sentinelLinkedTrafficPayloadArgs,
@@ -134,6 +135,16 @@ export const sentinelFindingTrafficListTool: ToolDefinition = {
   parameters: {
     revision: revisionField,
     findingId: findingField,
+    graphFindingId: {
+      type: "string",
+      description:
+        "Exact saved graph finding source ID to discover active attachments. Omit findingId and payload arguments.",
+    },
+    assetId: {
+      type: "string",
+      description:
+        "Exact affected asset for a graph finding. Optional for leased workers bound to that asset.",
+    },
     recheckId: {
       type: "string",
       description:
@@ -294,7 +305,45 @@ function listForScope(
   }
   const selector = sentinelTrafficLinksArgs(args);
   if (!selector) return unavailable;
-  const { findingId, recheckId, limit = 5, offset = 0 } = selector;
+  const {
+    findingId,
+    graphFindingId,
+    assetId,
+    recheckId,
+    limit = 5,
+    offset = 0,
+  } = selector;
+  if (graphFindingId !== undefined) {
+    if ((!subject && !assetId) || (subject && assetId && subject !== assetId)) {
+      return unavailable;
+    }
+    const ids = discoverSentinelFindingNodeTraffic(
+      scope.snapshotPath,
+      caseId,
+      revision,
+      graphFindingId,
+      offset,
+      limit,
+      subject ?? assetId,
+      allowPayloadAsset,
+    );
+    if (!ids) return unavailable;
+    const links = ids.links.flatMap(({ trafficLinkId, assetId }) =>
+      listSentinelFindingTrafficLinks(scope.snapshotPath, {
+        id: trafficLinkId,
+        assetId,
+        evidenceRevision: revision,
+      })
+    );
+    if (links.length !== ids.links.length) return unavailable;
+    return boundFindingTrafficPage(
+      caseId,
+      revision,
+      links,
+      offset,
+      ids.nextOffset !== null,
+    );
+  }
   const retained = listSentinelFindingTrafficLinks(scope.snapshotPath, {
     evidenceRevision: revision,
     assetId: subject,
@@ -312,6 +361,25 @@ function listForScope(
       subject,
     ).digest
     : undefined;
+  return boundFindingTrafficPage(
+    caseId,
+    revision,
+    links,
+    offset,
+    links.length < retained.length,
+    evidenceVersion,
+  );
+}
+
+function boundFindingTrafficPage(
+  caseId: string,
+  revision: number,
+  links: ReturnType<typeof listSentinelFindingTrafficLinks>,
+  offset: number,
+  more: boolean,
+  evidenceVersion?: string,
+): string {
+  const originalLength = links.length;
   do {
     const output = JSON.stringify({
       _classification: "INTERNAL",
@@ -319,9 +387,11 @@ function listForScope(
       evidenceRevision: revision,
       links,
       evidenceVersion,
-      nextOffset: links.length < retained.length ? offset + links.length : null,
+      nextOffset: more || links.length < originalLength
+        ? offset + links.length
+        : null,
     });
-    if (output.length <= maxOutput && (links.length || !retained.length)) {
+    if (output.length <= maxOutput && (links.length || !originalLength)) {
       return output;
     }
   } while (links.pop());
@@ -1182,6 +1252,72 @@ export async function attachOperatorSentinelFindingTrafficBatch(
     : unavailable;
 }
 
+/** Reauthorize the exact graph finding and scoped assets without reopening payloads. */
+export function scopedSentinelFindingTrafficAssets(
+  path: string,
+  revision: number,
+  graphFindingId: string,
+  assetId?: string,
+  allowAsset?: (id: string) => boolean,
+) {
+  const runId = readSentinelRunIdForRevision(path, revision);
+  const saved = readSentinelAssessmentRevision(path, revision);
+  const graph = saved?.result.sharedGraph.snapshot;
+  if (
+    !runId || readSentinelAssessment(path)?.plan.runId !== runId ||
+    !graph?.nodes.some(({ id, kind }) =>
+      id === graphFindingId && kind === "finding"
+    )
+  ) return;
+  const allowed = readSentinelOperatingConstraints(path, runId)
+    ?.constraints.allowedAssetIds;
+  const assets = new Set(
+    graph.edges.flatMap(({ from, to, relation }) =>
+      from === graphFindingId && relation === "affects" &&
+        (assetId === undefined || assetId === to) &&
+        (allowed === undefined || allowed.includes(to)) &&
+        (!allowAsset || allowAsset(to)) &&
+        graph.nodes.some(({ id, kind }) => id === to && kind === "asset")
+        ? [to]
+        : []
+    ),
+  );
+  if (assets.size) return assets;
+}
+
+/** Check a saved attachment page against current scope and exact original findings. */
+export function allowsSentinelGraphFindingTrafficPage(
+  path: string,
+  caseId: string,
+  revision: number,
+  graphFindingId: string | undefined,
+  links: ReturnType<typeof listSentinelFindingTrafficLinks>,
+  assetId?: string,
+): boolean {
+  if (graphFindingId === undefined) return true;
+  const assets = scopedSentinelFindingTrafficAssets(
+    path,
+    revision,
+    graphFindingId,
+    assetId,
+  );
+  if (!assets) return false;
+  const runId = readSentinelRunIdForRevision(path, revision);
+  const reports = readSentinelCaseFindingReceipts(
+    path,
+    [...new Set(links.map(({ findingId }) => findingId))],
+  );
+  return links.every((link) => {
+    const report = reports.get(link.findingId);
+    return report?.kind === "finding" &&
+      link.caseId === caseId && report.caseId === caseId &&
+      report.runId === runId && report.evidenceRevision <= revision &&
+      link.evidenceRevision === revision &&
+      report.graphFindingId === graphFindingId &&
+      report.targetId === link.assetId && assets.has(link.assetId);
+  });
+}
+
 /** Offer discovery metadata for reports anchored to one authorized graph finding. */
 export function discoverSentinelFindingNodeTraffic(
   path: string,
@@ -1190,18 +1326,18 @@ export function discoverSentinelFindingNodeTraffic(
   graphFindingId: string,
   offset: number,
   limit: number,
+  assetId?: string,
+  allowAsset?: (id: string) => boolean,
 ) {
   const runId = readSentinelRunIdForRevision(path, revision);
-  const state = readSentinelAssessment(path);
-  const saved = readSentinelAssessmentRevision(path, revision);
-  if (
-    !runId || state?.plan.runId !== runId ||
-    !saved?.result.sharedGraph.snapshot?.nodes.some(
-      ({ id, kind }) => id === graphFindingId && kind === "finding",
-    )
-  ) return;
-  const allowed = readSentinelOperatingConstraints(path, runId)?.constraints
-    .allowedAssetIds;
+  const assets = scopedSentinelFindingTrafficAssets(
+    path,
+    revision,
+    graphFindingId,
+    assetId,
+    allowAsset,
+  );
+  if (!runId || !assets) return;
   const entries: {
     findingId: string;
     assetId: string;
@@ -1222,10 +1358,7 @@ export function discoverSentinelFindingNodeTraffic(
       if (ids.length > 128) return;
       for (const findingId of ids) {
         const finding = findings.readFinding(findingId);
-        if (
-          !finding ||
-          (allowed && !allowed.includes(finding.targetId))
-        ) continue;
+        if (!finding || !assets.has(finding.targetId)) continue;
         const count = offset + limit + 1 - entries.length;
         if (count <= 0) break;
         const links = [];

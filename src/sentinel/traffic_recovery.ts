@@ -112,16 +112,39 @@ export function sentinelTrafficLinksArgs(value: unknown) {
   if (
     !args ||
     Object.keys(args).some((name) =>
-      !["revision", "findingId", "recheckId", "limit", "offset"].includes(name)
+      ![
+        "revision",
+        "findingId",
+        "graphFindingId",
+        "assetId",
+        "recheckId",
+        "limit",
+        "offset",
+      ].includes(name)
     )
   ) return;
-  const { revision, findingId, recheckId, limit, offset } = args;
+  const {
+    revision,
+    findingId,
+    graphFindingId,
+    assetId,
+    recheckId,
+    limit,
+    offset,
+  } = args;
   if (
     typeof revision !== "number" || !Number.isSafeInteger(revision) ||
     revision < 1 ||
     (findingId !== undefined &&
       (typeof findingId !== "string" ||
         !/^worker-finding:[a-f0-9]{64}$/.test(findingId))) ||
+    (graphFindingId !== undefined &&
+      (typeof graphFindingId !== "string" || !graphFindingId.trim() ||
+        graphFindingId.length > 4096 || graphFindingId.includes("\0") ||
+        findingId !== undefined)) ||
+    (assetId !== undefined &&
+      (graphFindingId === undefined || typeof assetId !== "string" ||
+        !assetId.trim() || assetId.length > 4096 || assetId.includes("\0"))) ||
     (recheckId !== undefined && (findingId === undefined ||
       typeof recheckId !== "string" ||
       !/^worker-recheck:[a-f0-9]{64}$/.test(recheckId))) ||
@@ -135,6 +158,8 @@ export function sentinelTrafficLinksArgs(value: unknown) {
   return {
     revision,
     ...(findingId !== undefined && { findingId }),
+    ...(graphFindingId !== undefined && { graphFindingId }),
+    ...(assetId !== undefined && { assetId }),
     ...(recheckId !== undefined && { recheckId }),
     ...(limit !== undefined && { limit }),
     ...(offset !== undefined && { offset }),

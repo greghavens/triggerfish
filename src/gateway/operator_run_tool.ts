@@ -300,6 +300,7 @@ import { executeOperatorRunArchive } from "./operator_run_archive.ts";
 import { readOperatorSentinelInventory } from "./operator_sentinel_inventory.ts";
 import { createOperatorSentinelRuns } from "./operator_sentinel_runs.ts";
 import {
+  allowsSentinelGraphFindingTrafficPage,
   annotateOperatorSentinelFindingTraffic,
   attachOperatorSentinelFindingTraffic,
   attachOperatorSentinelFindingTrafficBatch,
@@ -1503,6 +1504,16 @@ function reopenSentinelPlannerTraffic(
       })[0]
     );
     if (links.some((link) => !link || link.caseId !== caseId)) return;
+    if (
+      !allowsSentinelGraphFindingTrafficPage(
+        path,
+        caseId,
+        revision,
+        page.args.graphFindingId,
+        links,
+        page.args.assetId,
+      )
+    ) return;
     result = {
       _classification: "INTERNAL",
       caseId,
@@ -7624,6 +7635,16 @@ ${
                   if (!saved) return unavailable;
                   records.push(saved);
                 }
+                if (
+                  !allowsSentinelGraphFindingTrafficPage(
+                    path,
+                    ref.id,
+                    ref.revision,
+                    linkArgs.graphFindingId,
+                    records,
+                    task.nodeId,
+                  )
+                ) return unavailable;
                 text = JSON.stringify({
                   _classification: "INTERNAL",
                   caseId: ref.id,
