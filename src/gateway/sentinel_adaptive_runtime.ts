@@ -9860,6 +9860,24 @@ export function createSentinelModelPlanner(
             ) return;
             return projectSentinelExactWorkflowObservation(observation);
           }
+          if (exchange.name === SENTINEL_WORKER_NARRATIVE_READ) {
+            const target = visibleWorkerNarratives.find(
+              ({ id }) => id === exchange.args.id,
+            );
+            const record = target && currentWorkerNarrative(
+              snapshotPath,
+              runId,
+              state.revision,
+              exchange.args.id,
+              target.targetId,
+            );
+            if (!record) return;
+            const result = JSON.stringify({
+              _classification: "INTERNAL",
+              ...record,
+            });
+            return result.length <= 7000 ? result : undefined;
+          }
           const { asset, taskId, recheckId } = exchange.args;
           if (
             !inputs.repositoryVisibilityRechecks?.some((source) =>
@@ -10092,6 +10110,7 @@ export function createSentinelModelPlanner(
                       tool === "sentinel_incident_alerts" ||
                       tool === "sentinel_graph_facts" ||
                       tool === "sentinel_worker_findings" ||
+                      tool === SENTINEL_WORKER_NARRATIVE_READ ||
                       sharedAssetDiscovery || graphOverviewProjection ||
                       discoveryPage ||
                       intermediateWorkflowObservation ||
@@ -10318,7 +10337,8 @@ export function createSentinelModelPlanner(
                   const target = exchange.name === "sentinel_defense"
                     ? exchange.args.alertId
                     : exchange.name === "sentinel_graph_facts" ||
-                        exchange.name === SENTINEL_INTERMEDIATE_WORKFLOW_READ
+                        exchange.name === SENTINEL_INTERMEDIATE_WORKFLOW_READ ||
+                        exchange.name === SENTINEL_WORKER_NARRATIVE_READ
                     ? exchange.args.id
                     : exchange.name === SENTINEL_GOAL_RECHECK_READ
                     ? exchange.args.receiptId
@@ -10359,6 +10379,10 @@ export function createSentinelModelPlanner(
                     const { _classification, ...fact } = JSON.parse(projection);
                     openedGraphFacts.set(fact.id, fact);
                     rememberMixedSource(fact.id, fact.targetId);
+                  } else if (exchange.name === SENTINEL_WORKER_NARRATIVE_READ) {
+                    const { id, targetId } = JSON.parse(projection);
+                    openedNarratives.set(id, targetId);
+                    rememberMixedSource(id, targetId);
                   } else if (exchange.name === SENTINEL_GOAL_RECHECK_READ) {
                     rememberFinding(
                       exchange.args.receiptId,
@@ -10416,7 +10440,10 @@ export function createSentinelModelPlanner(
               const projection = projectPlannerReadCheckpoint(value, prompt);
               if (
                 !projection || !projection.exchanges.every((exchange) => {
-                  if (exchange.name !== SENTINEL_GOAL_RECHECK_READ) return true;
+                  if (
+                    exchange.name !== SENTINEL_GOAL_RECHECK_READ &&
+                    exchange.name !== SENTINEL_WORKER_NARRATIVE_READ
+                  ) return true;
                   const text = projectPlannerRead(exchange);
                   return text !== undefined &&
                     createHash("sha256").update(text).digest("hex") ===

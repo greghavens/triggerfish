@@ -227,6 +227,7 @@ async function verifyRetainedNarrative(
   fromAlert: boolean,
   perFact = false,
   denyBatch = false,
+  checkpointOnly = false,
 ) {
   const baseDir = await Deno.makeTempDir();
   const caseId = fromAlert ? "alert-narrative" : "traffic-narrative";
@@ -244,6 +245,7 @@ async function verifyRetainedNarrative(
   let planned: string | undefined;
   let peerRead: string | undefined;
   let scopeDenials = 0;
+  let revokeOnReplay = false;
   let deniedBatch = false;
   let checkRevokedPlanning = false;
   let withheldFromPlanner = false;
@@ -262,6 +264,13 @@ async function verifyRetainedNarrative(
       ) {
         publicationResult = input.tool_response;
         deniedBatch = true;
+      }
+      if (
+        revokeOnReplay && hook === "POST_TOOL_RESPONSE" &&
+        input.tool_name === "sentinel_worker_narrative"
+      ) {
+        revokeOnReplay = false;
+        allowTraffic = false;
       }
       const denied = !allowTraffic && hook === "PRE_TOOL_CALL" &&
         input.tool_name === sourceTool;
@@ -632,6 +641,121 @@ async function verifyRetainedNarrative(
     assertEquals(JSON.parse(peerRead!), created);
     assertEquals(sourceFinished, false);
     assertEquals(scopeDenials, 0);
+    if (checkpointOnly) {
+      await coordinator.stop();
+      finishSource.resolve();
+      await waitFor(
+        "initial planner stopped",
+        () => !planner?.hasInFlightWork(),
+      );
+      let requests = 0;
+      let dispatches = 0;
+      let resumed: string | undefined;
+      let paused: ReturnType<typeof Promise.withResolvers<void>> | undefined;
+      const replayModel = createProviderRegistry();
+      replayModel.register({
+        name: "planner-fact-batch-replay",
+        supportsStreaming: false,
+        async complete(messages) {
+          const result = messages.findLast(({ role }) => role === "tool");
+          if (!result) {
+            requests++;
+            return complete("", open, { id });
+          }
+          resumed = String(result.content);
+          await paused?.promise;
+          return complete("[]");
+        },
+      });
+      replayModel.setDefault("planner-fact-batch-replay");
+      const restart = () =>
+        createSentinelModelPlanner(
+          path,
+          (current, assignmentId) => {
+            if (assignmentId) {
+              return { execute: () => Promise.resolve(), clear() {} };
+            }
+            const agent = createSentinelSubagent({
+              snapshotPath: path,
+              assessmentRevision: current.revision,
+              plannerExecutionEvidenceRunId: runId,
+              providerRegistry: replayModel,
+              hookRunner: hooks,
+              allowModelAccess: true,
+            });
+            return {
+              ...agent,
+              execute(prompt, send, signal, trace, access, options) {
+                return agent.execute(
+                  prompt,
+                  send,
+                  signal,
+                  (step) => {
+                    if (step.tool === open) dispatches++;
+                    trace?.(step);
+                  },
+                  access,
+                  options,
+                );
+              },
+            };
+          },
+          undefined,
+          () => Date.now() + wakeOffset,
+        );
+      const interrupt = async (note: string) => {
+        wakeOffset += 4 * 60_000;
+        addSentinelCaseHint(path, note);
+        paused = Promise.withResolvers<void>();
+        resumed = undefined;
+        planner = restart();
+        try {
+          planner.advance(state);
+          await waitFor(
+            "planner received committed mixed fact batch",
+            () => !!resumed,
+          );
+          assertEquals(resumed, planned);
+        } finally {
+          planner.stop();
+          paused.resolve();
+          paused = undefined;
+          await waitFor(
+            "interrupted planner stopped",
+            () => !planner?.hasInFlightWork(),
+          );
+          resumed = undefined;
+          wakeOffset += 4 * 60_000;
+        }
+      };
+      await interrupt("Resume the exact scoped mixed fact batch.");
+      let counters = [requests, dispatches];
+      planner = restart();
+      planner.advance(state);
+      await waitFor(
+        "planner resumed from its saved read",
+        () => !planner?.hasInFlightWork(),
+      );
+      assertEquals(resumed, planned);
+      assertEquals([requests, dispatches], counters);
+      await interrupt(
+        "Recheck authorization before replaying the mixed fact batch.",
+      );
+      counters = [requests, dispatches];
+      const priorDenials = scopeDenials;
+      revokeOnReplay = true;
+      planner = restart();
+      planner.advance(state);
+      await waitFor(
+        "planner stopped after secondary source denial",
+        () => !planner?.hasInFlightWork(),
+      );
+      assert(!revokeOnReplay);
+      assert(scopeDenials > priorDenials);
+      assertEquals(resumed, undefined);
+      assertEquals([requests, dispatches], counters);
+      return;
+    }
     if (perFact) {
       allowTraffic = false;
       checkRevokedPlanning = true;
@@ -797,3 +921,6 @@ Deno.test("A leased fact batch binds each exact source through planning, peer re
 
 Deno.test("A leased fact batch denies a revoked secondary atomically", () =>
   verifyRetainedNarrative(false, true, true));
+
+Deno.test("Planner resumes a mixed fact batch without dispatch only while every source remains authorized", () =>
+  verifyRetainedNarrative(false, true, false, true));

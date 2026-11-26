@@ -9577,6 +9577,7 @@ function createAgent(
               name === SENTINEL_INCIDENT_ALERTS_READ ||
               name === SENTINEL_DEFENSE_READ ||
               name === SENTINEL_GOAL_GRAPH_FACT_READ ||
+              name === SENTINEL_WORKER_NARRATIVE_READ ||
               name === SENTINEL_GOAL_RECHECK_READ ||
               name === SENTINEL_SHARED_DISCOVERY_READ ||
               name === SENTINEL_INTERMEDIATE_WORKFLOW_READ ||
@@ -9708,6 +9709,9 @@ function createAgent(
               goalArgs.offset ?? 0,
               goalArgs.cursor !== undefined,
             )
+            : canReadPlannerCase && name === SENTINEL_WORKER_NARRATIVE_READ
+            ? redactCredentialText(result) === result &&
+              JSON.parse(result).id === goalArgs.id
             : name === SENTINEL_SHARED_DISCOVERY_READ
             ? goalArgs.id === undefined
               ? parseSavedDiscoveryList(result)
@@ -11311,6 +11315,8 @@ function createAgent(
                         checkpointCurrent() &&
                         currentPlannerReceiptScope(turn, assetId),
                     )
+                    : selector.name === SENTINEL_WORKER_NARRATIVE_READ
+                    ? await workerNarrative(turn, selector.name, selector.args)
                     : await reopenRepositoryVisibilityVerdict(
                       runId,
                       revision,

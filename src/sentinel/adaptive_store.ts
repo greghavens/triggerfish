@@ -2391,6 +2391,7 @@ function normalizePlannerRead(read: AdaptivePlannerRead): AdaptivePlannerRead {
           "sentinel_graph_facts",
           "sentinel_graph_overview",
           "sentinel_worker_findings",
+          SENTINEL_WORKER_NARRATIVE_READ,
           "sentinel_shared_asset_discoveries",
           "sentinel_intermediate_workflow_observation",
         ].includes(read.tool) &&

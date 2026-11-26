@@ -11,6 +11,10 @@ import {
   sentinelDefenseReadArgs,
   sentinelGoalReceiptReadArguments,
 } from "./worker_goal_recovery.ts";
+import {
+  isWorkerNarrativeId,
+  SENTINEL_WORKER_NARRATIVE_READ,
+} from "./worker_narratives.ts";
 
 export const MAX_PLANNER_CHECKPOINT_READS = 4;
 const SHA256 = /^[a-f0-9]{64}$/;
@@ -28,6 +32,10 @@ export function plannerCheckpointReadSelector(name: string, input: unknown) {
       Object.keys(args).length !== 1 || typeof args.id !== "string" ||
       !/^worker-graph-fact:[a-f0-9]{64}$/.test(args.id)
     ) return;
+    return { name, args: { id: args.id } } as const;
+  }
+  if (name === SENTINEL_WORKER_NARRATIVE_READ) {
+    if (Object.keys(args).length !== 1 || !isWorkerNarrativeId(args.id)) return;
     return { name, args: { id: args.id } } as const;
   }
   if (name === SENTINEL_INTERMEDIATE_WORKFLOW_READ) {
