@@ -1772,6 +1772,104 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
         trafficLink,
       );
       const trafficAction = { ...receiptAction, action: "finding_traffic" };
+      const batchFindingJournal = openSentinelWorkerFindingStore(peerPath);
+      const batchFinding = batchFindingJournal.recordFinding({
+        ...original,
+        title: "Atomic retained traffic batch",
+        requestId: crypto.randomUUID(),
+      });
+      batchFindingJournal.close();
+      const batchTraffic = {
+        ...trafficAction,
+        action: "attach_finding_traffic_batch",
+        receiptId: batchFinding.id,
+        reportVersion: 1,
+        requestId: crypto.randomUUID(),
+        trafficRefs: [
+          {
+            evidenceId: candidate.evidenceId,
+            digest: candidate.digest,
+            evidenceRole: "proof",
+            evidenceNote: "First retained result.",
+          },
+          {
+            evidenceId: nextCandidatePage.receipts[0].evidenceId,
+            digest: nextCandidatePage.receipts[0].digest,
+            evidenceRole: "supporting",
+            evidenceNote: "Second retained result.",
+          },
+        ],
+      };
+      const batchRead = { ...trafficAction, receiptId: batchFinding.id };
+      const batchApprovals = confirmations.length;
+      denied = "PRE_TOOL_CALL";
+      await turn(batchTraffic);
+      denied = undefined;
+      for (
+        const rejected of [
+          { ...batchTraffic, ...exact },
+          { ...batchTraffic, reportVersion: 2 },
+          {
+            ...batchTraffic,
+            trafficRefs: [
+              batchTraffic.trafficRefs[0],
+              { ...batchTraffic.trafficRefs[1], digest: "a".repeat(64) },
+            ],
+          },
+        ]
+      ) assertStringIncludes((await turn(rejected)).result, "unavailable");
+      assertEquals(confirmations.length, batchApprovals);
+      assertEquals(JSON.parse((await turn(batchRead)).result).page.links, []);
+      const savedBatch = JSON.parse((await turn(batchTraffic)).result).links;
+      assertEquals(
+        savedBatch.map(({ trafficId }: { trafficId: string }) => trafficId),
+        batchTraffic.trafficRefs.map(({ evidenceId }) => evidenceId),
+      );
+      assertEquals(
+        savedBatch.map(({ evidenceNote }: { evidenceNote: string }) =>
+          evidenceNote
+        ),
+        batchTraffic.trafficRefs.map(({ evidenceNote }) => evidenceNote),
+      );
+      assertEquals(confirmations.length, batchApprovals + 1);
+      await withGateway(async (reconnected) => {
+        assertEquals(
+          JSON.parse((await reconnected(batchTraffic)).result).links,
+          savedBatch,
+        );
+        const changedRefs = batchTraffic.trafficRefs.map((ref) => ({
+          ...ref,
+          evidenceNote: "Do not overwrite a retained note.",
+        }));
+        assertStringIncludes(
+          (await reconnected({ ...batchTraffic, trafficRefs: changedRefs }))
+            .result,
+          "unavailable",
+        );
+        assertEquals(confirmations.length, batchApprovals + 1);
+        const distinctRequest = JSON.parse(
+          (await reconnected({
+            ...batchTraffic,
+            requestId: crypto.randomUUID(),
+            trafficRefs: changedRefs,
+          })).result,
+        ).links;
+        assertEquals(distinctRequest, savedBatch);
+        const retained = JSON.parse((await reconnected(batchRead)).result).page;
+        assertEquals(retained.links.map(({ id }: { id: string }) => id), [
+          savedBatch[1].id,
+          savedBatch[0].id,
+        ]);
+        denied = "POST_TOOL_RESPONSE";
+        assertEquals(
+          (await reconnected(batchTraffic)).result,
+          "Tool response withheld by policy.",
+        );
+        denied = "PRE_OUTPUT";
+        assertEquals((await reconnected(batchTraffic)).response, undefined);
+        denied = undefined;
+        assertEquals(confirmations.length, batchApprovals + 2);
+      });
       assertEquals(JSON.parse((await turn(trafficAction)).result).page.links, [
         trafficLink,
       ]);

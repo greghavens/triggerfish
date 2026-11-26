@@ -257,6 +257,18 @@ const evidenceStoreSchemas: Partial<
         ],
         optionalTable: true,
       },
+      {
+        name: "traffic_link_batches",
+        columns: [
+          "request_id",
+          "run_id",
+          "revision",
+          "finding_id",
+          "binding",
+          "link_ids",
+        ],
+        optionalTable: true,
+      },
     ],
   },
 };

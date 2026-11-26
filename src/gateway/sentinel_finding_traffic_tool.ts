@@ -1,4 +1,5 @@
 /** Exact leased-worker links from immutable findings to sanitized retained traffic. */
+import { createHash } from "node:crypto";
 import type { ToolDefinition } from "../core/types/tool.ts";
 import {
   type readSentinelAssessment,
@@ -9,8 +10,10 @@ import {
 import { isSentinelCaseId, locateSentinelCase } from "../sentinel/cases.ts";
 import {
   listSentinelFindingTrafficLinks,
+  MAX_FINDING_TRAFFIC_BATCH,
   openSentinelFindingTrafficLinks,
   parseSentinelFindingTrafficAnnotationChange,
+  previewSentinelFindingTrafficBatch,
   sentinelFindingTrafficEvidenceVersion,
   type SentinelFindingTrafficLinkInput,
   sentinelTrafficEvidenceAnnotation,
@@ -870,4 +873,166 @@ export async function editOperatorSentinelFindingTrafficSet(
   ) return "Error: The operator declined the traffic set change.";
   const saved = inspect(preview.proposal)?.amendment;
   return saved ? present(saved) : unavailable;
+}
+
+/** Review and atomically attach a bounded set of already-retained evidence. */
+export async function attachOperatorSentinelFindingTrafficBatch(
+  snapshotPath: string,
+  revision: number,
+  args: Record<string, unknown>,
+  confirm: (prompt: string) => Promise<boolean>,
+): Promise<string> {
+  const { receiptId, recheckId, reportVersion, requestId, trafficRefs } = args;
+  const caseId = locateSentinelCase(snapshotPath)?.caseId;
+  if (
+    !caseId || typeof receiptId !== "string" ||
+    !findingPattern.test(receiptId) ||
+    (recheckId !== undefined &&
+      (typeof recheckId !== "string" || !recheckPattern.test(recheckId))) ||
+    !positiveInteger(reportVersion) || typeof requestId !== "string" ||
+    !uuidPattern.test(requestId) ||
+    !Array.isArray(trafficRefs) || trafficRefs.length < 2 ||
+    trafficRefs.length > MAX_FINDING_TRAFFIC_BATCH
+  ) return unavailable;
+  const canonicalRequest = requestId.toLowerCase();
+  const submitted: {
+    evidenceId: string;
+    digest: string;
+    annotation: NonNullable<
+      ReturnType<typeof sentinelTrafficEvidenceAnnotation>
+    >;
+    itemRequestId: string;
+  }[] = [];
+  const ids = new Set<string>();
+  for (const [index, raw] of trafficRefs.entries()) {
+    if (
+      !raw || typeof raw !== "object" || Array.isArray(raw) ||
+      Object.keys(raw).some((key) =>
+        !["evidenceId", "digest", "evidenceRole", "evidenceNote"].includes(key)
+      )
+    ) return unavailable;
+    const { evidenceId, digest } = raw as Record<string, unknown>;
+    const annotation = sentinelTrafficEvidenceAnnotation(raw);
+    if (
+      !annotation || !exactId(evidenceId, 100) || ids.has(evidenceId) ||
+      typeof digest !== "string" || !digestPattern.test(digest)
+    ) return unavailable;
+    ids.add(evidenceId);
+    const hash = createHash("sha256").update(
+      JSON.stringify(["sentinel-traffic-link-batch", canonicalRequest, index]),
+    ).digest("hex");
+    const itemRequestId = `${hash.slice(0, 8)}-${hash.slice(8, 12)}-4${
+      hash.slice(13, 16)
+    }-8${hash.slice(17, 20)}-${hash.slice(20, 32)}`;
+    submitted.push({ evidenceId, digest, annotation, itemRequestId });
+  }
+  const inspect = (approvedBinding?: string) =>
+    withSentinelAssessmentWriteLock(snapshotPath, (state) => {
+      const runId = state?.plan.runId;
+      if (
+        !runId || !state.active || state.revision !== revision ||
+        !hasSentinelWorkerFindingJournal(snapshotPath)
+      ) return;
+      const journal = openSentinelWorkerFindingStore(snapshotPath);
+      try {
+        const report = journal.readFindingReport(receiptId, revision);
+        const original = report?.finding;
+        if (
+          !original || original.caseId !== caseId || original.runId !== runId ||
+          readSentinelOperatingConstraints(snapshotPath, runId, revision)
+              ?.constraints.allowedAssetIds?.includes(original.targetId) ===
+            false ||
+          !state.result?.sharedGraph.snapshot?.nodes.some(({ id, kind }) =>
+            kind === "asset" && id === original.targetId
+          )
+        ) return;
+        if (recheckId !== undefined) {
+          const recheck = journal.read(recheckId);
+          if (
+            recheck?.kind !== "recheck" || recheck.findingId !== original.id ||
+            recheck.caseId !== caseId || recheck.runId !== runId ||
+            recheck.targetId !== original.targetId ||
+            recheck.evidenceRevision > revision
+          ) return;
+        }
+        const inputs: SentinelFindingTrafficLinkInput[] = [];
+        for (
+          const { evidenceId, digest, annotation, itemRequestId } of submitted
+        ) {
+          const receipt = readSentinelTrafficReceipt(snapshotPath, revision, {
+            evidenceId,
+            digest,
+          }, original.targetId);
+          if (!receipt) return;
+          inputs.push({
+            caseId,
+            evidenceRevision: revision,
+            assetId: original.targetId,
+            findingId: receiptId,
+            ...(typeof recheckId === "string" && { recheckId }),
+            reportVersion,
+            trafficId: evidenceId,
+            trafficDigest: digest,
+            trafficSource: receipt.family,
+            ...annotation,
+            authority: { kind: "operator" },
+            requestId: itemRequestId,
+          });
+        }
+        const preview = previewSentinelFindingTrafficBatch(
+          snapshotPath,
+          canonicalRequest,
+          runId,
+          inputs,
+        );
+        if (
+          !preview ||
+          (approvedBinding !== undefined && approvedBinding !== preview.binding)
+        ) return;
+        if (preview.saved) return { ...preview, links: preview.saved };
+        if (report.version !== reportVersion) return;
+        if (approvedBinding === undefined) {
+          return { ...preview, links: undefined };
+        }
+        const links = openSentinelFindingTrafficLinks(snapshotPath);
+        try {
+          return {
+            ...preview,
+            links: links.recordBatch(
+              canonicalRequest,
+              runId,
+              inputs,
+              () =>
+                journal.readFindingReport(receiptId, revision)?.version ===
+                  reportVersion,
+            ),
+          };
+        } finally {
+          links.close();
+        }
+      } finally {
+        journal.close();
+      }
+    });
+  const preview = inspect();
+  if (!preview) return unavailable;
+  if (preview.links) {
+    return JSON.stringify({
+      _classification: "INTERNAL",
+      links: preview.links,
+    });
+  }
+  if (
+    !await confirm(
+      `Attach these exact retained records to ${receiptId} at Sentinel case ${caseId}, revision ${revision}, report version ${reportVersion}?\n${
+        JSON.stringify(
+          preview.canonical.map(({ requestId: _requestId, ...input }) => input),
+        )
+      }`,
+    )
+  ) return "Error: The operator declined the traffic attachment batch.";
+  const links = inspect(preview.binding)?.links;
+  return links
+    ? JSON.stringify({ _classification: "INTERNAL", links })
+    : unavailable;
 }

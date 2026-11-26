@@ -301,6 +301,7 @@ import { createOperatorSentinelRuns } from "./operator_sentinel_runs.ts";
 import {
   annotateOperatorSentinelFindingTraffic,
   attachOperatorSentinelFindingTraffic,
+  attachOperatorSentinelFindingTrafficBatch,
   editOperatorSentinelFindingTrafficSet,
   executeSentinelFindingTrafficTool,
   reopenSentinelLinkedTrafficPayload,
@@ -432,6 +433,7 @@ export const operatorRunTool: ToolDefinition = {
         "finding_traffic_candidates",
         "topology_source",
         "attach_finding_traffic",
+        "attach_finding_traffic_batch",
         "annotate_finding_traffic",
         "reorder_finding_traffic",
         "finding_traffic_set_receipt",
@@ -544,6 +546,22 @@ export const operatorRunTool: ToolDefinition = {
     incidentId: {
       type: "string",
       description: "Exact saved Sentinel incident candidate ID",
+    },
+    trafficRefs: {
+      type: "array",
+      description:
+        "Two to four exact retained traffic references for one atomic finding attachment.",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["evidenceId", "digest"],
+        properties: {
+          evidenceId: { type: "string" },
+          digest: { type: "string" },
+          evidenceRole: { type: "string" },
+          evidenceNote: { type: "string" },
+        },
+      },
     },
     trafficLinkIds: {
       type: "array",
@@ -8421,6 +8439,33 @@ ${
           ) || !await controller.inspect(ref)
         ) return unavailable;
         return await annotateOperatorSentinelFindingTraffic(
+          resolveSentinelCasePath(options.baseDir, ref.id),
+          ref.revision,
+          args,
+          options.confirm,
+        );
+      }
+      if (action === "attach_finding_traffic_batch") {
+        if (
+          ref.kind !== "sentinel" || ref.revision === undefined ||
+          !context?.authenticatedOwnerSessionId ||
+          !canFlowTo("INTERNAL", context.ceiling ?? "PUBLIC") ||
+          !canFlowTo(context.inputClassification ?? "PUBLIC", "INTERNAL") ||
+          Object.keys(args).some((key) =>
+            ![
+              "action",
+              "kind",
+              "id",
+              "revision",
+              "receiptId",
+              "recheckId",
+              "reportVersion",
+              "trafficRefs",
+              "requestId",
+            ].includes(key)
+          ) || !await controller.inspect(ref)
+        ) return unavailable;
+        return await attachOperatorSentinelFindingTrafficBatch(
           resolveSentinelCasePath(options.baseDir, ref.id),
           ref.revision,
           args,

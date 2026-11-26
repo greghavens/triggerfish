@@ -2,7 +2,10 @@ import {
   decodeSentinelTrafficComposition,
   MAX_TRAFFIC_COMPOSITION_JOURNAL_BYTES,
 } from "./finding_traffic_composition.ts";
-import { decodeSentinelTrafficLinkAnnotation } from "./finding_traffic_links.ts";
+import {
+  decodeSentinelTrafficLinkAnnotation,
+  MAX_FINDING_TRAFFIC_BATCH,
+} from "./finding_traffic_links.ts";
 import {
   parseSentinelModelRoute,
   validSentinelModelRouteHistory,
@@ -229,7 +232,8 @@ function checkedDatabase<T>(
           family === "sentinel-finding-traffic-links.db" &&
             version === 2 && (name === "traffic_link_request_aliases" ||
               name === "traffic_link_annotations" ||
-              name === "traffic_link_composition")
+              name === "traffic_link_composition" ||
+              name === "traffic_link_batches")
         : name === family || name.startsWith(family + "_") ||
           family === "assessment" && name === "sentinel_operating_constraints");
     const tables = new Set<string>();
@@ -681,6 +685,47 @@ function validateAuxiliary(
         ) {
           throw new Error("Foreign Sentinel archive traffic set scope");
         }
+      }
+    }
+    if (tables.has("traffic_link_batches")) {
+      requireColumns(db, "traffic_link_batches", [
+        "request_id",
+        "run_id",
+        "revision",
+        "finding_id",
+        "binding",
+        "link_ids",
+      ]);
+      const rows = db.prepare("SELECT * FROM traffic_link_batches LIMIT 4097")
+        .all();
+      if (rows.length > 4096) {
+        throw new Error("Invalid archived Sentinel traffic batch count");
+      }
+      const exactLink = db.prepare(
+        "SELECT id FROM traffic_links WHERE id = ? AND revision = ? AND finding_id = ?",
+      );
+      for (const row of rows) {
+        const ids = JSON.parse(String(row.link_ids));
+        if (
+          typeof row.request_id !== "string" || !uuid.test(row.request_id) ||
+          typeof row.run_id !== "string" || !uuid.test(row.run_id) ||
+          typeof row.revision !== "number" ||
+          !Number.isSafeInteger(row.revision) ||
+          row.revision < 1 || row.revision > revision ||
+          (row.revision === revision && row.run_id !== runId) ||
+          typeof row.finding_id !== "string" ||
+          !/^worker-finding:[a-f0-9]{64}$/.test(row.finding_id) ||
+          typeof row.binding !== "string" ||
+          !/^[a-f0-9]{64}$/.test(row.binding) ||
+          !Array.isArray(ids) || ids.length < 2 ||
+          ids.length > MAX_FINDING_TRAFFIC_BATCH ||
+          new Set(ids).size !== ids.length ||
+          ids.some((id) =>
+            typeof id !== "string" ||
+            !/^finding-traffic-link:[a-f0-9]{64}$/.test(id) ||
+            !exactLink.get(id, row.revision as number, row.finding_id as string)
+          )
+        ) throw new Error("Invalid archived Sentinel traffic batch scope");
       }
     }
     const scoped = name === "sentinel-worker-findings.db"

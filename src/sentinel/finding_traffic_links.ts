@@ -153,6 +153,10 @@ export function decodeSentinelTrafficLinkAnnotation(
   };
 }
 
+export const MAX_FINDING_TRAFFIC_BATCH = 4;
+const batchTable = "traffic_link_batches";
+const batchRejected = new Error("Sentinel traffic batch could not commit");
+
 export interface SentinelFindingTrafficLinkFilter {
   readonly id?: string;
   readonly findingId?: string;
@@ -309,6 +313,37 @@ function initialize(db: DatabaseSync, readOnly: boolean) {
   };
   if (readOnly) validate();
   else transaction(db, validate);
+}
+
+function prepareTrafficBatch(
+  caseId: string,
+  requestId: string,
+  runId: string,
+  inputs: readonly SentinelFindingTrafficLinkInput[],
+) {
+  if (
+    !uuid.test(requestId) || !uuid.test(runId) ||
+    inputs.length < 2 || inputs.length > MAX_FINDING_TRAFFIC_BATCH
+  ) return;
+  const canonical = inputs.map((input) => normalize(input, caseId));
+  const { findingId, assetId, evidenceRevision, recheckId, reportVersion } =
+    canonical[0];
+  if (
+    canonical.some((input) =>
+      input.findingId !== findingId ||
+      input.assetId !== assetId ||
+      input.evidenceRevision !== evidenceRevision ||
+      input.recheckId !== recheckId ||
+      input.reportVersion !== reportVersion ||
+      input.authority.kind !== "operator"
+    ) ||
+    new Set(canonical.map(({ trafficId }) => trafficId)).size !==
+      canonical.length
+  ) return;
+  const binding = createHash("sha256").update(
+    JSON.stringify([runId, canonical]),
+  ).digest("hex");
+  return { canonical, binding, saved: undefined };
 }
 
 function openLinks(snapshotPath: string, readOnly: boolean, now: () => number) {
@@ -470,6 +505,182 @@ function openLinks(snapshotPath: string, readOnly: boolean, now: () => number) {
       ),
       count: composeFindingTrafficLinks(ids, scopedChanges).length,
     };
+  }
+
+  /** Apply one normalized link inside the caller's transaction. */
+  function recordOne(
+    raw: SentinelFindingTrafficLinkInput,
+    verifyNew: (input: SentinelFindingTrafficLinkInput) => boolean,
+  ): SentinelFindingTrafficLink | undefined {
+    if (readOnly) {
+      throw new Error("The Sentinel traffic journal is read-only");
+    }
+    const input = normalize(raw, caseId!);
+    const serialized = JSON.stringify(input);
+    const id = identifier(serialized);
+    const existing = db.prepare(
+      "SELECT * FROM traffic_links WHERE request_id = ?",
+    ).get(input.requestId);
+    if (existing) return existing.id === id ? decode(existing) : undefined;
+    const alias = db.prepare(`
+          SELECT links.* FROM traffic_link_request_aliases AS aliases
+          JOIN traffic_links AS links ON links.id = aliases.link_id
+          WHERE aliases.request_id = ?
+        `).get(input.requestId);
+    const content = linkContent(input);
+    if (alias) {
+      const prior = decode(alias);
+      const { id: _id, recordedAt: _at, ...priorInput } = prior;
+      return linkContent(priorInput) === content ? prior : undefined;
+    }
+    if (verifyNew(input) !== true) return undefined;
+    const equivalent = db.prepare(`
+          SELECT * FROM traffic_links
+          WHERE finding_id = ? AND revision = ?
+            AND json_remove(input, '$.requestId') = ?
+          ORDER BY rowid LIMIT 1
+        `).get(input.findingId, input.evidenceRevision, content);
+    if (equivalent) {
+      const count = Number(
+        db.prepare(
+          "SELECT count(*) AS count FROM traffic_link_request_aliases",
+        ).get()?.count,
+      );
+      if (count >= maxRequestAliases) {
+        throw new Error("Sentinel traffic link request limit reached");
+      }
+      db.prepare("INSERT INTO traffic_link_request_aliases VALUES (?, ?)")
+        .run(input.requestId, equivalent.id);
+      return decode(equivalent);
+    }
+    const count = Number(
+      db.prepare(
+        "SELECT COUNT(*) AS count FROM traffic_links",
+      ).get()?.count,
+    );
+    if (count >= maxLinks) {
+      throw new Error("Sentinel traffic link limit reached");
+    }
+    const time = now();
+    if (!Number.isSafeInteger(time)) {
+      throw new Error("Invalid traffic link clock");
+    }
+    const recordedAt = new Date(time).toISOString();
+    db.prepare(`INSERT INTO traffic_links
+          (id,request_id,revision,finding_id,input,recorded_at) VALUES (?,?,?,?,?,?)`)
+      .run(
+        id,
+        input.requestId,
+        input.evidenceRevision,
+        input.findingId,
+        serialized,
+        time,
+      );
+    return { ...input, id, recordedAt };
+  }
+
+  function inspectBatch(
+    requestId: string,
+    runId: string,
+    inputs: readonly SentinelFindingTrafficLinkInput[],
+  ) {
+    const prepared = prepareTrafficBatch(caseId!, requestId, runId, inputs);
+    if (!prepared) return;
+    const { canonical, binding } = prepared;
+    const { findingId, assetId, evidenceRevision, recheckId } = canonical[0];
+    const prior = hasTable(db, batchTable)
+      ? db.prepare(
+        "SELECT * FROM traffic_link_batches WHERE request_id = ?",
+      ).get(requestId)
+      : undefined;
+    if (!prior) return { canonical, binding, saved: undefined };
+    if (
+      prior.binding !== binding || prior.revision !== evidenceRevision ||
+      prior.finding_id !== findingId || prior.run_id !== runId
+    ) return;
+    const ids = JSON.parse(String(prior.link_ids));
+    if (
+      !Array.isArray(ids) || ids.length !== canonical.length ||
+      new Set(ids).size !== ids.length ||
+      !ids.every((id) => typeof id === "string" && linkIdPattern.test(id))
+    ) return;
+    const lookup = db.prepare("SELECT * FROM traffic_links WHERE id = ?");
+    const saved = [];
+    for (const [index, id] of ids.entries()) {
+      const row = lookup.get(id);
+      const link = row && decode(row);
+      const expected = canonical[index];
+      if (
+        !link || link.findingId !== findingId || link.assetId !== assetId ||
+        link.evidenceRevision !== evidenceRevision ||
+        link.recheckId !== recheckId ||
+        link.trafficId !== expected.trafficId ||
+        link.trafficDigest !== expected.trafficDigest ||
+        link.trafficSource !== expected.trafficSource
+      ) return;
+      saved.push(link);
+    }
+    return { canonical, binding, saved };
+  }
+
+  function recordBatch(
+    requestId: string,
+    runId: string,
+    inputs: readonly SentinelFindingTrafficLinkInput[],
+    verifyNew: (input: SentinelFindingTrafficLinkInput) => boolean,
+  ) {
+    try {
+      return transaction(db, () => {
+        const preview = inspectBatch(requestId, runId, inputs);
+        if (!preview || preview.saved) return preview?.saved;
+        const links = [];
+        const existing = db.prepare(
+          `SELECT * FROM traffic_links WHERE finding_id = ?
+          AND revision = ? AND json_extract(input, '$.trafficId') = ?
+          AND json_extract(input, '$.recheckId') IS ? ORDER BY rowid LIMIT 1`,
+        );
+        for (const input of preview.canonical) {
+          if (!verifyNew(input)) throw batchRejected;
+          const row = existing.get(
+            input.findingId,
+            input.evidenceRevision,
+            input.trafficId,
+            input.recheckId ?? null,
+          );
+          const link = row ? decode(row) : recordOne(input, verifyNew);
+          if (
+            !link || link.assetId !== input.assetId ||
+            link.trafficDigest !== input.trafficDigest ||
+            link.trafficSource !== input.trafficSource
+          ) throw batchRejected;
+          links.push(link);
+        }
+        db.exec(`CREATE TABLE IF NOT EXISTS traffic_link_batches (
+          request_id TEXT PRIMARY KEY,
+          run_id TEXT NOT NULL, revision INTEGER NOT NULL, finding_id TEXT NOT NULL,
+          binding TEXT NOT NULL, link_ids TEXT NOT NULL
+        ) STRICT`);
+        if (
+          Number(
+            db.prepare("SELECT count(*) AS count FROM traffic_link_batches")
+              .get()?.count,
+          ) >= maxLinks
+        ) throw batchRejected;
+        const { evidenceRevision, findingId } = preview.canonical[0];
+        db.prepare("INSERT INTO traffic_link_batches VALUES (?,?,?,?,?,?)").run(
+          requestId,
+          runId,
+          evidenceRevision,
+          findingId,
+          preview.binding,
+          JSON.stringify(links.map(({ id }) => id)),
+        );
+        return links;
+      });
+    } catch (error) {
+      if (error === batchRejected) return;
+      throw error;
+    }
   }
 
   return {
@@ -641,78 +852,14 @@ function openLinks(snapshotPath: string, readOnly: boolean, now: () => number) {
       ) return link;
     },
 
+    inspectBatch,
+    recordBatch,
     /** The caller must gate case and lease for every request, including retries. */
     record(
       raw: SentinelFindingTrafficLinkInput,
       verifyNew: (input: SentinelFindingTrafficLinkInput) => boolean,
-    ): SentinelFindingTrafficLink | undefined {
-      if (readOnly) {
-        throw new Error("The Sentinel traffic journal is read-only");
-      }
-      const input = normalize(raw, caseId);
-      const serialized = JSON.stringify(input);
-      const id = identifier(serialized);
-      return transaction(db, () => {
-        const existing = db.prepare(
-          "SELECT * FROM traffic_links WHERE request_id = ?",
-        ).get(input.requestId);
-        if (existing) return existing.id === id ? decode(existing) : undefined;
-        const alias = db.prepare(`
-          SELECT links.* FROM traffic_link_request_aliases AS aliases
-          JOIN traffic_links AS links ON links.id = aliases.link_id
-          WHERE aliases.request_id = ?
-        `).get(input.requestId);
-        const content = linkContent(input);
-        if (alias) {
-          const prior = decode(alias);
-          const { id: _id, recordedAt: _at, ...priorInput } = prior;
-          return linkContent(priorInput) === content ? prior : undefined;
-        }
-        if (verifyNew(input) !== true) return undefined;
-        const equivalent = db.prepare(`
-          SELECT * FROM traffic_links
-          WHERE finding_id = ? AND revision = ?
-            AND json_remove(input, '$.requestId') = ?
-          ORDER BY rowid LIMIT 1
-        `).get(input.findingId, input.evidenceRevision, content);
-        if (equivalent) {
-          const count = Number(
-            db.prepare(
-              "SELECT count(*) AS count FROM traffic_link_request_aliases",
-            ).get()?.count,
-          );
-          if (count >= maxRequestAliases) {
-            throw new Error("Sentinel traffic link request limit reached");
-          }
-          db.prepare("INSERT INTO traffic_link_request_aliases VALUES (?, ?)")
-            .run(input.requestId, equivalent.id);
-          return decode(equivalent);
-        }
-        const count = Number(
-          db.prepare(
-            "SELECT COUNT(*) AS count FROM traffic_links",
-          ).get()?.count,
-        );
-        if (count >= maxLinks) {
-          throw new Error("Sentinel traffic link limit reached");
-        }
-        const time = now();
-        if (!Number.isSafeInteger(time)) {
-          throw new Error("Invalid traffic link clock");
-        }
-        const recordedAt = new Date(time).toISOString();
-        db.prepare(`INSERT INTO traffic_links
-          (id,request_id,revision,finding_id,input,recorded_at) VALUES (?,?,?,?,?,?)`)
-          .run(
-            id,
-            input.requestId,
-            input.evidenceRevision,
-            input.findingId,
-            serialized,
-            time,
-          );
-        return { ...input, id, recordedAt };
-      });
+    ) {
+      return transaction(db, () => recordOne(raw, verifyNew));
     },
     list(filter: SentinelFindingTrafficLinkFilter = {}) {
       const {
@@ -835,6 +982,23 @@ export function listSentinelFindingTrafficLinks(
 }
 
 /** Resolve a committed attachment without invoking the handler or reopening traffic. */
+/** Preview exact metadata and replay without creating or migrating an empty journal. */
+export function previewSentinelFindingTrafficBatch(
+  snapshotPath: string,
+  requestId: string,
+  runId: string,
+  inputs: readonly SentinelFindingTrafficLinkInput[],
+) {
+  const existing = readFindingTrafficLinks(snapshotPath, (links) => ({
+    result: links.inspectBatch(requestId, runId, inputs),
+  }));
+  if (existing) return existing.result;
+  const caseId = locateSentinelCase(snapshotPath)?.caseId;
+  return caseId
+    ? prepareTrafficBatch(caseId, requestId, runId, inputs)
+    : undefined;
+}
+
 export function readSentinelFindingTrafficWriteReceipt(
   snapshotPath: string,
   scope: Parameters<ReturnType<typeof openLinks>["readAssignmentRequest"]>[0],

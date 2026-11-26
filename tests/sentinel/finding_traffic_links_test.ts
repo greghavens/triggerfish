@@ -319,3 +319,43 @@ Deno.test("finding traffic journal deduplicates a regenerated UUID without weake
     await Deno.remove(root, { recursive: true });
   }
 });
+
+Deno.test("a denied second attachment rolls back the complete retained batch", async () => {
+  const root = await Deno.makeTempDir();
+  const path = resolveSentinelCasePath(root);
+  try {
+    await Deno.mkdir(dirname(path), { recursive: true });
+    const store = openSentinelFindingTrafficLinks(path);
+    try {
+      const request = crypto.randomUUID();
+      const runId = crypto.randomUUID();
+      const one = { ...initial, authority: { kind: "operator" } as const };
+      const two = {
+        ...one,
+        trafficId: `har:evidence:${"9".repeat(64)}`,
+        requestId: crypto.randomUUID(),
+      };
+      assertEquals(
+        store.recordBatch(
+          request,
+          runId,
+          [one, two],
+          (input) => input.trafficId === one.trafficId,
+        ),
+        undefined,
+      );
+      assertEquals(store.list(), []);
+      const saved = store.recordBatch(request, runId, [one, two], () => true);
+      assertEquals(saved?.length, 2);
+      assertEquals(
+        store.recordBatch(request, runId, [one, two], () => false),
+        saved,
+      );
+      assertEquals(store.list().length, 2);
+    } finally {
+      store.close();
+    }
+  } finally {
+    await Deno.remove(root, { recursive: true });
+  }
+});

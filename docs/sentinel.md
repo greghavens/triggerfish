@@ -347,6 +347,12 @@ Use an empty category string to clear the label. Each approved correction
 appends a report version while earlier versions keep their original
 metadata and evidence.
 
+Use `operator_runs attach_finding_traffic_batch` to attach two to four
+already retained traffic references in one reviewed operation. Each reference
+must match the finding's case, asset and evidence revision. The batch commits
+all links together. Repeating a reference preserves the existing link and
+its note.
+
 Use `operator_runs annotate_finding_traffic` to review a role or note
 correction on an existing retained traffic link. Provide the exact finding,
 link, report version, and current `evidenceVersion` from `finding_traffic`.
