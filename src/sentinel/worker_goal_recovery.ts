@@ -294,6 +294,9 @@ export function sentinelCheckpointInventoryArgs(args: Record<string, unknown>) {
   const text = args.assetText === undefined
     ? undefined
     : parseSentinelInventoryText(args.assetText);
+  const organizationText = args.organizationText === undefined
+    ? undefined
+    : parseSentinelInventoryText(args.organizationText);
   const gap = sentinelAssetCoverageGaps.find((entry) => entry === coverageGap);
   const selectors = [
     "assetId",
@@ -305,6 +308,12 @@ export function sentinelCheckpointInventoryArgs(args: Record<string, unknown>) {
   ] as const;
   if (
     (view !== "assets" && view !== "organizations" && view !== "coverage") ||
+    (args.organizationText !== undefined &&
+      (!organizationText || view !== "organizations")) ||
+    (args.includeMembers !== undefined &&
+      (args.includeMembers !== true || view !== "organizations" ||
+        typeof args.organizationId !== "string" ||
+        !args.organizationId.trim())) ||
     (args.assetText !== undefined &&
       (!text || view !== "assets" ||
         args.assetId !== undefined || args.assetIds !== undefined)) ||
@@ -323,6 +332,7 @@ export function sentinelCheckpointInventoryArgs(args: Record<string, unknown>) {
     Object.keys(args).some((key) =>
       key !== "view" && key !== "limit" && key !== "coverageGap" &&
       key !== "asOf" && key !== "assetIds" && key !== "assetText" &&
+      key !== "organizationText" && key !== "includeMembers" &&
       !selectors.some((selector) => selector === key)
     )
   ) return;
@@ -342,6 +352,8 @@ export function sentinelCheckpointInventoryArgs(args: Record<string, unknown>) {
     ...retained,
     ...(batch && { assetIds: batch }),
     ...(text !== undefined && { assetText: text }),
+    ...(organizationText !== undefined && { organizationText }),
+    ...(args.includeMembers === true && { includeMembers: true as const }),
     ...(limit !== undefined && { limit }),
     ...(gap && { coverageGap: gap }),
     ...(typeof asOf === "string" && { asOf }),
@@ -701,6 +713,8 @@ type GoalReceiptReadArguments =
     assetId?: string;
     assetIds?: readonly string[];
     assetText?: string;
+    organizationText?: string;
+    includeMembers?: true;
     organizationId?: string;
     assetType?: string;
     parentId?: string;

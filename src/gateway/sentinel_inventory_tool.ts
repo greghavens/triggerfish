@@ -18,7 +18,7 @@ import {
   querySentinelOrganizations,
   readSentinelPlannerCoverageResult,
   sentinelAssetCoverageGaps,
-  type SentinelAssetInventoryOptions,
+  type SentinelOrganizationInventoryOptions,
   validSentinelCoverageTime,
 } from "../sentinel/inventory_queries.ts";
 import { digestSentinelSnapshot } from "../sentinel/shared_inventory.ts";
@@ -67,6 +67,16 @@ export const sentinelInventoryTool: ToolDefinition = {
       items: { type: "string" },
       description:
         "Up to twenty exact asset IDs for the asset view. Omit other asset filters. A leased worker may name only its assigned asset.",
+    },
+    organizationText: {
+      type: "string",
+      description:
+        "Case-insensitive literal organization name, only for the organizations view.",
+    },
+    includeMembers: {
+      type: "boolean",
+      description:
+        "Page the already visible asset IDs declared for an exact organizationId. Organizations view only.",
     },
     organizationId: { type: "string", description: "Exact organization ID" },
     assetType: { type: "string", description: "Exact typed asset property" },
@@ -150,6 +160,9 @@ function queryOptions(
   const text = args.assetText === undefined
     ? undefined
     : parseSentinelInventoryText(args.assetText);
+  const organizationText = args.organizationText === undefined
+    ? undefined
+    : parseSentinelInventoryText(args.organizationText);
   if (
     Object.keys(args).some((key) =>
       ![
@@ -160,6 +173,8 @@ function queryOptions(
         "asOf",
         "assetIds",
         "assetText",
+        "organizationText",
+        "includeMembers",
         ...filters,
       ].includes(
         key,
@@ -172,6 +187,12 @@ function queryOptions(
       args[key] !== undefined && (typeof args[key] !== "string" ||
         args[key].length === 0 || args[key].length > 800)
     ) ||
+    (args.organizationText !== undefined &&
+      (!organizationText || args.view !== "organizations")) ||
+    (args.includeMembers !== undefined &&
+      (args.includeMembers !== true || args.view !== "organizations" ||
+        typeof args.organizationId !== "string" ||
+        !args.organizationId.trim())) ||
     (args.assetText !== undefined &&
       (!text || args.view !== "assets" ||
         args.assetId !== undefined || args.assetIds !== undefined)) ||
@@ -186,6 +207,8 @@ function queryOptions(
   return {
     onlyAsset: batch ? undefined : assignedAsset ?? args.assetId,
     ...(text !== undefined && { assetText: text }),
+    ...(organizationText !== undefined && { organizationText }),
+    ...(args.includeMembers === true && { includeMembers: true }),
     ...(batch && { exactAssetIds: batch }),
     organizationId: args.organizationId,
     assetType: args.assetType,
@@ -193,7 +216,7 @@ function queryOptions(
     alias: args.alias,
     cursor,
     limit,
-  } as SentinelAssetInventoryOptions;
+  } as SentinelOrganizationInventoryOptions;
 }
 
 function leasedAsset(options: InventoryScope) {
@@ -249,7 +272,7 @@ export function reopenSentinelAssignedInventory(
     !snapshot || !caseId ||
     !snapshot.nodes.some(({ id, kind }) => id === assetId && kind === "asset")
   ) return;
-  let query: SentinelAssetInventoryOptions;
+  let query: SentinelOrganizationInventoryOptions;
   try {
     query = queryOptions(selector, assetId);
   } catch {

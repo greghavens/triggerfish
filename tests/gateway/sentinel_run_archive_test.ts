@@ -3613,7 +3613,8 @@ async function verifyPlannerArchive(
     | "facts"
     | "digests"
     | "coverage"
-    | "inventory-text",
+    | "inventory-text"
+    | "organization-inventory",
 ) {
   const baseDir = await Deno.makeTempDir();
   const caseId = "planner-archive";
@@ -3678,8 +3679,22 @@ async function verifyPlannerArchive(
     const graph = {
       version: 1,
       nodes: [
-        { id: "app", kind: "asset", label: "Application" },
-        { id: "db", kind: "asset", label: "Database" },
+        {
+          id: "app",
+          kind: "asset",
+          label: "Application",
+          ...(mode === "organization-inventory"
+            ? { organization: { id: "ops", label: "Operations" } }
+            : {}),
+        },
+        {
+          id: "db",
+          kind: "asset",
+          label: "Database",
+          ...(mode === "organization-inventory"
+            ? { organization: { id: "ops", label: "Operations" } }
+            : {}),
+        },
       ],
       edges: [],
     };
@@ -4213,6 +4228,20 @@ async function verifyPlannerArchive(
         },
       });
     }
+    if (mode === "organization-inventory") {
+      plannerCalls.splice(10, 2, {
+        name: "sentinel_case_inventory",
+        args: { view: "organizations", organizationText: " OPER " },
+      }, {
+        name: "sentinel_case_inventory",
+        args: {
+          view: "organizations",
+          organizationId: "ops",
+          includeMembers: true,
+          limit: 1,
+        },
+      });
+    }
     advanceAdaptiveSentinel(path, state);
     const revision = adaptiveRevision(state);
     const store = openSentinelAdaptiveStore(
@@ -4484,6 +4513,15 @@ async function verifyPlannerArchive(
       assertEquals(expanded.page.members[0].id, "asset:app");
       assertEquals(expanded.page.nextCursor, `${expanded.page.digest.id}:1`);
       assertEquals(round.reads[11].plannerDigestResult, undefined);
+    } else if (mode === "organization-inventory") {
+      assertEquals(observed.organizations, [{
+        id: "ops",
+        label: "Operations",
+        assetCount: 2,
+      }]);
+      const members = JSON.parse(responses[11]);
+      assertEquals(members.assetIds, ["app"]);
+      assert(members.nextCursor);
     } else if (mode === "inventory-text") {
       assertEquals(observed.assets.map(({ id }: { id: string }) => id), [
         "app",
@@ -5212,7 +5250,10 @@ async function verifyPlannerArchive(
         const sha256 = createHash("sha256").update(responses[index]).digest(
           "hex",
         );
-        if ((mode === "coverage" || mode === "inventory-text") && index >= 10) {
+        if (
+          (mode === "coverage" || mode === "inventory-text" ||
+            mode === "organization-inventory") && index >= 10
+        ) {
           assertEquals(round.reads?.[index].plannerCoverageResult, undefined);
         } else if (mode === "digests" && index >= 10) {
           assertEquals(round.reads?.[index].plannerDigestResult, undefined);
@@ -5266,7 +5307,10 @@ async function verifyPlannerArchive(
         "PRE_TOOL_CALL",
         "POST_TOOL_RESPONSE",
       ]);
-      if (mode === "coverage" || mode === "inventory-text") {
+      if (
+        mode === "coverage" || mode === "inventory-text" ||
+        mode === "organization-inventory"
+      ) {
         policy.denyWorkerSourceAfter = false;
         assert(run.runId);
         const prior = readSentinelOperatingConstraints(path, run.runId);
@@ -5391,3 +5435,6 @@ Deno.test("dispatched Sentinel planner coverage pages survive review changes and
 
 Deno.test("dispatched Sentinel planner literal inventory pages survive archive under current scope", () =>
   verifyPlannerArchive("inventory-text"));
+
+Deno.test("gateway reopens exact archived planner organization inventory", () =>
+  verifyPlannerArchive("organization-inventory"));

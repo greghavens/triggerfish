@@ -1117,6 +1117,16 @@ export const operatorRunTool: ToolDefinition = {
       description:
         "Return inventory coverage gaps for the selected case or approved membership",
     },
+    organizationText: {
+      type: "string",
+      description:
+        "Literal case-insensitive organization name for authorized inventory discovery.",
+    },
+    includeMembers: {
+      type: "boolean",
+      description:
+        "Page the visible asset IDs declared for the exact organizationId.",
+    },
     organizationId: {
       type: "string",
       description: "Exact organization ID declared in the selected case",
@@ -1226,6 +1236,8 @@ export const sentinelOperatorCaseReadParameters = [
   "assetIds",
   "assetText",
   "organizationId",
+  "organizationText",
+  "includeMembers",
   "assetType",
   "parentId",
   "alias",
@@ -2387,7 +2399,10 @@ export function createOperatorRunToolExecutor(options: {
           canFlowTo(classification, context?.ceiling ?? "PUBLIC"));
     }
     const action = args.action;
-    if (args.assetText !== undefined && action !== "inventory") {
+    if (
+      (args.assetText !== undefined || args.organizationText !== undefined ||
+        args.includeMembers !== undefined) && action !== "inventory"
+    ) {
       return unavailable;
     }
     if (
@@ -8501,13 +8516,17 @@ ${
           const snapshot = inventory &&
             readSentinelAssessmentRevision(path, ref.revision)?.result
               .sharedGraph.snapshot;
+          const scopedInventoryQuery = inventory &&
+            (inventory.args.assetText !== undefined ||
+              inventory.args.organizationText !== undefined ||
+              inventory.args.includeMembers === true);
           const inventoryScope = () =>
             snapshot && ({
               caseId: ref.id,
               evidenceRevision: ref.revision!,
               snapshotDigest: digestSentinelSnapshot(snapshot),
               snapshot,
-              assetTextScope: {
+              scopedQueryOptions: {
                 allowedAssetIds: readSentinelOperatingConstraints(path, runId)
                   ?.constraints.allowedAssetIds,
                 scopeBinding: JSON.stringify([path, ref.revision, null]),
@@ -8585,8 +8604,8 @@ ${
                   allowed.includes(id)
                 );
             };
-            const textAllowed = () =>
-              inventory.args.assetText === undefined ||
+            const queryAllowed = () =>
+              !scopedInventoryQuery ||
               !!readSentinelPlannerInventoryResult(
                 inventory.args,
                 inventory.text,
@@ -8606,7 +8625,7 @@ ${
               createHash("sha256").update(inventory.text).digest("hex") !==
                 inventory.sha256 ||
               !await authorize(scope, read.tool, selector, inventory.text) ||
-              !assetsAllowed() || !textAllowed() || !await peerAllowed() ||
+              !assetsAllowed() || !queryAllowed() || !await peerAllowed() ||
               !isCurrent()
             ) return unavailable;
             return safeProjection({

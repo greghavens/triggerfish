@@ -24,7 +24,7 @@ import {
   querySentinelAssetReviewCoverage,
   querySentinelOrganizations,
   sentinelAssetCoverageGaps,
-  type SentinelAssetInventoryOptions,
+  type SentinelOrganizationInventoryOptions,
   validSentinelCoverageTime,
 } from "../sentinel/inventory_queries.ts";
 import { readHistoricalAdaptiveSentinel } from "./sentinel_adaptive_runtime.ts";
@@ -41,6 +41,8 @@ const queryFields = new Set([
   "view",
   "assetIds",
   "assetText",
+  "organizationText",
+  "includeMembers",
   "scope",
   "limit",
   "coverageGap",
@@ -52,7 +54,7 @@ function optionsFor(
   args: Record<string, unknown>,
   path: string,
   revision: number,
-): SentinelAssetInventoryOptions | undefined {
+): SentinelOrganizationInventoryOptions | undefined {
   const { assetType, limit = 10 } = args;
   const batch = args.assetIds !== undefined
     ? parseSentinelInventoryAssetIds(args.assetIds)
@@ -61,6 +63,9 @@ function optionsFor(
   const text = args.assetText === undefined
     ? undefined
     : parseSentinelInventoryText(args.assetText);
+  const organizationText = args.organizationText === undefined
+    ? undefined
+    : parseSentinelInventoryText(args.organizationText);
   if (
     Object.keys(args).some((key) => !queryFields.has(key)) ||
     textFilters.some((key) =>
@@ -69,6 +74,12 @@ function optionsFor(
     typeof limit !== "number" || !Number.isSafeInteger(limit) || limit < 1 ||
     limit > 30 ||
     (assetType !== undefined && !exactType) ||
+    (args.organizationText !== undefined &&
+      (!organizationText || args.view !== "organizations")) ||
+    (args.includeMembers !== undefined &&
+      (args.includeMembers !== true || args.view !== "organizations" ||
+        typeof args.organizationId !== "string" ||
+        !args.organizationId.trim())) ||
     (args.assetText !== undefined &&
       (!text || (args.view !== undefined && args.view !== "assets") ||
         args.assetId !== undefined || args.assetIds !== undefined)) ||
@@ -80,6 +91,8 @@ function optionsFor(
     onlyAsset: args.assetId as string | undefined,
     ...(batch && { exactAssetIds: batch }),
     ...(text !== undefined && { assetText: text }),
+    ...(organizationText !== undefined && { organizationText }),
+    ...(args.includeMembers === true && { includeMembers: true }),
     organizationId: args.organizationId as string | undefined,
     assetType: exactType,
     parentId: args.parentId as string | undefined,

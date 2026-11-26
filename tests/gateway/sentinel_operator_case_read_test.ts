@@ -47,7 +47,9 @@ Deno.test("Authenticated Sentinel chat reads exact approved cross-case graph fin
               `${name}.example`,
               ...(id === "unregistered" ? ["hidden-only.example"] : []),
             ],
-            organization: { id: "ops", label: "Operations" },
+            organization: id === "unregistered"
+              ? { id: "hidden-ops", label: "Hidden Group" }
+              : { id: "ops", label: "Operations" },
           })),
         ],
         edges: [],
@@ -461,6 +463,57 @@ Deno.test("Authenticated Sentinel chat reads exact approved cross-case graph fin
       label: "Operations",
       assetCount: 2,
     }]);
+
+    const organizationSearch = {
+      ...inventory,
+      view: "organizations",
+      organizationText: " PERAT ",
+      limit: 1,
+    };
+    await turn(
+      "Find authorized organizations by partial name",
+      organizationSearch,
+    );
+    assertEquals(JSON.parse(result).page.organizations, [{
+      id: "ops",
+      label: "Operations",
+      assetCount: 2,
+    }]);
+    await turn("Search for an organization from an unauthorized case", {
+      ...organizationSearch,
+      organizationText: "hidden",
+    });
+    assertEquals(JSON.parse(result).page.organizations, []);
+    const memberQuery = {
+      ...organizationSearch,
+      organizationId: "ops",
+      includeMembers: true,
+    };
+    await turn("Open the declared members of one organization", memberQuery);
+    const memberPage = JSON.parse(result).page;
+    assertEquals(memberPage.assetIds, ["asset-a"]);
+    assert(memberPage.nextCursor);
+    await turn("Continue the same organization member query", {
+      ...memberQuery,
+      organizationText: "perat",
+      cursor: memberPage.nextCursor,
+    });
+    assertEquals(JSON.parse(result).page.assetIds, ["asset-b"]);
+    for (
+      const invalid of [
+        { ...memberQuery, id: "unregistered" },
+        { ...memberQuery, organizationId: undefined },
+        {
+          ...memberQuery,
+          organizationText: "operations",
+          cursor: memberPage.nextCursor,
+        },
+        { ...organizationSearch, cursor: memberPage.nextCursor },
+      ]
+    ) {
+      await turn("Reject an unauthorized or mismatched member query", invalid);
+      assertStringIncludes(result, "unavailable");
+    }
 
     const coverage = {
       ...inventory,

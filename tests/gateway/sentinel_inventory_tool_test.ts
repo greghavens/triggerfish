@@ -420,6 +420,13 @@ Deno.test("Sentinel inventory enforces the real leased asset and stops flow on h
           { view: "assets", assetIds: ["alpha", "private-asset"] },
           { view: "assets", assetText: " ALPHA " },
           { view: "assets", assetText: "beta" },
+          { view: "organizations", organizationText: "green" },
+          {
+            view: "organizations",
+            organizationText: " OPERATIONS ",
+            organizationId: "blue",
+            includeMembers: true,
+          },
         ],
         undefined,
         lease,
@@ -451,6 +458,22 @@ Deno.test("Sentinel inventory enforces the real leased asset and stops flow on h
       );
       assertEquals(JSON.parse(worker.resultFrames[7]).assets[0].id, "alpha");
       assertEquals(JSON.parse(worker.resultFrames[8]).assets, []);
+      assertEquals(JSON.parse(worker.resultFrames[9]).organizations, []);
+      assertEquals(JSON.parse(worker.resultFrames[10]).assetIds, ["alpha"]);
+      const memberReceipt = worker.trace.find((step) =>
+        step.goalReceiptRead?.args.includeMembers === true
+      )?.goalReceiptRead;
+      assert(memberReceipt);
+      assertEquals(
+        reopenSentinelAssignedInventory(
+          main,
+          state.revision,
+          assigned.task.id,
+          "alpha",
+          memberReceipt.args,
+        ),
+        worker.resultFrames[10],
+      );
       const retained = worker.trace.find((step) =>
         step.goalReceiptRead?.args.assetText === "alpha"
       )?.goalReceiptRead;

@@ -246,29 +246,64 @@ export function querySentinelAssetInventory(
   return { snapshotDigest, nextCursor, assets: results };
 }
 
+export interface SentinelOrganizationInventoryOptions
+  extends SentinelAssetInventoryOptions {
+  readonly organizationText?: string;
+  readonly includeMembers?: boolean;
+}
+
 /** Group only explicit asset organization declarations in one snapshot. */
 export function querySentinelOrganizations(
   input: unknown,
-  options: SentinelAssetInventoryOptions = {},
+  options: SentinelOrganizationInventoryOptions = {},
 ) {
   const snapshot = loadSentinelGraph(input).snapshot();
   const snapshotDigest = digestSentinelSnapshot(snapshot);
   const { assets, filters } = filterAssets(snapshot, options);
+  const { organizationText, includeMembers } = options;
+  const text = organizationText === undefined
+    ? undefined
+    : parseSentinelInventoryText(organizationText);
+  if (
+    (organizationText !== undefined && !text) ||
+    (includeMembers !== undefined &&
+      (includeMembers !== true || !options.organizationId))
+  ) throw new Error("Invalid Sentinel organization selector");
   const organizations = new Map<
     string,
     { id: string; label: string; assetCount: number }
   >();
   for (const { organization } of assets) {
-    if (!organization) continue;
+    if (
+      !organization || (text &&
+        !organization.label.normalize("NFC").toLowerCase().includes(text))
+    ) continue;
     const previous = organizations.get(organization.id);
     if (previous) previous.assetCount++;
     else organizations.set(organization.id, { ...organization, assetCount: 1 });
+  }
+  if (includeMembers) {
+    const members = assets.filter(({ organization }) =>
+      organization && organizations.has(organization.id)
+    );
+    const { results, nextCursor } = page(
+      members,
+      ({ id }) => id,
+      options,
+      ["organization-members", snapshotDigest, filters, text],
+    );
+    return {
+      snapshotDigest,
+      nextCursor,
+      organizations: [...organizations.values()],
+      assetIds: results.map(({ id }) => id),
+    };
   }
   const { results, nextCursor } = page(
     [...organizations.values()],
     (organization) => organization.id,
     options,
-    ["organizations", snapshotDigest, filters],
+    ["organizations", snapshotDigest, filters, ...(text ? [text] : [])],
   );
   return { snapshotDigest, nextCursor, organizations: results };
 }
@@ -524,37 +559,59 @@ type PlannerInventoryScope = {
   readonly evidenceRevision: number;
   readonly snapshotDigest: string;
   readonly snapshot?: Snapshot;
-  readonly assetTextScope?:
+  readonly scopedQueryOptions?:
     & Pick<PageOptions, "scopeBinding">
     & Pick<SentinelAssetInventoryOptions, "allowedAssetIds">;
 };
 
-function readPlannerInventoryTextPage(
+function readPlannerInventoryQueryPage(
   args: Record<string, unknown>,
   text: string,
   scope?: PlannerInventoryScope,
 ) {
+  const organizationView = args.view === "organizations";
   const assetText = parseSentinelInventoryText(args.assetText);
-  const { cursor, limit = 5, alias, organizationId, assetType, parentId } =
-    args;
+  const organizationText = parseSentinelInventoryText(args.organizationText);
+  const {
+    cursor,
+    limit = 5,
+    alias,
+    organizationId,
+    assetType,
+    parentId,
+    assetId,
+    includeMembers,
+  } = args;
   const exactType = sentinelAssetTypes.find((value) => value === assetType);
   const cursorPattern = /^[a-f0-9]{64}\.[a-f0-9]{64}$/;
   if (
-    !assetText || typeof text !== "string" || text.length > 6000 ||
+    (organizationView
+      ? args.assetText !== undefined ||
+        (args.organizationText !== undefined && !organizationText) ||
+        (includeMembers !== undefined &&
+          (includeMembers !== true || typeof organizationId !== "string" ||
+            !organizationId.trim())) ||
+        (!organizationText && !includeMembers)
+      : !assetText || args.organizationText !== undefined ||
+        includeMembers !== undefined || assetId !== undefined) ||
+    typeof text !== "string" || text.length > 6000 ||
     redactCredentialText(text) !== text ||
     Object.keys(args).some((key) =>
       ![
         "view",
         "assetText",
+        "organizationText",
+        "includeMembers",
         "limit",
         "cursor",
         "alias",
         "organizationId",
         "assetType",
         "parentId",
+        "assetId",
       ].includes(key)
     ) ||
-    [alias, organizationId, parentId].some((value) =>
+    [alias, organizationId, parentId, assetId].some((value) =>
       value !== undefined &&
       (typeof value !== "string" || !validIdentifier(value, 800) ||
         redactCredentialText(value) !== value)
@@ -566,7 +623,9 @@ function readPlannerInventoryTextPage(
       (typeof cursor !== "string" || !cursorPattern.test(cursor)))
   ) return;
   const filters = {
-    assetText,
+    ...(assetText && { assetText }),
+    ...(organizationText && { organizationText }),
+    ...(includeMembers === true && { includeMembers: true as const }),
     ...(typeof alias === "string" && { alias }),
     ...(typeof organizationId === "string" && { organizationId }),
     ...(exactType && { assetType: exactType }),
@@ -575,42 +634,54 @@ function readPlannerInventoryTextPage(
   };
   try {
     const page = JSON.parse(text);
+    const rows = organizationView ? page?.organizations : page?.assets;
     if (
-      !page || Object.keys(page).length !== 6 ||
+      !page || Object.keys(page).length !== (includeMembers ? 7 : 6) ||
       page._classification !== "INTERNAL" ||
       !isSentinelCaseId(page.caseId) ||
       !Number.isSafeInteger(page.evidenceRevision) ||
       page.evidenceRevision < 1 ||
       typeof page.snapshotDigest !== "string" ||
       !/^[a-f0-9]{64}$/.test(page.snapshotDigest) ||
-      !Array.isArray(page.assets) || page.assets.length > limit ||
+      !Array.isArray(rows) || rows.length > (includeMembers ? 1 : limit) ||
+      rows.some((row) =>
+        !validIdentifier(row?.id) || !validIdentifier(row.label) ||
+        (organizationView
+          ? Object.keys(row).length !== 3 ||
+            !Number.isSafeInteger(row.assetCount) || row.assetCount < 1 ||
+            (includeMembers && row.id !== organizationId)
+          : row.kind !== "asset")
+      )
+    ) return;
+    const ids: unknown = includeMembers
+      ? page.assetIds
+      : rows.map(({ id }) => id);
+    if (
+      !Array.isArray(ids) || ids.length > limit ||
+      !ids.every((id) => typeof id === "string" && validIdentifier(id)) ||
+      !isDeepStrictEqual(ids, [...new Set(ids)].sort()) ||
+      (includeMembers && ids.length > (rows[0]?.assetCount ?? 0)) ||
       (page.nextCursor !== null &&
         (typeof page.nextCursor !== "string" ||
-          !cursorPattern.test(page.nextCursor) ||
-          !page.assets.length ||
-          page.nextCursor.slice(65) !== hash(page.assets.at(-1).id)))
+          !cursorPattern.test(page.nextCursor) || !ids.length ||
+          page.nextCursor.slice(65) !== hash(ids.at(-1)!)))
     ) return;
-    const assetIds: string[] = [];
-    for (const row of page.assets) {
-      if (
-        !validIdentifier(row?.id) || row.kind !== "asset" ||
-        !validIdentifier(row.label)
-      ) return;
-      assetIds.push(row.id);
-    }
-    if (!isDeepStrictEqual(assetIds, [...new Set(assetIds)].sort())) return;
     if (scope) {
       if (
-        !scope.snapshot || !scope.assetTextScope ||
+        !scope.snapshot || !scope.scopedQueryOptions ||
         page.caseId !== scope.caseId ||
         page.evidenceRevision !== scope.evidenceRevision ||
         page.snapshotDigest !== scope.snapshotDigest
       ) return;
-      const current = querySentinelAssetInventory(scope.snapshot, {
+      const options = {
         ...filters,
         limit,
-        ...scope.assetTextScope,
-      });
+        ...(typeof assetId === "string" && { onlyAsset: assetId }),
+        ...scope.scopedQueryOptions,
+      };
+      const current = organizationView
+        ? querySentinelOrganizations(scope.snapshot, options)
+        : querySentinelAssetInventory(scope.snapshot, options);
       const expected = JSON.stringify({
         ...current,
         caseId: scope.caseId,
@@ -619,10 +690,12 @@ function readPlannerInventoryTextPage(
       });
       if (text !== expected) return;
     }
+    const assetIds = organizationView && !includeMembers ? [] : ids as string[];
     return {
       args: {
-        view: "assets" as const,
+        view: organizationView ? "organizations" as const : "assets" as const,
         ...filters,
+        ...(typeof assetId === "string" && { assetId }),
         ...(args.limit !== undefined && { limit }),
       },
       assetIds,
@@ -634,15 +707,18 @@ function readPlannerInventoryTextPage(
   }
 }
 
-/** Preserve only exact planner asset pages and the existing coverage projection. */
+/** Preserve exact planner inventory pages and the existing coverage projection. */
 export function readSentinelPlannerInventoryResult(
   args: Record<string, unknown>,
   text: string,
   scope?: PlannerInventoryScope,
 ) {
-  if (args?.view === "assets" && args.assetText !== undefined) {
-    return readPlannerInventoryTextPage(args, text, scope);
-  }
+  if (
+    (args?.view === "assets" && args.assetText !== undefined) ||
+    (args?.view === "organizations" &&
+      (args.organizationText !== undefined ||
+        args.includeMembers !== undefined))
+  ) return readPlannerInventoryQueryPage(args, text, scope);
   if (args?.view === "coverage") {
     const coverage = readSentinelPlannerCoverageResult(args, text, scope);
     return coverage && { ...coverage, requestedAssetIds: coverage.assetIds };
