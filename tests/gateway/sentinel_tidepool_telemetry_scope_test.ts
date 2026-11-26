@@ -168,6 +168,13 @@ Deno.test("Authenticated Tidepool hides revoked retained alert records and mixed
       "sentinel_source_snapshot",
     );
 
+    const findingSelection = { ...sourceSelection, finding: "allowed-finding" };
+    const originalFinding = await request(
+      "shared_finding_source",
+      findingSelection,
+    );
+    assertEquals(originalFinding.type, "sentinel_source_snapshot");
+    assertEquals(originalFinding.graph, originalGraph);
     const raw = await request("revision_alerts");
     assertEquals((raw.alerts as unknown[]).length, 4);
     const before = await request("incident_page");
@@ -346,6 +353,29 @@ Deno.test("Authenticated Tidepool hides revoked retained alert records and mixed
       await readArchivedSentinelSnapshot(baseDir, "main", sourceDigest),
       originalGraph,
     );
+
+    const scopedFinding = await request(
+      "shared_finding_source",
+      findingSelection,
+    );
+    assertEquals(scopedFinding.type, "sentinel_source_snapshot");
+    assertEquals(scopedFinding.scopeRestricted, true);
+    assertEquals(scopedFinding.snapshotDigest, sourceDigest);
+    assertEquals(scopedFinding.graph, scopedArchive.graph);
+    assert(!JSON.stringify(scopedFinding).includes("Revoked finding title"));
+    const deniedFinding = await request("shared_finding_source", {
+      ...findingSelection,
+      asset: "private",
+      finding: "private-finding",
+    });
+    assertEquals(deniedFinding.type, "error");
+    assertEquals(deniedFinding.graph, undefined);
+    const foreignFinding = await request("shared_finding_source", {
+      ...findingSelection,
+      sourceCase: peerCase,
+    });
+    assertEquals(foreignFinding.type, "error");
+    assertEquals(foreignFinding.graph, undefined);
 
     const live = await request("status", { includeRevisions: true });
     assertEquals(live.type, "sentinel_state");

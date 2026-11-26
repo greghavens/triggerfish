@@ -192,6 +192,55 @@ function retainedTelemetryScope(path: string, revision: number) {
 }
 
 /** Reuse the same saved/current subject scope for a page and its origin rows. */
+function projectTidepoolSourceSnapshot(
+  recipientPath: string,
+  sourcePath: string,
+  assetId: string,
+  graph: ReturnType<ReturnType<typeof loadSentinelGraph>["snapshot"]>,
+  findingId?: string,
+) {
+  const recipient = sourcePath !== recipientPath &&
+    readSentinelAssessment(recipientPath);
+  if (recipient && retainedTelemetryScope(recipientPath, recipient.revision)) {
+    throw new SentinelAssignmentError(
+      "The source snapshot is unavailable in this case scope.",
+    );
+  }
+  const source = readSentinelAssessment(sourcePath);
+  const scope = source && retainedTelemetryScope(sourcePath, source.revision);
+  if (!source || !scope) return { graph, scopeRestricted: false };
+  const currentNodes = source.result?.sharedGraph.snapshot?.nodes;
+  const currentFinding = findingId === undefined
+    ? undefined
+    : currentNodes?.find(({ id }) => id === findingId);
+  if (
+    !currentNodes?.some(({ id, kind }) => id === assetId && kind === "asset") ||
+    !scope.allowFinding(assetId) ||
+    (currentFinding && (currentFinding.kind !== "finding" ||
+      !scope.allowFinding(currentFinding.id)))
+  ) {
+    throw new SentinelAssignmentError(
+      "The requested evidence is unavailable in the source snapshot.",
+    );
+  }
+  const visible = scopedSentinelInventoryGraph(
+    sourcePath,
+    source.revision,
+    loadSentinelGraph(graph),
+  ).snapshot();
+  if (
+    findingId !== undefined &&
+    !visible.edges.some(({ from, to, relation }) =>
+      relation === "affects" && from === findingId && to === assetId
+    )
+  ) {
+    throw new SentinelAssignmentError(
+      "The requested evidence is unavailable in the source snapshot.",
+    );
+  }
+  return { graph: visible, scopeRestricted: true };
+}
+
 function tidepoolDecisionScope(path: string) {
   const scopes = new Map<
     number,
@@ -2373,37 +2422,13 @@ export function createTidepoolSentinelHandler(
             }
             published = true;
           }
-          const sourceState = readSentinelAssessment(sourcePath);
-          const sourceScope = sourceState &&
-            retainedTelemetryScope(sourcePath, sourceState.revision);
-          const recipientState = sourceCase !== caseId &&
-            readSentinelAssessment(path);
-          const recipientScope = recipientState &&
-            retainedTelemetryScope(path, recipientState.revision);
-          if (recipientScope) {
-            throw new SentinelAssignmentError(
-              "The source snapshot is unavailable in this case scope.",
-            );
-          }
-          if (sourceState && sourceScope) {
-            const currentAssets = sourceState.result?.sharedGraph.snapshot
-              ?.nodes;
-            if (
-              !currentAssets?.some(({ id, kind }) =>
-                id === asset && kind === "asset"
-              ) ||
-              !sourceScope.allowFinding(asset)
-            ) {
-              throw new SentinelAssignmentError(
-                "The asset is unavailable in the source snapshot.",
-              );
-            }
-            graph = scopedSentinelInventoryGraph(
-              sourcePath,
-              sourceState.revision,
-              loadSentinelGraph(graph),
-            ).snapshot();
-          }
+          const projection = projectTidepoolSourceSnapshot(
+            path,
+            sourcePath,
+            asset,
+            graph,
+          );
+          graph = projection.graph;
           if (
             !graph.nodes.some(({ id, kind }) =>
               id === asset && kind === "asset"
@@ -2413,7 +2438,7 @@ export function createTidepoolSentinelHandler(
               "The asset is unavailable in the source snapshot.",
             );
           }
-          const cases = sourceScope ? [] : [
+          const cases = projection.scopeRestricted ? [] : [
             ...new Set([
               caseId,
               "main",
@@ -2516,7 +2541,7 @@ export function createTidepoolSentinelHandler(
             snapshotDigest,
             asset,
             graph,
-            ...(sourceScope && { scopeRestricted: true }),
+            ...(projection.scopeRestricted && { scopeRestricted: true }),
             published,
             citations,
             moreCitations: nextCitationCursor !== undefined,
@@ -2529,7 +2554,7 @@ export function createTidepoolSentinelHandler(
         case "shared_finding_source": {
           const { sourceCase, snapshotDigest, asset, finding } = message;
           if (
-            typeof sourceCase !== "string" ||
+            !isSentinelCaseId(sourceCase) ||
             typeof snapshotDigest !== "string" ||
             typeof asset !== "string" || typeof finding !== "string"
           ) {
@@ -2559,6 +2584,13 @@ export function createTidepoolSentinelHandler(
               "The finding is unavailable for this asset in the source snapshot.",
             );
           }
+          const projection = projectTidepoolSourceSnapshot(
+            path,
+            resolveSentinelCasePath(bootstrap.baseDir, sourceCase),
+            asset,
+            source.graph,
+            finding,
+          );
           send({
             topic: "sentinel",
             type: "sentinel_source_snapshot",
@@ -2566,7 +2598,8 @@ export function createTidepoolSentinelHandler(
             sourceCase,
             snapshotDigest,
             asset: finding,
-            graph: source.graph,
+            graph: projection.graph,
+            ...(projection.scopeRestricted && { scopeRestricted: true }),
             published: source.published,
           });
           return;
