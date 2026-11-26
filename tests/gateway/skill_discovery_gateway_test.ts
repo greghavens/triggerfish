@@ -1,6 +1,7 @@
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { join } from "@std/path";
 import { createProviderRegistry } from "../../src/agent/llm.ts";
+import { createOrchestrator } from "../../src/agent/orchestrator/mod.ts";
 import { openAgentProfiles } from "../../src/core/agent_profiles.ts";
 import { createMessageStore } from "../../src/core/conversation/conversation_store.ts";
 import type { HookType } from "../../src/core/policy/rules.ts";
@@ -12,8 +13,20 @@ import {
 } from "../../src/core/types/session.ts";
 import { createChatSession } from "../../src/gateway/chat.ts";
 import { createGatewayServer } from "../../src/gateway/server/server.ts";
+import { loadSkillUsageHistory } from "../../src/gateway/skill_usage_history.ts";
+import { delegatedSubagentIdentity } from "../../src/gateway/startup/factory/delegated_agent_recovery.ts";
+import { buildSubagentFactory } from "../../src/gateway/startup/factory/subagent.ts";
 import { filterToolsForRole } from "../../src/gateway/tools/defs/role_filter.ts";
 import { resolveToolsForProfile } from "../../src/gateway/tools/defs/tool_profile_defs.ts";
+import {
+  bindScheduledAgent,
+  createScheduledSession,
+  schedulerExecutionIdentity,
+} from "../../src/scheduler/service_execution.ts";
+import type {
+  OrchestratorFactory,
+  SchedulerServiceConfig,
+} from "../../src/scheduler/service_types.ts";
 import {
   createSkillAuthor,
   createSkillContextTracker,
@@ -128,6 +141,7 @@ Deno.test("Owner gateway discovers live skill grants and blocks pending draft ac
   };
   const storage = createMemoryStorage();
   const messageStore = createMessageStore(storage);
+  const tracePath = join(dir, "execution-traces.db");
   let historyLoads = 0;
   let visibilityReads = 0;
   const execute = createSkillToolExecutor({
@@ -151,9 +165,14 @@ Deno.test("Owner gateway discovers live skill grants and blocks pending draft ac
     skillScanner: createSkillScanner(),
     skillContextTracker: tracker,
     getSessionTaint: () => session.taint,
-    loadOwnerSkillHistory: () => {
+    loadOwnerSkillHistory: (run) => {
       historyLoads++;
-      return createMessageStore(storage).loadSession(session.id);
+      return loadSkillUsageHistory(
+        tracePath,
+        createMessageStore(storage),
+        () => session,
+        run,
+      );
     },
     listReviewedAgentProfiles: () => {
       visibilityReads++;
@@ -494,6 +513,168 @@ Deno.test("Owner gateway discovers live skill grants and blocks pending draft ac
         grant: "inherited",
       },
     ]);
+
+    const workerFactory: OrchestratorFactory = {
+      create(channelId, options) {
+        const id = options?.recoverySessionId;
+        assert(id);
+        const worker = {
+          ...createSession({
+            userId: "worker" as UserId,
+            channelId: channelId as ChannelId,
+          }),
+          id,
+          taint: "INTERNAL" as const,
+        };
+        const workerTools = createSkillToolExecutor({
+          skillLoader: loader,
+          getSessionTaint: () => worker.taint,
+          skillScanner: createSkillScanner(),
+        });
+        const toolExecutor = async (
+          name: string,
+          parameters: Record<string, unknown>,
+        ) => await workerTools(name, parameters) ?? "Unavailable";
+        return Promise.resolve({
+          session: worker,
+          getSessionTaint: () => worker.taint,
+          toolExecutor,
+          orchestrator: createOrchestrator({
+            providerRegistry: registry,
+            tools: resolveToolsForProfile("subagent"),
+            toolExecutor,
+            messageStore,
+            hookRunner: {
+              evaluateHook(hook) {
+                const allowed = hook !== deny;
+                return Promise.resolve({
+                  allowed,
+                  action: allowed ? "ALLOW" : "BLOCK",
+                  ruleId: null,
+                  duration: 0,
+                });
+              },
+            },
+          }),
+        });
+      },
+    };
+    const subagent = buildSubagentFactory(workerFactory, {
+      executionTracePath: tracePath,
+    });
+    const launchWorker = async (
+      owner: typeof session.id,
+      parameters: Record<string, unknown>,
+    ) => {
+      wanted = "read_skill";
+      args = parameters;
+      const executionId = crypto.randomUUID();
+      const identity = await delegatedSubagentIdentity(owner, executionId);
+      await subagent("Open one skill.", undefined, {
+        recovery: {
+          parentSessionId: owner,
+          executionId,
+          run: (_, orchestrator, options) =>
+            orchestrator.executeAgentTurn(options),
+          targetClassification: "INTERNAL",
+        },
+      });
+      return identity;
+    };
+    const owned = await launchWorker(session.id, inspect);
+    const inaccessible = await launchWorker(
+      createSession({
+        userId: "neighbor" as UserId,
+        channelId: "other" as ChannelId,
+      }).id,
+      inspect,
+    );
+    const scoped = { run_kind: "delegated", run_id: owned.executionId };
+    const references = await messageStore.loadSession(owned.sessionId);
+    const savedStep = references.find((row) => row.tool_name === "read_skill");
+    assert(savedStep);
+    assertEquals(
+      JSON.parse(
+        (await turn("list_skill_usage", {
+          ...inspect,
+          ...scoped,
+        })).result,
+      ).calls,
+      [{
+        message_id: savedStep.message_id,
+        accessed_at: savedStep.timestamp,
+      }],
+    );
+    assertStringIncludes(
+      (await turn("list_skill_usage", {
+        ...inspect,
+        ...scoped,
+        run_id: inaccessible.executionId,
+      })).result,
+      "history is unavailable",
+    );
+    const missed = await launchWorker(session.id, unavailable);
+    const scopedMissing = JSON.parse(
+      (await turn(
+        "list_unavailable_skill_requests",
+        { run_kind: "delegated", run_id: missed.executionId },
+      )).result,
+    );
+    assertEquals(scopedMissing.unavailable.length, 1);
+    assertEquals(
+      scopedMissing.unavailable[0].skill_name,
+      unavailable.skill_name,
+    );
+    assertEquals(scopedMissing.unavailable[0].calls, 1);
+    const schedulerConfig: SchedulerServiceConfig = {
+      executionTracePath: tracePath,
+      orchestratorFactory: workerFactory,
+      recoverTurn: (_, orchestrator, options) =>
+        orchestrator.executeAgentTurn(options),
+      triggerMdPath: join(dir, "TRIGGER.md"),
+      trigger: {
+        enabled: false,
+        intervalMinutes: 30,
+        classificationCeiling: "INTERNAL",
+      },
+      webhooks: { enabled: false, sources: {} },
+    };
+    const occurrence = schedulerExecutionIdentity(
+      "cron",
+      "fixture-skill-job",
+      1,
+    );
+    const scheduled = bindScheduledAgent(
+      schedulerConfig,
+      await createScheduledSession(schedulerConfig, "fallback", {}, occurrence),
+      occurrence,
+    );
+    wanted = "read_skill";
+    args = inspect;
+    const ran = await scheduled.orchestrator.executeAgentTurn({
+      session: scheduled.session,
+      message: "Open one skill on schedule.",
+      targetClassification: "INTERNAL",
+    });
+    assert(ran.ok);
+    const scheduledRows = await messageStore.loadSession(scheduled.session.id);
+    const scheduledStep = scheduledRows.find((row) =>
+      row.tool_name === "read_skill"
+    );
+    assert(scheduledStep);
+    assertEquals(
+      JSON.parse(
+        (await turn("list_skill_usage", {
+          ...inspect,
+          run_kind: "scheduled",
+          run_id: occurrence.id,
+        })).result,
+      ).calls,
+      [{
+        message_id: scheduledStep.message_id,
+        accessed_at: scheduledStep.timestamp,
+      }],
+    );
   } finally {
     if (socket.readyState < WebSocket.CLOSING) {
       const closed = Promise.withResolvers<void>();

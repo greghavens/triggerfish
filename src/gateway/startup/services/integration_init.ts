@@ -42,6 +42,7 @@ import type { BootstrapResult } from "../bootstrap.ts";
 import type { CoreInfraResult } from "../infra/core_infra.ts";
 import type { LineageStore } from "../../../core/session/lineage_types.ts";
 import type { MainSessionState } from "../tools/tool_executor.ts";
+import { loadSkillUsageHistory } from "../../skill_usage_history.ts";
 import {
   buildExploreExecutor,
   buildGitHubExecutor,
@@ -192,7 +193,13 @@ export function buildAgentToolExecutors(
       getSessionTaint: () => state.session.taint,
       skillScanner: createSkillScanner(),
       getConfirmPrompt: () => state.activeConfirmPrompt,
-      loadOwnerSkillHistory: () => messageStore.loadSession(state.session.id),
+      loadOwnerSkillHistory: (run) =>
+        loadSkillUsageHistory(
+          join(baseDir, "execution-traces.db"),
+          messageStore,
+          () => state.session,
+          run,
+        ),
       listReviewedAgentProfiles: () => openAgentProfiles(baseDir).list(),
     }),
     skillContextTracker,

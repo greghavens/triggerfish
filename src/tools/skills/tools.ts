@@ -57,6 +57,11 @@ async function scanSkillPackage(scanner: SkillScanner, markdown: string) {
 /** Skill type argument accepted by read_skill. */
 export type SkillType = "BUNDLED" | "USER_PROVIDED";
 
+export interface SkillHistoryRun {
+  readonly kind: "delegated" | "scheduled";
+  readonly id: string;
+}
+
 /** Context required by the skill tool executor. */
 export interface SkillToolContext {
   /** Skill loader used to discover available skills. */
@@ -68,7 +73,9 @@ export interface SkillToolContext {
   /** If provided, skill content is scanned at activation time. */
   readonly skillScanner?: SkillScanner;
   readonly getConfirmPrompt?: () => (prompt: string) => Promise<boolean>;
-  readonly loadOwnerSkillHistory?: () => Promise<readonly ConversationRecord[]>;
+  readonly loadOwnerSkillHistory?: (
+    run?: SkillHistoryRun,
+  ) => Promise<readonly ConversationRecord[] | undefined>;
   readonly listReviewedAgentProfiles?: () => readonly AgentProfileRevision[];
 }
 
@@ -100,6 +107,15 @@ function buildReadSkillDef(): ToolDefinition {
   };
 }
 
+const skillHistoryRunParams = {
+  run_kind: {
+    type: "string",
+    description: "Optional background run kind, used with run_id",
+    enum: ["delegated", "scheduled"],
+  },
+  run_id: { type: "string", description: "Optional exact background run ID" },
+};
+
 /** Tool definitions for skill reading operations. */
 export function buildSkillToolDefinitions(): readonly ToolDefinition[] {
   return [buildReadSkillDef()];
@@ -129,17 +145,19 @@ export function buildSkillAdministrationToolDefinitions(): readonly ToolDefiniti
   }, {
     name: "list_skill_usage",
     description:
-      "List recent authorized loads of one skill from the current owner conversation. Returns exact saved message references and timestamps.",
+      "List recent authorized loads of one skill from this owner conversation or one exact authorized background run. Returns saved message references and timestamps.",
     parameters: {
       ...buildReadSkillDef().parameters,
       limit: { type: "integer", description: "Maximum entries, from 1 to 50" },
+      ...skillHistoryRunParams,
     },
   }, {
     name: "list_unavailable_skill_requests",
     description:
-      "Count authorized requests for skills that were unavailable when requested in the current owner conversation.",
+      "Count authorized requests for skills that were unavailable in this owner conversation or one exact authorized background run.",
     parameters: {
       limit: { type: "integer", description: "Maximum groups, from 1 to 50" },
+      ...skillHistoryRunParams,
     },
   }, {
     name: "list_skill_visibility",
@@ -284,6 +302,17 @@ function validSkillSelector(value: unknown): value is string {
     enforceSkillName(value).ok;
 }
 
+function parseSkillHistoryRun(
+  kind: unknown,
+  id: unknown,
+): SkillHistoryRun | undefined | null {
+  if (kind === undefined && id === undefined) return;
+  return (kind === "delegated" || kind === "scheduled") &&
+      typeof id === "string" && /^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,255}$/.test(id)
+    ? { kind, id }
+    : null;
+}
+
 async function executeSkillUsage(
   ctx: SkillToolContext,
   input: Record<string, unknown>,
@@ -296,18 +325,22 @@ async function executeSkillUsage(
     return "Error: Skill history requires the active owner session.";
   }
   const { skill_name, type, limit = 25 } = input;
+  const run = parseSkillHistoryRun(input.run_kind, input.run_id);
   if (
     Object.keys(input).some((key) =>
-      !["skill_name", "type", "limit"].includes(key)
+      !["skill_name", "type", "limit", "run_id", "run_kind"].includes(key)
     ) ||
     !validSkillSelector(skill_name) ||
     (type !== "BUNDLED" && type !== "USER_PROVIDED") ||
+    run === null ||
     typeof limit !== "number" || !Number.isSafeInteger(limit) ||
     limit < 1 || limit > 50
   ) return "Error: Invalid skill history selector.";
 
-  const history = await ctx.loadOwnerSkillHistory();
-  if (!isCurrentOwner()) return "Error: The owner session is no longer active.";
+  const history = await ctx.loadOwnerSkillHistory(run);
+  if (!isCurrentOwner() || !history) {
+    return "Error: Skill history is unavailable.";
+  }
   const taint = ctx.getSessionTaint();
   const calls = [];
   for (const row of history.toReversed()) {
@@ -333,7 +366,7 @@ async function executeSkillUsage(
     });
     if (calls.length >= limit) break;
   }
-  return JSON.stringify({ calls, _classification: taint });
+  return JSON.stringify({ calls, ...(run && { run }), _classification: taint });
 }
 
 async function executeUnavailableSkillRequests(
@@ -348,14 +381,20 @@ async function executeUnavailableSkillRequests(
     return "Error: Skill history requires the active owner session.";
   }
   const { limit = 25 } = input;
+  const run = parseSkillHistoryRun(input.run_kind, input.run_id);
   if (
-    Object.keys(input).some((key) => key !== "limit") ||
+    Object.keys(input).some((key) =>
+      !["limit", "run_id", "run_kind"].includes(key)
+    ) ||
+    run === null ||
     typeof limit !== "number" || !Number.isSafeInteger(limit) ||
     limit < 1 || limit > 50
   ) return "Error: Invalid unavailable skill request limit.";
 
-  const history = await ctx.loadOwnerSkillHistory();
-  if (!isCurrentOwner()) return "Error: The owner session is no longer active.";
+  const history = await ctx.loadOwnerSkillHistory(run);
+  if (!isCurrentOwner() || !history) {
+    return "Error: Skill history is unavailable.";
+  }
   const taint = ctx.getSessionTaint();
   const groups = new Map<string, {
     skill_name: string;
@@ -397,7 +436,11 @@ async function executeUnavailableSkillRequests(
   const unavailable = [...groups.entries()].sort(([left, a], [right, b]) =>
     b.calls - a.calls || left.localeCompare(right)
   ).slice(0, limit).map(([, group]) => group);
-  return JSON.stringify({ unavailable, _classification: taint });
+  return JSON.stringify({
+    unavailable,
+    ...(run && { run }),
+    _classification: taint,
+  });
 }
 
 function executeSkillVisibility(
