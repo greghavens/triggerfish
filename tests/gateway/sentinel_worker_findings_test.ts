@@ -2427,6 +2427,58 @@ async function verifyOperatorNativeRecheck(options: {
     assertEquals(JSON.parse(result.results[0][0]).record.id, id);
     return result.results[1][0];
   };
+  const queued = () => readAdaptiveSentinel(path, options.state)?.tasks ?? [];
+  const recheckGate = () =>
+    queued().find(({ plannerRound }) =>
+      plannerRound?.passingRecheckForFindingId === options.findingId
+    );
+  const recheckDependent = () => {
+    const gate = recheckGate();
+    return gate &&
+      queued().find(({ prerequisites }) => prerequisites.includes(gate.id));
+  };
+  if (options.goalSettlement) {
+    await withFindingAssignmentGateway(
+      options.baseDir,
+      () => Promise.resolve(true),
+      async (turn) => {
+        const gate = JSON.parse(
+          await turn({
+            action: "assign",
+            kind: "sentinel",
+            id: caseId,
+            revision: options.state.revision,
+            runId: discovered.runId,
+            adaptiveRevision: discovered.adaptiveRevision,
+            requestId: crypto.randomUUID(),
+            taskKind: "trace",
+            node: "app",
+            passingRecheckForFindingId: options.findingId,
+          }),
+        ).receipt;
+        assertEquals(recheckGate()?.id, gate.taskId);
+        const store = openSentinelAdaptiveStore(
+          join(dirname(path), "sentinel-adaptive.db"),
+        );
+        try {
+          const added = store.applyModelPlan(
+            discovered.adaptiveRevision,
+            null,
+            [{
+              kind: "impact",
+              nodeId: "dependent-recheck-asset",
+              reason: "Review the connection after remediation.",
+              prerequisites: [gate.taskId],
+            }],
+            {},
+          );
+          assertEquals(added, 1);
+        } finally {
+          store.close();
+        }
+      },
+    );
+  }
   const rationale =
     "The retained control evidence did not resolve the operator’s requested comparison.";
   const rationaleRequest = crypto.randomUUID();
@@ -2581,6 +2633,10 @@ async function verifyOperatorNativeRecheck(options: {
           assertStringIncludes(repeated.results[1][2], "Error:");
         }
         if (options.goalSettlement) {
+          advanceAdaptiveSentinel(path, state);
+          assertEquals(recheckGate()?.status, "queued");
+          assertEquals(recheckGate()?.attempts, 0);
+          assertEquals(recheckDependent()?.status, "queued");
           goalWorker = assignedLease(path, state, "impact");
           assertStringIncludes(await reportGoal(record.id), "Error:");
           assertEquals(
@@ -2654,6 +2710,19 @@ async function verifyOperatorNativeRecheck(options: {
     assertEquals(workerRuns, 1);
     if (options.goalSettlement) {
       assert(verified);
+      advanceAdaptiveSentinel(path, options.state);
+      if (options.stopAfterResult) {
+        assertEquals(recheckGate()?.status, "queued");
+        assertEquals(recheckDependent()?.status, "queued");
+      } else {
+        assertEquals(recheckGate()?.status, "completed");
+        assertEquals(recheckGate()?.attempts, 0);
+        assertEquals(
+          recheckGate()?.factSatisfaction?.findingRecheckId,
+          verified.id,
+        );
+        assertEquals(recheckDependent()?.status, "completed");
+      }
       const proof = await reportGoal(verified.id);
       if (options.stopAfterResult) {
         assertStringIncludes(proof, "Error:");
@@ -4601,6 +4670,13 @@ async function verifyReceiptFamily(
         ...snapshot,
         nodes: [
           ...snapshot.nodes,
+          ...(goalSettlement
+            ? [{
+              id: "dependent-recheck-asset",
+              kind: "asset",
+              label: "Dependent asset",
+            }]
+            : []),
           ...(alternateNode
             ? [{
               id: alternateNode,

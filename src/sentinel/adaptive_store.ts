@@ -2814,13 +2814,24 @@ export function readSentinelDedicatedRecheckSettlements(
     throw error;
   }
   try {
-    if (
-      !db.prepare(
-        "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'adaptive_evidence_revisions'",
-      ).get()
-    ) return new Map();
-    return new Map(
-      db.prepare(`
+    return readDedicatedRecheckSettlements(db, runId, evidenceRevision);
+  } finally {
+    db.close();
+  }
+}
+
+function readDedicatedRecheckSettlements(
+  db: DatabaseSync,
+  runId: string,
+  evidenceRevision: number,
+) {
+  if (
+    !db.prepare(
+      "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'adaptive_evidence_revisions'",
+    ).get()
+  ) return new Map();
+  return new Map(
+    db.prepare(`
       SELECT task.id, task.nodeId,
         json_extract(task.plannerRound, '$.recheckFindingId') AS findingId,
         (
@@ -2837,19 +2848,26 @@ export function readSentinelDedicatedRecheckSettlements(
         AND task.kind = 'review_evidence'
         AND json_extract(task.plannerRound, '$.recheckFindingId') IS NOT NULL
     `).all(runId, evidenceRevision).map((row) =>
-        [
-          String(row.id),
-          {
-            findingId: String(row.findingId),
-            evidenceId: String(row.nodeId),
-            completed: row.settlement === "model_review_completed",
-          },
-        ] as const
-      ),
-    );
-  } finally {
-    db.close();
-  }
+      [
+        String(row.id),
+        {
+          findingId: String(row.findingId),
+          evidenceId: String(row.nodeId),
+          completed: row.settlement === "model_review_completed",
+        },
+      ] as const
+    ),
+  );
+}
+
+function passingRecheckSettled(
+  settlements: ReturnType<typeof readDedicatedRecheckSettlements>,
+  receipt: SentinelWorkerFindingRecheckRecord,
+) {
+  const assignment = settlements.get(receipt.taskId);
+  return !assignment || (assignment.completed &&
+    assignment.findingId === receipt.findingId &&
+    assignment.evidenceId === receipt.evidenceId);
 }
 
 /** Read through a separate read-only connection during checkpoint reconciliation. */
@@ -4390,6 +4408,9 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
     let constraints:
       | ReturnType<typeof readSentinelOperatingConstraints>
       | undefined;
+    let recheckSettlements:
+      | ReturnType<typeof readDedicatedRecheckSettlements>
+      | undefined;
     const expired = completed.flatMap((row) => {
       const task = decodeTask(row);
       const requirement = task.plannerRound?.graphRelationship;
@@ -4429,6 +4450,14 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
           );
           if (
             receipt && receipt.taskId === binding.sourceTaskId &&
+            passingRecheckSettled(
+              recheckSettlements ??= readDedicatedRecheckSettlements(
+                db,
+                runId,
+                evidenceRevision,
+              ),
+              receipt,
+            ) &&
             (round.passingRecheckId
               ? round.passingRecheckId === receipt.id
               : round.passingRecheckForFindingId === receipt.findingId) &&
@@ -8123,7 +8152,15 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
         const mapping = this.forEvidence(recheck.evidenceRevision);
         if (
           activeRevision() !== revision || mapping?.revision !== revision ||
-          mapping.goal.id !== recheck.runId || recheck.outcome !== "pass"
+          mapping.goal.id !== recheck.runId || recheck.outcome !== "pass" ||
+          !passingRecheckSettled(
+            readDedicatedRecheckSettlements(
+              db,
+              recheck.runId,
+              recheck.evidenceRevision,
+            ),
+            recheck,
+          )
         ) return false;
         const time = now();
         recover(revision, time);

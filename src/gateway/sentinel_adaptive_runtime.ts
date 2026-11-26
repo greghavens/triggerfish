@@ -4474,30 +4474,28 @@ export function advanceAdaptiveSentinel(snapshotPath: string, state: State) {
                       ? [record.id]
                       : []
                   );
-              let receipt;
               for (const id of ids) {
-                receipt = currentPassingFindingRecheck(
+                const receipt = currentPassingFindingRecheck(
                   snapshotPath,
                   current,
                   id,
                   task.nodeId,
                   checkedAt,
                 );
-                if (receipt) break;
-              }
-              if (
-                receipt && store.satisfyQueuedFindingRecheck(
-                  revision,
-                  task.id,
-                  receipt,
-                  held,
-                  checkedAt,
-                )
-              ) {
-                return {
-                  kind: "satisfied" as const,
-                  continue: refillAfterCompletion(),
-                };
+                if (
+                  receipt && store.satisfyQueuedFindingRecheck(
+                    revision,
+                    task.id,
+                    receipt,
+                    held,
+                    checkedAt,
+                  )
+                ) {
+                  return {
+                    kind: "satisfied" as const,
+                    continue: refillAfterCompletion(),
+                  };
+                }
               }
               held.add(task.id);
               continue;
