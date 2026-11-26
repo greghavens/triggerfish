@@ -1412,6 +1412,10 @@ async function verifyReviewedMixedSourceAssignment(
     if (plannerOrigin) {
       const model = createProviderRegistry();
       let blockFinding = true;
+      let pausePlanner = false;
+      let requestedBatches = 0;
+      let reopenedFindingChecks = 0;
+      const releasePlanner = Promise.withResolvers<void>();
       let proposals = 0;
       let plannerReads: string[] = [];
       const reviewSources = [parsedFact.id, finding.id];
@@ -1422,10 +1426,11 @@ async function verifyReviewedMixedSourceAssignment(
       model.register({
         name: "mixed-source-admission-planner",
         supportsStreaming: false,
-        complete(messages) {
+        async complete(messages) {
           const reads = messages.filter(({ role }) => role === "tool");
           const usage = { inputTokens: 1, outputTokens: 1 };
           if (!reads.length) {
+            requestedBatches++;
             return Promise.resolve({
               content: "",
               usage,
@@ -1438,6 +1443,7 @@ async function verifyReviewedMixedSourceAssignment(
           }
           plannerReads = reads.map(({ content }) => String(content));
           proposals++;
+          if (pausePlanner) await releasePlanner.promise;
           return Promise.resolve({
             content: JSON.stringify({
               prioritize: [],
@@ -1461,37 +1467,42 @@ async function verifyReviewedMixedSourceAssignment(
             plannerRound && "sourceEvidence" in plannerRound &&
             plannerRound.sourceEvidence?.length === 2
           );
-      const admission = createSentinelModelPlanner(
-        path,
-        (current, taskId) =>
-          taskId
-            ? { execute: () => Promise.resolve(), clear() {} }
-            : createSentinelSubagent({
-              snapshotPath: path,
-              assessmentRevision: current.revision,
-              plannerExecutionEvidenceRunId: current.plan.runId,
-              sharedInventoryBaseDir: baseDir,
-              providerRegistry: model,
-              allowModelAccess: true,
-              hookRunner: {
-                evaluateHook(hook, { input }) {
-                  const name = input.tool_name ??
-                    (input.tool_call as { name?: string } | undefined)?.name;
-                  const permitted =
-                    !(blockFinding && hook === "PRE_TOOL_CALL" &&
-                      name === findings);
-                  return Promise.resolve({
-                    allowed: permitted,
-                    action: permitted ? "ALLOW" : "BLOCK",
-                    duration: 0,
-                    ruleId: null,
-                  });
+      const makeAdmission = () =>
+        createSentinelModelPlanner(
+          path,
+          (current, taskId) =>
+            taskId
+              ? { execute: () => Promise.resolve(), clear() {} }
+              : createSentinelSubagent({
+                snapshotPath: path,
+                assessmentRevision: current.revision,
+                plannerExecutionEvidenceRunId: current.plan.runId,
+                sharedInventoryBaseDir: baseDir,
+                providerRegistry: model,
+                allowModelAccess: true,
+                hookRunner: {
+                  evaluateHook(hook, { input }) {
+                    const name = input.tool_name ??
+                      (input.tool_call as { name?: string } | undefined)?.name;
+                    if (name === findings && hook === "POST_TOOL_RESPONSE") {
+                      reopenedFindingChecks++;
+                    }
+                    const permitted =
+                      !(blockFinding && hook === "PRE_TOOL_CALL" &&
+                        name === findings);
+                    return Promise.resolve({
+                      allowed: permitted,
+                      action: permitted ? "ALLOW" : "BLOCK",
+                      duration: 0,
+                      ruleId: null,
+                    });
+                  },
                 },
-              },
-            }),
-        () => planned() ? undefined : () => {},
-        () => clock,
-      );
+              }),
+          () => planned() ? undefined : () => {},
+          () => clock,
+        );
+      let admission = makeAdmission();
       try {
         admission.advance(state);
         await waitForCondition(
@@ -1507,10 +1518,28 @@ async function verifyReviewedMixedSourceAssignment(
           path,
           "Review both exact retained sources together.",
         );
+        pausePlanner = true;
+        await waitForCondition(
+          () => proposals === 2,
+          () => admission.advance(state),
+        );
+        const originalResults = [...plannerReads];
+        const beforeResume = { requestedBatches, reopenedFindingChecks };
+        assertEquals(JSON.parse(originalResults[1]).record, finding);
+        assertEquals(planned(), undefined);
+        admission.stop();
+        pausePlanner = false;
+        releasePlanner.resolve();
+        await waitForCondition(() => !admission.hasInFlightWork(), () => {});
+        clock += 4 * 60_000;
+        admission = makeAdmission();
         await waitForCondition(
           () => !!planned() && !admission.hasInFlightWork(),
           () => admission.advance(state),
         );
+        assertEquals(plannerReads, originalResults);
+        assertEquals(requestedBatches, beforeResume.requestedBatches);
+        assert(reopenedFindingChecks > beforeResume.reopenedFindingChecks);
         assertEquals(JSON.parse(plannerReads[1]).record, finding);
         const accepted = planned()!;
         assert(
@@ -1526,6 +1555,7 @@ async function verifyReviewedMixedSourceAssignment(
         };
       } finally {
         admission.stop();
+        releasePlanner.resolve();
       }
     } else {await withFindingAssignmentGateway(
         baseDir,
@@ -2686,6 +2716,119 @@ Deno.test("Leased Sentinel workers report, recheck, and amend findings visible i
         ?.observations[0].evidence[0].reference,
       check.id,
     );
+    const current = readSentinelAssessment(path);
+    assert(current?.active);
+    const exactCheck = check;
+    let interruptedResult: string | undefined;
+    let restoredResult: string | undefined;
+    const releaseRecheck = Promise.withResolvers<void>();
+    let dispatches = 0;
+    let reopening = false;
+    let clock = Date.now() + 4 * 60_000;
+    const replayRecheck = () => {
+      const providers = createProviderRegistry();
+      providers.register({
+        name: "checkpoint-local-recheck",
+        supportsStreaming: false,
+        async complete(messages) {
+          const result = messages.find(({ role }) => role === "tool");
+          const usage = { inputTokens: 1, outputTokens: 1 };
+          if (!result) {
+            assert(!reopening, "Planner repeated the completed recheck read");
+            return {
+              content: "",
+              usage,
+              toolCalls: [{
+                type: "function",
+                id: "exact-local-recheck",
+                function: {
+                  name: findings,
+                  arguments: JSON.stringify({ receiptId: exactCheck.id }),
+                },
+              }],
+            };
+          }
+          const payload = String(result.content);
+          if (reopening) restoredResult = payload;
+          else {
+            interruptedResult = payload;
+            await releaseRecheck.promise;
+          }
+          return {
+            content: '{"assignments":[],"prioritize":[]}',
+            usage,
+            toolCalls: [],
+          };
+        },
+      });
+      providers.setDefault("checkpoint-local-recheck");
+      return createSentinelModelPlanner(
+        path,
+        (state, taskId) => {
+          if (taskId) return { execute: () => Promise.resolve(), clear() {} };
+          const agent = createSentinelSubagent({
+            snapshotPath: path,
+            assessmentRevision: state.revision,
+            plannerExecutionEvidenceRunId: state.plan.runId,
+            providerRegistry: providers,
+            allowModelAccess: true,
+            hookRunner: {
+              evaluateHook: () =>
+                Promise.resolve({
+                  allowed: true,
+                  action: "ALLOW",
+                  ruleId: null,
+                  duration: 0,
+                }),
+            },
+          });
+          return {
+            ...agent,
+            execute(prompt, send, signal, trace, access, options) {
+              return agent.execute(
+                prompt,
+                send,
+                signal,
+                (step) => {
+                  if (step.tool === findings) dispatches++;
+                  trace?.(step);
+                },
+                access,
+                options,
+              );
+            },
+          };
+        },
+        undefined,
+        () => clock,
+      );
+    };
+    let restoredPlanner = replayRecheck();
+    try {
+      restoredPlanner.advance(current);
+      await waitForCondition(() => interruptedResult !== undefined, () => {});
+      const saved = interruptedResult!;
+      assertEquals(JSON.parse(saved).record, exactCheck);
+      restoredPlanner.stop();
+      releaseRecheck.resolve();
+      await waitForCondition(
+        () => !restoredPlanner.hasInFlightWork(),
+        () => {},
+      );
+      reopening = true;
+      clock += 4 * 60_000;
+      restoredPlanner = replayRecheck();
+      restoredPlanner.advance(current);
+      await waitForCondition(
+        () => !restoredPlanner.hasInFlightWork(),
+        () => {},
+      );
+      assertEquals(restoredResult, saved);
+      assertEquals(dispatches, 1);
+    } finally {
+      releaseRecheck.resolve();
+      restoredPlanner.stop();
+    }
     await withTidepool(baseDir, async (list, provenance, request) => {
       const selected = {
         caseId: "main",
@@ -3114,7 +3257,9 @@ Deno.test("Leased Sentinel workers report, recheck, and amend findings visible i
         restored.planningAttempts.map(({ inputManifest }) =>
           inputManifest?.findingRecheckIds
         ),
-        [undefined, undefined, [check!.id], undefined],
+        [undefined, undefined, [check!.id], undefined, [check!.id], [
+          check!.id,
+        ]],
       );
       assertEquals(restored.workerFindings.amendments, [amendment!]);
       const mixedRequest = {

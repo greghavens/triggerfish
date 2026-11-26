@@ -5,6 +5,7 @@ import { isModelRouteIdentity } from "../core/model_route_identity.ts";
 import type { AgentTurnCheckpoint } from "../core/types/orchestrator.ts";
 import {
   SENTINEL_GOAL_GRAPH_FACT_READ,
+  SENTINEL_GOAL_RECHECK_READ,
   sentinelGoalReceiptReadArguments,
 } from "./worker_goal_recovery.ts";
 
@@ -20,6 +21,17 @@ export function plannerCheckpointReadSelector(name: string, input: unknown) {
       !/^worker-graph-fact:[a-f0-9]{64}$/.test(args.id)
     ) return;
     return { name, args: { id: args.id } } as const;
+  }
+  if (name === SENTINEL_GOAL_RECHECK_READ) {
+    const exact = sentinelGoalReceiptReadArguments(name, args);
+    if (!exact?.receiptId) return;
+    return {
+      name,
+      args: {
+        receiptId: exact.receiptId,
+        ...(exact.revision === undefined ? {} : { revision: exact.revision }),
+      },
+    } as const;
   }
   if (name === SENTINEL_SAVED_REPOSITORY_VISIBILITY) {
     const exact = sentinelGoalReceiptReadArguments(name, args);

@@ -376,6 +376,7 @@ import {
   readSentinelFindingReceiptScope,
   readSentinelPlannerFindingDraft,
   recordOperatorSentinelFinding,
+  reopenSentinelPlannerLocalFinding,
   sentinelFindingReadTools,
   sentinelFindingWriteTools,
 } from "./sentinel_worker_findings.ts";
@@ -10298,6 +10299,17 @@ function createAgent(
                         (id) => currentPlannerReceiptScope(turn, id),
                         undefined,
                         operatingConstraints,
+                      )
+                      : selector.name === SENTINEL_GOAL_RECHECK_READ
+                      ? reopenSentinelPlannerLocalFinding(
+                        options.snapshotPath,
+                        {
+                          caseId: location.caseId,
+                          runId,
+                          evidenceRevision: revision,
+                        },
+                        selector.args,
+                        (id) => currentPlannerReceiptScope(turn, id),
                       )
                       : await reopenRepositoryVisibilityVerdict(
                         runId,

@@ -4,6 +4,7 @@ import {
   projectPlannerReadCheckpoint,
   reopenPlannerReadCheckpoint,
 } from "../sentinel/planner_read_checkpoint.ts";
+import { reopenSentinelPlannerLocalFinding } from "./sentinel_worker_findings.ts";
 import { readSentinelPlannerGraphFacts } from "./sentinel_graph_fact_tool.ts";
 import type { TelemetryAlert } from "../sentinel/telemetry.ts";
 import { resolveWorkerNarrativeAlert } from "../sentinel/worker_narrative_alerts.ts";
@@ -9421,10 +9422,31 @@ export function createSentinelModelPlanner(
         } finally {
           store.close();
         }
-        const projections = retainedRead?.exchanges.map((exchange) => {
-          if (!runId || !checkpointCurrent()) return;
+        const projectPlannerRead = (
+          exchange: NonNullable<
+            ReturnType<typeof plannerCheckpointReadSelector>
+          >,
+        ) => {
+          if (!location || !runId || !checkpointCurrent()) return;
           if (exchange.name === "sentinel_graph_facts") {
             return projectGraphFact(exchange.args.id);
+          }
+          if (exchange.name === SENTINEL_GOAL_RECHECK_READ) {
+            return reopenSentinelPlannerLocalFinding(
+              snapshotPath,
+              {
+                caseId: location.caseId,
+                runId,
+                evidenceRevision: state.revision,
+              },
+              exchange.args,
+              (nodeId) =>
+                sentinelOperatingConstraintsAllow(
+                  constraints?.constraints,
+                  { kind: "review_evidence", nodeId },
+                  snapshot,
+                ),
+            );
           }
           const { asset, taskId, recheckId } = exchange.args;
           if (
@@ -9446,7 +9468,8 @@ export function createSentinelModelPlanner(
             reference: proof.reference,
             verdict: proof.verdict,
           });
-        });
+        };
+        const projections = retainedRead?.exchanges.map(projectPlannerRead);
         const resume = retainedRead && projections?.every((part) =>
             part !== undefined
           )
@@ -9456,6 +9479,48 @@ export function createSentinelModelPlanner(
         let checkpointSaved = resume !== undefined;
         let checkpointEligible = true;
         let admittedCheckpointReads = retainedRead?.exchanges.length ?? 0;
+        const rememberFinding = (
+          id: string,
+          evidenceRevision: number | undefined,
+          digest: string,
+        ) => {
+          const receipt = readSentinelCaseFindingReceipts(
+            snapshotPath,
+            [id],
+          ).get(id);
+          if (
+            receipt &&
+            receipt.caseId ===
+              locateSentinelCase(snapshotPath)?.caseId &&
+            receipt.runId === state.plan.runId &&
+            receipt.evidenceRevision <= state.revision &&
+            (evidenceRevision === undefined ||
+              receipt.evidenceRevision ===
+                evidenceRevision) &&
+            sentinelOperatingConstraintsAllow(
+              constraints?.constraints,
+              { kind: "review_evidence", nodeId: receipt.targetId },
+              snapshot,
+            )
+          ) {
+            if (
+              receipt.kind === "finding" &&
+              findingRecheckStillApplies(snapshot, receipt)
+            ) {
+              openedRecheckFindings.set(id, receipt.targetId);
+              if (
+                createHash("sha256").update(JSON.stringify({
+                  _classification: "INTERNAL",
+                  record: receipt,
+                })).digest("hex") === digest
+              ) rememberMixedSource(id, receipt.targetId);
+            } else if (
+              receipt.kind === "recheck" &&
+              receipt.outcome === "pass" &&
+              receipt.evidenceRevision === state.revision
+            ) openedPassingRechecks.set(id, receipt.targetId);
+          }
+        };
         const rememberVisibility = (result: string) => {
           if (
             !result.startsWith("{") || !matchesRound(state)
@@ -9671,43 +9736,11 @@ export function createSentinelModelPlanner(
                   tool === SENTINEL_GOAL_RECHECK_READ &&
                   goalReceiptRead?.args.receiptId
                 ) {
-                  const id = goalReceiptRead.args.receiptId;
-                  const receipt = readSentinelCaseFindingReceipts(
-                    snapshotPath,
-                    [id],
-                  ).get(id);
-                  if (
-                    receipt &&
-                    receipt.caseId ===
-                      locateSentinelCase(snapshotPath)?.caseId &&
-                    receipt.runId === state.plan.runId &&
-                    receipt.evidenceRevision <= state.revision &&
-                    (goalReceiptRead.args.revision === undefined ||
-                      receipt.evidenceRevision ===
-                        goalReceiptRead.args.revision) &&
-                    sentinelOperatingConstraintsAllow(
-                      constraints?.constraints,
-                      { kind: "review_evidence", nodeId: receipt.targetId },
-                      snapshot,
-                    )
-                  ) {
-                    if (
-                      receipt.kind === "finding" &&
-                      findingRecheckStillApplies(snapshot, receipt)
-                    ) {
-                      openedRecheckFindings.set(id, receipt.targetId);
-                      if (
-                        createHash("sha256").update(JSON.stringify({
-                          _classification: "INTERNAL",
-                          record: receipt,
-                        })).digest("hex") === goalReceiptRead.sha256
-                      ) rememberMixedSource(id, receipt.targetId);
-                    } else if (
-                      receipt.kind === "recheck" &&
-                      receipt.outcome === "pass" &&
-                      receipt.evidenceRevision === state.revision
-                    ) openedPassingRechecks.set(id, receipt.targetId);
-                  }
+                  rememberFinding(
+                    goalReceiptRead.args.receiptId,
+                    goalReceiptRead.args.revision,
+                    goalReceiptRead.sha256,
+                  );
                 }
                 if (recorded && outcome === "returned") {
                   if (
@@ -9871,13 +9904,16 @@ export function createSentinelModelPlanner(
                   }
                   const target = exchange.name === "sentinel_graph_facts"
                     ? exchange.args.id
+                    : exchange.name === SENTINEL_GOAL_RECHECK_READ
+                    ? exchange.args.receiptId
                     : exchange.args.asset;
                   if (
                     !audit.recordModelPlanRead(roundIdentity, claim, {
                       tool: exchange.name,
                       outcome: "returned",
                       target,
-                      ...(exchange.name === "sentinel_graph_facts" && {
+                      ...(exchange.name !==
+                          SENTINEL_SAVED_REPOSITORY_VISIBILITY && {
                         goalReceiptRead: {
                           args: exchange.args,
                           sha256: exchange.resultSha256,
@@ -9890,6 +9926,12 @@ export function createSentinelModelPlanner(
                     const { _classification, ...fact } = JSON.parse(projection);
                     openedGraphFacts.set(fact.id, fact);
                     rememberMixedSource(fact.id, fact.targetId);
+                  } else if (exchange.name === SENTINEL_GOAL_RECHECK_READ) {
+                    rememberFinding(
+                      exchange.args.receiptId,
+                      exchange.args.revision,
+                      exchange.resultSha256,
+                    );
                   } else {
                     rememberVisibility(projection);
                   }
@@ -9904,9 +9946,12 @@ export function createSentinelModelPlanner(
                 checkpointEligible && calls.length > 0 &&
                 admittedCheckpointReads + calls.length <=
                   MAX_PLANNER_CHECKPOINT_READS &&
-                calls.every(({ name, args }) =>
-                  plannerCheckpointReadSelector(name, args)
-                )
+                calls.every(({ name, args }) => {
+                  const selector = plannerCheckpointReadSelector(name, args);
+                  return selector &&
+                    (selector.name !== SENTINEL_GOAL_RECHECK_READ ||
+                      projectPlannerRead(selector) !== undefined);
+                })
               ) {
                 admittedCheckpointReads += calls.length;
                 return;
@@ -9929,7 +9974,15 @@ export function createSentinelModelPlanner(
                 return Promise.resolve();
               }
               const projection = projectPlannerReadCheckpoint(value, prompt);
-              if (!projection) return Promise.resolve();
+              if (
+                !projection || !projection.exchanges.every((exchange) => {
+                  if (exchange.name !== SENTINEL_GOAL_RECHECK_READ) return true;
+                  const text = projectPlannerRead(exchange);
+                  return text !== undefined &&
+                    createHash("sha256").update(text).digest("hex") ===
+                      exchange.resultSha256;
+                })
+              ) return Promise.resolve();
               const audit = openSentinelAdaptiveStore(
                 storePath(snapshotPath),
                 now,

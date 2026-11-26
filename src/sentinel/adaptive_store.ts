@@ -84,7 +84,6 @@ import {
   readSentinelTaskObservationPageReference,
   readSentinelWorkerTracePageReference,
   SENTINEL_CASE_INVENTORY_READ,
-  SENTINEL_GOAL_GRAPH_FACT_READ,
   SENTINEL_GOAL_PROPOSE,
   SENTINEL_GOAL_PROVE,
   SENTINEL_GOAL_RECHECK_READ,
@@ -7278,8 +7277,8 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
             return step?.tool === exchange.name &&
               step.outcome === "returned" &&
               step.resultSha256 === exchange.resultSha256 &&
-              (exchange.name !== SENTINEL_GOAL_GRAPH_FACT_READ ||
-                step.goalReceiptRead?.args.id === exchange.args.id);
+              (exchange.name === SENTINEL_SAVED_REPOSITORY_VISIBILITY ||
+                isDeepStrictEqual(step.goalReceiptRead?.args, exchange.args));
           })
         ) return false;
         db.exec(`CREATE TABLE IF NOT EXISTS adaptive_model_read_checkpoints (

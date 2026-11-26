@@ -66,6 +66,7 @@ import {
   readSentinelWorkerFindingWriteReceipt,
   readStagedTrafficLinks,
   type SentinelAnalystFindingInput,
+  type SentinelWorkerFindingJournalRecord,
   type SentinelWorkerFindingRecord,
 } from "../sentinel/worker_finding_store.ts";
 import {
@@ -1237,6 +1238,59 @@ export function reopenSentinelPlannerFindings(
     records,
     nextBeforeReceiptId: page.nextBeforeReceiptId,
   });
+}
+
+/** Rebuild the minimal exact local finding result for an active planner checkpoint. */
+export function reopenSentinelPlannerLocalFinding(
+  path: string,
+  scope: { caseId: string; runId: string; evidenceRevision: number },
+  selector: { receiptId: string; revision?: number },
+  allow: (id: string) => boolean,
+) {
+  const record = readSentinelCaseFindingReceipts(path, [selector.receiptId])
+    .get(selector.receiptId);
+  const policy = readSentinelFindingReceiptScope(path, scope.evidenceRevision);
+  if (
+    !record || policy?.runId !== scope.runId ||
+    (selector.revision !== undefined &&
+      selector.revision !== record.evidenceRevision)
+  ) return;
+
+  const localEvidence = (item: SentinelWorkerFindingJournalRecord) => {
+    if (
+      (item.kind === "recheck" && item.nativeRepositoryVisibility) ||
+      item.caseId !== scope.caseId || item.runId !== scope.runId ||
+      item.evidenceRevision > scope.evidenceRevision ||
+      item.targetId !== record.targetId || !policy.allowsRecord(item) ||
+      !allow(item.targetId)
+    ) return false;
+    const sourcePolicy = readSentinelFindingReceiptScope(
+      path,
+      item.evidenceRevision,
+    );
+    if (
+      sourcePolicy?.runId !== scope.runId || !sourcePolicy.allowsRecord(item) ||
+      !sourcePolicy.allows(item.evidenceId)
+    ) return false;
+    const source = readSentinelAssessmentRevision(path, item.evidenceRevision)
+      ?.result.sharedGraph.snapshot;
+    if (!source || digestSentinelSnapshot(source) !== item.snapshotDigest) {
+      return false;
+    }
+    const evidence = source.nodes.find(({ id }) => id === item.evidenceId);
+    const finding = source.nodes.find(({ id }) => id === item.graphFindingId);
+    return evidence?.kind === "evidence" && !evidence.executionSource &&
+      !evidence.nativeWorkflowSource && !evidence.relationshipSources?.length &&
+      finding?.kind === "finding" && !finding.workerFindingSource;
+  };
+
+  if (!localEvidence(record)) return;
+  if (record.kind === "recheck") {
+    const original = readSentinelCaseFindingReceipts(path, [record.findingId])
+      .get(record.findingId);
+    if (original?.kind !== "finding" || !localEvidence(original)) return;
+  }
+  return JSON.stringify({ _classification: "INTERNAL", record });
 }
 
 type FindingActorDraft = {
