@@ -998,11 +998,12 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
             : assessment.active && assessment.revision === revision;
         };
         if (!current()) return unavailable;
-        const scopedRead = sentinelScopedTelemetryReadActions.some(
-          (allowed) => allowed === action,
-        ) || sentinelScopedGraphReadActions.some((allowed) =>
-          allowed === action
-        );
+        const scopedDecision = action === "review_incident";
+        const scopedRead = scopedDecision ||
+          sentinelScopedTelemetryReadActions.some(
+            (allowed) => allowed === action,
+          ) ||
+          sentinelScopedGraphReadActions.some((allowed) => allowed === action);
         const sourcePath = scopedRead ? resolveCase() : undefined;
         const sourceRun = sourcePath &&
           readSentinelRunIdForRevision(sourcePath, revision);
@@ -1141,7 +1142,7 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
                   JSON.stringify(JSON.parse(reopened).membership) ===
                     JSON.stringify(JSON.parse(text).membership);
               }
-              if (linkedRead || selectedReport) {
+              if (linkedRead || selectedReport || scopedDecision) {
                 return await read() === text && sourceIsCurrent();
               }
               if (source.name !== SENTINEL_SHARED_ASSET_LINKS_READ) return true;

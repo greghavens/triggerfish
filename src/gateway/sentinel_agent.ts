@@ -5656,6 +5656,7 @@ function createAgent(
           selectedCaseAction === "withdraw_goal" ||
           selectedCaseAction === "set_case_membership" ||
           selectedCaseAction === "add_case_membership" ||
+          selectedCaseAction === "review_incident" ||
           selectedCaseAction === "record_analyst_finding";
         const pendingTelemetry = active?.pendingTelemetryFence;
         const selectedCaseGraph =

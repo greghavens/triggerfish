@@ -1,5 +1,6 @@
 import { dirname, join } from "@std/path";
 import { isDeepStrictEqual } from "node:util";
+import { notifyCommittedEvidence } from "../../../core/evidence_task_progression.ts";
 import { readSentinelWorkerEvidenceScope } from "../../sentinel_worker_evidence_scope.ts";
 import { scopedSentinelInventoryGraph } from "../../sentinel_agent.ts";
 import { sentinelOperatingConstraintsAllow } from "../../../sentinel/operating_constraints.ts";
@@ -103,6 +104,7 @@ import {
   readSavedSentinelIncidentCandidate,
   readSavedSentinelIncidentPage,
   readSavedSentinelPlanningEvidence,
+  readSentinelIncidentReviewScope,
   renderSavedSentinelIncidentJson,
 } from "../../../sentinel/incident_archive.ts";
 import {
@@ -1130,15 +1132,23 @@ export function createTidepoolSentinelHandler(
           const decision = sentinelIncidentDispositions.find((value) =>
             value === disposition
           );
+          const scope = () =>
+            typeof revision === "number" &&
+              typeof incidentId === "string"
+              ? readSentinelIncidentReviewScope(path, revision, incidentId)
+              : undefined;
+          const admitted = scope();
           if (
             typeof revision !== "number" || typeof incidentId !== "string" ||
-            typeof note !== "string" || !decision ||
+            typeof note !== "string" || !decision || !admitted ||
             !recordSentinelIncidentReview(
               path,
               revision,
               incidentId,
               decision,
               note,
+              undefined,
+              () => isDeepStrictEqual(scope(), admitted),
             )
           ) {
             throw new SentinelAssignmentError(
@@ -1147,6 +1157,17 @@ export function createTidepoolSentinelHandler(
           }
           const state = readSentinelAssessment(path);
           if (state) advanceAdaptiveSentinel(path, state);
+          const review = readSentinelIncidentReviews(path, revision).find(
+            (record) => record.incidentId === incidentId,
+          );
+          if (review && isDeepStrictEqual(scope(), admitted)) {
+            notifyCommittedEvidence({
+              case: caseId,
+              run_id: admitted.runId,
+              revision,
+              observation_id: `incident-review:${review.id}`,
+            });
+          }
           break;
         }
         case "hint_detail": {

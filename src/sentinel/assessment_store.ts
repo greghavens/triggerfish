@@ -4392,6 +4392,7 @@ export function recordSentinelIncidentReview(
   disposition: IncidentDisposition,
   note: string,
   requestId?: string,
+  authorizeScope?: () => boolean,
 ): boolean {
   if (
     !Number.isSafeInteger(revision) || revision < 1 ||
@@ -4405,6 +4406,7 @@ export function recordSentinelIncidentReview(
   if (!db) return false;
   try {
     return transact(db, () => {
+      if (authorizeScope && !authorizeScope()) return false;
       const prior = requestId &&
         operatorReviewRequest(db, "incident", requestId);
       if (prior) {

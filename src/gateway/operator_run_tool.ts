@@ -116,6 +116,7 @@ import {
   readSavedSentinelIncidentAssetScopes,
   readSavedSentinelIncidentCandidate,
   readSavedSentinelIncidentCandidates,
+  readSentinelIncidentReviewScope,
 } from "../sentinel/incident_archive.ts";
 import { sentinelTelemetryAssetResolver } from "../sentinel/defense_coverage.ts";
 import { redactCredentialText } from "../core/logger/redactor.ts";
@@ -1573,6 +1574,7 @@ export const sentinelOperatorCaseControlActions = [
   "set_case_membership",
   "add_case_membership",
   "record_analyst_finding",
+  "review_incident",
 ] as const;
 
 export const sentinelOperatorCaseControlParameters = [
@@ -1586,6 +1588,7 @@ export const sentinelOperatorCaseControlParameters = [
   "version",
   "expectedVersion",
   "requestId",
+  "disposition",
   "deniedKinds",
   "note",
   "targetId",
@@ -7891,8 +7894,13 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
           ) ||
           !await controller.inspect(ref)
         ) return unavailable;
+        const path = resolveSentinelCasePath(options.baseDir, ref.id);
+        if (
+          kind === "incident" &&
+          !readSentinelIncidentReviewScope(path, ref.revision, subjectId)
+        ) return unavailable;
         const page = readSentinelDecisionHistory(
-          resolveSentinelCasePath(options.baseDir, ref.id),
+          path,
           ref.revision,
           kind,
           subjectId,
@@ -7907,6 +7915,7 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
         const selector = kind === "incident" ? "incidentId" : "findingId";
         const subjectId = args[selector];
         const { disposition, note, requestId } = args;
+        const requestedRunId = args.runId;
         const incidentDecision = kind === "incident" &&
           sentinelIncidentDispositions.find((value) => value === disposition);
         const findingDecision = kind === "finding" &&
@@ -7919,6 +7928,11 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
           subjectId.length > 800 ||
           (kind === "incident" && !/^incident:[0-9a-f]{64}$/.test(subjectId)) ||
           (!incidentDecision && !findingDecision) || typeof note !== "string" ||
+          (kind === "incident" &&
+            (requestedRunId !== undefined ||
+              context.authorizeSelectedSentinelCase) &&
+            (typeof requestedRunId !== "string" ||
+              !digestPattern.test(requestedRunId))) ||
           !note.trim() ||
           note.length > 1000 || redactCredentialText(note) !== note ||
           typeof requestId !== "string" || !digestPattern.test(requestId) ||
@@ -7932,14 +7946,32 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
               "disposition",
               "note",
               "requestId",
+              ...(kind === "incident" ? ["runId"] : []),
             ].includes(key)
           ) ||
           !await controller.inspect(ref)
         ) return unavailable;
         const path = resolveSentinelCasePath(options.baseDir, ref.id);
         const key = requestId.toLowerCase();
+        const incidentScope = () =>
+          readSentinelIncidentReviewScope(
+            path,
+            ref.revision!,
+            subjectId,
+          );
+        const admitted = incidentDecision ? incidentScope() : undefined;
+        const scopeCurrent = () =>
+          !!admitted &&
+          (requestedRunId === undefined || requestedRunId === admitted.runId) &&
+          (context.authorizeSelectedSentinelCase?.() ?? true) &&
+          isDeepStrictEqual(incidentScope(), admitted);
+        if (incidentDecision && !scopeCurrent()) return unavailable;
         const prior = readSentinelOperatorReviewRequest(path, kind, key);
         if (prior) {
+          if (
+            incidentDecision &&
+            (!await authorize(args) || !scopeCurrent())
+          ) return unavailable;
           return prior.record.revision === ref.revision &&
               prior.subjectId === subjectId &&
               prior.record.disposition === disposition &&
@@ -7948,7 +7980,10 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
             : unavailable;
         }
         const state = readSentinelAssessment(path);
-        if (!state || state.revision !== ref.revision) return unavailable;
+        if (
+          !state || state.revision !== ref.revision ||
+          (incidentDecision && state.plan.runId !== admitted?.runId)
+        ) return unavailable;
         const present = kind === "incident"
           ? (state.active || state.paused) &&
             (sentinelIncidentCandidates(state).some(({ id }) =>
@@ -7972,11 +8007,15 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
                 disposition,
                 note: note.trim(),
                 requestId: key,
+                ...(admitted &&
+                  { runId: admitted.runId, assetIds: admitted.assetIds }),
               })
             }`,
           )
         ) return "Error: The operator declined the run action.";
-        if (!await authorize(args)) return unavailable;
+        if (!await authorize(args) || (incidentDecision && !scopeCurrent())) {
+          return unavailable;
+        }
         const committed = incidentDecision
           ? recordSentinelIncidentReview(
             path,
@@ -7985,6 +8024,7 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
             incidentDecision,
             note,
             key,
+            scopeCurrent,
           )
           : findingDecision &&
             recordSentinelFindingReview(
@@ -8001,6 +8041,15 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
           advanceAdaptiveSentinel(path, current);
         }
         const review = readSentinelOperatorReviewRequest(path, kind, key);
+        if (incidentDecision && !scopeCurrent()) return unavailable;
+        if (review && incidentDecision && admitted) {
+          notifyCommittedEvidence({
+            case: ref.id,
+            run_id: admitted.runId,
+            revision: ref.revision,
+            observation_id: `incident-review:${review.record.id}`,
+          });
+        }
         return review
           ? safeProjection({ run: ref, review: review.record })
           : unavailable;

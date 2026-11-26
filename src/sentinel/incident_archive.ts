@@ -3,10 +3,15 @@ import {
   readSentinelAssessmentAlerts,
   readSentinelAssessmentRevision,
   readSentinelIncidentReviews,
+  readSentinelLatestRunRevision,
+  readSentinelOperatingConstraints,
+  readSentinelRunIdForRevision,
   type SentinelIncidentReview,
 } from "./assessment_store.ts";
 import type { TelemetryAlert } from "./telemetry.ts";
 import { loadSentinelGraph } from "./graph.ts";
+import { sentinelTelemetryAssetResolver } from "./defense_coverage.ts";
+import { sentinelOperatingConstraintsAllow } from "./operating_constraints.ts";
 import {
   compareSentinelIncidentPriority,
   correlateSentinelIncidents,
@@ -112,6 +117,58 @@ export function readSavedSentinelIncidentAssetScopes(
     }
   }
   return scopes;
+}
+
+/** Validate every member against the saved and current scope of the original run. */
+export function readSentinelIncidentReviewScope(
+  path: string,
+  revision: number,
+  incidentId: string,
+) {
+  const runId = readSentinelRunIdForRevision(path, revision);
+  const latestRevision = runId && readSentinelLatestRunRevision(path, runId);
+  const incident = readSavedSentinelIncident(path, revision, incidentId, true);
+  if (
+    !runId || !latestRevision || "error" in incident || !incident.members.length
+  ) return;
+  const saved = readSentinelAssessmentRevision(path, revision)?.result
+    .sharedGraph.snapshot;
+  const latest = latestRevision === revision
+    ? saved
+    : readSentinelAssessmentRevision(path, latestRevision)?.result.sharedGraph
+      .snapshot;
+  if (!saved || !latest) return;
+  const before = readSentinelOperatingConstraints(path, runId, revision);
+  const current = readSentinelOperatingConstraints(path, runId);
+  const savedAsset = sentinelTelemetryAssetResolver(saved, before?.constraints);
+  const currentAsset = sentinelTelemetryAssetResolver(
+    latest,
+    current?.constraints,
+  );
+  const assetIds = new Set<string>();
+  for (const member of incident.members) {
+    const nodeId = savedAsset(member);
+    if (
+      !nodeId || currentAsset(member) !== nodeId ||
+      !sentinelOperatingConstraintsAllow(before?.constraints, {
+        kind: "review_incident",
+        nodeId,
+      }, saved) ||
+      !sentinelOperatingConstraintsAllow(current?.constraints, {
+        kind: "review_incident",
+        nodeId,
+      }, latest)
+    ) return;
+    assetIds.add(nodeId);
+  }
+  return {
+    runId,
+    latestRevision,
+    assetIds: [...assetIds].sort(),
+    savedDigest: before?.digest,
+    currentDigest: current?.digest,
+    currentVersion: current?.version,
+  };
 }
 
 export function readSavedSentinelPlanningEvidence(
