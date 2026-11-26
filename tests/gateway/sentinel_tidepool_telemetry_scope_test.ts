@@ -5,7 +5,12 @@ import {
   sentinelAlertKey,
   type TelemetryAlert,
 } from "../../src/sentinel/telemetry.ts";
-import { assert, assertEquals, assertExists } from "@std/assert";
+import {
+  assert,
+  assertEquals,
+  assertExists,
+  assertStringIncludes,
+} from "@std/assert";
 import { dirname, join } from "@std/path";
 import type { BootstrapResult } from "../../src/gateway/startup/bootstrap.ts";
 import { createTidepoolSentinelHandler } from "../../src/gateway/startup/services/tidepool_sentinel.ts";
@@ -34,8 +39,24 @@ Deno.test("Authenticated Tidepool hides revoked retained alert records and mixed
         { id: "app", kind: "asset", label: "Application" },
         { id: "proxy", kind: "asset", label: "Proxy" },
         { id: "private", kind: "asset", label: "Private asset" },
+        {
+          id: "allowed-finding",
+          kind: "finding",
+          severity: "high",
+          label: "Authorized finding title",
+        },
+        {
+          id: "private-finding",
+          kind: "finding",
+          severity: "high",
+          label: "Revoked finding title",
+        },
       ],
-      edges: [{ from: "proxy", to: "private", relation: "depends_on" }],
+      edges: [
+        { from: "proxy", to: "private", relation: "depends_on" },
+        { from: "allowed-finding", to: "app", relation: "affects" },
+        { from: "private-finding", to: "private", relation: "affects" },
+      ],
     };
     await Deno.mkdir(dirname(path), { recursive: true });
     await Deno.writeTextFile(path, JSON.stringify(graph));
@@ -63,7 +84,8 @@ Deno.test("Authenticated Tidepool hides revoked retained alert records and mixed
         alert("authentication_failure_burst", "private", "01", "private-auth"),
       ]),
     );
-    const saved = startSentinelAssessment(path);
+    const privateGoal = "Private fixture assessment objective";
+    const saved = startSentinelAssessment(path, { goal: privateGoal });
     const runId = saved.plan.runId;
     assertExists(runId);
     host.registerTopicHandler(
@@ -324,7 +346,11 @@ Deno.test("Authenticated Tidepool hides revoked retained alert records and mixed
       incidentNodes: { sourceId: string }[];
       graph: { nodes: { id: string }[] };
     };
-    assertEquals(compared.graph.nodes.map(({ id }) => id), ["app", "proxy"]);
+    assertEquals(compared.graph.nodes.map(({ id }) => id).toSorted(), [
+      "allowed-finding",
+      "app",
+      "proxy",
+    ]);
     for (
       const feed of [compared.fullAlerts.earlier, compared.fullAlerts.later]
     ) {
@@ -385,11 +411,50 @@ Deno.test("Authenticated Tidepool hides revoked retained alert records and mixed
     ]);
     assert(!JSON.stringify(incidentExport).includes(mixed.sourceId));
     const inventoryExport = await download("inventory");
-    assertEquals(inventoryExport.nodes.map(({ id }: { id: string }) => id), [
-      "app",
-      "proxy",
+    assertEquals(
+      inventoryExport.nodes.map(({ id }: { id: string }) => id).toSorted(),
+      [
+        "allowed-finding",
+        "app",
+        "proxy",
+      ],
+    );
+    assertEquals(inventoryExport.edges, [
+      { from: "allowed-finding", to: "app", relation: "affects" },
     ]);
-    assertEquals(inventoryExport.edges, []);
+
+    for (const format of ["csv", "markdown", "provenance"]) {
+      const response = await request("export", { format });
+      assertEquals(response.type, "export");
+      assert(typeof response.content === "string");
+      assertStringIncludes(response.content, "Authorized finding title");
+      assert(!response.content.includes("Revoked finding title"));
+      assert(!response.content.includes(privateGoal));
+      if (format === "provenance") {
+        const report = JSON.parse(response.content);
+        assertEquals(report.scopeRestricted, true);
+        assertEquals(report.operatingConstraints, undefined);
+        assertEquals(report.planningAttempts, []);
+        assertEquals(report.observations, []);
+        assertEquals(
+          report.inventory.nodes.map(({ id }: { id: string }) => id).toSorted(),
+          [
+            "allowed-finding",
+            "app",
+            "proxy",
+          ],
+        );
+      }
+    }
+
+    const activeReport = await request("export", {
+      format: "markdown",
+      revision: undefined,
+    });
+    assertEquals(activeReport.revision, next.revision);
+    assert(typeof activeReport.content === "string");
+    assertStringIncludes(activeReport.content, "Authorized finding title");
+    assert(!activeReport.content.includes(privateGoal));
 
     const scoped = await request("revision_alerts");
     assertEquals(

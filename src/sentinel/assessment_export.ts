@@ -52,6 +52,7 @@ export type SentinelAssessmentExportInput =
     Pick<CurrentAssessment, "plan" | "active" | "paused" | "completion">
   >
   & {
+    readonly scopeRestricted?: true;
     readonly incidentReviews?: readonly SentinelIncidentReview[];
     readonly findingReviews?: readonly SentinelFindingReview[];
     readonly workerFindings?:
@@ -148,7 +149,7 @@ export function renderSentinelProvenanceJson(
     ? assessment.findingTrafficLinks ??
       exportSentinelFindingTrafficLinks(path, assessment.revision)
     : [];
-  const operatingConstraints = exactCase
+  const operatingConstraints = exactCase && !assessment.scopeRestricted
     ? readSentinelOperatingConstraintsForRevision(path, assessment.revision)
     : undefined;
   const planningDecisions = [
@@ -175,6 +176,7 @@ export function renderSentinelProvenanceJson(
       caseId,
       revision: assessment.revision,
       updatedAt: assessment.updatedAt,
+      ...(assessment.scopeRestricted && { scopeRestricted: true }),
       ...(assessment.completion && { completion: assessment.completion }),
       ...(workerFindings && { workerFindings }),
       ...(findingTrafficLinks.length > 0 && { findingTrafficLinks }),

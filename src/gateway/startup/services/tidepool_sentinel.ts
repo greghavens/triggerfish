@@ -1831,8 +1831,28 @@ export function createTidepoolSentinelHandler(
               "No full alert feed was saved for this evidence revision.",
             );
           }
+          const reportScope = format === "inventory" || format === "alerts"
+            ? undefined
+            : telemetryScope;
+          const saved = reportScope &&
+            readSentinelAssessmentRevision(path, state.revision);
+          if (reportScope && !saved) {
+            throw new SentinelAssignmentError(
+              "The scoped evidence revision is unavailable.",
+            );
+          }
+          const scopedState = saved
+            ? {
+              ...scopedRetainedAssessment(path, saved),
+              active: current?.active,
+              paused: current?.paused,
+              scopeRestricted: true as const,
+            }
+            : undefined;
+          const allowsDecision = tidepoolDecisionScope(path);
           const adaptive =
-            format === "csv" || format === "inventory" || format === "alerts"
+            reportScope || format === "csv" || format === "inventory" ||
+              format === "alerts"
               ? undefined
               : current
               ? readAdaptiveSentinel(path, current, "revision") ?? undefined
@@ -1859,7 +1879,7 @@ export function createTidepoolSentinelHandler(
             [...new Set(findingTrafficLinks.map(({ findingId }) => findingId))],
           );
           const exportState = {
-            ...state,
+            ...(scopedState ?? state),
             workerFindings: format === "markdown" || format === "provenance"
               ? readScopedSentinelWorkerFindingReport(
                 path,
@@ -1879,9 +1899,19 @@ export function createTidepoolSentinelHandler(
             }),
             findingReviews: format === "inventory" || format === "alerts"
               ? undefined
-              : readSentinelFindingReviews(path, state.revision),
+              : readSentinelFindingReviews(path, state.revision).filter(
+                ({ findingId, revision }) =>
+                  !reportScope ||
+                  (reportScope.allowFinding(findingId) &&
+                    allowsDecision("finding", findingId, revision)),
+              ),
             incidentReviews: format === "markdown" || format === "provenance"
-              ? readSentinelIncidentReviews(path, state.revision)
+              ? readSentinelIncidentReviews(path, state.revision).filter(
+                ({ incidentId, revision }) =>
+                  !reportScope ||
+                  (reportScope.allowIncident(incidentId) &&
+                    allowsDecision("incident", incidentId, revision)),
+              )
               : undefined,
           };
           const content = format === "csv"
