@@ -716,6 +716,19 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
       tracesStore.close();
     }
     await withGateway(async (turn) => {
+      const denyDuringRunReview = async (request: Record<string, unknown>) => {
+        const beforeReview = confirmations.length;
+        duringConfirmation = () => {
+          denied = "PRE_TOOL_CALL";
+        };
+        try {
+          assertStringIncludes((await turn(request)).result, "unavailable");
+        } finally {
+          duringConfirmation = undefined;
+          denied = undefined;
+        }
+        assertEquals(confirmations.length, beforeReview + 1);
+      };
       denied = "PRE_TOOL_CALL";
       const withoutApproval = await turn({ action: "start", ...sentinel });
       assert(withoutApproval.result);
@@ -766,6 +779,10 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
       assert(blockedProfiles.error);
       denied = undefined;
 
+      await denyDuringRunReview({ action: "start", ...sentinel });
+      await denyDuringRunReview({ action: "start", ...configured });
+      assertEquals(readSentinelAssessment(path), undefined);
+      assertEquals(workflows.list(), []);
       const started =
         JSON.parse((await turn({ action: "start", ...sentinel })).result).run;
       assertEquals(started.status, "running");
@@ -2963,6 +2980,9 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
         requestId: crypto.randomUUID(),
         note: "Focus on the retained defensive evidence.",
       };
+      const hintsBeforeReview = readSentinelCaseHints(path, 10);
+      await denyDuringRunReview(hint);
+      assertEquals(readSentinelCaseHints(path, 10), hintsBeforeReview);
       assertEquals(JSON.parse((await turn(hint)).result).run.ref, exact);
       assertEquals(JSON.parse((await turn(hint)).result).run.ref, exact);
       assertEquals(readSentinelCaseHints(path, 10).map(({ text }) => text), [
@@ -2972,6 +2992,8 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
         (await turn({ ...hint, note: "Different duplicate hint" })).result,
         "unavailable",
       );
+      await denyDuringRunReview({ action: "pause", ...exact });
+      assertEquals(readSentinelAssessment(path)?.paused, false);
       assertEquals(
         JSON.parse((await turn({ action: "pause", ...exact })).result).run
           .status,
@@ -2985,6 +3007,7 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
         })).result,
         "unavailable",
       );
+      await denyDuringRunReview({ action: "resume", ...exact });
       assertEquals(readSentinelAssessment(path)?.paused, true);
       const { runId, adaptiveRevision } = JSON.parse(inspection.result).run
         .details;

@@ -12743,6 +12743,9 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
         return unavailable;
       }
       if (
+        !context?.authenticatedOwnerSessionId || !context.authorizeOwnerRunCall
+      ) return unavailable;
+      if (
         ref.kind === "sentinel" && action !== "start" &&
         ref.revision === undefined
       ) {
@@ -12855,7 +12858,10 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
       ) {
         return "Error: The operator declined the run action.";
       }
-      if (authorizeTrafficHint && !await authorizeTrafficHint()) {
+      const authorized = authorizeTrafficHint
+        ? await authorizeTrafficHint()
+        : await context.authorizeOwnerRunCall(args);
+      if (!authorized) {
         return unavailable;
       }
       const run = await controller.mutate(action, ref, control);
