@@ -1,3 +1,4 @@
+import { bindModelCallScope } from "../../agent/providers/monitoring.ts";
 import {
   createSentinelFindingDelivery,
   isCurrentSentinelFindingNotification,
@@ -590,19 +591,38 @@ export async function startServicesAndChannels(
       assignedTaskId?: string,
       assignedTaskLeaseToken?: string,
       role?: "planner" | "reporter" | "recheck",
-    ) =>
-      createSentinelSubagent({
-        ...modelRouting.workerOptions(
-          state.plan.modelProfile,
-          state.plan.runId
-            ? {
-              path: casePath,
-              runId: state.plan.runId,
-              revision: state.revision,
-              role: role ?? "worker",
-            }
-            : undefined,
-        ),
+    ) => {
+      const routing = modelRouting.workerOptions(
+        state.plan.modelProfile,
+        state.plan.runId
+          ? {
+            path: casePath,
+            runId: state.plan.runId,
+            revision: state.revision,
+            role: role ?? "worker",
+          }
+          : undefined,
+      );
+      const caseId = locateSentinelCase(casePath)?.caseId;
+      const runId = state.plan.runId;
+      const scope = caseId && runId &&
+          (role === "planner" || (assignedTaskId && assignedTaskLeaseToken))
+        ? {
+          caseId,
+          runId,
+          revision: state.revision,
+          assignmentId: assignedTaskId,
+        }
+        : undefined;
+      return createSentinelSubagent({
+        ...routing,
+        ...(scope &&
+          {
+            providerRegistry: bindModelCallScope(
+              routing.providerRegistry,
+              scope,
+            ),
+          }),
         hookRunner: toolInfra.hookRunner,
         snapshotPath: casePath,
         sharedInventoryBaseDir: bootstrap.baseDir,
@@ -718,7 +738,8 @@ export async function startServicesAndChannels(
         readOutputLanguage: () =>
           readSentinelModelSettings(casePath)?.outputLanguage,
         webContainmentConfigured,
-      })
+      });
+    }
     : undefined;
   const reserveModelWorker = createSentinelWorkerPool(
     bootstrap.config.sentinel?.model_worker_limit ?? 2,

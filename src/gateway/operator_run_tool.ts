@@ -1203,6 +1203,11 @@ export const operatorRunTool: ToolDefinition = {
       type: "integer",
       description: "Exact record to delete or cursor for the next page.",
     },
+    modelScopeDigest: {
+      type: "string",
+      description:
+        "Exact digest from model_call_scope before reviewed scoped deletion.",
+    },
     modelUsageDays: {
       type: "integer",
       description: "Number of UTC days to report.",

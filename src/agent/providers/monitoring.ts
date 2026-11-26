@@ -1,11 +1,54 @@
 import { parseClassification } from "../../core/types/classification.ts";
-import { modelMonitor } from "../../core/model_monitor.ts";
+import { type ModelCallScope, modelMonitor } from "../../core/model_monitor.ts";
 import { isTransientModelAvailabilityError } from "./retry.ts";
 import type {
   LlmProvider,
   LlmProviderRegistry,
   LlmUsage,
 } from "../../core/types/llm.ts";
+
+const modelScope = Symbol("approved model call scope");
+type ScopedOptions = Record<string, unknown> & {
+  readonly [modelScope]?: ModelCallScope;
+};
+
+/** Bind metadata only from a trusted, already acquired execution context. */
+export function bindModelCallScope(
+  registry: LlmProviderRegistry,
+  scope: ModelCallScope,
+): LlmProviderRegistry {
+  const wrap = (provider: LlmProvider | undefined) => {
+    if (!provider) return;
+    const stream = provider.stream;
+    return {
+      ...provider,
+      complete(messages, tools, options) {
+        return provider.complete(messages, tools, {
+          ...options,
+          [modelScope]: scope,
+        });
+      },
+      ...(stream && {
+        stream(messages, tools, options) {
+          return stream.call(provider, messages, tools, {
+            ...options,
+            [modelScope]: scope,
+          });
+        },
+      }),
+    } satisfies LlmProvider;
+  };
+  return {
+    ...registry,
+    get: (name) => wrap(registry.get(name)),
+    getDefault: () => wrap(registry.getDefault()),
+    getForClassification: (level) => wrap(registry.getForClassification(level)),
+    ...(registry.snapshotForTurn && {
+      snapshotForTurn: (prior) =>
+        bindModelCallScope(registry.snapshotForTurn!(prior), scope),
+    }),
+  };
+}
 
 export function monitorProviderRegistry(
   registry: LlmProviderRegistry,
@@ -63,6 +106,7 @@ export function monitorProviderRegistry(
             ? "transient"
             : undefined,
           status,
+          (options as ScopedOptions)[modelScope],
         );
       } catch {
         // Optional measurements cannot change the result of a provider call.
@@ -75,7 +119,9 @@ export function monitorProviderRegistry(
         checkCooldown(options);
         const start = performance.now();
         try {
-          const result = await provider.complete(messages, tools, options);
+          const { [modelScope]: _scope, ...transport } =
+            options as ScopedOptions;
+          const result = await provider.complete(messages, tools, transport);
           save(options, start, "success", result.usage);
           return result;
         } catch (error) {
@@ -99,8 +145,10 @@ export function monitorProviderRegistry(
           let usage: LlmUsage | undefined;
           let failure: unknown;
           try {
+            const { [modelScope]: _scope, ...transport } =
+              options as ScopedOptions;
             for await (
-              const chunk of stream.call(provider, messages, tools, options)
+              const chunk of stream.call(provider, messages, tools, transport)
             ) {
               usage = chunk.usage ?? usage;
               if (chunk.done) outcome = "success";

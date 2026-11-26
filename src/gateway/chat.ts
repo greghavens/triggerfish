@@ -365,6 +365,8 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
                     "reset_live_model_route",
                     "model_usage_totals",
                     "tool_usage_totals",
+                    "model_call_scope",
+                    "delete_model_call_scope",
                   ].includes(action)) &&
                   typeof call.args?.modelRouteClassification === "string"
                 ? parseClassification(call.args.modelRouteClassification)
@@ -379,6 +381,7 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
                       "list",
                       "profiles",
                       "model_route",
+                      "model_call_scope",
                       "named_conversations",
                       "agent_profiles",
                       "agent_profile",
@@ -474,7 +477,9 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
                     action === "set_case_membership" ||
                     action === "add_case_membership" ||
                     action === "record_analyst_finding" ||
-                    action === "amend_finding_report") &&
+                    action === "amend_finding_report" ||
+                    action === "model_call_scope" ||
+                    action === "delete_model_call_scope") &&
                   {
                     case_id: typeof call.args?.id === "string" &&
                         isSentinelCaseId(call.args.id)

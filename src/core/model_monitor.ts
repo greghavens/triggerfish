@@ -1,9 +1,17 @@
 /** Classified routing stays in the provider registry. This ledger accepts model-call metadata only. */
 /// <reference path="./sqlite_types.d.ts" />
+import { createHash } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import { join } from "@std/path";
 import type { ClassificationLevel } from "./types/classification.ts";
 import type { LlmUsage } from "./types/llm.ts";
+
+export interface ModelCallScope {
+  readonly caseId: string;
+  readonly runId: string;
+  readonly revision: number;
+  readonly assignmentId?: string;
+}
 
 const retainRecords = 10_000;
 const cooldowns = [60_000, 300_000, 1_800_000];
@@ -67,6 +75,10 @@ export function modelMonitor(baseDir: string) {
           inputTokens INTEGER NOT NULL, outputTokens INTEGER NOT NULL,
           recordedAt INTEGER NOT NULL, PRIMARY KEY(classification, id)
         );
+        CREATE TABLE IF NOT EXISTS model_scope_deletions(
+          requestId TEXT PRIMARY KEY, scope TEXT NOT NULL, digest TEXT NOT NULL,
+          deleted INTEGER NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS model_health(
           classification TEXT NOT NULL, provider TEXT NOT NULL, model TEXT NOT NULL, failures INTEGER NOT NULL,
           version INTEGER NOT NULL, PRIMARY KEY(classification, provider, model)
@@ -92,6 +104,10 @@ export function modelMonitor(baseDir: string) {
           "TEXT CHECK (failureReason IN ('transient', 'hard', 'other'))",
         ],
         ["httpStatus", "INTEGER CHECK (httpStatus BETWEEN 400 AND 599)"],
+        ["caseId", "TEXT"],
+        ["runId", "TEXT"],
+        ["revision", "INTEGER"],
+        ["assignmentId", "TEXT"],
       ];
       const existingColumns = columns();
       if (migrate.some(([column]) => !existingColumns.includes(column))) {
@@ -129,6 +145,54 @@ export function modelMonitor(baseDir: string) {
         throw error;
       }
     });
+  }
+
+  const scopeWhere =
+    "classification=? AND caseId=? AND runId=? AND revision=? AND assignmentId IS ?";
+  const scopeValues = (
+    classification: ClassificationLevel,
+    scope: ModelCallScope,
+  ) =>
+    [
+      classification,
+      scope.caseId,
+      scope.runId,
+      scope.revision,
+      scope.assignmentId ?? null,
+    ] as const;
+
+  function deletionPreview(
+    db: DatabaseSync,
+    classification: ClassificationLevel,
+    scope: ModelCallScope,
+  ) {
+    const values = scopeValues(classification, scope);
+    const rows = db.prepare(
+      `SELECT id FROM model_calls WHERE ${scopeWhere} ORDER BY id`,
+    ).all(...values);
+    return {
+      digest: createHash("sha256").update(
+        JSON.stringify([values, rows.map(({ id }) => id)]),
+      ).digest("hex"),
+      count: rows.length,
+    };
+  }
+
+  function deletionReceipt(
+    db: DatabaseSync,
+    classification: ClassificationLevel,
+    scope: ModelCallScope,
+    digest: string,
+    requestId: string,
+  ) {
+    const row = db.prepare(
+      "SELECT scope,digest,deleted FROM model_scope_deletions WHERE requestId=?",
+    ).get(requestId);
+    if (!row) return;
+    return row.scope === JSON.stringify(scopeValues(classification, scope)) &&
+        row.digest === digest
+      ? { deleted: Number(row.deleted), digest, requestId }
+      : false;
   }
 
   return {
@@ -173,6 +237,7 @@ export function modelMonitor(baseDir: string) {
       usage?: LlmUsage,
       availability?: "transient" | "hard",
       httpStatus?: number,
+      scope?: ModelCallScope,
     ) {
       const time = Date.now();
       const input = count(usage?.inputTokens);
@@ -188,8 +253,9 @@ export function modelMonitor(baseDir: string) {
         db.prepare(`
           INSERT INTO model_calls (
             classification,id,provider,model,outcome,elapsed,inputTokens,
-            outputTokens,recordedAt,failureReason,httpStatus
-          ) VALUES (?,?,?,?,?,?,?,?,?,?,?)
+            outputTokens,recordedAt,failureReason,httpStatus,caseId,runId,
+            revision,assignmentId
+          ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         `)
           .run(
             classification,
@@ -207,6 +273,10 @@ export function modelMonitor(baseDir: string) {
               httpStatus <= 599
               ? httpStatus
               : null,
+            scope?.caseId ?? null,
+            scope?.runId ?? null,
+            scope?.revision ?? null,
+            scope?.assignmentId ?? null,
           );
         db.prepare("DELETE FROM model_calls WHERE classification=? AND id <= ?")
           .run(classification, id - retainRecords);
@@ -357,6 +427,53 @@ export function modelMonitor(baseDir: string) {
           "SELECT classification,id,provider,model,outcome,elapsed,inputTokens,outputTokens,recordedAt,failureReason,httpStatus FROM model_calls WHERE classification=? AND provider=? AND model=? AND id=?",
         ).get(classification, provider, model, id)
       );
+    },
+    previewScopeRemoval(
+      classification: ClassificationLevel,
+      scope: ModelCallScope,
+    ) {
+      return access((db) => deletionPreview(db, classification, scope));
+    },
+    scopeRemovalReceipt(
+      classification: ClassificationLevel,
+      scope: ModelCallScope,
+      digest: string,
+      requestId: string,
+    ) {
+      return access((db) =>
+        deletionReceipt(db, classification, scope, digest, requestId)
+      );
+    },
+    removeScope(
+      classification: ClassificationLevel,
+      scope: ModelCallScope,
+      digest: string,
+      requestId: string,
+    ) {
+      return transaction((db) => {
+        const replay = deletionReceipt(
+          db,
+          classification,
+          scope,
+          digest,
+          requestId,
+        );
+        if (replay !== undefined) return replay || undefined;
+        const preview = deletionPreview(db, classification, scope);
+        if (preview.digest !== digest || !preview.count) return;
+        const values = scopeValues(classification, scope);
+        const deleted = Number(
+          db.prepare(`DELETE FROM model_calls WHERE ${scopeWhere}`).run(
+            ...values,
+          ).changes,
+        );
+        if (deleted !== preview.count) {
+          throw new Error("Model diagnostic scope changed");
+        }
+        db.prepare("INSERT INTO model_scope_deletions VALUES (?,?,?,?)")
+          .run(requestId, JSON.stringify(values), digest, deleted);
+        return { deleted, digest, requestId };
+      });
     },
     remove(
       classification: ClassificationLevel,

@@ -5,6 +5,15 @@ import {
   maxClassification,
   parseClassification,
 } from "../core/types/classification.ts";
+import {
+  isSentinelCaseId,
+  resolveSentinelCasePath,
+} from "../sentinel/cases.ts";
+import {
+  readSentinelAssessment,
+  readSentinelRunIdForRevision,
+} from "../sentinel/assessment_store.ts";
+import { readSentinelWorkerEvidenceScope } from "./sentinel_worker_evidence_scope.ts";
 import { modelMonitor } from "../core/model_monitor.ts";
 import type { OperatorRunToolContext } from "./operator_run_tool.ts";
 
@@ -30,6 +39,8 @@ export const modelMonitoringActions = [
   "model_call_records",
   "model_call_record",
   "delete_model_call_record",
+  "model_call_scope",
+  "delete_model_call_scope",
 ] as const;
 type ModelMonitoringAction = typeof modelMonitoringActions[number];
 
@@ -40,6 +51,113 @@ function exactInteger(
 ): value is number {
   return typeof value === "number" && Number.isSafeInteger(value) &&
     value >= min && value <= max;
+}
+
+const recordRequestId = /^[\da-f]{8}(?:-[\da-f]{4}){3}-[\da-f]{12}$/i;
+
+async function executeModelCallScope(
+  baseDir: string,
+  confirm: (question: string) => Promise<boolean>,
+  action: "model_call_scope" | "delete_model_call_scope",
+  args: Record<string, unknown>,
+  context: OperatorRunToolContext,
+) {
+  const {
+    id,
+    kind,
+    runId,
+    revision,
+    taskId,
+    requestId,
+    modelScopeDigest,
+    modelRouteClassification,
+  } = args;
+  const deleting = action === "delete_model_call_scope";
+  if (
+    kind !== "sentinel" || typeof id !== "string" || !isSentinelCaseId(id) ||
+    typeof runId !== "string" || !recordRequestId.test(runId) ||
+    !exactInteger(revision, 1, Number.MAX_SAFE_INTEGER) ||
+    (taskId !== undefined &&
+      (typeof taskId !== "string" ||
+        !/^adaptive:[0-9a-f]{64}$/.test(taskId))) ||
+    (deleting &&
+      (typeof requestId !== "string" || !recordRequestId.test(requestId) ||
+        typeof modelScopeDigest !== "string" ||
+        !/^[0-9a-f]{64}$/.test(modelScopeDigest))) ||
+    Object.keys(args).some((key) =>
+      ![
+        "action",
+        "kind",
+        "id",
+        "runId",
+        "revision",
+        "taskId",
+        "modelRouteClassification",
+        ...(deleting ? ["modelScopeDigest", "requestId"] : []),
+      ].includes(key)
+    )
+  ) return;
+  const parsed = parseClassification(
+    typeof modelRouteClassification === "string"
+      ? modelRouteClassification
+      : "INTERNAL",
+  );
+  if (
+    (modelRouteClassification !== undefined &&
+      typeof modelRouteClassification !== "string") ||
+    !parsed.ok ||
+    !canFlowTo(
+      maxClassification("INTERNAL", parsed.value),
+      context.ceiling ?? "PUBLIC",
+    )
+  ) return;
+
+  const path = resolveSentinelCasePath(baseDir, id);
+  const currentRevision = () => {
+    const state = readSentinelAssessment(path);
+    return state && `${state.plan.runId}:${state.revision}`;
+  };
+  const expectedCaseRevision = currentRevision();
+  if (!expectedCaseRevision) return;
+
+  const accepted = () =>
+    currentRevision() === expectedCaseRevision &&
+    readSentinelRunIdForRevision(path, revision) === runId &&
+    (context.authorizeSentinelCaseRead?.(id, revision) ?? true) &&
+    (taskId === undefined ||
+      readSentinelWorkerEvidenceScope(path, revision)?.allowedTaskIds.includes(
+          taskId,
+        ) === true);
+  if (!accepted()) return;
+  const monitor = modelMonitor(baseDir);
+  const level = parsed.value;
+  const _classification = maxClassification("INTERNAL", level);
+  const scope = { caseId: id, runId, revision, assignmentId: taskId };
+  const preview = monitor.previewScopeRemoval(level, scope);
+  if (!deleting) return { _classification, scope, ...preview };
+  if (typeof requestId !== "string" || typeof modelScopeDigest !== "string") {
+    return;
+  }
+  const request = requestId.toLowerCase();
+  const prior = monitor.scopeRemovalReceipt(
+    level,
+    scope,
+    modelScopeDigest,
+    request,
+  );
+  if (prior !== undefined) {
+    return prior ? { _classification, scope, ...prior } : undefined;
+  }
+  if (
+    preview.digest !== modelScopeDigest || !preview.count ||
+    !await confirm(
+      `Delete exactly ${preview.count} provider diagnostic records for this classified scope?
+${JSON.stringify({ scope, level, digest: preview.digest })}`,
+    ) ||
+    !await context.authorizeOwnerRunCall?.(args) || !accepted()
+  ) return;
+  const removed = monitor.removeScope(level, scope, modelScopeDigest, request);
+  return removed ? { _classification, scope, ...removed } : undefined;
 }
 
 /** Each usage partition is independently authorized, including its record cursors. */
@@ -57,6 +175,9 @@ export async function executeOperatorModelMonitor(
   const authorize = context.authorizeOwnerRunCall;
   if (!authorize || !await authorize(args)) return;
   const monitor = modelMonitor(baseDir);
+  if (action === "model_call_scope" || action === "delete_model_call_scope") {
+    return await executeModelCallScope(baseDir, confirm, action, args, context);
+  }
   const {
     modelProfile,
     modelRouteModel,
@@ -70,7 +191,7 @@ export async function executeOperatorModelMonitor(
     modelProfileAfter,
     toolUsageAfter,
   } = args;
-  const fields: Record<ModelMonitoringAction, readonly string[]> = {
+  const fields: Record<typeof action, readonly string[]> = {
     model_retry_policy: [],
     set_model_retry_policy: [
       "expectedVersion",

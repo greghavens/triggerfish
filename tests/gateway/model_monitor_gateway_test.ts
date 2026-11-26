@@ -1,12 +1,23 @@
+import { openSentinelAdaptiveStore } from "../../src/sentinel/adaptive_store.ts";
+import type { ModelCallScope } from "../../src/core/model_monitor.ts";
+import {
+  advanceAdaptiveSentinel,
+  readAdaptiveSentinel,
+} from "../../src/gateway/sentinel_adaptive_runtime.ts";
+import { startSentinelAssessment } from "../../src/sentinel/assessment_store.ts";
+import { resolveSentinelCasePath } from "../../src/sentinel/cases.ts";
 import {
   assert,
   assertEquals,
   assertRejects,
   assertStringIncludes,
 } from "@std/assert";
-import { join } from "@std/path";
+import { dirname, join } from "@std/path";
 import { createProviderRegistry } from "../../src/agent/llm.ts";
-import { monitorProviderRegistry } from "../../src/agent/providers/monitoring.ts";
+import {
+  bindModelCallScope,
+  monitorProviderRegistry,
+} from "../../src/agent/providers/monitoring.ts";
 import { withRetry } from "../../src/agent/providers/retry.ts";
 import { assignmentRecoveryKey } from "../../src/core/durable_assignment.ts";
 import {
@@ -43,6 +54,15 @@ Deno.test("gateway reviews model retry edits and keeps monitoring metadata class
   let blockedOutput = 0;
   let denyRollup = false;
   let exerciseFailure = () => Promise.resolve();
+  let scopeOnApproval: ModelCallScope | undefined;
+  let recordDiagnostic: (scope?: ModelCallScope) => Promise<unknown> = () => {
+    throw new Error("The diagnostic fixture provider is unavailable.");
+  };
+  const diagnosticsProfile = {
+    modelProfile: "scoped-fixture",
+    modelRouteModel: "scoped-v1",
+  };
+
   const inputClassification = "INTERNAL";
   const providerSecret = "fixture-only-provider-error-credential";
   let attempts = 0;
@@ -95,6 +115,24 @@ Deno.test("gateway reviews model retry edits and keeps monitoring metadata class
         );
       },
     });
+    registry.register({
+      name: diagnosticsProfile.modelProfile,
+      model: diagnosticsProfile.modelRouteModel,
+      supportsStreaming: false,
+      complete(_messages, _tools, options) {
+        assertEquals(Object.getOwnPropertySymbols(options), []);
+        return Promise.resolve({
+          content: "fixture diagnostic only",
+          toolCalls: [],
+          usage: { inputTokens: 2, outputTokens: 1 },
+        });
+      },
+    });
+    recordDiagnostic = (scope?) =>
+      (scope ? bindModelCallScope(registry, scope) : registry)
+        .get(diagnosticsProfile.modelProfile)!.complete([], [], {
+          modelUsageClassification: "INTERNAL",
+        });
     exerciseFailure = () =>
       assertRejects(() =>
         registry.get("failing")!.complete([], [], {
@@ -127,8 +165,10 @@ Deno.test("gateway reviews model retry edits and keeps monitoring metadata class
             if (
               hook === "PRE_TOOL_CALL" && holds &&
               (context.input.tool_call as
-                  | { args?: { action?: string } }
-                  | undefined)?.args?.action === "set_model_retry_policy"
+                | { args?: { action?: string } }
+                | undefined)?.args?.action?.match(
+                  /^(set_model_retry_policy|delete_model_call_scope)$/,
+                )
             ) {
               return Promise.resolve({
                 allowed: false,
@@ -160,10 +200,15 @@ Deno.test("gateway reviews model retry edits and keeps monitoring metadata class
         },
         operatorRunExecutor: createOperatorRunToolExecutor({
           baseDir,
-          confirm: () => {
+          confirm: async () => {
             reviews++;
             if (revokeOnReview) holds = true;
-            return Promise.resolve(true);
+            if (scopeOnApproval) {
+              const captured = scopeOnApproval;
+              scopeOnApproval = undefined;
+              await recordDiagnostic(captured);
+            }
+            return true;
           },
         }),
       }),
@@ -508,6 +553,126 @@ Deno.test("gateway reviews model retry edits and keeps monitoring metadata class
     );
     assertStringIncludes(await turn(read), "unavailable");
     assert(classified > 5);
+    const casePath = resolveSentinelCasePath(baseDir, "main");
+    await Deno.mkdir(dirname(casePath), { recursive: true });
+    await Deno.writeTextFile(
+      casePath,
+      JSON.stringify({
+        version: 1,
+        nodes: [
+          { kind: "asset", id: "target", label: "Target" },
+          { kind: "asset", id: "neighbor", label: "Neighbor" },
+        ],
+        edges: [],
+      }),
+    );
+    const state = startSentinelAssessment(casePath);
+    advanceAdaptiveSentinel(casePath, state);
+    const revision = readAdaptiveSentinel(casePath, state)!.revision;
+    const caseStore = openSentinelAdaptiveStore(
+      join(dirname(casePath), "sentinel-adaptive.db"),
+    );
+    let tasks;
+    try {
+      tasks = caseStore.sync(
+        revision,
+        ["target", "neighbor"].map((nodeId) => ({
+          kind: "trace",
+          nodeId,
+          depth: 1,
+        })),
+        revision,
+      );
+    } finally {
+      caseStore.close();
+    }
+    const assignmentId = tasks.find(({ nodeId }) => nodeId === "target")?.id;
+    const otherAssignmentId = tasks.find(({ nodeId }) => nodeId === "neighbor")
+      ?.id;
+    assert(state.plan.runId && assignmentId && otherAssignmentId);
+    const scope = {
+      caseId: "main",
+      runId: state.plan.runId,
+      revision: state.revision,
+      assignmentId,
+    };
+    await recordDiagnostic(scope);
+    await recordDiagnostic({ ...scope, assignmentId: otherAssignmentId });
+    await recordDiagnostic({ ...scope, assignmentId: undefined });
+    await recordDiagnostic();
+    const scopeRequest = {
+      action: "model_call_scope",
+      kind: "sentinel",
+      id: scope.caseId,
+      runId: scope.runId,
+      revision: scope.revision,
+      taskId: assignmentId,
+    };
+    const preview = JSON.parse(await turn(scopeRequest));
+    assertEquals(preview.count, 1);
+    const deleteScope = {
+      ...scopeRequest,
+      action: "delete_model_call_scope",
+      requestId: crypto.randomUUID(),
+      modelScopeDigest: preview.digest,
+    };
+    const firstReviews = reviews;
+    const wrong = { ...deleteScope, runId: crypto.randomUUID() };
+    assertStringIncludes(await turn(wrong), "unavailable");
+    assertEquals(reviews, firstReviews);
+    holds = true;
+    assertStringIncludes(await turn(deleteScope), "blocked");
+    assertEquals(reviews, firstReviews);
+    holds = false;
+    revokeOnReview = true;
+    assertStringIncludes(await turn(deleteScope), "unavailable");
+    assertEquals(reviews, firstReviews + 1);
+    assertEquals(JSON.parse(await turn(scopeRequest)).count, 1);
+    holds = false;
+    revokeOnReview = false;
+    scopeOnApproval = scope;
+    assertStringIncludes(await turn(deleteScope), "unavailable");
+    const refreshed = JSON.parse(await turn(scopeRequest));
+    assertEquals(refreshed.count, 2);
+    const beforeTotals = JSON.parse(
+      await turn({ action: "model_usage", ...diagnosticsProfile }),
+    );
+    const mutationScope = {
+      ...deleteScope,
+      requestId: crypto.randomUUID(),
+      modelScopeDigest: refreshed.digest,
+    };
+    const removal = JSON.parse(await turn(mutationScope));
+    assertEquals(removal.deleted, 2);
+    assertEquals(JSON.parse(await turn(scopeRequest)).count, 0);
+    assertEquals(
+      JSON.parse(await turn({ ...scopeRequest, taskId: otherAssignmentId }))
+        .count,
+      1,
+    );
+    const { taskId: _task, ...runOnly } = scopeRequest;
+    assertEquals(JSON.parse(await turn(runOnly)).count, 1);
+    assertEquals(
+      JSON.parse(await turn({ action: "model_usage", ...diagnosticsProfile })),
+      beforeTotals,
+    );
+    const retained = JSON.parse(
+      await turn({ action: "model_call_records", ...diagnosticsProfile }),
+    );
+    assertEquals(retained.records.length, 3);
+    socket?.close();
+    await gateway.stop();
+    gateway = makeGateway("RESTRICTED");
+    await connect();
+    await recordDiagnostic(scope);
+    const reviewsBeforeReplay = reviews;
+    assertEquals(JSON.parse(await turn(mutationScope)), removal);
+    assertEquals(reviews, reviewsBeforeReplay);
+    assertEquals(JSON.parse(await turn(scopeRequest)).count, 1);
+    assertStringIncludes(
+      await turn({ ...mutationScope, taskId: otherAssignmentId }),
+      "unavailable",
+    );
   } finally {
     socket?.close();
     await gateway.stop();
