@@ -89,6 +89,7 @@ import {
   sentinelOperatorCaseControlActions,
   sentinelOperatorCaseControlParameters,
   sentinelOperatorCaseReadActions,
+  sentinelOperatorCaseReadParameterAllowed,
   sentinelOperatorCaseReadParameters,
   sentinelScopedTelemetryReadActions,
 } from "./operator_run_tool.ts";
@@ -424,6 +425,8 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
                     action === "preview_inventory_affiliation" ||
                     action === "affiliate_inventory_asset" ||
                     action === "append_goals" || action === "withdraw_goal" ||
+                    action === "preview_membership" ||
+                    action === "set_case_membership" ||
                     action === "add_case_membership" ||
                     action === "record_analyst_finding") &&
                   {
@@ -442,7 +445,9 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
               return config.hookRunner.evaluateHook(hook, {
                 ...context,
                 input: { ...context.input, ...meta },
-                auditInput: action === "add_case_membership" ||
+                auditInput: action === "preview_membership" ||
+                    action === "set_case_membership" ||
+                    action === "add_case_membership" ||
                     action === "preview_inventory_affiliation" ||
                     action === "affiliate_inventory_asset"
                   ? meta
@@ -941,6 +946,8 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
           action === "linked_finding";
         const selectedReport = action === "finding_report" ||
           action === "finding_report_history";
+        const previewMembership = action === "preview_membership";
+        const setMembership = action === "set_case_membership";
         const selectedControl = sentinelOperatorCaseControlActions.some((
           allowed,
         ) => allowed === action);
@@ -956,9 +963,7 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
           typeof revision !== "number" || !Number.isSafeInteger(revision) ||
           revision < 1 ||
           Object.keys(args).some((key) =>
-            !sentinelOperatorCaseReadParameters.some((allowed) =>
-              allowed === key
-            ) &&
+            !sentinelOperatorCaseReadParameterAllowed(action, key) &&
             (!selectedControl ||
               !sentinelOperatorCaseControlParameters.some((allowed) =>
                 allowed === key
@@ -977,7 +982,8 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
           ) return false;
           const casePath = resolveCase();
           if (!selectedControl) {
-            return directRead || linkedRead || selectedReport
+            return directRead || linkedRead || selectedReport ||
+                previewMembership
               ? casePath === selectedPath
               : !!casePath;
           }
@@ -1003,6 +1009,11 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
         const sourcePolicy = sourcePath && sourceRun
           ? readSentinelOperatingConstraints(sourcePath, sourceRun)
           : undefined;
+        let membershipReceipt: {
+          readonly version: number;
+          readonly digest: string;
+          readonly sourceDigest: string;
+        } | undefined;
         const sourceIsCurrent = () => {
           if (
             !sourcePath || !sourceRun || !current() ||
@@ -1012,10 +1023,21 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
             readSentinelRunIdForRevision(sourcePath, revision) !==
               sourceRun
           ) return false;
+          if (previewMembership) return true;
           const latest = readSentinelOperatingConstraints(
             sourcePath,
             sourceRun,
           );
+          if (setMembership) {
+            return !!membershipReceipt && !!latest &&
+              latest.evidenceRevision === revision &&
+              typeof args.requestId === "string" &&
+              latest.requestId === args.requestId.toLowerCase() &&
+              latest.version === membershipReceipt.version &&
+              latest.digest === membershipReceipt.digest &&
+              latest.membership?.snapshotDigest ===
+                membershipReceipt.sourceDigest;
+          }
           return latest?.version === sourcePolicy?.version &&
             latest?.digest === sourcePolicy?.digest;
         };
@@ -1032,7 +1054,9 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
         const read = () =>
           execute(args, {
             ...authority,
-            ...(selectedControl && { authorizeSelectedSentinelCase: current }),
+            ...((selectedControl || previewMembership) && {
+              authorizeSelectedSentinelCase: current,
+            }),
             authorizeSentinelCaseRead: (caseId, evidenceRevision) =>
               current() &&
               ((caseId === id && evidenceRevision === revision) ||
@@ -1057,6 +1081,7 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
           : await read();
         if (!current()) return unavailable;
         if (scopedRead && result.startsWith("{")) {
+          if (setMembership) membershipReceipt = JSON.parse(result);
           if (!sourceIsCurrent()) return unavailable;
           const source = directRead ??
             { name: operatorRunTool.name, args };
@@ -1069,7 +1094,7 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
             case_id: id,
             evidence_revision: revision,
             resource_classification: "INTERNAL",
-            operation_type: "read",
+            operation_type: setMembership ? "write" : "read",
           };
           const policy: typeof orchestratorConfig = {
             ...orchestratorConfig,
@@ -1108,6 +1133,14 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
                 { resultText: text, blocked: false },
               );
               if (approved.blocked || !sourceIsCurrent()) return false;
+              if (previewMembership) {
+                // Publishing the reviewed membership changes the preview version
+                // without necessarily changing its authorized exact assets.
+                const reopened = await read();
+                return sourceIsCurrent() && reopened.startsWith("{") &&
+                  JSON.stringify(JSON.parse(reopened).membership) ===
+                    JSON.stringify(JSON.parse(text).membership);
+              }
               if (linkedRead || selectedReport) {
                 return await read() === text && sourceIsCurrent();
               }

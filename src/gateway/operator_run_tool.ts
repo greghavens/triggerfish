@@ -1489,6 +1489,7 @@ export const sentinelOperatorCaseReadActions = [
   "findings",
   "node",
   "inventory",
+  "preview_membership",
   "facts",
   "finding_receipts",
   "finding_receipt",
@@ -1553,6 +1554,14 @@ export const sentinelOperatorCaseReadParameters = [
   "linkedFinding",
 ] as const;
 
+export function sentinelOperatorCaseReadParameterAllowed(
+  action: unknown,
+  parameter: string,
+): boolean {
+  return sentinelOperatorCaseReadParameters.some((key) => key === parameter) ||
+    (action === "preview_membership" && parameter === "allowedAssetIds");
+}
+
 export const sentinelOperatorCaseControlActions = [
   "constraints",
   "narrow_constraints",
@@ -1561,6 +1570,7 @@ export const sentinelOperatorCaseControlActions = [
   "assign_batch",
   "append_goals",
   "withdraw_goal",
+  "set_case_membership",
   "add_case_membership",
   "record_analyst_finding",
 ] as const;
@@ -2983,9 +2993,7 @@ export function createOperatorRunToolExecutor(options: {
         kind !== "sentinel" ||
         !canFlowTo("INTERNAL", context.ceiling ?? "PUBLIC") ||
         Object.keys(args).some((key) =>
-          !sentinelOperatorCaseReadParameters.some((allowed) =>
-            allowed === key
-          ) &&
+          !sentinelOperatorCaseReadParameterAllowed(action, key) &&
           (!selectedControl ||
             !sentinelOperatorCaseControlParameters.some((allowed) =>
               allowed === key
@@ -7528,6 +7536,7 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
         } = args;
         const update = action === "set_case_membership";
         const authorize = context?.authorizeOwnerRunCall;
+        const selected = context?.authorizeSelectedSentinelCase;
         if (
           (update && (!authorize || !context?.authenticatedOwnerSessionId)) ||
           ref.kind !== "sentinel" || ref.revision === undefined ||
@@ -7549,7 +7558,7 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
               ...(update ? ["expectedVersion", "requestId"] : []),
             ].includes(key)
           ) ||
-          !await controller.inspect(ref)
+          (selected && !selected()) || !await controller.inspect(ref)
         ) return unavailable;
         const path = resolveSentinelCasePath(options.baseDir, ref.id);
         const current = readSentinelAssessment(path);
@@ -7557,7 +7566,7 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
         if (
           !current?.active || current.revision !== ref.revision ||
           current.plan.runId !== activeRunId ||
-          !current.result?.sharedGraph.snapshot
+          !current.result?.sharedGraph.snapshot || (selected && !selected())
         ) return unavailable;
         const membership = resolveSentinelCaseMembership(
           current.result.sharedGraph.snapshot,
@@ -7572,6 +7581,13 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
         if (!membership) return unavailable;
         const prior = readSentinelOperatingConstraints(path, activeRunId);
         const version = prior?.version ?? 0;
+        const existingScope = prior?.constraints.allowedAssetIds;
+        if (
+          selected && existingScope &&
+          membership.assetIds.some((id) => !existingScope.includes(id))
+        ) {
+          return unavailable;
+        }
         if (!update) {
           return safeProjection({
             run: ref,
@@ -7609,6 +7625,11 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
             sourceDigest: membership.snapshotDigest,
           });
         }
+        // Selected mode initializes membership. Changes to an established
+        // selection use its own reviewed additive or narrowing controls.
+        if (selected && prior?.membership) {
+          return unavailable;
+        }
         if (
           !await options.confirm(
             `Approve this exact Sentinel case membership?\n${
@@ -7624,7 +7645,10 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
             }`,
           )
         ) return "Error: The operator declined the run action.";
-        if (!await authorize?.(args)) return unavailable;
+        if (
+          (selected && !selected()) ||
+          !await authorize?.(args) || (selected && !selected())
+        ) return unavailable;
         const committed = recordSentinelOperatingConstraints(path, {
           runId: activeRunId,
           evidenceRevision: ref.revision,

@@ -4543,6 +4543,8 @@ export const sentinelScopedGraphReadActions = [
   "linked_finding",
   "finding_report",
   "finding_report_history",
+  "preview_membership",
+  "set_case_membership",
   "graph_overview",
   "graph",
   "findings",
@@ -5607,6 +5609,7 @@ function createAgent(
           selectedCaseAction === "assign_batch" ||
           selectedCaseAction === "append_goals" ||
           selectedCaseAction === "withdraw_goal" ||
+          selectedCaseAction === "set_case_membership" ||
           selectedCaseAction === "add_case_membership" ||
           selectedCaseAction === "record_analyst_finding";
         const pendingTelemetry = active?.pendingTelemetryFence;
@@ -5710,6 +5713,8 @@ function createAgent(
               ...context,
               input: { ...context.input, ...metadata },
               auditInput: plannerTodo || plannerControl || plannerFinding ||
+                  selectedCaseAction === "preview_membership" ||
+                  selectedCaseAction === "set_case_membership" ||
                   selectedCaseAction === "add_case_membership"
                 ? metadata
                 : { ...context.auditInput, ...metadata },
