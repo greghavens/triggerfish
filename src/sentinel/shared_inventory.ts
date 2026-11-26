@@ -370,7 +370,7 @@ export async function readSharedSentinelAssetLinks(
         caseId: string,
         assetId: string,
         finding: Finding,
-      ) => boolean;
+      ) => boolean | Promise<boolean>;
     };
   },
 ) {
@@ -458,7 +458,7 @@ export async function readSharedSentinelAssetLinks(
         if (
           finding.kind === "finding" && findingIds.has(finding.id) &&
           (!selectedFindings ||
-            selectedFindings.permits(caseId, anchor, finding))
+            await selectedFindings.permits(caseId, anchor, finding))
         ) {
           snapshotDigest ??= digestSentinelSnapshot(snapshot);
           if (

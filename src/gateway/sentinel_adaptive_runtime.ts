@@ -1,4 +1,4 @@
-import { permitsLinkedLocalFinding } from "./sentinel_linked_findings.ts";
+import { readLinkedFindingProof } from "./sentinel_linked_findings.ts";
 import { reopenSentinelAssignedInventory } from "./sentinel_inventory_tool.ts";
 import { createEvidencePlanningGate } from "../core/evidence_task_progression.ts";
 import { reopenSentinelLinkedTrafficPayload } from "./sentinel_finding_traffic_tool.ts";
@@ -5929,11 +5929,46 @@ export function createSentinelModelPlanner(
               { version: constraints.version, digest: constraints.digest },
           },
         );
-      }).then(() => {
+      }).then(async () => {
         if (signal.aborted) return;
         if (!proposal.trim()) {
           failed = true;
           return;
+        }
+        const selected = state.plan.linkedCaseSources;
+        const sourceBase = selected &&
+          locateSentinelCase(snapshotPath)?.baseDir;
+        const authorizeCurrent = () => {
+          const current = readSentinelAssessment(snapshotPath);
+          return !signal.aborted && !!current?.active && !current.paused &&
+            matchesRound(current);
+        };
+        const checkedPeers = new Map<
+          string,
+          NonNullable<ReturnType<typeof readLinkedFindingProof>>
+        >();
+        if (selected && sourceBase) {
+          for (const [key, citation] of peerFindings) {
+            const { sourceCaseId, sourceAssetId, sourceFindingId } = citation;
+            const proof = readLinkedFindingProof(
+              sourceBase,
+              selected,
+              sourceCaseId,
+              sourceAssetId,
+              sourceFindingId,
+            );
+            if (
+              !proof || (proof.execution &&
+                !await worker.authorizeLinkedFinding?.(
+                  sourceCaseId,
+                  sourceAssetId,
+                  sourceFindingId,
+                  signal,
+                  authorizeCurrent,
+                ))
+            ) continue;
+            checkedPeers.set(key, proof);
+          }
         }
         const committed = withSentinelAssessmentWriteLock(
           snapshotPath,
@@ -5973,17 +6008,18 @@ export function createSentinelModelPlanner(
                 ).map(({ id }) => id),
               );
               const shown = new Set(existing.map(({ id }) => id));
-              const selected = state.plan.linkedCaseSources;
-              const sourceBase = selected &&
-                locateSentinelCase(snapshotPath)?.baseDir;
-              const revokedSource = selected && [...peerFindings.values()].some(
-                (cited) =>
-                  !sourceBase || !permitsLinkedLocalFinding(
-                    sourceBase,
-                    selected,
-                    cited.sourceCaseId,
-                    cited.sourceAssetId,
-                    cited.sourceFindingId,
+              const revokedSource = selected && [...peerFindings].some(
+                ([key, cited]) =>
+                  !sourceBase || !checkedPeers.has(key) ||
+                  !isDeepStrictEqual(
+                    checkedPeers.get(key),
+                    readLinkedFindingProof(
+                      sourceBase,
+                      selected,
+                      cited.sourceCaseId,
+                      cited.sourceAssetId,
+                      cited.sourceFindingId,
+                    ),
                   ),
               );
               const invalidDirective = revokedSource ||

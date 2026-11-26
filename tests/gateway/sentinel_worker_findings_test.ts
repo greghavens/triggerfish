@@ -41,7 +41,10 @@ import {
   readSentinelGoalCompletionAtRevision,
   reportSentinelGoalCompletion,
 } from "../../src/gateway/sentinel_goal_completion.ts";
-import { createSentinelSubagent } from "../../src/gateway/sentinel_agent.ts";
+import {
+  createSentinelSubagent,
+  type SentinelAgentOptions,
+} from "../../src/gateway/sentinel_agent.ts";
 import type { BootstrapResult } from "../../src/gateway/startup/bootstrap.ts";
 import { createTidepoolSentinelHandler } from "../../src/gateway/startup/services/tidepool_sentinel.ts";
 import {
@@ -51,6 +54,7 @@ import {
 import { openSentinelAdaptiveStore } from "../../src/sentinel/adaptive_store.ts";
 import {
   applySentinelFormalGoals,
+  readSentinelAssessment,
   recordSentinelOperatingConstraints,
   refreshSentinelAssessment,
   startSentinelAssessment,
@@ -171,6 +175,12 @@ async function workerTurn(
     options:
       Parameters<ReturnType<typeof createSentinelSubagent>["execute"]> extends
         [unknown, unknown, ...infer Rest] ? Rest : never;
+    authorizeExecutionTracePayload?:
+      SentinelAgentOptions["authorizeExecutionTracePayload"];
+    blockedSource?: {
+      name: string;
+      hook: "PRE_TOOL_CALL" | "POST_TOOL_RESPONSE";
+    };
   },
 ) {
   const receiptHooks: string[] = [];
@@ -211,7 +221,9 @@ async function workerTurn(
           deny === "receipt-pre") &&
         !(name === findings && hook === "POST_TOOL_RESPONSE" &&
           deny === "receipt-post") &&
-        !(hook === "PRE_OUTPUT" && deny === "output");
+        !(hook === "PRE_OUTPUT" && deny === "output") &&
+        !(name === execution?.blockedSource?.name &&
+          hook === execution.blockedSource.hook);
       return Promise.resolve({
         allowed,
         action: allowed ? "ALLOW" : "BLOCK",
@@ -260,9 +272,10 @@ async function workerTurn(
     ...lease,
     sharedInventoryBaseDir: executionSourceScope,
     readRetainedWorkflow,
-    authorizeExecutionTracePayload: executionSourceScope
-      ? (payload) => Promise.resolve([42, 43].includes(payload.repositoryId))
-      : undefined,
+    authorizeExecutionTracePayload: execution?.authorizeExecutionTracePayload ??
+      (executionSourceScope
+        ? (payload) => Promise.resolve([42, 43].includes(payload.repositoryId))
+        : undefined),
   });
   const events: ChatEvent[] = [];
   try {
@@ -2359,18 +2372,37 @@ async function verifyConnectorFindingPublication(
       }),
       { mode: 0o600 },
     );
-    const consumerState = startSentinelAssessment(consumerPath);
+    const started = JSON.parse(
+      await turn({
+        action: "spawn",
+        targetKind: "sentinel",
+        targetId: consumerCase,
+        requestId: crypto.randomUUID(),
+        sourceCases: [{ caseId: "main", revision: state.revision }],
+      }),
+    ).run;
+    assertEquals(started.ref.id, consumerCase);
+    const consumerState = readSentinelAssessment(consumerPath);
+    assert(consumerState?.active);
     const consumer = assignedLease(consumerPath, consumerState, "impact");
+    const selectedExecution: NonNullable<Parameters<typeof workerTurn>[6]> = {
+      prompt: "Review the exact selected source.",
+      options: [],
+      authorizeExecutionTracePayload: authorize,
+    };
+    const listSelected = tool("sentinel_shared_asset_links", {
+      asset: "app",
+      sourceCase: "main",
+      includeFindings: true,
+    });
     const peer = await workerTurn(
       consumerPath,
       consumer,
-      [[tool("sentinel_shared_asset_links", {
-        asset: "app",
-        sourceCase: "main",
-        includeFindings: true,
-      })]],
+      [[listSelected]],
       undefined,
       baseDir,
+      readLiveWorkflow,
+      selectedExecution,
     );
     const page = JSON.parse(peer.results[0][0]);
     const entry = page.findings.find((
@@ -2381,7 +2413,160 @@ async function verifyConnectorFindingPublication(
       entry.finding.workerFindingSource,
       publication.finding.workerFindingSource,
     );
+    const exactSelected = tool("sentinel_shared_finding_source", {
+      asset: "app",
+      sourceCase: "main",
+      sourceAsset: "app",
+      finding: finding.id,
+      snapshotDigest: entry.snapshotDigest,
+    });
+    const exact = await workerTurn(
+      consumerPath,
+      consumer,
+      [[listSelected], [exactSelected]],
+      undefined,
+      baseDir,
+      readLiveWorkflow,
+      selectedExecution,
+    );
+    assert(!exact.results[1][0].startsWith("Error:"));
+    assertStringIncludes(exact.results[1][0], finding.id);
+    assert(!exact.results[1][0].includes(credential));
+
+    if (attempt) {
+      for (const hook of ["PRE_TOOL_CALL", "POST_TOOL_RESPONSE"] as const) {
+        const before = checks;
+        const denied = await workerTurn(
+          consumerPath,
+          consumer,
+          [[listSelected]],
+          undefined,
+          baseDir,
+          readLiveWorkflow,
+          { ...selectedExecution, blockedSource: { name: sourceTool, hook } },
+        );
+        assert(!denied.results[0][0].includes(finding.id));
+        assertEquals(checks === before, hook === "PRE_TOOL_CALL");
+      }
+      let revokeOnProposal = true;
+      let proposed = 0;
+      let plannerClock = Date.now();
+      const providers = createProviderRegistry();
+      providers.register({
+        name: "selected-connector-planner",
+        supportsStreaming: false,
+        complete(messages) {
+          const last = messages.at(-1);
+          const prior = last?.role === "tool" ? String(last.content) : "";
+          const call = !prior
+            ? listSelected
+            : prior.includes("live_published_inventory")
+            ? exactSelected
+            : undefined;
+          if (!call) {
+            assertStringIncludes(prior, finding.id);
+            proposed++;
+            if (revokeOnProposal) access = false;
+          }
+          return Promise.resolve({
+            usage: { inputTokens: 1, outputTokens: 1 },
+            content: call ? "" : JSON.stringify({
+              prioritize: [],
+              assignments: [{
+                kind: "trace",
+                nodeId: "app",
+                depth: 1,
+                peerFinding: {
+                  localAssetId: "app",
+                  sourceCaseId: "main",
+                  sourceAssetId: "app",
+                  sourceFindingId: finding.id,
+                  snapshotDigest: entry.snapshotDigest,
+                },
+              }],
+            }),
+            toolCalls: call
+              ? [{
+                id: crypto.randomUUID(),
+                type: "function",
+                function: {
+                  name: call.name,
+                  arguments: JSON.stringify(call.args),
+                },
+              }]
+              : [],
+          });
+        },
+      });
+      providers.setDefault("selected-connector-planner");
+      const planner = createSentinelModelPlanner(
+        consumerPath,
+        (current, taskId) =>
+          taskId
+            ? { execute: () => Promise.resolve(), clear() {} }
+            : createSentinelSubagent({
+              snapshotPath: consumerPath,
+              assessmentRevision: current.revision,
+              plannerExecutionEvidenceRunId: current.plan.runId,
+              sharedInventoryBaseDir: baseDir,
+              authorizeExecutionTracePayload: authorize,
+              allowModelAccess: true,
+              providerRegistry: providers,
+              hookRunner: {
+                evaluateHook: (hook, { input }) => {
+                  if (input.tool_name === sourceTool) sourceHooks.push(hook);
+                  return Promise.resolve({
+                    allowed: true,
+                    action: "ALLOW",
+                    ruleId: null,
+                    duration: 0,
+                  });
+                },
+              },
+            }),
+        undefined,
+        () => plannerClock,
+      );
+      const hasCitedAssignment = () =>
+        readAdaptiveSentinel(consumerPath, consumerState, "revision")
+          ?.tasks.some(({ plannerRound }) =>
+            plannerRound?.peerFindingCitations?.some(
+              ({ sourceFindingId }) => sourceFindingId === finding.id,
+            )
+          ) ?? false;
+      try {
+        planner.advance(consumerState);
+        await waitForCondition(
+          () => proposed === 1 && !planner.hasInFlightWork(),
+          () => {},
+        );
+        assertEquals(hasCitedAssignment(), false);
+        access = true;
+        revokeOnProposal = false;
+        plannerClock += 65_000;
+        addSentinelCaseHint(
+          consumerPath,
+          "Use authorized retained evidence for a follow-up.",
+        );
+        planner.advance(consumerState);
+        await waitForCondition(hasCitedAssignment, () => {});
+      } finally {
+        planner.stop();
+      }
+    }
+
     access = false;
+    const revokedSelected = await workerTurn(
+      consumerPath,
+      consumer,
+      [[listSelected], [exactSelected]],
+      undefined,
+      baseDir,
+      readLiveWorkflow,
+      selectedExecution,
+    );
+    assert(!revokedSelected.results[0][0].includes(finding.id));
+    assert(revokedSelected.results[1][0].startsWith("Error:"));
     const original = {
       action: "case_execution_evidence",
       node: finding.evidenceId,

@@ -91,9 +91,12 @@ discoveries from those revisions when they still match the local asset
 and the source approval is current. Parent links and source selections
 carry no authority to read another case's full graph.
 When a child asks for published findings, the selection also bounds
-operator-published findings backed by local control evidence. The exact
-source report and current policy must still permit the finding. Withdrawal
-hides it from fresh reads while saved citations remain inspectable.
+operator-published findings backed by local or retained connector evidence.
+A connector-backed finding is usable while the exact source receipt, current
+connector access, and root policy verify the published conclusion. The
+planner rechecks that authorization before recording a cited follow-up.
+Withdrawal hides a finding from fresh reads while saved citations remain
+inspectable.
 An owner can submit a committed local relationship fact for discovery review
 with `operator_runs propose_graph_fact_discovery`. Provide the original
 `factId`, an exact supporting evidence `node` observed on both assets, and

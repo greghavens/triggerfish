@@ -1,4 +1,4 @@
-/** Authorize live reuse of an explicitly published local finding in a linked case. */
+/** Resolve an explicitly published finding at an exact linked source revision. */
 import { isDeepStrictEqual } from "node:util";
 import {
   readSentinelAssessmentRevision,
@@ -17,7 +17,7 @@ import {
   openSentinelWorkerFindingStore,
 } from "../sentinel/worker_finding_store.ts";
 
-export function permitsLinkedLocalFinding(
+export function readLinkedFindingProof(
   baseDir: string,
   sources: readonly SentinelLinkedCaseSource[],
   caseId: string,
@@ -25,7 +25,7 @@ export function permitsLinkedLocalFinding(
   finding: string | Extract<GraphNode, { kind: "finding" }>,
 ) {
   const id = typeof finding === "string" ? finding : finding.id;
-  if (!sources.some((binding) => binding.caseId === caseId)) return false;
+  if (!sources.some((binding) => binding.caseId === caseId)) return undefined;
   const path = resolveSentinelCasePath(baseDir, caseId);
   try {
     const publication = readSentinelWorkerFindingPublications(path, caseId)
@@ -36,7 +36,7 @@ export function permitsLinkedLocalFinding(
       (typeof finding !== "string" &&
         !isDeepStrictEqual(publication.finding, finding))
     ) {
-      return false;
+      return undefined;
     }
     const origin = publication.finding.workerFindingSource;
     if (
@@ -47,7 +47,7 @@ export function permitsLinkedLocalFinding(
       readSentinelRunIdForRevision(path, origin.revision) !== origin.runId ||
       !hasSentinelWorkerFindingJournal(path)
     ) {
-      return false;
+      return undefined;
     }
 
     const snapshot = readSentinelAssessmentRevision(path, origin.revision)
@@ -60,13 +60,13 @@ export function permitsLinkedLocalFinding(
       origin.revision,
     );
     if (
-      !snapshot || evidence?.kind !== "evidence" || evidence.executionSource ||
-      evidence.nativeWorkflowSource || !sentinelOperatingConstraintsAllow(
+      !snapshot || evidence?.kind !== "evidence" ||
+      !sentinelOperatingConstraintsAllow(
         policy?.constraints,
         { kind: "review_evidence", nodeId: assetId },
         snapshot,
       )
-    ) return false;
+    ) return undefined;
     const journal = openSentinelWorkerFindingStore(path);
     try {
       const report = journal.readFindingReport(
@@ -88,7 +88,7 @@ export function permitsLinkedLocalFinding(
             origin.receiptId,
           ).digest !==
           publication.evidenceVersion
-      ) return false;
+      ) return undefined;
       const checked = verifyWorkerFindingRecheck(
         snapshot,
         {
@@ -103,14 +103,31 @@ export function permitsLinkedLocalFinding(
           evidenceId: receipt.evidenceId,
         },
       );
-      return checked?.outcome === "fail" &&
-        checked.snapshotDigest === origin.snapshotDigest &&
-        checked.observedAt === receipt.observedAt &&
-        checked.validUntil === receipt.validUntil;
+      if (
+        checked?.outcome !== "fail" ||
+        checked.snapshotDigest !== origin.snapshotDigest ||
+        checked.observedAt !== receipt.observedAt ||
+        checked.validUntil !== receipt.validUntil
+      ) return undefined;
+      return {
+        publication,
+        ...(evidence.executionSource || evidence.nativeWorkflowSource
+          ? {
+            execution: {
+              path,
+              runId: origin.runId,
+              revision: origin.revision,
+              assetId,
+              evidence,
+              controlId: receipt.controlId,
+            },
+          }
+          : {}),
+      };
     } finally {
       journal.close();
     }
   } catch {
-    return false;
+    return undefined;
   }
 }

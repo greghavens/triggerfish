@@ -1,4 +1,4 @@
-import { permitsLinkedLocalFinding } from "./sentinel_linked_findings.ts";
+import { readLinkedFindingProof } from "./sentinel_linked_findings.ts";
 import { notifyCommittedEvidence } from "../core/evidence_task_progression.ts";
 import { guardAssignmentExecution } from "../core/durable_assignment.ts";
 import { readSentinelPlannerCoverageResult } from "../sentinel/inventory_queries.ts";
@@ -23,6 +23,7 @@ import type { createSentinelLiveWorkflowReader } from "./sentinel_live_workflow.
 import {
   type ExecutionControlReceipt,
   executionControlReceipt,
+  executionReceiptSupportsCheck,
   plannerExecutionRecheckCandidates,
 } from "./sentinel_execution_rechecks.ts";
 import { sentinelOperatingConstraintsAllow } from "../sentinel/operating_constraints.ts";
@@ -388,7 +389,17 @@ export interface SentinelTurnCheckpointOptions {
   ) => Promise<void>;
 }
 
+type SelectedFinding = Parameters<typeof readLinkedFindingProof>[4];
+type LinkedFindingSources = Parameters<typeof readLinkedFindingProof>[1];
+
 export interface SentinelAgent {
+  readonly authorizeLinkedFinding?: (
+    caseId: string,
+    assetId: string,
+    finding: SelectedFinding,
+    signal: AbortSignal,
+    current: () => boolean,
+  ) => Promise<boolean>;
   readonly futureWorkflowTargets?: readonly {
     readonly assetId: string;
     readonly repository: string;
@@ -1604,7 +1615,7 @@ export function readSentinelCarriedEvidence(
 
 async function readNativeExecutionEvidence(
   options: SentinelAgentOptions,
-  turn: ActiveTurn,
+  turn: Pick<ActiveTurn, "signal">,
   session: SessionState,
   evidenceRevision: number,
   nodeId: string,
@@ -2036,6 +2047,11 @@ async function validateSavedSharedAssetLinks(
   caseId: string,
   args: NonNullable<ReturnType<typeof sentinelSharedAssetLinksArgs>>,
   result: string,
+  authorizeFinding: (
+    caseId: string,
+    assetId: string,
+    finding: SelectedFinding,
+  ) => Promise<boolean>,
 ) {
   if (redactCredentialText(result) !== result) return false;
   const page = parseSharedAssetLinkPage(result, revision, args);
@@ -2045,9 +2061,11 @@ async function validateSavedSharedAssetLinks(
   if (
     selected && (!readAssignedModelReview(options)?.nodeId ||
       readAssignedModelReview(options)?.nodeId !== args.asset ||
-      page.findings?.some(({ caseId, assetId, finding }) =>
-        !permitsLinkedLocalFinding(baseDir, selected, caseId, assetId, finding)
-      ))
+      !(await Promise.all(
+        (page.findings ?? []).map(({ caseId, assetId, finding }) =>
+          authorizeFinding(caseId, assetId, finding)
+        ),
+      )).every(Boolean))
   ) return false;
   const local = (await turn.readGraph()).snapshot();
   if (
@@ -4478,12 +4496,18 @@ function createAgent(
               original?.kind !== "finding" ||
               (turn.requiresLiveAssignment &&
                 readAssignedModelReview(options)?.nodeId !== asset) ||
-              !permitsLinkedLocalFinding(
-                options.sharedInventoryBaseDir,
-                selected,
+              !await authorizeLinkedFinding(
                 sourceCase,
                 sourceAsset,
                 original,
+                turn.signal,
+                () =>
+                  active === turn &&
+                  (!needsAssignment ||
+                    !!assignedPeerFinding(options, citation)) &&
+                  (!canReadPlannerCase ||
+                    currentPlannerReceiptScope(turn, asset)),
+                selected,
               )
             ) {
               return "Error: The selected finding source is no longer authorized.";
@@ -4581,6 +4605,15 @@ function createAgent(
           ) {
             return "Error: The asset is unavailable in the assigned case.";
           }
+          const current = () =>
+            active === turn && !turn.signal.aborted &&
+            (!turn.requiresLiveAssignment ||
+              readAssignedModelReview(options)?.nodeId === asset) &&
+            (!canReadPlannerCase || currentPlannerReceiptScope(turn, asset));
+          const handled = new Map<
+            string,
+            ReturnType<typeof readLinkedFindingProof>
+          >();
           const { unavailable, mappingSources, ...result } =
             await readSharedSentinelAssetLinks(
               baseDir,
@@ -4598,14 +4631,33 @@ function createAgent(
                   selectedFindings: {
                     includesSource: (caseId) =>
                       selected.some((source) => source.caseId === caseId),
-                    permits: (caseId, assetId, finding) =>
-                      permitsLinkedLocalFinding(
+                    async permits(caseId, assetId, finding) {
+                      const proof = readLinkedFindingProof(
                         baseDir,
                         selected,
                         caseId,
                         assetId,
                         finding,
-                      ),
+                      );
+                      if (!proof || !current()) return false;
+                      if (
+                        proof.execution &&
+                        (++turn.reads > MAX_READS_PER_TURN ||
+                          !await authorizeLinkedFinding(
+                            caseId,
+                            assetId,
+                            finding,
+                            turn.signal,
+                            current,
+                            selected,
+                          ))
+                      ) return false;
+                      handled.set(
+                        JSON.stringify([caseId, assetId, finding.id]),
+                        proof,
+                      );
+                      return true;
+                    },
                   },
                 }),
                 excludedSnapshot: options.assessmentRevision === undefined
@@ -4618,15 +4670,17 @@ function createAgent(
             return "Error: The local asset is unavailable to this planner.";
           }
           if (
-            selected && ((turn.requiresLiveAssignment &&
-              readAssignedModelReview(options)?.nodeId !== asset) ||
+            selected && (!current() ||
               result.findings?.some(({ caseId, assetId, finding }) =>
-                !permitsLinkedLocalFinding(
-                  baseDir,
-                  selected,
-                  caseId,
-                  assetId,
-                  finding,
+                !isDeepStrictEqual(
+                  handled.get(JSON.stringify([caseId, assetId, finding.id])),
+                  readLinkedFindingProof(
+                    baseDir,
+                    selected,
+                    caseId,
+                    assetId,
+                    finding,
+                  ),
                 )
               ))
           ) {
@@ -5614,6 +5668,90 @@ function createAgent(
     },
   });
 
+  async function authorizeLinkedFinding(
+    caseId: string,
+    assetId: string,
+    finding: SelectedFinding,
+    signal: AbortSignal,
+    current: () => boolean,
+    selected: LinkedFindingSources | undefined = linkedFindingSources(options),
+  ): Promise<boolean> {
+    const base = options.sharedInventoryBaseDir;
+    if (!base || !selected || signal.aborted || !current()) return false;
+    try {
+      const proof = readLinkedFindingProof(
+        base,
+        selected,
+        caseId,
+        assetId,
+        finding,
+      );
+      if (!proof) return false;
+      const { execution } = proof;
+      if (!execution) return true;
+      const isCurrent = () =>
+        !signal.aborted && current() &&
+        isDeepStrictEqual(
+          readLinkedFindingProof(base, selected, caseId, assetId, finding),
+          proof,
+        );
+      const source = execution.evidence.nativeWorkflowSource
+        ? await readNativeExecutionEvidence(
+          { ...options, snapshotPath: execution.path },
+          { signal },
+          session,
+          execution.revision,
+          execution.evidence.id,
+          assetId,
+          isCurrent,
+        )
+        : await readCaseExecutionEvidence(
+          base,
+          execution.path,
+          execution.revision,
+          execution.evidence.id,
+          assetId,
+        );
+      if (!source || !isCurrent()) return false;
+      const { payload, classification } = source;
+      const call = executionTracePayloadCall(payload);
+      if (
+        (!("stepIndex" in source) &&
+          (!options.authorizeExecutionTracePayload ||
+            !await authorizeSavedToolCalls(
+              [call],
+              config,
+              session,
+              undefined,
+              signal,
+            ) ||
+            !isCurrent() ||
+            !await options.authorizeExecutionTracePayload(
+              payload,
+              classification,
+            ))) ||
+        !isCurrent() ||
+        !executionReceiptSupportsCheck(
+          execution.evidence,
+          execution.runId,
+          execution.assetId,
+          execution.controlId,
+          "fail",
+          executionControlReceipt(payload),
+        )
+      ) return false;
+      const response = await enforcePostToolResponse(
+        "stepIndex" in source ? liveWorkflowStatusTool.name : call.name,
+        config,
+        session,
+        { resultText: executionTracePayloadResponse(payload), blocked: false },
+      );
+      return !response.blocked && isCurrent();
+    } catch {
+      return false;
+    }
+  }
+
   const location = locateSentinelCase(options.snapshotPath);
   const futureWorkflowTargets =
     canReadPlannerCase && options.readRetainedWorkflow && location
@@ -5626,6 +5764,7 @@ function createAgent(
       }))
       : undefined;
   return {
+    ...(canReadPlannerCase && { authorizeLinkedFinding }),
     ...(futureWorkflowTargets?.length && {
       futureWorkflowTargets,
       permitsFutureWorkflow(asset, selector) {
@@ -5947,6 +6086,16 @@ function createAgent(
                         caseId,
                         args,
                         saved,
+                        (source, asset, finding) =>
+                          authorizeLinkedFinding(
+                            source,
+                            asset,
+                            finding,
+                            turn.signal,
+                            () =>
+                              active === turn &&
+                              !!readAssignedModelReview(options),
+                          ),
                       )
                     ) return false;
                     continue;
