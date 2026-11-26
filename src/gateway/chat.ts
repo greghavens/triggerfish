@@ -1287,7 +1287,13 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
           );
         const context = readContext();
         if (!context) return;
-        const { constraintsKey, runId, steps, ...committedContext } = context;
+        const {
+          constraintsKey,
+          referenceKey,
+          runId,
+          steps,
+          ...committedContext
+        } = context;
         const isCurrent = () => {
           if (state.ownerSessionId !== owner || authorizedPath() !== path) {
             return false;
@@ -1295,7 +1301,8 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
           const latest = readContext();
           return latest?.runId === runId &&
             latest.adaptiveRevision === context.adaptiveRevision &&
-            latest.constraintsKey === constraintsKey;
+            latest.constraintsKey === constraintsKey &&
+            latest.referenceKey === referenceKey;
         };
         const resultKeys: string[] = [];
         const approvedSteps = [];
@@ -1361,6 +1368,7 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
             worker.taskId,
             "authorized-worker-evidence",
             ...(constraintsKey ? [constraintsKey] : []),
+            ...(referenceKey ? [`evidence-refs:${referenceKey}`] : []),
             ...resultKeys,
           ],
           taint,

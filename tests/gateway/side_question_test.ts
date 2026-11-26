@@ -1,3 +1,5 @@
+import { openSentinelWorkerFindingStore } from "../../src/sentinel/worker_finding_store.ts";
+import { digestSentinelSnapshot } from "../../src/sentinel/shared_inventory.ts";
 import { sentinelAlertsPath } from "../../src/sentinel/paths.ts";
 import { sentinelAlertReference } from "../../src/sentinel/telemetry.ts";
 import { createHash } from "node:crypto";
@@ -310,6 +312,32 @@ Deno.test("authenticated Sentinel /btw reads only the selected running worker's 
   startSentinelAssessment(alternate);
   const state = startSentinelAssessment(path);
   const revision = adaptiveRevision(state);
+  assertExists(state.result?.sharedGraph.snapshot);
+  const digest = digestSentinelSnapshot(state.result.sharedGraph.snapshot);
+  const journal = openSentinelWorkerFindingStore(path);
+  const baseTime = Date.now();
+  const recordFinding = (targetId: string, runId = state.plan.runId!) =>
+    journal.recordFinding({
+      caseId: "main",
+      runId,
+      evidenceRevision: state.revision,
+      taskId: "original-fixture-worker",
+      targetId,
+      graphFindingId: "previous-failure",
+      controlId: "control",
+      evidenceId: "retained-result",
+      snapshotDigest: digest,
+      observedAt: new Date(baseTime - 1000).toISOString(),
+      evaluatedAt: new Date(baseTime).toISOString(),
+      validUntil: new Date(baseTime + 60_000).toISOString(),
+      requestId: crypto.randomUUID(),
+      title: "Retained control finding",
+      summary: "Authorized original observation.",
+    });
+  const originalFinding = recordFinding("app");
+  const neighborFinding = recordFinding(revokedAsset);
+  const otherRunFinding = recordFinding("app", "another-assessment");
+  journal.close();
   const db = openSentinelAdaptiveStore(
     join(dirname(path), "sentinel-adaptive.db"),
   );
@@ -445,6 +473,10 @@ Deno.test("authenticated Sentinel /btw reads only the selected running worker's 
           retainedAlertId,
           revokedAlertId,
           unretainedAlertId,
+          originalFinding.id,
+          neighborFinding.id,
+          otherRunFinding.id,
+          `worker-finding:${"a".repeat(64)}`,
         ],
         reason: MODEL_ASSIGNMENT_REASON,
       }],
@@ -492,6 +524,10 @@ Deno.test("authenticated Sentinel /btw reads only the selected running worker's 
     assertStringIncludes(prompt, retainedAlertId);
     assertStringIncludes(prompt, revokedAlertId);
     assert(!prompt.includes(unretainedAlertId));
+    assertStringIncludes(prompt, originalFinding.id);
+    assertStringIncludes(prompt, neighborFinding.id);
+    assert(!prompt.includes(otherRunFinding.id));
+    assert(!prompt.includes(`worker-finding:${"a".repeat(64)}`));
     assertEquals((await ws.send("/btw", "side_history")).entries, [
       answer.entry,
     ]);
@@ -567,6 +603,8 @@ Deno.test("authenticated Sentinel /btw reads only the selected running worker's 
     assert(!prompt.includes(revokedAsset));
     assertStringIncludes(prompt, retainedAlertId);
     assert(!prompt.includes(revokedAlertId));
+    assertStringIncludes(prompt, originalFinding.id);
+    assert(!prompt.includes(neighborFinding.id));
     assertEquals((await ws.send(selection, "side_history")).entries, [
       current.entry,
     ]);

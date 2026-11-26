@@ -3442,6 +3442,27 @@ export function readSentinelWorkerSideContext(
         }
         return allowedAlertIds.has(id);
       }
+      if (id.startsWith("worker-finding:")) {
+        const caseId = locateSentinelCase(snapshotPath)?.caseId;
+        if (
+          !caseId || !state.plan.runId ||
+          !hasSentinelWorkerFindingJournal(snapshotPath)
+        ) return false;
+        const journal = openSentinelWorkerFindingStore(snapshotPath);
+        try {
+          const finding = journal.readFinding(id);
+          return !!finding && finding.caseId === caseId &&
+            finding.runId === state.plan.runId &&
+            finding.evidenceRevision <= evidenceRevision &&
+            sentinelOperatingConstraintsAllow(
+              policy?.constraints,
+              { kind: "review_evidence", nodeId: finding.targetId },
+              snapshot,
+            );
+        } finally {
+          journal.close();
+        }
+      }
       return !graphNodeIds.has(id) || sentinelOperatingConstraintsAllow(
         policy?.constraints,
         { kind: "review_evidence", nodeId: id },
@@ -3506,6 +3527,15 @@ export function readSentinelWorkerSideContext(
           }),
         };
       });
+      const evidenceIds = task.evidenceIds
+        .filter((id) => id.length <= 256 && allowsEvidenceId(id)).slice(0, 12);
+      const isProtectedReference = (id: string) =>
+        id.startsWith("case-alert:") || id.startsWith("worker-finding:");
+      const referenceKey = task.evidenceIds.some(isProtectedReference)
+        ? createHash("sha256").update(JSON.stringify(
+          evidenceIds.filter(isProtectedReference),
+        )).digest("hex")
+        : undefined;
       return {
         adaptiveRevision: revision,
         runId: goal.id,
@@ -3513,9 +3543,8 @@ export function readSentinelWorkerSideContext(
         taskId,
         kind: task.kind,
         nodeId: task.nodeId,
-        evidenceIds: task.evidenceIds
-          .filter((id) => id.length <= 256 && allowsEvidenceId(id))
-          .slice(0, 12),
+        evidenceIds,
+        referenceKey,
         modelReviewStatus: review.status,
         steps,
       };
