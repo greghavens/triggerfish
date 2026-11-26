@@ -2053,11 +2053,15 @@ async function reopenSentinelSourceResult(
     step.tool === "sentinel_defense" &&
     step.plannerDefenseContainment !== undefined
   ) {
-    text = await readDefenseCoverage({
-      snapshotPath: path,
-      assessmentRevision: revision,
-      webContainmentConfigured: step.plannerDefenseContainment ?? undefined,
-    }, selector);
+    text = await readDefenseCoverage(
+      {
+        snapshotPath: path,
+        assessmentRevision: revision,
+        webContainmentConfigured: step.plannerDefenseContainment ?? undefined,
+      },
+      selector,
+      {},
+    );
   } else if (isSentinelArchivedInventoryRead(step.tool, selector)) {
     if ((selector.node ?? selector.to) !== step.target) return;
     text = await readSentinelGraphProjection(
@@ -7663,6 +7667,10 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
                 createHash("sha256").update(text).digest("hex") !==
                   citation.sha256 ||
                 !await authorize(scope, step.tool, args, text) ||
+                (step.tool === "sentinel_defense" &&
+                  await readDefenseCoverage(readOptions, args, {
+                      assignment: task,
+                    }) !== text) ||
                 (step.tool === "sentinel_path" && args.graph === "provenance" &&
                   !allowsSavedSentinelProvenancePath(
                     path,
@@ -9605,6 +9613,7 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
           if (
             includeResult && [
               "sentinel_worker_observation",
+              "sentinel_defense",
               "sentinel_provenance_node",
               "sentinel_provenance_search",
               "sentinel_graph_overview",

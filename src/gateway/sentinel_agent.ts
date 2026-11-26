@@ -171,6 +171,7 @@ import {
   readSentinelGitHubWorkflowReadReceipt,
   readSentinelLinkedSourcesForRevision,
   readSentinelOperatingConstraints,
+  readSentinelRunIdForRevision,
   recordSentinelWorkerGoalProposal,
   type SentinelGitHubWorkflowReadReceipt,
   type SentinelReviewStep,
@@ -1049,6 +1050,13 @@ const instructions = [
   "Keep the analysis defensive. Do not supply exploit instructions, offensive automation, or intrusion workflows.",
 ];
 
+interface SentinelDefenseEvidenceScope {
+  readonly assignment?: {
+    readonly kind: string;
+    readonly nodeId?: string | null;
+  };
+}
+
 export async function readDefenseCoverage(
   options: Pick<
     SentinelAgentOptions,
@@ -1058,6 +1066,7 @@ export async function readDefenseCoverage(
     | "webContainmentConfigured"
   >,
   args: Record<string, unknown>,
+  scope?: SentinelDefenseEvidenceScope,
 ): Promise<string> {
   const request = sentinelDefenseReadArgs(args);
   if (!request) {
@@ -1091,8 +1100,55 @@ export async function readDefenseCoverage(
   }
 
   try {
+    const revision = options.assessmentRevision;
+    const snapshot = scope && revision !== undefined &&
+      readSentinelAssessmentRevision(options.snapshotPath, revision)?.result
+        .sharedGraph.snapshot;
+    const runId = scope && revision !== undefined &&
+      readSentinelRunIdForRevision(options.snapshotPath, revision);
+    if (scope && (!snapshot || !runId)) {
+      return "Error: Saved Sentinel telemetry evidence is unavailable or invalid.";
+    }
+    const graph = snapshot ? loadSentinelGraph(snapshot) : undefined;
+    const policy = runId
+      ? readSentinelOperatingConstraints(options.snapshotPath, runId)
+        ?.constraints
+      : undefined;
+    const assignment = scope?.assignment;
+    const incident =
+      assignment?.kind === "review_incident" && assignment.nodeId &&
+        revision !== undefined
+        ? readSavedSentinelIncident(
+          options.snapshotPath,
+          revision,
+          assignment.nodeId,
+          true,
+        )
+        : undefined;
+    if (
+      assignment?.kind === "review_incident" &&
+      (!incident || "error" in incident)
+    ) {
+      return "Error: Incident evidence is unavailable outside the current assignment.";
+    }
+    const members = incident && "members" in incident && incident.members
+      ? new Set(incident.members.map(sentinelAlertReference))
+      : undefined;
     const assessment = assessSentinelDefenseCoverage({
       alerts,
+      ...(graph && {
+        allowAlert: (alert) => {
+          const asset = graph.resolveAssetId(alert.asset);
+          return !!asset && sentinelOperatingConstraintsAllow(
+            policy,
+            { kind: "review_evidence", nodeId: asset },
+            snapshot || undefined,
+          ) && (!assignment ||
+            (members
+              ? members.has(sentinelAlertReference(alert))
+              : asset === assignment.nodeId));
+        },
+      }),
       webContainmentConfigured: options.webContainmentConfigured,
     });
     if (upstreamCheck !== undefined) {
@@ -4248,9 +4304,27 @@ function createAgent(
         );
         if (
           result.allowed && name === "POST_TOOL_RESPONSE" &&
-          provenanceRead && canReadPlannerCase &&
-          (!turn || !currentPlannerReceiptScope(turn))
+          (provenanceRead || toolName === SENTINEL_DEFENSE_READ) &&
+          canReadPlannerCase && (!turn || !currentPlannerReceiptScope(turn))
         ) return { ...result, allowed: false, action: "BLOCK" };
+        if (
+          result.allowed && name === "POST_TOOL_RESPONSE" &&
+          toolName === SENTINEL_DEFENSE_READ && options.assignedTaskId
+        ) {
+          const runId = options.assessmentRevision !== undefined &&
+            readSentinelRunIdForRevision(
+              options.snapshotPath,
+              options.assessmentRevision,
+            );
+          const policy = runId
+            ? readSentinelOperatingConstraints(options.snapshotPath, runId)
+            : undefined;
+          if (
+            !turn || !readAssignedModelReview(options) ||
+            policy?.digest !== proof?.digest ||
+            policy?.version !== proof?.version
+          ) return { ...result, allowed: false, action: "BLOCK" };
+        }
         if (
           result.allowed && name === "POST_TOOL_RESPONSE" &&
           canReadPlannerCase &&
@@ -5356,7 +5430,24 @@ function createAgent(
         }
       }
       if (name === SENTINEL_DEFENSE_READ) {
-        return await readDefenseCoverage(options, args);
+        const leased = options.assignedTaskId !== undefined ||
+          options.assignedTaskLeaseToken !== undefined;
+        const assignment = leased
+          ? readAssignedModelReview(options)
+          : undefined;
+        const current = () =>
+          !turn.signal.aborted &&
+          (!leased || !!readAssignedModelReview(options)) &&
+          (!canReadPlannerCase || currentPlannerReceiptScope(turn));
+        const unavailable =
+          "Error: The requested Sentinel evidence scope is unavailable.";
+        if (!current()) return unavailable;
+        const text = await readDefenseCoverage(
+          options,
+          args,
+          canReadPlannerCase || leased ? { assignment } : undefined,
+        );
+        return current() ? text : unavailable;
       }
       if (name === graphOverviewTool.name) {
         if (canReadPlannerCase && !currentPlannerReceiptScope(turn)) {

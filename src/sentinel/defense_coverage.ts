@@ -780,6 +780,7 @@ export function matchesSentinelUpstreamCheck(
 
 export interface SentinelDefenseCoverageOptions {
   readonly alerts?: readonly unknown[];
+  readonly allowAlert?: (alert: TelemetryAlert) => boolean;
   /** Gateway configuration status as reported by the caller. */
   readonly webContainmentConfigured?: boolean;
 }
@@ -799,6 +800,7 @@ export function assessSentinelDefenseCoverage(
   for (const [index, raw] of (options.alerts ?? []).entries()) {
     const sourceRecord = index + 1;
     const alert = parseSentinelTelemetryAlert(raw, sourceRecord);
+    if (options.allowAlert && !options.allowAlert(alert)) continue;
     const evidence = {
       sourceRecord,
       asset: alert.asset,

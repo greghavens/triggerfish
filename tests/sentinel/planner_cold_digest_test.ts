@@ -500,6 +500,18 @@ Deno.test("Gateway traces a follow-up to an exact retained incident-member alert
     evidenceIds: ["retained-upstream-fixture"],
   };
   const alertId = sentinelAlertReference(alert);
+  const alternate = {
+    id: "other-delivery",
+    kind: "asset",
+    label: "Other delivery",
+  };
+  const alternateAlert = {
+    ...alert,
+    asset: alternate.id,
+    subject: "Separate asset event",
+    evidenceIds: ["other-asset-fixture"],
+  };
+  const alternateAlertId = sentinelAlertReference(alternateAlert);
   const checkId = "cloudtrail_logging_stopped";
   const registry = createProviderRegistry();
   registry.register({
@@ -515,7 +527,22 @@ Deno.test("Gateway traces a follow-up to an exact retained incident-member alert
           completion('{"summary":"Reviewed other evidence.","followUps":[]}'),
         );
       }
-      const read = messages.findLast(({ role }) => role === "tool");
+      const reads = messages.filter(({ role }) => role === "tool");
+      const read = reads.at(-1);
+      if (!isPlanner && reads.length === 0) {
+        return Promise.resolve(completion("", "sentinel_defense", {
+          upstreamCheck: checkId,
+          alertId: alternateAlertId,
+        }));
+      }
+      if (!isPlanner && reads.length === 1) {
+        assertStringIncludes(String(read?.content), "did not match");
+        assert(!String(read?.content).includes(alternateAlert.subject));
+        return Promise.resolve(completion("", "sentinel_defense", {
+          upstreamCheck: checkId,
+          alertId,
+        }));
+      }
       if (!read) {
         return Promise.resolve(completion("", "sentinel_defense", {
           upstreamCheck: checkId,
@@ -568,12 +595,13 @@ Deno.test("Gateway traces a follow-up to an exact retained incident-member alert
       await Deno.mkdir(dirname(selected), { recursive: true });
       await Deno.writeTextFile(
         selected,
-        JSON.stringify({ version: 1, nodes: [asset], edges: [] }),
+        JSON.stringify({ version: 1, nodes: [asset, alternate], edges: [] }),
       );
       await Deno.writeTextFile(
         sentinelAlertsPath(selected),
         JSON.stringify([
           { ...alert, subject },
+          alternateAlert,
           ...Array.from({ length: 26 }, (_, index) => ({
             ...alert,
             subject,
@@ -630,6 +658,45 @@ Deno.test("Gateway traces a follow-up to an exact retained incident-member alert
         goalReceiptRead.args.alertId === alertId
       ),
     );
+    const report = readAdaptiveSentinel(path, state)?.modelPlannerHistory.find(
+      ({ reads }) => reads?.some(({ tool }) => tool === "sentinel_defense"),
+    );
+    const workerStepIndex = workerRead()?.steps.findIndex(
+      ({ goalReceiptRead }) =>
+        goalReceiptRead &&
+        "alertId" in goalReceiptRead.args &&
+        goalReceiptRead.args.alertId === alertId,
+    );
+    assert(report && workerStepIndex !== undefined && workerStepIndex >= 0);
+    const runId = state.plan.runId;
+    assert(runId);
+    const ref = {
+      kind: "sentinel" as const,
+      id: caseId,
+      revision: state.revision,
+    };
+    const plannerRead = {
+      ...ref,
+      action: "planner_reads",
+      plannerIdentity: report.identity,
+      attempt: report.attempt,
+      ordinal: 1,
+      includeResult: true,
+    };
+    const workerTrace = {
+      ...ref,
+      action: "worker_trace_result",
+      taskId: followup.id,
+      stepIndices: [workerStepIndex],
+    };
+    await withArchivedPlannerRead(base, async (read) => {
+      for (const selected of [plannerRead, workerTrace]) {
+        assertEquals(
+          JSON.parse(await read(selected)).result.matches[0].alertId,
+          alertId,
+        );
+      }
+    });
     const refreshed = refreshSentinelAssessment(path);
     assert(refreshed?.revision === state.revision + 1);
     const node = `observation:assessment:${alertId}`;
@@ -655,6 +722,29 @@ Deno.test("Gateway traces a follow-up to an exact retained incident-member alert
         await read({ ...request, revision: refreshed.revision }),
         "unavailable",
       );
+    });
+    await archiveAndRestoreDigestFixture(base, path, {
+      ...ref,
+      revision: refreshed.revision,
+    }, runId);
+    await withArchivedPlannerRead(base, async (read) => {
+      for (const selected of [plannerRead, workerTrace]) {
+        assertEquals(
+          JSON.parse(await read(selected)).result.matches[0].alertId,
+          alertId,
+        );
+      }
+      assert(recordSentinelOperatingConstraints(path, {
+        runId,
+        evidenceRevision: refreshed.revision,
+        expectedVersion: 0,
+        operatorScope: "defense-history-fixture",
+        requestId: crypto.randomUUID(),
+        constraints: { deniedKinds: [], allowedAssetIds: [alternate.id] },
+      }));
+      for (const selected of [plannerRead, workerTrace]) {
+        assertStringIncludes(await read(selected), "unavailable");
+      }
     });
   } finally {
     planner.stop();
