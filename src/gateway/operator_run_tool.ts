@@ -1192,6 +1192,11 @@ export const operatorRunTool: ToolDefinition = {
         "One to sixteen exact selected finding IDs for finding_asset_tree.",
       items: { type: "string" },
     },
+    includeFacets: {
+      type: "boolean",
+      description:
+        "Include severity, disposition, and paged category counts for authorized finding_groups scopes.",
+    },
     scopes: {
       type: "array",
       description:
@@ -1208,6 +1213,7 @@ export const operatorRunTool: ToolDefinition = {
           },
           revision: { type: "integer", minimum: 1 },
           offset: { type: "integer", minimum: 0 },
+          categoryOffset: { type: "integer", minimum: 0 },
           cursor: { type: "string" },
         },
       },
@@ -3303,48 +3309,66 @@ ${
         return tree ? safeProjection({ tree }) : unavailable;
       }
       if (action === "finding_groups") {
-        const { scopes, limit = 1 } = args;
+        const { scopes, limit = 1, includeFacets = false } = args;
         if (
           !context?.authenticatedOwnerSessionId ||
+          typeof includeFacets !== "boolean" ||
           !canFlowTo("INTERNAL", context.ceiling ?? "PUBLIC") ||
           !Array.isArray(scopes) || scopes.length < 1 || scopes.length > 4 ||
           typeof limit !== "number" || !Number.isSafeInteger(limit) ||
           limit < 1 || limit > 3 ||
           Object.keys(args).some((key) =>
-            !["action", "scopes", "limit"].includes(key)
+            !["action", "scopes", "limit", "includeFacets"].includes(key)
           )
         ) return unavailable;
         const selected = new Map<string, {
           revision: number;
           offset: number;
+          categoryOffset?: number;
         }>();
         for (const scope of scopes) {
           if (!scope || typeof scope !== "object" || Array.isArray(scope)) {
             return unavailable;
           }
-          const { id, kind = "sentinel", revision, offset = 0 } = scope;
+          const {
+            id,
+            kind = "sentinel",
+            revision,
+            offset = 0,
+            categoryOffset,
+          } = scope;
           if (
             !isSentinelCaseId(id) || kind !== "sentinel" || selected.has(id) ||
             typeof revision !== "number" || !Number.isSafeInteger(revision) ||
             revision < 1 || typeof offset !== "number" ||
             !Number.isSafeInteger(offset) || offset < 0 ||
+            categoryOffset !== undefined &&
+              (!includeFacets || typeof categoryOffset !== "number" ||
+                !Number.isSafeInteger(categoryOffset) || categoryOffset < 0) ||
             Object.keys(scope).some((key) =>
-              !["kind", "id", "revision", "offset"].includes(key)
+              !["kind", "id", "revision", "offset", "categoryOffset"].includes(
+                key,
+              )
             ) ||
             !await controller.inspect({ kind, id, revision }) ||
             context.authorizeSentinelCaseRead?.(id, revision) === false
           ) return unavailable;
-          selected.set(id, { revision, offset });
+          selected.set(id, {
+            revision,
+            offset,
+            ...(includeFacets && { categoryOffset: categoryOffset ?? 0 }),
+          });
         }
         const groups = [];
         let findingTotal = 0;
-        for (const [id, { revision, offset }] of selected) {
+        for (const [id, { revision, offset, categoryOffset }] of selected) {
           const group = readSentinelFindingGroup(
             resolveSentinelCasePath(options.baseDir, id),
             id,
             revision,
             offset,
             limit,
+            categoryOffset,
           );
           if (!group) return unavailable;
           groups.push(group);

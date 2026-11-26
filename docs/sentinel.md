@@ -376,6 +376,10 @@ In authenticated owner chat, use `operator_runs finding_groups` with
 `scopes` containing one to four exact case IDs and saved revisions. Each
 group reports its count of imported and worker findings and has an independent
 `offset` and `nextOffset`. The optional `limit` sets the page size per group.
+With `includeFacets: true`, each group's `facets` reports severity and
+disposition counts for findings allowed by the saved and current scope.
+Each case can page its categories independently with `categoryOffset`
+and `nextCategoryOffset`. The entry page and its offset are unchanged.
 For up to sixteen selected `findingIds`, use `operator_runs finding_asset_tree`
 with `kind: sentinel`, the case `id`, and a saved `revision`. It shows the
 affected assets and their declared in-scope ancestors. Aggregate counts count

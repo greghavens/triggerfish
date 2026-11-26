@@ -1455,6 +1455,17 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
       trafficLinkId,
       payloadPart: "response",
     });
+    let preArchiveFindingFacets: {
+      categories: unknown;
+      categoryTotal: number;
+      disposition: { confirmed: number };
+      severity: { medium: number };
+    };
+    const facetRequest = {
+      action: "finding_groups",
+      includeFacets: true,
+      scopes: [{ kind: exact.kind, id: exact.id, revision: exact.revision }],
+    };
     await withGateway(baseDir, async (turn, approvals, policy) => {
       policy.denyTrafficBefore = true;
       assert(!(await turn(trafficBlob)).includes("🙂"));
@@ -1598,6 +1609,9 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
         action: "amend_finding_report",
         reportVersion: 1,
         evidenceVersion,
+        severity: "medium",
+        disposition: "confirmed",
+        findingCategory: "Retained control coverage",
         title: "Reviewed archived traffic",
         summary: "The finding now references the retained status response.",
         requestId: crypto.randomUUID(),
@@ -1628,6 +1642,24 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
         "unavailable",
       );
       assertEquals(approvals.length, approvalCount + 2);
+      preArchiveFindingFacets =
+        JSON.parse(await turn(facetRequest)).groups[0].facets;
+      assertEquals(preArchiveFindingFacets.categories, [
+        { category: "Retained control coverage", count: 1 },
+      ]);
+      assertEquals(preArchiveFindingFacets.disposition.confirmed, 2);
+      assert(preArchiveFindingFacets.severity.medium >= 1);
+      const offsetFacets = JSON.parse(
+        await turn({
+          ...facetRequest,
+          scopes: [{ ...facetRequest.scopes[0], categoryOffset: 1 }],
+        }),
+      ).groups[0].facets;
+      assertEquals(offsetFacets.categories, []);
+      assertEquals(
+        offsetFacets.categoryTotal,
+        preArchiveFindingFacets.categoryTotal,
+      );
       const reportHistory = {
         ...trafficScope,
         action: "finding_report_history",
@@ -1646,6 +1678,9 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
           evidenceRevision: exact.revision,
           taskId: "operator",
           authority: "operator",
+          severity: "medium",
+          disposition: "confirmed",
+          findingCategory: "Retained control coverage",
           recordedAt: (ownerReport as { recordedAt: string }).recordedAt,
           evidenceVersion,
         },
@@ -2660,6 +2695,10 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
         status: "unknown",
         asOfRevision: state.revision,
       });
+      assertEquals(
+        JSON.parse(await turn(facetRequest)).groups[0].facets,
+        preArchiveFindingFacets!,
+      );
       const restoredReportHistory = {
         ...trafficScope,
         action: "finding_report_history",

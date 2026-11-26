@@ -6,12 +6,60 @@ import {
   readSentinelOperatingConstraints,
   readSentinelRunIdForRevision,
 } from "./assessment_store.ts";
-import { loadSentinelGraph } from "./graph.ts";
+import {
+  loadSentinelGraph,
+  type sentinelFindingDispositions,
+  type sentinelFindingSeverities,
+} from "./graph.ts";
+import { sentinelOperatingConstraintsAllow } from "./operating_constraints.ts";
 import {
   hasSentinelWorkerFindingJournal,
   openSentinelWorkerFindingStore,
   readSentinelCaseFindingReceipts,
 } from "./worker_finding_store.ts";
+
+function findingFacets(categoryOffset: number) {
+  const severity = {
+    critical: 0,
+    high: 0,
+    medium: 0,
+    low: 0,
+    info: 0,
+    unknown: 0,
+  };
+  const disposition = { open: 0, confirmed: 0, resolved: 0, dismissed: 0 };
+  const categories = new Map<string, number>();
+  let total = 0;
+  return {
+    add(
+      level?: typeof sentinelFindingSeverities[number],
+      state?: typeof sentinelFindingDispositions[number],
+      category?: string,
+    ) {
+      total++;
+      severity[level ?? "unknown"]++;
+      disposition[state ?? "open"]++;
+      if (category) {
+        categories.set(category, (categories.get(category) ?? 0) + 1);
+      }
+    },
+    page() {
+      const end = categoryOffset + 8;
+      const entries = [...categories.keys()].sort().slice(categoryOffset, end)
+        .map(
+          (category) => ({ category, count: categories.get(category)! }),
+        );
+      return {
+        total,
+        severity,
+        disposition,
+        categories: entries,
+        categoryTotal: categories.size,
+        nextCategoryOffset: end < categories.size ? end : null,
+      };
+    },
+  };
+}
 
 export function readSentinelFindingGroup(
   path: string,
@@ -19,6 +67,7 @@ export function readSentinelFindingGroup(
   revision: number,
   offset: number,
   limit: number,
+  categoryOffset?: number,
 ) {
   const state = readSentinelAssessmentRevision(path, revision);
   if (!state) return;
@@ -75,6 +124,52 @@ export function readSentinelFindingGroup(
           { findingCategory: report.findingCategory }),
       });
     }
+    const facets = categoryOffset === undefined
+      ? undefined
+      : findingFacets(categoryOffset);
+    if (facets) {
+      const saved = readSentinelOperatingConstraints(path, runId, revision)
+        ?.constraints;
+      const current = readSentinelOperatingConstraints(path, runId)
+        ?.constraints;
+      for (const finding of imported) {
+        const trace = { kind: "review_finding", nodeId: finding.id } as const;
+        if (
+          sentinelOperatingConstraintsAllow(saved, trace, snapshot) &&
+          sentinelOperatingConstraintsAllow(current, trace, snapshot)
+        ) {
+          facets.add(finding.severity, reviews.get(finding.id));
+        }
+      }
+      const scopedWorkers = journal?.pageFindingIds(
+        caseId,
+        runId,
+        revision,
+        0,
+        4097,
+      );
+      if (scopedWorkers && scopedWorkers.total > 4096) return;
+      for (const id of scopedWorkers?.ids ?? []) {
+        const report = journal?.readFindingReport(id, revision);
+        if (
+          report?.finding.caseId !== caseId || report.finding.runId !== runId
+        ) return;
+        const trace = {
+          kind: "review_evidence",
+          nodeId: report.finding.targetId,
+        } as const;
+        if (
+          sentinelOperatingConstraintsAllow(saved, trace, snapshot) &&
+          sentinelOperatingConstraintsAllow(current, trace, snapshot)
+        ) {
+          facets.add(
+            report.severity,
+            report.disposition,
+            report.findingCategory,
+          );
+        }
+      }
+    }
     const entries = [...graphEntries, ...workerEntries];
     const total = imported.length + workers.total;
     return {
@@ -84,6 +179,7 @@ export function readSentinelFindingGroup(
       total,
       imported: imported.length,
       worker: workers.total,
+      ...(facets && { facets: facets.page() }),
       entries,
       nextOffset: offset + entries.length < total
         ? offset + entries.length

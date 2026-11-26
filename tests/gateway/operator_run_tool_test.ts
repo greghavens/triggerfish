@@ -1263,6 +1263,18 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
       );
       assertEquals(findingGroups.groups[1].entries[0].id, "peer-only");
       assertEquals(findingGroups.groups[1].revision, peer.revision);
+      const faceted = { ...grouped, includeFacets: true };
+      const facetedGroups = JSON.parse((await turn(faceted)).result).groups;
+      assertEquals(facetedGroups[1].facets.total, 3);
+      assertEquals(facetedGroups[1].facets.disposition.open, 3);
+      assertEquals(facetedGroups[1].facets.severity.unknown, 2);
+      assertEquals(facetedGroups[1].facets.categories, []);
+      const { facets: _facets, ...plainGroup } = facetedGroups[1];
+      assertEquals(plainGroup, findingGroups.groups[1]);
+      denied = "PRE_TOOL_CALL";
+      const hiddenFacets = await turn(faceted);
+      assert(!hiddenFacets.result.includes('"facets"'));
+      denied = undefined;
       const followGroup = {
         ...grouped,
         scopes: [{ ...peer, offset: 1 }],
