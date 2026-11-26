@@ -392,6 +392,7 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
                       "finding_report_history",
                       "finding_lineage",
                       "linked_finding",
+                      "linked_findings",
                       "finding_traffic",
                       "finding_traffic_set_receipt",
                       "finding_traffic_candidates",

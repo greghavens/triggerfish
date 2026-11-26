@@ -3587,6 +3587,23 @@ async function verifyConnectorFindingPublication(
       action: "linked_finding",
       linkedFinding: exactSelected.args,
     };
+    const catalog = {
+      id: consumerCase,
+      revision: consumerState.revision,
+      action: "linked_findings",
+      assetId: "app",
+      sourceCase: "main",
+    };
+    const pageRead = await turn(catalog);
+    const [catalogEntry] = JSON.parse(pageRead).entries;
+    assertEquals(catalogEntry.source, publication.finding.workerFindingSource);
+    assert(!pageRead.includes("owner/repo") && !pageRead.includes(credential));
+    assertEquals(
+      JSON.parse(
+        await turn({ ...linked, linkedFinding: catalogEntry.selector }),
+      ).source,
+      catalogEntry.source,
+    );
     const ownerRead = await turn(linked);
     assert(!ownerRead.startsWith("Error:"), ownerRead);
     const ownerFinding = JSON.parse(ownerRead);
@@ -3600,6 +3617,9 @@ async function verifyConnectorFindingPublication(
       const before = checks;
       assertStringIncludes(await turn(linked), "unavailable");
       assertEquals(checks === before, hook === "PRE_TOOL_CALL");
+      const beforeList = checks;
+      assertEquals(JSON.parse(await turn(catalog)).entries, []);
+      assertEquals(checks === beforeList, hook === "PRE_TOOL_CALL");
     }
     blockSource = undefined;
 

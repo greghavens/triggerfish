@@ -11,7 +11,9 @@ import {
 } from "../sentinel/recheck_inconclusive.ts";
 import { normalizeSentinelRecheckNote } from "../sentinel/worker_finding_recovery.ts";
 import { createSentinelFindingRemediationReader } from "../sentinel/finding_remediation.ts";
+import { readLinkedFindingProof } from "./sentinel_linked_findings.ts";
 import {
+  listSentinelSelectedFindingCandidates,
   reopenSentinelPeerCoverage,
   reopenSentinelSelectedFinding,
 } from "./sentinel_peer_coverage.ts";
@@ -519,6 +521,7 @@ export const operatorRunTool: ToolDefinition = {
         "finding_report_history",
         "finding_lineage",
         "linked_finding",
+        "linked_findings",
         "amend_finding_report",
         "traffic_search",
         "traffic_get",
@@ -10776,6 +10779,174 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
           )
         ) return unavailable;
         return safeProjection({ run: ref, taskId, stepIndex: index, source });
+      }
+      if (action === "linked_findings") {
+        const { assetId, sourceCase, query = "", cursor, limit = 3 } = args;
+        if (
+          ref.kind !== "sentinel" || ref.revision === undefined ||
+          !context?.authenticatedOwnerSessionId ||
+          !context.authorizeOwnerRunCall ||
+          !canFlowTo("INTERNAL", context.ceiling ?? "PUBLIC") ||
+          typeof assetId !== "string" || !assetId.trim() ||
+          assetId.length > 800 ||
+          typeof sourceCase !== "string" || !isSentinelCaseId(sourceCase) ||
+          sourceCase === ref.id ||
+          typeof query !== "string" || query.length > 80 ||
+          redactCredentialText(query) !== query ||
+          (cursor !== undefined &&
+            (typeof cursor !== "string" ||
+              !/^[a-f0-9]{64}\.[1-9][0-9]?$/.test(cursor))) ||
+          typeof limit !== "number" || !Number.isSafeInteger(limit) ||
+          limit < 1 || limit > 5 ||
+          Object.keys(args).some((key) =>
+            ![
+              "action",
+              "kind",
+              "id",
+              "revision",
+              "assetId",
+              "sourceCase",
+              "query",
+              "cursor",
+              "limit",
+            ].includes(key)
+          ) || !await controller.inspect(ref)
+        ) return unavailable;
+        const path = resolveSentinelCasePath(options.baseDir, ref.id);
+        const revision = ref.revision;
+        const catalog = listSentinelSelectedFindingCandidates(
+          path,
+          revision,
+          sourceCase,
+          assetId,
+          query.trim().toLocaleLowerCase(),
+        );
+        if (!catalog) return unavailable;
+        const { selected, candidates, current } = catalog;
+        const allowed = () =>
+          current() &&
+          context.authorizeSentinelCaseRead?.(ref.id, revision) !== false &&
+          context.authorizeSentinelCaseRead?.(sourceCase, selected.revision) !==
+            false;
+        if (!allowed()) return unavailable;
+        const visible = [];
+        for (const entry of candidates) {
+          const finding = entry.finding.id;
+          const sourceAsset = entry.targetId;
+          if (
+            !await context.authorizeOwnerRunCall({
+              action: "finding_report",
+              kind: "sentinel",
+              id: sourceCase,
+              revision: selected.revision,
+              receiptId: finding,
+            }) || !allowed()
+          ) continue;
+          const checked = () =>
+            readLinkedFindingProof(
+              options.baseDir,
+              [selected],
+              sourceCase,
+              sourceAsset,
+              entry.finding,
+            );
+          const proof = checked();
+          const source = proof?.publication.finding.workerFindingSource;
+          if (!proof || !source) continue;
+          const scopeIsCurrent = () =>
+            allowed() && isDeepStrictEqual(checked(), proof) &&
+            sentinelOperatingConstraintsAllow(
+              readSentinelOperatingConstraints(
+                resolveSentinelCasePath(options.baseDir, sourceCase),
+                selected.runId,
+              )?.constraints,
+              { kind: "review_evidence", nodeId: sourceAsset },
+              readSentinelAssessmentRevision(
+                resolveSentinelCasePath(options.baseDir, sourceCase),
+                selected.revision,
+              )?.result.sharedGraph.snapshot,
+            );
+          if (!scopeIsCurrent()) continue;
+          const operation = proof.execution;
+          if (operation) {
+            const evidence = await readAuthorizedCaseEvidence(
+              sourceCase,
+              operation.path,
+              operation.revision,
+              operation.evidence.id,
+              context,
+              scopeIsCurrent,
+            );
+            if (
+              !evidence ||
+              !executionReceiptSupportsCheck(
+                operation.evidence,
+                operation.runId,
+                operation.assetId,
+                operation.controlId,
+                "fail",
+                executionControlReceipt(evidence.payload),
+              )
+            ) continue;
+          }
+          const item = {
+            finding,
+            sourceAsset,
+            source,
+            inherited: true,
+            title: entry.finding.label,
+          };
+          if (
+            await context.authorizeSavedResponse(
+              operatorRunTool.name,
+              safeProjection(item),
+              "INTERNAL",
+            ) && scopeIsCurrent()
+          ) visible.push({ item, scopeIsCurrent });
+        }
+        const records = visible.filter(({ scopeIsCurrent }) =>
+          scopeIsCurrent()
+        );
+        const binding = createHash("sha256").update(
+          JSON.stringify([
+            ref,
+            selected,
+            assetId,
+            query,
+            records.map(({ item }) => item),
+          ]),
+        ).digest("hex") + ".";
+        if (cursor !== undefined && !cursor.startsWith(binding)) {
+          return unavailable;
+        }
+        const offset = typeof cursor === "string"
+          ? Number(cursor.slice(binding.length))
+          : 0;
+        if (offset && offset >= records.length) return unavailable;
+        const page = records.slice(offset, offset + limit);
+        const outputAllowed = () =>
+          allowed() && records.every(({ scopeIsCurrent }) => scopeIsCurrent());
+        const snapshotDigest = await catalog.retain(
+          new Set(page.map(({ item }) => item.finding)),
+          outputAllowed,
+        );
+        if (!snapshotDigest || !outputAllowed()) return unavailable;
+        return safeProjection({
+          run: ref,
+          entries: page.map(({ item: { finding, sourceAsset, ...item } }) => ({
+            ...item,
+            selector: {
+              asset: assetId,
+              sourceCase,
+              sourceAsset,
+              finding,
+              snapshotDigest,
+            },
+          })),
+          nextCursor: offset + limit < records.length
+            ? binding + (offset + limit)
+            : null,
+        });
       }
       if (action === "linked_finding") {
         const raw = args.linkedFinding;

@@ -16,8 +16,16 @@ import {
   type SentinelPeerCoverageReceipt,
 } from "../sentinel/peer_coverage.ts";
 import {
+  digestSentinelSnapshot,
+  indexArchivedSentinelAssetSource,
   readPinnedSentinelSharedFindingSource,
+  retainSentinelSourceSnapshot,
 } from "../sentinel/shared_inventory.ts";
+import {
+  applySentinelWorkerFindingPublications,
+  readSentinelWorkerFindingPublications,
+} from "../sentinel/worker_finding_publications.ts";
+import { withSentinelSourceSnapshotLock } from "../sentinel/source_snapshot_lock.ts";
 import { readLinkedFindingProof } from "./sentinel_linked_findings.ts";
 
 export async function reopenSentinelSelectedFinding(
@@ -105,6 +113,93 @@ export async function reopenSentinelSelectedFinding(
   } catch {
     return;
   }
+}
+
+/** Build exact selectors from one reviewed source. Unmatched assets reveal no findings. */
+export function listSentinelSelectedFindingCandidates(
+  path: string,
+  revision: number,
+  sourceCase: string,
+  asset: string,
+  query: string,
+) {
+  const location = locateSentinelCase(path);
+  const selected = readSentinelLinkedSourcesForRevision(path, revision)
+    ?.find(({ caseId }) => caseId === sourceCase);
+  const local = readSentinelAssessmentRevision(path, revision)?.result
+    .sharedGraph.snapshot;
+  const runId = readSentinelRunIdForRevision(path, revision);
+  const scope = runId && readSentinelOperatingConstraints(path, runId);
+  if (
+    !location || !selected || !local || !scope || !scope.membership ||
+    !scope.constraints.allowedAssetIds?.includes(asset) ||
+    !sentinelOperatingConstraintsAllow(scope.constraints, {
+      kind: "review_evidence",
+      nodeId: asset,
+    }, local)
+  ) return;
+  const sourcePath = resolveSentinelCasePath(location.baseDir, sourceCase);
+  if (
+    readSentinelRunIdForRevision(sourcePath, selected.revision) !==
+      selected.runId
+  ) return;
+  const source = readSentinelAssessmentRevision(sourcePath, selected.revision)
+    ?.result.sharedGraph.snapshot;
+  if (!source) return;
+  const matching = readSentinelWorkerFindingPublications(sourcePath, sourceCase)
+    .filter(({ finding, targetId, withdrawal }) =>
+      !withdrawal &&
+      finding.workerFindingSource?.revision === selected.revision &&
+      finding.workerFindingSource.runId === selected.runId &&
+      (!query || finding.label.toLocaleLowerCase().includes(query)) &&
+      !!indexArchivedSentinelAssetSource(local, source, asset, targetId)
+    );
+  // Bound permission checks even when an approved source has many publications.
+  if (matching.length > 12) return;
+  const current = () =>
+    readSentinelRunIdForRevision(path, revision) === runId &&
+    isDeepStrictEqual(
+      readSentinelAssessmentRevision(path, revision)?.result.sharedGraph
+        .snapshot,
+      local,
+    ) &&
+    isDeepStrictEqual(readSentinelOperatingConstraints(path, runId), scope) &&
+    isDeepStrictEqual(
+      readSentinelLinkedSourcesForRevision(path, revision)
+        ?.find(({ caseId }) => caseId === sourceCase),
+      selected,
+    );
+  return {
+    selected,
+    current,
+    candidates: matching.toSorted((a, b) =>
+      a.finding.id.localeCompare(b.finding.id)
+    ),
+    async retain(visible: ReadonlySet<string>, permitted: () => boolean) {
+      const graph = applySentinelWorkerFindingPublications(
+        source,
+        matching.filter(({ finding }) => visible.has(finding.id)),
+      );
+      const digest = digestSentinelSnapshot(graph);
+      if (
+        visible.size && !await withSentinelSourceSnapshotLock(
+          location.baseDir,
+          true,
+          async () => {
+            if (!permitted()) return false;
+            await retainSentinelSourceSnapshot(
+              location.baseDir,
+              sourceCase,
+              digest,
+              graph,
+            );
+            return permitted();
+          },
+        )
+      ) return;
+      return digest;
+    },
+  };
 }
 
 type LinkedFindingExecution = NonNullable<

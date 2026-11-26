@@ -141,7 +141,8 @@ async function withArchivedPlannerRead(
         async evaluateHook(hook, { input }) {
           if (beforeHook) await beforeHook(hook, input);
           const blockedPublication = (selection.action === "publish_finding" ||
-            selection.action === "linked_finding") &&
+            selection.action === "linked_finding" ||
+            selection.action === "linked_findings") &&
             publicationPolicy && !publicationPolicy(hook, input);
           const allowed = !blockedPublication &&
             !(deny && hook === "POST_TOOL_RESPONSE" &&
@@ -2308,6 +2309,7 @@ Deno.test("Sentinel plans from an exact published case finding and keeps its evi
     assert(lease);
     const workerRegistry = createProviderRegistry();
     let savedFinding: string | undefined;
+    let workerFindingTitle = "Verified worker report";
     workerRegistry.register({
       name: "publication-worker",
       supportsStreaming: false,
@@ -2328,28 +2330,31 @@ Deno.test("Sentinel plans from an exact published case finding and keeps its evi
           graphFindingId: "original-finding",
           controlId: "current-control",
           evidenceId: "original-evidence",
-          title: "Verified worker report",
+          title: workerFindingTitle,
           summary: "Recorded failure from an exact retained check.",
           requestId: crypto.randomUUID(),
         }));
       },
     });
     workerRegistry.setDefault("publication-worker");
-    const worker = createSentinelSubagent({
-      snapshotPath: sourcePath,
-      assessmentRevision: sourceState.revision,
-      snapshotOverride: sourceState.result?.sharedGraph.snapshot,
-      assignedTaskId: lease.task.id,
-      assignedTaskLeaseToken: lease.token,
-      providerRegistry: workerRegistry,
-      hookRunner: allowHooks,
-      allowModelAccess: true,
-    });
-    try {
-      await worker.execute("Report the verified finding.", () => {});
-    } finally {
-      worker.clear();
-    }
+    const reportFinding = async () => {
+      const worker = createSentinelSubagent({
+        snapshotPath: sourcePath,
+        assessmentRevision: sourceState.revision,
+        snapshotOverride: sourceState.result?.sharedGraph.snapshot,
+        assignedTaskId: lease.task.id,
+        assignedTaskLeaseToken: lease.token,
+        providerRegistry: workerRegistry,
+        hookRunner: allowHooks,
+        allowModelAccess: true,
+      });
+      try {
+        await worker.execute("Report the verified finding.", () => {});
+      } finally {
+        worker.clear();
+      }
+    };
+    await reportFinding();
     assert(savedFinding);
     const sourceRef = {
       kind: "sentinel",
@@ -2880,7 +2885,14 @@ Deno.test("Sentinel plans from an exact published case finding and keeps its evi
       action: "linked_finding",
       linkedFinding: exactSelected,
     };
+    const catalog = {
+      ...selectedRef,
+      action: "linked_findings",
+      assetId: selectedAsset,
+      sourceCase: source,
+    };
     let ownerFinding: unknown;
+    let savedCatalog: unknown;
     let denySource = false;
     await withArchivedPlannerRead(
       directory,
@@ -2904,7 +2916,24 @@ Deno.test("Sentinel plans from an exact published case finding and keeps its evi
           }),
           "unavailable",
         );
+        savedCatalog = JSON.parse(await read(catalog));
+        const [item] = JSON.parse(JSON.stringify(savedCatalog)).entries;
+        assertEquals(item.source, publication.finding.workerFindingSource);
+        assertEquals(item.inherited, true);
+        const catalogFind = JSON.parse(
+          await read({ ...ownerLinkedFinding, linkedFinding: item.selector }),
+        );
+        assertEquals(catalogFind.source, item.source);
+        assertStringIncludes(
+          await read({ ...catalog, assetId: "app" }),
+          "unavailable",
+        );
+        assertStringIncludes(
+          await read({ ...catalog, sourceCase: privateCase }),
+          "unavailable",
+        );
         denySource = true;
+        assertEquals(JSON.parse(await read(catalog)).entries, []);
         assertStringIncludes(await read(ownerLinkedFinding), "unavailable");
       },
       undefined,
@@ -2912,6 +2941,53 @@ Deno.test("Sentinel plans from an exact published case finding and keeps its evi
         !(denySource && hook === "PRE_TOOL_CALL" &&
           JSON.stringify(input).includes('"finding_report"')),
     );
+    const firstReceipt = savedFinding;
+    workerFindingTitle = "Second verified worker report";
+    await reportFinding();
+    const secondReceipt = savedFinding;
+    assert(secondReceipt && secondReceipt !== firstReceipt);
+    savedFinding = firstReceipt;
+    await withArchivedPlannerRead(directory, async (read) => {
+      const selection = { ...sourceRef, receiptId: secondReceipt };
+      const { preview } = JSON.parse(
+        await read({ ...selection, action: "preview_finding_publication" }),
+      );
+      assert(
+        JSON.parse(
+          await read({
+            ...selection,
+            action: "publish_finding",
+            requestId: crypto.randomUUID(),
+            reportVersion: preview.finding.workerFindingSource.reportVersion,
+            evidenceVersion: preview.evidenceVersion,
+          }),
+        ).publication,
+      );
+      const first = JSON.parse(await read({ ...catalog, limit: 1 }));
+      assert(first.nextCursor);
+      const next = JSON.parse(
+        await read({ ...catalog, limit: 1, cursor: first.nextCursor }),
+      );
+      assertEquals(next.nextCursor, null);
+      assertEquals(
+        [first.entries[0].selector.finding, next.entries[0].selector.finding]
+          .sort(),
+        [firstReceipt, secondReceipt].sort(),
+      );
+      assert(
+        JSON.parse(
+          await read({
+            ...selection,
+            action: "withdraw_published_finding",
+            requestId: crypto.randomUUID(),
+          }),
+        ).publication.withdrawal,
+      );
+      assertStringIncludes(
+        await read({ ...catalog, limit: 1, cursor: first.nextCursor }),
+        "unavailable",
+      );
+    });
     readSelectedAgain = true;
     const readSelected = async () => {
       const agent = createSelectedAgent();
@@ -3030,6 +3106,7 @@ Deno.test("Sentinel plans from an exact published case finding and keeps its evi
       );
       assertStringIncludes(await read(peerCoverageRead, true), "unavailable");
       assertEquals(JSON.parse(await read(ownerLinkedFinding)), ownerFinding);
+      assertEquals(JSON.parse(await read(catalog)), savedCatalog);
     });
     const resumed = resumeSentinelAssessment(
       selectedPath,
