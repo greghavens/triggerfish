@@ -687,6 +687,28 @@ export function openSentinelWorkerFindingStore(
     updateFindingReport,
     readFindingReport,
     listFindingReportVersions,
+    pageFindingIds(
+      caseId: string,
+      runId: string,
+      revision: number,
+      offset: number,
+      limit: number,
+    ) {
+      const scope = `FROM receipts WHERE revision <= ?
+        AND findingId IS NULL AND reportVersion IS NULL
+        AND json_extract(input, '$.caseId') = ?
+        AND json_extract(input, '$.runId') = ?`;
+      const params = [revision, caseId, runId] as const;
+      return transaction(db, () => ({
+        total: Number(
+          db.prepare(`SELECT COUNT(*) AS total ${scope}`).get(...params)?.total,
+        ),
+        ids: db.prepare(
+          `SELECT id ${scope} ORDER BY rowid ASC LIMIT ? OFFSET ?`,
+        )
+          .all(...params, limit, offset).map(({ id }) => String(id)),
+      }));
+    },
     listFindingIds(
       caseId: string,
       runId: string,

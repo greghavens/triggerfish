@@ -321,6 +321,11 @@ The `md-zip` response provides a base64 ZIP with one Markdown file per finding,
 a suggested `filename`, and `contentType: application/zip`. Each file retains the
 same reviewed report and exact evidence references as the Markdown export.
 
+In authenticated owner chat, use `operator_runs finding_groups` with
+`scopes` containing one to four exact case IDs and saved revisions. Each
+group reports its count of imported and worker findings and has an independent
+`offset` and `nextOffset`. The optional `limit` sets the page size per group.
+
 ### Archive and restore a named assessment
 
 The authenticated owner agent can use `operator_runs` to archive a stopped

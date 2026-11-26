@@ -322,6 +322,7 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
             call?.args?.action === "case_execution_evidence" ||
             call?.args?.action === "finding_recheck_sources" ||
             call?.args?.action === "search_case_traces" ||
+            call?.args?.action === "finding_groups" ||
             call?.args?.action === "list_trace_workers" ||
             call?.args?.action === "worker_trace_result")
         ) {
@@ -1028,6 +1029,60 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
           journal.close();
         }
       })();
+      const grouped = { action: "finding_groups", scopes: [exact, peer] };
+      const findingGroups = JSON.parse((await turn(grouped)).result);
+      assertEquals(findingGroups.findingTotal, 3);
+      assertEquals(
+        findingGroups.groups.map(
+          (
+            { total, imported, worker, nextOffset }: Record<string, number>,
+          ) => [total, imported, worker, nextOffset],
+        ),
+        [[0, 0, 0, null], [3, 1, 2, 1]],
+      );
+      assertEquals(findingGroups.groups[1].entries[0].id, "peer-only");
+      assertEquals(findingGroups.groups[1].revision, peer.revision);
+      const followGroup = {
+        ...grouped,
+        scopes: [{ ...peer, offset: 1 }],
+        limit: 2,
+      };
+      await withGateway(async (reconnected) => {
+        const { findingTotal, groups } = JSON.parse(
+          (await reconnected(followGroup)).result,
+        );
+        assertEquals(findingTotal, 3);
+        assertEquals(groups.length, 1);
+        assertEquals(groups[0].runId, original.runId);
+        assertEquals(groups[0].entries.map(({ id }: { id: string }) => id), [
+          original.id,
+          later.id,
+        ]);
+        assertEquals(groups[0].entries[0].taskId, original.taskId);
+        assertEquals(groups[0].nextOffset, null);
+      });
+      for (
+        const invalid of [
+          { ...grouped, scopes: [] },
+          { ...grouped, scopes: [peer, peer] },
+          { ...grouped, scopes: [peer, { ...exact, revision: 9_999 }] },
+          { ...grouped, scopes: [peer, { id: "unknown-case", revision: 1 }] },
+        ]
+      ) {
+        const { result } = await turn(invalid);
+        assertStringIncludes(result, "unavailable");
+        assert(!result.includes("peer-only"));
+      }
+      denied = "PRE_TOOL_CALL";
+      assert(!(await turn(grouped)).result.includes("peer-only"));
+      denied = "POST_TOOL_RESPONSE";
+      assertEquals(
+        (await turn(grouped)).result,
+        "Tool response withheld by policy.",
+      );
+      denied = "PRE_OUTPUT";
+      assertEquals((await turn(grouped)).response, undefined);
+      denied = undefined;
       const receiptAction = {
         action: "finding_receipt",
         ...peer,

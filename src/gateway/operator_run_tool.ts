@@ -107,6 +107,7 @@ import {
   matchSentinelAssetDiscoveryDestination,
   verifySentinelAssetDiscovery,
 } from "../sentinel/asset_discovery_evidence.ts";
+import { readSentinelFindingGroup } from "../sentinel/finding_groups.ts";
 import { loadSentinelGraph } from "../sentinel/graph.ts";
 import { isSentinelFindingMutation } from "../sentinel/worker_finding_recovery.ts";
 import { executionFindingAsset } from "../sentinel/worker_finding_evidence.ts";
@@ -423,6 +424,7 @@ export const operatorRunTool: ToolDefinition = {
         "completed_graph_followup",
         "set_case_membership",
         "traces",
+        "finding_groups",
         "search_case_traces",
         "list_trace_workers",
         "worker_trace_progress",
@@ -2591,6 +2593,56 @@ ${
         return safeProjection({
           runs: (await controller.list(filter)).slice(0, 20),
         });
+      }
+      if (action === "finding_groups") {
+        const { scopes, limit = 1 } = args;
+        if (
+          !context?.authenticatedOwnerSessionId ||
+          !canFlowTo("INTERNAL", context.ceiling ?? "PUBLIC") ||
+          !Array.isArray(scopes) || scopes.length < 1 || scopes.length > 4 ||
+          typeof limit !== "number" || !Number.isSafeInteger(limit) ||
+          limit < 1 || limit > 3 ||
+          Object.keys(args).some((key) =>
+            !["action", "scopes", "limit"].includes(key)
+          )
+        ) return unavailable;
+        const selected = new Map<string, {
+          revision: number;
+          offset: number;
+        }>();
+        for (const scope of scopes) {
+          if (!scope || typeof scope !== "object" || Array.isArray(scope)) {
+            return unavailable;
+          }
+          const { id, kind = "sentinel", revision, offset = 0 } = scope;
+          if (
+            !isSentinelCaseId(id) || kind !== "sentinel" || selected.has(id) ||
+            typeof revision !== "number" || !Number.isSafeInteger(revision) ||
+            revision < 1 || typeof offset !== "number" ||
+            !Number.isSafeInteger(offset) || offset < 0 ||
+            Object.keys(scope).some((key) =>
+              !["kind", "id", "revision", "offset"].includes(key)
+            ) ||
+            !await controller.inspect({ kind, id, revision }) ||
+            context.authorizeSentinelCaseRead?.(id, revision) === false
+          ) return unavailable;
+          selected.set(id, { revision, offset });
+        }
+        const groups = [];
+        let findingTotal = 0;
+        for (const [id, { revision, offset }] of selected) {
+          const group = readSentinelFindingGroup(
+            resolveSentinelCasePath(options.baseDir, id),
+            id,
+            revision,
+            offset,
+            limit,
+          );
+          if (!group) return unavailable;
+          groups.push(group);
+          findingTotal += group.total;
+        }
+        return safeProjection({ groups, findingTotal });
       }
       if (action === "search_case_traces") {
         const { scopes, query, limit = 1 } = args;
