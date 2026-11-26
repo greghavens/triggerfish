@@ -67,6 +67,7 @@ import type { ChatHistoryEntry } from "./chat_session_interface.ts";
 import {
   readSentinelAssessment,
   readSentinelGitHubWorkflowReadReceipt,
+  readSentinelLinkedSourcesForRevision,
   readSentinelOperatingConstraints,
   readSentinelRunIdForRevision,
 } from "../sentinel/assessment_store.ts";
@@ -401,6 +402,7 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
                       "finding_lineage",
                       "linked_finding",
                       "linked_findings",
+                      "linked_worker_review",
                       "finding_traffic",
                       "finding_traffic_set_receipt",
                       "finding_traffic_candidates",
@@ -895,6 +897,7 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
         directRead?: { name: string; args: Record<string, unknown> },
       ) {
         const { action, kind, id, revision, runId } = args;
+        const linkedReview = action === "linked_worker_review";
         const selectedControl = sentinelOperatorCaseControlActions.some((
           allowed,
         ) => allowed === action);
@@ -931,7 +934,9 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
           ) return false;
           const casePath = resolveCase();
           if (!selectedControl) {
-            return directRead ? casePath === selectedPath : !!casePath;
+            return directRead || linkedReview
+              ? casePath === selectedPath
+              : !!casePath;
           }
           if (casePath !== selectedPath) return false;
           const assessment = readSentinelAssessment(selectedPath);
@@ -981,6 +986,23 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
         ) return unavailable;
         const nativeGraph = directRead &&
           isSentinelNativeGraphRead(directRead.name);
+        const read = () =>
+          execute(args, {
+            ...authority,
+            ...(selectedControl && { authorizeSelectedSentinelCase: current }),
+            authorizeSentinelCaseRead: (caseId, evidenceRevision) =>
+              current() &&
+              ((caseId === id && evidenceRevision === revision) ||
+                (linkedReview && caseId === args.sourceCase &&
+                  readSentinelLinkedSourcesForRevision(selectedPath, revision)
+                      ?.some((source) =>
+                        source.caseId === caseId &&
+                        source.revision === evidenceRevision &&
+                        source.workerReviews?.some(({ taskId }) =>
+                          taskId === args.taskId
+                        )
+                      ) === true)),
+          });
         const result = nativeGraph && sourcePath
           ? await readScopedSentinelConsoleGraph(
             sourcePath,
@@ -989,13 +1011,7 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
             directRead.args,
             { baseDir: config.sentinelSharedInventoryBaseDir, signal },
           )
-          : await execute(args, {
-            ...authority,
-            ...(selectedControl &&
-              { authorizeSelectedSentinelCase: current }),
-            authorizeSentinelCaseRead: (caseId, evidenceRevision) =>
-              caseId === id && evidenceRevision === revision && current(),
-          });
+          : await read();
         if (!current()) return unavailable;
         if (scopedRead && result.startsWith("{")) {
           if (!sourceIsCurrent()) return unavailable;
@@ -1049,6 +1065,9 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
                 { resultText: text, blocked: false },
               );
               if (approved.blocked || !sourceIsCurrent()) return false;
+              if (linkedReview) {
+                return await read() === text && sourceIsCurrent();
+              }
               if (source.name !== SENTINEL_SHARED_ASSET_LINKS_READ) return true;
               return !!sourcePath && await readScopedSentinelConsoleGraph(
                     sourcePath,

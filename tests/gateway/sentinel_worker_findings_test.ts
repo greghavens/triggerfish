@@ -474,13 +474,14 @@ async function withFindingAssignmentGateway(
   baseDir: string,
   confirm: () => Promise<boolean>,
   test: (
-    turn: (args: Record<string, unknown>) => Promise<string>,
+    turn: (args: Record<string, unknown> | string) => Promise<string>,
   ) => Promise<void>,
   outputPolicy?: (hook: string, input: Record<string, unknown>) => boolean,
   onFrame?: (frame: string) => void,
   workflows?: ReturnType<typeof createOperatorWorkflowRuns>,
   readLiveWorkflow?: ReturnType<typeof nativeWorkflowReader>,
   echoToolResult = false,
+  fixtureSnapshotPath?: string,
 ) {
   const registry = createProviderRegistry();
   let input: Record<string, unknown> = {};
@@ -515,6 +516,12 @@ async function withFindingAssignmentGateway(
     }),
     providerRegistry: registry,
     enableStreaming: false,
+    sentinelSnapshotPath: fixtureSnapshotPath,
+    sentinelSharedInventoryBaseDir: fixtureSnapshotPath ? baseDir : undefined,
+    resolveSentinelChatCase: fixtureSnapshotPath
+      ? (id) => resolveSentinelCasePath(baseDir, id)
+      : undefined,
+    allowSentinelModelAccess: fixtureSnapshotPath !== undefined,
     operatorRunExecutor: createOperatorRunToolExecutor({
       baseDir,
       confirm,
@@ -544,7 +551,7 @@ async function withFindingAssignmentGateway(
       socket.addEventListener("error", reject, { once: true });
     });
     await test(async (args) => {
-      input = args;
+      input = typeof args === "string" ? {} : args;
       output = "";
       const completed = Promise.withResolvers<void>();
       const timer = setTimeout(
@@ -554,7 +561,9 @@ async function withFindingAssignmentGateway(
       const receive = ({ data }: MessageEvent) => {
         onFrame?.(String(data));
         const frame = JSON.parse(data);
-        if (frame.type === "response") completed.resolve();
+        if (
+          frame.type === (typeof args === "string" ? "turn_end" : "response")
+        ) completed.resolve();
         if (frame.type === "error") completed.reject(new Error(frame.message));
       };
       socket.addEventListener("message", receive);
@@ -562,7 +571,9 @@ async function withFindingAssignmentGateway(
         socket.send(
           JSON.stringify({
             type: "message",
-            content: "Review the exact remediation requirement.",
+            content: typeof args === "string"
+              ? args
+              : "Review the exact remediation requirement.",
           }),
         );
         await completed.promise;
@@ -6612,6 +6623,9 @@ Deno.test("Reviewed cross-case worker review reaches a scoped planner and reopen
     };
     let approvals = 0;
     let denyDelivery = false;
+    const directCases: string[] = [];
+    let classifiedDirectRead = false;
+    let denySourceClassification = false;
     let blockedDelivery = false;
     const frames: string[] = [];
     const gateway = (
@@ -6625,6 +6639,29 @@ Deno.test("Reviewed cross-case worker review reaches a scoped planner and reopen
         },
         body,
         (hook, input) => {
+          const call = input.tool_call as
+            | { args?: { action?: string } }
+            | undefined;
+          if (
+            hook === "PRE_TOOL_CALL" &&
+            call?.args?.action === "linked_worker_review"
+          ) {
+            directCases.push(String(input.case_id));
+          }
+          if (
+            hook === "POST_TOOL_RESPONSE" &&
+            input.tool_name === "operator_runs" &&
+            String(input.tool_response).includes(exactSummary)
+          ) {
+            classifiedDirectRead ||= String(input.tool_response).includes(
+              "INTERNAL",
+            );
+          }
+          if (
+            denySourceClassification && hook === "POST_TOOL_RESPONSE" &&
+            input.case_id === sourceCase &&
+            input.assignment_id === sourceTask.id
+          ) return false;
           if (
             denyDelivery && hook === "PRE_OUTPUT" &&
             String(input.content).includes(exactSummary)
@@ -6638,6 +6675,7 @@ Deno.test("Reviewed cross-case worker review reaches a scoped planner and reopen
         undefined,
         undefined,
         true,
+        path(sourceCase),
       );
     await gateway(async (turn) => {
       assertStringIncludes(
@@ -6856,7 +6894,58 @@ Deno.test("Reviewed cross-case worker review reaches a scoped planner and reopen
     const admitted = await plan(approvedCase, true);
     assert(admitted);
     const archiveId = crypto.randomUUID();
+    const exactReview = {
+      kind: "sentinel",
+      id: admitted.run.id,
+      revision: admitted.run.revision,
+      action: "linked_worker_review",
+      sourceCase,
+      taskId: sourceTask.id,
+      assetId: "app",
+    };
+    const verifyReview = (output: string) => {
+      const read = JSON.parse(output);
+      assertEquals(read.reference, admitted.read.reference);
+      assertEquals(read.summary, exactSummary);
+    };
     await gateway(async (turn) => {
+      verifyReview(await turn(exactReview));
+      assert(classifiedDirectRead);
+      assertStringIncludes(
+        await turn({ ...exactReview, id: linkOnlyCase }),
+        "unavailable",
+      );
+      assertStringIncludes(
+        await turn({ ...exactReview, id: wrongIdentityCase }),
+        "unavailable",
+      );
+      await turn("/sentinel on");
+      await turn(`/sentinel case ${approvedCase}`);
+      const beforeSelection = directCases.length;
+      verifyReview(await turn(exactReview));
+      assert(directCases.slice(beforeSelection).includes(approvedCase));
+      denySourceClassification = true;
+      try {
+        assertStringIncludes(await turn(exactReview), "unavailable");
+      } finally {
+        denySourceClassification = false;
+      }
+      assertStringIncludes(
+        await turn({ ...exactReview, id: linkOnlyCase }),
+        "unavailable",
+      );
+      await turn(`/sentinel case ${linkOnlyCase}`);
+      assertStringIncludes(await turn(exactReview), "unavailable");
+      await turn(`/sentinel case ${approvedCase}`);
+      frames.length = 0;
+      denyDelivery = true;
+      try {
+        await assertRejects(() => turn(exactReview), Error);
+      } finally {
+        denyDelivery = false;
+      }
+      assert(!frames.some((frame) => frame.includes(exactSummary)));
+      await turn("/sentinel off");
       assertEquals(
         JSON.parse(await turn(admitted.trace)).result,
         admitted.read,
@@ -6864,6 +6953,7 @@ Deno.test("Reviewed cross-case worker review reaches a scoped planner and reopen
       frames.length = 0;
       denyDelivery = true;
       try {
+        await assertRejects(() => turn(exactReview), Error);
         await assertRejects(() => turn(admitted.trace), Error);
       } finally {
         denyDelivery = false;
@@ -7052,7 +7142,9 @@ Deno.test("Reviewed cross-case worker review reaches a scoped planner and reopen
       } finally {
         worker.stop();
       }
+      verifyReview(await turn(exactReview));
       assert(recordScope(3, []));
+      assertStringIncludes(await turn(exactReview), "unavailable");
       assertStringIncludes(await turn(admitted.trace), "unavailable");
     });
   } finally {

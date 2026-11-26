@@ -545,6 +545,7 @@ export const operatorRunTool: ToolDefinition = {
         "finding_lineage",
         "linked_finding",
         "linked_findings",
+        "linked_worker_review",
         "amend_finding_report",
         "record_analyst_finding",
         "traffic_search",
@@ -1468,6 +1469,7 @@ export const sentinelOperatorCaseReadActions = [
   "list_trace_workers",
   "worker_trace_progress",
   "worker_trace_result",
+  "linked_worker_review",
   "analyst_observation",
 ] as const;
 
@@ -1511,6 +1513,7 @@ export const sentinelOperatorCaseReadParameters = [
   "stepIndices",
   "latestResult",
   "workflowRunNumber",
+  "sourceCase",
 ] as const;
 
 export const sentinelOperatorCaseControlActions = [
@@ -1712,6 +1715,41 @@ function exactCategoryTargets(
     });
   }
   return targets;
+}
+
+async function authorizeLinkedSentinelReviewSource(
+  context: OperatorRunToolContext,
+  reference: NonNullable<
+    ReturnType<typeof readLinkedSentinelWorkerReview>
+  >["reference"],
+  result: string,
+  isCurrent: () => boolean,
+) {
+  const { sourceCase, sourceRevision, sourceTaskId } = reference;
+  const scope = {
+    caseId: sourceCase,
+    revision: sourceRevision,
+    taskId: sourceTaskId,
+  };
+  const source = {
+    kind: "sentinel",
+    id: sourceCase,
+    revision: sourceRevision,
+    action: "node",
+    node: `observation:adaptive:review:${sourceTaskId}`,
+  };
+  return !!context.authorizeOwnerRunCall &&
+    !!context.authorizeSentinelTraceRead &&
+    isCurrent() &&
+    await context.authorizeOwnerRunCall(source) &&
+    isCurrent() &&
+    await context.authorizeSentinelTraceRead(
+      scope,
+      operatorRunTool.name,
+      source,
+      result,
+    ) &&
+    isCurrent();
 }
 
 function safeProjection(
@@ -10455,7 +10493,12 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
               const policy = readSentinelFindingReceiptScope(path, revision);
               if (
                 !snapshot || !sources || !policy?.allows(reference.asset) ||
-                context?.authorizeSentinelCaseRead?.(ref.id, revision) === false
+                context?.authorizeSentinelCaseRead?.(ref.id, revision) ===
+                  false ||
+                context?.authorizeSentinelCaseRead?.(
+                    reference.sourceCase,
+                    reference.sourceRevision,
+                  ) === false
               ) return;
               return readLinkedSentinelWorkerReview(
                 options.baseDir,
@@ -10480,18 +10523,19 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
               createHash("sha256").update(text).digest("hex") !==
                 read.resultSha256 ||
               !await authorize(pinned, read.tool, selector) ||
-              !await context.authorizeOwnerRunCall({
-                kind: "sentinel",
-                id: reference.sourceCase,
-                revision: reference.sourceRevision,
-                action: "node",
-                node: `observation:adaptive:review:${reference.sourceTaskId}`,
-              }) ||
+              !isDeepStrictEqual(saved, lookup()) ||
+              !await authorizeLinkedSentinelReviewSource(
+                context,
+                reference,
+                text,
+                () => isDeepStrictEqual(saved, lookup()),
+              ) ||
               !await context.authorizeSavedResponse(
                 read.tool,
                 text,
                 "INTERNAL",
               ) ||
+              !isDeepStrictEqual(saved, lookup()) ||
               !await authorize(pinned, read.tool, selector, text) ||
               !isDeepStrictEqual(saved, lookup())
             ) return unavailable;
@@ -12189,6 +12233,66 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
             ? binding + (offset + limit)
             : null,
         });
+      }
+      if (action === "linked_worker_review") {
+        const { sourceCase, taskId, assetId } = args;
+        if (
+          ref.kind !== "sentinel" || ref.revision === undefined ||
+          typeof sourceCase !== "string" || !isSentinelCaseId(sourceCase) ||
+          sourceCase === ref.id ||
+          typeof taskId !== "string" ||
+          !/^adaptive:[a-f0-9]{64}$/.test(taskId) ||
+          typeof assetId !== "string" || !assetId || assetId.length > 256 ||
+          !context?.authenticatedOwnerSessionId ||
+          !context.authorizeOwnerRunCall ||
+          !canFlowTo("INTERNAL", context.ceiling ?? "PUBLIC") ||
+          Object.keys(args).some((key) =>
+            ![
+              "action",
+              "kind",
+              "id",
+              "revision",
+              "sourceCase",
+              "taskId",
+              "assetId",
+            ]
+              .includes(key)
+          ) || !await controller.inspect(ref)
+        ) return unavailable;
+        const revision = ref.revision;
+        const path = resolveSentinelCasePath(options.baseDir, ref.id);
+        const lookup = () => {
+          const sources = readSentinelLinkedSourcesForRevision(path, revision);
+          const source = sources?.find(({ caseId }) => caseId === sourceCase);
+          const snapshot = readSentinelAssessmentRevision(path, revision)
+            ?.result.sharedGraph.snapshot;
+          if (
+            !sources || !source || !snapshot ||
+            !readSentinelFindingReceiptScope(path, revision)?.allows(assetId) ||
+            context.authorizeSentinelCaseRead?.(ref.id, revision) === false ||
+            context.authorizeSentinelCaseRead?.(sourceCase, source.revision) ===
+              false
+          ) return;
+          return readLinkedSentinelWorkerReview(
+            options.baseDir,
+            sources,
+            snapshot,
+            { sourceCase, taskId, asset: assetId },
+          );
+        };
+        const saved = lookup();
+        if (!saved) return unavailable;
+        const current = () => isDeepStrictEqual(saved, lookup());
+        const result = safeProjection(saved);
+        if (
+          !await authorizeLinkedSentinelReviewSource(
+            context,
+            saved.reference,
+            result,
+            current,
+          )
+        ) return unavailable;
+        return result;
       }
       if (action === "linked_finding") {
         const raw = args.linkedFinding;
