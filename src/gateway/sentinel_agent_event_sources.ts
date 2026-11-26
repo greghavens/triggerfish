@@ -61,7 +61,7 @@ export function sentinelAgentEventSources(
         }
         if (kinds.has("finding")) {
           for (const finding of readSentinelWorkerFindingHistory(path)) {
-            if (finding.kind === "finding" && finding.runId === runId) {
+            if (finding.kind === "finding" && finding.caseId === caseId) {
               publish({
                 kind: "finding",
                 receipt: finding.id,

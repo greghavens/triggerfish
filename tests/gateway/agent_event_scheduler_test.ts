@@ -452,6 +452,32 @@ Deno.test("Reviewed event subscription dispatches committed case metadata only o
 
     scheduler.stop();
     const closed = startSentinelAssessment(path, { goal: "Retained goal" });
+    assert(closed.plan.runId);
+    const closedFindings = openSentinelWorkerFindingStore(path);
+    let closedFindingId: string;
+    try {
+      const finding = closedFindings.recordFinding({
+        caseId: "main",
+        runId: closed.plan.runId,
+        evidenceRevision: closed.revision,
+        taskId,
+        targetId: "local",
+        graphFindingId: "retained-finding",
+        controlId: "local-control",
+        evidenceId: "local-evidence",
+        snapshotDigest: "b".repeat(64),
+        requestId: crypto.randomUUID(),
+        evaluatedAt: new Date().toISOString(),
+        observedAt: new Date().toISOString(),
+        validUntil: new Date(Date.now() + 60_000).toISOString(),
+        title: "Retained finding",
+        summary: "Private historical finding.",
+      });
+      assert(finding);
+      closedFindingId = finding.id;
+    } finally {
+      closedFindings.close();
+    }
     assert(completeSentinelAssessmentGoal(
       path,
       closed.revision,
@@ -469,6 +495,9 @@ Deno.test("Reviewed event subscription dispatches committed case metadata only o
       `${closed.plan.runId}:${closed.revision}`,
     );
     assert(!messages[3].includes("Private historical conclusion"));
+    assertStringIncludes(messages[3], '"kind":"finding"');
+    assertStringIncludes(messages[3], closedFindingId);
+    assert(!messages[3].includes("Private historical finding"));
     scheduler.stop();
     scheduler.start();
     await manage({ action: "agent_event_subscriptions" });
