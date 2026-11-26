@@ -96,6 +96,7 @@ async function withArchivedPlannerRead(
   publicationPolicy?: (hook: string, input: Record<string, unknown>) => boolean,
   onFrame?: (frame: string) => void,
   sentinelMode = false,
+  beforeHook?: (hook: string, input: Record<string, unknown>) => Promise<void>,
 ) {
   let selection: Record<string, unknown> = {};
   let readout = "";
@@ -137,7 +138,8 @@ async function withArchivedPlannerRead(
         confirm: approval ?? (() => Promise.resolve(true)),
       }),
       hookRunner: {
-        evaluateHook(hook, { input }) {
+        async evaluateHook(hook, { input }) {
+          if (beforeHook) await beforeHook(hook, input);
           const blockedPublication = selection.action === "publish_finding" &&
             publicationPolicy && !publicationPolicy(hook, input);
           const allowed = !blockedPublication &&
@@ -150,12 +152,12 @@ async function withArchivedPlannerRead(
                 "sentinel_shared_finding_source",
                 ...(sentinelMode ? ["operator_runs"] : []),
               ].includes(String(input.tool_name)));
-          return Promise.resolve({
+          return {
             allowed,
             action: allowed ? "ALLOW" : "BLOCK",
             ruleId: null,
             duration: 0,
-          });
+          };
         },
       },
     }),
@@ -3220,6 +3222,10 @@ Deno.test("Retained digest pages reauthorize every assignment before and after a
       includeResult: true,
     };
     const cursors: string[] = [];
+    const unavailable = "Error: This operation or exact run is unavailable.";
+    const digestUnavailable =
+      "Error: The requested evidence digest or revision is unavailable.";
+    let allowedPage = "";
     await withArchivedPlannerRead(directory, async (read) => {
       for (const id of ids.slice(1)) {
         const { page } = JSON.parse(await read(request(id)));
@@ -3230,35 +3236,54 @@ Deno.test("Retained digest pages reauthorize every assignment before and after a
       assertEquals(JSON.parse(await read(retainedRead)).result.page.members, [
         publicMember,
       ]);
-      const narrowed = JSON.parse(
-        await read({
-          ...ref,
-          action: "narrow_constraints",
+      allowedPage = await read(request(ids[0]));
+      assertEquals(JSON.parse(allowedPage).page.members, [publicMember]);
+    });
+
+    let changedDuringSourceResponse = false;
+    await withArchivedPlannerRead(
+      directory,
+      async (read) => {
+        assertEquals(await read(retainedRead), unavailable);
+        assert(changedDuringSourceResponse);
+      },
+      undefined,
+      undefined,
+      undefined,
+      false,
+      async (hook, input) => {
+        if (
+          hook !== "POST_TOOL_RESPONSE" ||
+          input.tool_name !== "sentinel_expand_evidence_digest" ||
+          changedDuringSourceResponse
+        ) return;
+        await Promise.resolve();
+        assert(recordSentinelOperatingConstraints(path, {
           runId,
+          evidenceRevision: state.revision,
           expectedVersion: 0,
           requestId: crypto.randomUUID(),
-          deniedKinds: [],
-          allowedAssetIds: ["allowed"],
-        }),
-      );
-      assertEquals(narrowed.record.constraints.allowedAssetIds, ["allowed"]);
-    });
+          operatorScope: "digest-source-hook-fixture",
+          constraints: { deniedKinds: [], allowedAssetIds: ["allowed"] },
+        }));
+        changedDuringSourceResponse = true;
+      },
+    );
     for (const archived of [false, true]) {
       if (archived) {
         await archiveAndRestoreDigestFixture(directory, path, ref, runId);
       }
       await withArchivedPlannerRead(directory, async (read) => {
-        assertStringIncludes(await read(retainedRead), "unavailable");
-        const { page } = JSON.parse(await read(request(ids[0])));
-        assertEquals(page.members, [publicMember]);
+        assertEquals(await read(retainedRead), unavailable);
+        assertEquals(await read(request(ids[0])), allowedPage);
         for (const [index, id] of ids.slice(1).entries()) {
-          assertStringIncludes(await read(request(id)), "unavailable");
-          assertStringIncludes(
+          assertEquals(await read(request(id)), digestUnavailable);
+          assertEquals(
             await read({
               ...request(id),
               cursor: cursors[index],
             }),
-            "unavailable",
+            digestUnavailable,
           );
         }
       });
