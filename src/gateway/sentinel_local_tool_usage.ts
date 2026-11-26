@@ -4,6 +4,7 @@ import { canFlowTo } from "../core/types/classification.ts";
 import {
   readSentinelLocalUsageSteps,
   type SentinelLinkedUsageStep,
+  type SentinelTrafficBatchUsageStep,
   type SentinelTrafficResultUsageStep,
   type SentinelWorkflowUsageStep,
 } from "../sentinel/local_tool_usage.ts";
@@ -20,7 +21,10 @@ export async function readAuthorizedSentinelLocalToolUsage(
   context: OperatorRunToolContext | undefined,
   reopenLinked?: (step: SentinelLinkedUsageStep) => Promise<string | undefined>,
   authorizeExactResult?: (
-    step: SentinelWorkflowUsageStep | SentinelTrafficResultUsageStep,
+    step:
+      | SentinelWorkflowUsageStep
+      | SentinelTrafficResultUsageStep
+      | SentinelTrafficBatchUsageStep,
   ) => Promise<boolean>,
 ) {
   const owner = context?.authorizeOwnerRunCall;

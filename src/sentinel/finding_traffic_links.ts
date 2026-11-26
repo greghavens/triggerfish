@@ -776,6 +776,21 @@ function openLinks(snapshotPath: string, readOnly: boolean, now: () => number) {
       : undefined;
   }
 
+  function readAssignmentBatchById(
+    scope: Parameters<typeof readAssignmentBatch>[0],
+    id: string,
+  ) {
+    const match = /^finding-traffic-batch:([a-f0-9]{64})$/.exec(id);
+    if (!match || scope.caseId !== caseId || !hasTable(db, batchTable)) return;
+    const rows = db.prepare(`
+      SELECT request_id FROM traffic_link_batches
+      WHERE binding = ? AND run_id = ? AND revision = ? LIMIT 2
+    `).all(match[1], scope.runId, scope.evidenceRevision);
+    if (rows.length !== 1 || typeof rows[0].request_id !== "string") return;
+    const result = readAssignmentBatch(scope, rows[0].request_id);
+    return result?.id === id ? result : undefined;
+  }
+
   function hidePublicationLinks(links: readonly SentinelFindingTrafficLink[]) {
     db.exec(`CREATE TABLE IF NOT EXISTS staged_publication_links (
       link_id TEXT PRIMARY KEY REFERENCES traffic_links(id)
@@ -1025,6 +1040,7 @@ function openLinks(snapshotPath: string, readOnly: boolean, now: () => number) {
     inspectBatch,
     recordBatch,
     readAssignmentBatch,
+    readAssignmentBatchById,
     /** The caller must gate case and lease for every request, including retries. */
     record(
       raw: SentinelFindingTrafficLinkInput,
@@ -1210,6 +1226,18 @@ export function readSentinelFindingTrafficAssignmentBatch(
   return readFindingTrafficLinks(
     snapshotPath,
     (links) => links.readAssignmentBatch(scope, requestId),
+  );
+}
+
+/** Resolve the exact batch emitted by a saved assignment step. */
+export function readSentinelFindingTrafficAssignmentBatchById(
+  snapshotPath: string,
+  scope: Parameters<ReturnType<typeof openLinks>["readAssignmentBatchById"]>[0],
+  id: string,
+) {
+  return readFindingTrafficLinks(
+    snapshotPath,
+    (links) => links.readAssignmentBatchById(scope, id),
   );
 }
 

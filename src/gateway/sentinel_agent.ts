@@ -9830,8 +9830,11 @@ function createAgent(
               linkedNodeIds: assignedTargetEvidenceIds,
             },
           }),
-          ...((turn.traceResultDigests || assigned) && resultSha256 &&
-            { resultSha256 }),
+          ...((turn.traceResultDigests || assigned ||
+            name === SENTINEL_TRAFFIC_ATTACH &&
+              typeof target === "string" &&
+              target.startsWith("finding-traffic-batch:")) &&
+            resultSha256 && { resultSha256 }),
           ...((turn.traceResultDigests || goalReceiptRead) && !failed &&
             name === sharedFindingSourceTool.name && {
             peerFinding: {

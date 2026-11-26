@@ -470,6 +470,7 @@ import {
 } from "./sentinel_finding_traffic_tool.ts";
 import {
   listSentinelFindingTrafficLinks,
+  readSentinelFindingTrafficAssignmentBatchById,
   readSentinelTrafficCompositionHistory,
   readSentinelTrafficCompositionReceipt,
   readSentinelTrafficLinkAnnotations,
@@ -1225,7 +1226,7 @@ export const operatorRunTool: ToolDefinition = {
     includeRetainedTrafficResults: {
       type: "boolean",
       description:
-        "Include retained traffic search pages, payload pages, and finding traffic links after reauthorizing each exact source. Totals include no traffic payloads.",
+        "Include retained traffic search pages, payload pages, finding links, and attachment batches after reauthorizing each exact source. Totals include no traffic payloads.",
     },
     includeOriginalWorkflowReceipts: {
       type: "boolean",
@@ -9135,6 +9136,10 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
                     validated.attempt !== step.attempt ||
                     validated.ordinal !== step.ordinal + 1)
               ) return false;
+              if (
+                step.tool === "sentinel_attach_finding_traffic" &&
+                validated.result.id !== step.batchId
+              ) return false;
               if (step.tool === "sentinel_live_workflow_status") {
                 const receipt = readSentinelGitHubWorkflowReadReceipt(
                   validated.result,
@@ -11361,6 +11366,111 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
                 taskId,
                 index,
                 result: JSON.parse(text),
+              });
+            }
+            if (
+              step?.tool === SENTINEL_TRAFFIC_ATTACH &&
+              step.target?.startsWith("finding-traffic-batch:")
+            ) {
+              const task = history?.tasks.find(({ id }) => id === taskId);
+              const authorize = context.authorizeSentinelTraceRead;
+              if (
+                !task?.nodeId || !authorize || step.outcome !== "returned" ||
+                !step.resultSha256 || !/^[a-f0-9]{64}$/.test(step.resultSha256)
+              ) return unavailable;
+              const revision = ref.revision;
+              const assetId = task.nodeId;
+              const batchId = step.target;
+              const scope = { caseId: ref.id, revision, taskId: task.id };
+              const call = { revision, batchId };
+              const currentHistory = () =>
+                readHistoricalAdaptiveSentinel(
+                  path,
+                  revision,
+                );
+              const readBatch = () =>
+                readSentinelFindingTrafficAssignmentBatchById(
+                  path,
+                  {
+                    caseId: ref.id,
+                    runId,
+                    evidenceRevision: revision,
+                    taskId: task.id,
+                    assetId,
+                  },
+                  batchId,
+                );
+              if (!await authorize(scope, step.tool, call)) return unavailable;
+              const batch = readBatch();
+              if (!batch) return unavailable;
+              const memberSelector = (link: typeof batch.links[number]) => ({
+                revision,
+                evidenceId: link.trafficId,
+                digest: link.trafficDigest,
+              });
+              const readMember = (
+                link: typeof batch.links[number],
+                state: typeof history,
+              ) => {
+                const proof = link.sourceStep;
+                const args = memberSelector(link);
+                const source = proof && proof.stepIndex < index &&
+                  savedStep(state, proof.stepIndex);
+                if (
+                  !source || source.tool !== SENTINEL_TRAFFIC_READ ||
+                  source.outcome !== "returned" || !source.trafficRead ||
+                  !isDeepStrictEqual(source.trafficRead, {
+                    ...args,
+                    sha256: proof.sha256,
+                  })
+                ) return;
+                const projected = readProjectedSentinelTrafficReceipt(
+                  path,
+                  ref.id,
+                  revision,
+                  args,
+                  assetId,
+                );
+                if (projected?.receipt.family !== link.trafficSource) return;
+                const text = JSON.stringify(projected);
+                if (
+                  createHash("sha256").update(text).digest("hex") !==
+                    proof.sha256
+                ) {
+                  return;
+                }
+                return text;
+              };
+              for (const link of batch.links) {
+                const args = memberSelector(link);
+                if (!await authorize(scope, SENTINEL_TRAFFIC_READ, args)) {
+                  return unavailable;
+                }
+                const member = readMember(link, history);
+                if (
+                  !member ||
+                  !await authorize(scope, SENTINEL_TRAFFIC_READ, args, member)
+                ) return unavailable;
+              }
+              const retained = { _classification: "INTERNAL", ...batch };
+              const text = JSON.stringify(retained);
+              if (
+                createHash("sha256").update(text).digest("hex") !==
+                  step.resultSha256 ||
+                !await authorize(scope, step.tool, call, text)
+              ) return unavailable;
+              const current = currentHistory();
+              if (
+                !isDeepStrictEqual(savedStep(current), step) ||
+                !isDeepStrictEqual(readBatch(), batch) ||
+                batch.links.some((link) => !readMember(link, current))
+              ) return unavailable;
+              return projectResult({
+                run: ref,
+                runId,
+                taskId,
+                index,
+                result: retained,
               });
             }
             if (step?.tool === SENTINEL_TRAFFIC_ATTACH) {

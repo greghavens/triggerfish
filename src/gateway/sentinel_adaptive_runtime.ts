@@ -7818,6 +7818,39 @@ export function createSentinelModelPlanner(
                     continue;
                   }
                   if (
+                    call && call.name === SENTINEL_TRAFFIC_ATTACH &&
+                    typeof call.args.requestId === "string"
+                  ) {
+                    const receipt = lookupMutation(
+                      task.id,
+                      task.nodeId,
+                      call.name,
+                      call.args.requestId,
+                    );
+                    if (
+                      receipt?.result === entry.content &&
+                      receipt.id.startsWith("finding-traffic-batch:") &&
+                      "trafficBatch" in receipt && receipt.trafficBatch?.length
+                    ) {
+                      const previous = previousProgress.find((step) =>
+                        !resumedProgress.has(step) && step.tool === call.name &&
+                        step.outcome === "returned" &&
+                        step.target === receipt.id
+                      );
+                      if (previous) resumedProgress.add(previous);
+                      steps.push(
+                        {
+                          tool: call.name,
+                          outcome: "returned",
+                          target: receipt.id,
+                          ...previous,
+                          resultSha256: digest,
+                        },
+                      );
+                      continue;
+                    }
+                  }
+                  if (
                     call && (call.name === SENTINEL_ASSET_DISCOVERY_SUBMIT ||
                       call.name === SENTINEL_GOAL_PROVE) &&
                     typeof call.args.requestId === "string"

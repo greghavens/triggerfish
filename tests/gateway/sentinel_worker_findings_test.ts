@@ -13671,10 +13671,12 @@ async function testScopedReporterRestart(
   verifyReporterTrace: boolean | "relationship" = false,
 ) {
   const baseDir = await Deno.makeTempDir();
-  const path = resolveSentinelCasePath(
-    baseDir,
-    initialPublication ? "retained-finding" : undefined,
-  );
+  const caseId = initialPublication
+    ? "retained-finding"
+    : useBatch
+    ? "retained-batch"
+    : "main";
+  const path = resolveSentinelCasePath(baseDir, caseId);
   let planner: ReturnType<typeof createSentinelModelPlanner> | undefined;
   const configureReporter = !useBatch && !initialPublication && !hinted &&
     !verifyReporterTrace;
@@ -14145,6 +14147,7 @@ async function testScopedReporterRestart(
     let interruptedAfterCommit = false;
     const seenHooks: string[] = [];
     const attachmentHooks: string[] = [];
+    let exactBatch: { id: string } | undefined;
     let offeredAttachments = 0;
     const reportWrite = {
       findingId: finding.id,
@@ -14260,6 +14263,7 @@ async function testScopedReporterRestart(
             ? savedAttachment.links[0]
             : savedAttachment.link;
           if (useBatch) {
+            exactBatch = savedAttachment;
             assert(
               /^finding-traffic-batch:[a-f0-9]{64}$/.test(savedAttachment.id),
             );
@@ -14461,7 +14465,7 @@ async function testScopedReporterRestart(
       assertEquals(interruptedAfterAttachment, false);
       await withTidepool(baseDir, async (_list, provenance) => {
         assertEquals(
-          (await provenance(state.revision)).findingTrafficLinks ?? [],
+          (await provenance(state.revision, caseId)).findingTrafficLinks ?? [],
           [],
         );
       });
@@ -14516,8 +14520,146 @@ async function testScopedReporterRestart(
     assertEquals(offeredAttachments, 1);
     assert(attachmentHooks.includes("PRE_TOOL_CALL"));
     assert(attachmentHooks.includes("POST_TOOL_RESPONSE"));
+    if (useBatch) {
+      assert(exactBatch);
+      const exact = exactBatch;
+      const step = review()?.steps.findIndex(({ target }) =>
+        target === exact.id
+      );
+      assert(step !== undefined && step >= 0);
+      const run = {
+        kind: "sentinel",
+        id: caseId,
+        revision: state.revision,
+        runId: state.plan.runId,
+      };
+      const trace = {
+        action: "worker_trace_result",
+        kind: run.kind,
+        id: run.id,
+        revision: run.revision,
+        taskId: reporter.id,
+        stepIndices: [step],
+      };
+      const usage = {
+        ...run,
+        action: "case_local_tool_usage",
+        includeRetainedTrafficResults: true,
+      };
+      assert(stopSentinelAssessment(path));
+      const archiveId = crypto.randomUUID();
+      await withFindingAssignmentGateway(
+        baseDir,
+        () => Promise.resolve(true),
+        async (turn) => {
+          const preArchive = await turn(trace);
+          assert(preArchive.startsWith("{"), preArchive);
+          assertEquals(JSON.parse(preArchive).result, exact);
+          assertEquals(
+            JSON.parse(
+              await turn({ ...run, action: "archive", requestId: archiveId }),
+            )
+              .receipt.status,
+            "succeeded",
+          );
+        },
+      );
+      await Deno.rename(dirname(path), join(baseDir, "before-batch-restore"));
+      let denySecond = false;
+      const checks: string[] = [];
+      await withFindingAssignmentGateway(
+        baseDir,
+        () => Promise.resolve(true),
+        async (turn) => {
+          assertEquals(
+            JSON.parse(
+              await turn({
+                ...run,
+                action: "restore",
+                archiveId,
+                requestId: crypto.randomUUID(),
+              }),
+            ).receipt.status,
+            "succeeded",
+          );
+          const reopened = await turn(trace);
+          assert(reopened.startsWith("{"), reopened);
+          assertEquals(JSON.parse(reopened).result, exact);
+          assertEquals(
+            checks,
+            trafficRecords.map(({ evidenceId }) => evidenceId),
+          );
+          const result = await turn(usage);
+          assert(result.startsWith("{"), result);
+          assertEquals(
+            JSON.parse(result).totals.filter(({ tool }: { tool: string }) =>
+              tool === "sentinel_attach_finding_traffic"
+            ),
+            [{
+              role: "worker",
+              tool: "sentinel_attach_finding_traffic",
+              calls: 1,
+              failed: 0,
+            }],
+          );
+          assert(!result.includes(exact.id));
+          assert(!result.includes(trafficRecords[1].evidenceId));
+
+          denySecond = true;
+          const denied = await turn(trace);
+          assertStringIncludes(denied, "unavailable");
+          assert(!denied.includes(exact.id));
+          assert(!denied.includes(trafficRecords[0].evidenceId));
+          assertStringIncludes(await turn(usage), "unavailable");
+          assertStringIncludes(
+            await turn({ ...trace, revision: run.revision + 1 }),
+            "unavailable",
+          );
+          denySecond = false;
+          const journal = new DatabaseSync(
+            join(dirname(path), "sentinel-adaptive.db"),
+          );
+          try {
+            const note = journal.prepare(`
+              SELECT note_id, steps FROM adaptive_note_steps
+              JOIN adaptive_model_reviews ON note_id = noteId
+              WHERE taskId = ?
+            `).get(reporter.id);
+            assert(
+              note && typeof note.steps === "string" &&
+                typeof note.note_id === "number",
+            );
+            const originalSteps = JSON.parse(note.steps);
+            const put = journal.prepare(
+              "UPDATE adaptive_note_steps SET steps = ? WHERE note_id = ?",
+            );
+            for (const digest of [undefined, "0".repeat(64)]) {
+              const changed = structuredClone(originalSteps);
+              changed[step].resultSha256 = digest;
+              put.run(JSON.stringify(changed), note.note_id);
+              assertStringIncludes(await turn(trace), "unavailable");
+              assertStringIncludes(await turn(usage), "unavailable");
+            }
+            put.run(note.steps, note.note_id);
+          } finally {
+            journal.close();
+          }
+        },
+        (hook, input) => {
+          if (
+            input.tool_name !== "sentinel_traffic_get" ||
+            hook !== "POST_TOOL_RESPONSE"
+          ) return true;
+          const evidenceId = trafficRecords.find(({ evidenceId }) =>
+            String(input.tool_response).includes(evidenceId)
+          )?.evidenceId;
+          if (evidenceId) checks.push(evidenceId);
+          return !denySecond || evidenceId !== trafficRecords[1].evidenceId;
+        },
+      );
+    }
     await withTidepool(baseDir, async (_list, provenance, request) => {
-      const exported = await provenance(state.revision);
+      const exported = await provenance(state.revision, caseId);
       const links = exported.findingTrafficLinks ?? [];
       assertEquals(links.length, useBatch ? 2 : 1);
       if (useBatch) {

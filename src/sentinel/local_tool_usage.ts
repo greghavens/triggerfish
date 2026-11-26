@@ -98,11 +98,20 @@ function validTrafficResultDigest(value: unknown): value is string {
   return typeof value === "string" && /^[a-f0-9]{64}$/.test(value);
 }
 
+export type SentinelTrafficBatchUsageStep = Step & {
+  readonly tool: "sentinel_attach_finding_traffic";
+  readonly taskId: string;
+  readonly assignedTarget: string;
+  readonly batchId: string;
+  readonly receiptSha256: string;
+};
+
 export type SentinelLocalUsageStep =
   | SentinelLinkedUsageStep
   | SentinelTrafficUsageStep
   | SentinelWorkflowUsageStep
   | SentinelTrafficResultUsageStep
+  | SentinelTrafficBatchUsageStep
   | (
     & Step
     & (
@@ -293,7 +302,8 @@ export function readSentinelLocalUsageSteps(
         json_extract(step.value, '$.trafficRead.evidenceId') AS trafficEvidence,
         json_extract(step.value, '$.trafficRead.digest') AS trafficDigest,
         json_extract(step.value, '$.trafficRead.sha256') AS trafficSha,
-        ${trafficResultSha} AS trafficResultSha
+        ${trafficResultSha} AS trafficResultSha,
+        json_extract(step.value, '$.resultSha256') AS resultSha
       FROM selected JOIN json_each(selected.steps) step
       WHERE selected.rank = 1
         AND (json_extract(step.value, '$.tool') = 'sentinel_assigned_target'
@@ -306,6 +316,8 @@ export function readSentinelLocalUsageSteps(
             OR (? AND json_extract(step.value, '$.tool') IN (
               'sentinel_traffic_search', 'sentinel_traffic_blob',
               'sentinel_finding_traffic_links'))
+            OR (? AND json_extract(step.value, '$.tool') = 'sentinel_attach_finding_traffic'
+              AND json_extract(step.value, '$.target') LIKE 'finding-traffic-batch:%')
           )))
       ORDER BY selected.id, ordinal LIMIT ?
     `).all(
@@ -316,6 +328,7 @@ export function readSentinelLocalUsageSteps(
       Number(includeSavedWorkflowReceipts),
       Number(includeOriginalWorkflowReceipts),
       Number(includeRetainedTrafficResults),
+      Number(includeRetainedTrafficResults),
       budget + 1 - retained.length,
     );
     for (const row of rows) {
@@ -325,6 +338,23 @@ export function readSentinelLocalUsageSteps(
         typeof row.ordinal !== "number" || !Number.isSafeInteger(row.ordinal) ||
         (row.outcome !== "returned" && row.outcome !== "error")
       ) return;
+      if (row.tool === "sentinel_attach_finding_traffic") {
+        if (
+          typeof row.target !== "string" ||
+          !/^finding-traffic-batch:[a-f0-9]{64}$/.test(row.target) ||
+          !validTrafficResultDigest(row.resultSha)
+        ) return;
+        retained.push({
+          tool: row.tool,
+          taskId: row.id,
+          assignedTarget: row.nodeId,
+          ordinal: row.ordinal,
+          outcome: row.outcome,
+          batchId: row.target,
+          receiptSha256: row.resultSha,
+        });
+        continue;
+      }
       if (isTrafficResultTool(row.tool)) {
         if (!validTrafficResultDigest(row.trafficResultSha)) return;
         retained.push({
