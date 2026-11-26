@@ -4594,6 +4594,11 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
         category: templateCategory,
         childDescription: "Configuration baseline review",
         childGoal: "Compare approved configuration to the baseline.",
+        interceptRules: [{
+          effect: "block" as const,
+          enabled: true,
+          tool: "sentinel_graph_overview",
+        }],
       };
       const beforeTemplateApproval = confirmations.length;
       denied = "PRE_TOOL_CALL";
@@ -4637,6 +4642,13 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
       const templatedRun = JSON.parse((await turn(firstTemplateStart)).result);
       assertEquals(templatedRun.run.label, firstTemplate.description);
       assertEquals(templatedRun.template, { id: templateId, version: 1 });
+      assertEquals(firstTemplate.interceptRules, saveTemplate.interceptRules);
+      assertEquals(
+        readSentinelAssessment(
+          resolveSentinelCasePath(baseDir, firstTemplateStart.targetId),
+        )?.plan.assessmentTemplate?.interceptRules,
+        saveTemplate.interceptRules,
+      );
       assertEquals(
         readSentinelAssessment(
           resolveSentinelCasePath(baseDir, firstTemplateStart.targetId),

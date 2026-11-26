@@ -1,3 +1,4 @@
+import { withPinnedReviewedToolRules } from "../core/policy/reviewed_tool_rules.ts";
 import { withAgentProfileRuntime } from "../agent/orchestrator/agent_profile_runtime.ts";
 import { readAgentProfile } from "../core/agent_profiles.ts";
 import {
@@ -6486,7 +6487,17 @@ function createAgent(
             JSON.parse(context.input.tool_response).evidenceRevision,
           );
         }
-        const policyInput = scoped || selectedCaseCall ||
+        const localCase = typeof toolName === "string" &&
+          !selectedCaseGraph &&
+          locateSentinelCase(options.snapshotPath)?.caseId;
+        const localRun = localCase
+          ? readSentinelAssessment(options.snapshotPath)
+          : undefined;
+        const templateRules = localRun?.plan.assessmentTemplate?.interceptRules;
+        const pin = templateRules?.length && localCase && localRun?.plan.runId
+          ? { caseId: localCase, runId: localRun.plan.runId }
+          : undefined;
+        const policyInput = scoped || selectedCaseCall || pin ||
             (typeof toolName === "string" && !!options.assignedTaskLeaseToken)
           ? {
             tool_name: toolName,
@@ -6494,10 +6505,8 @@ function createAgent(
               ? (typeof call?.args?.id === "string"
                 ? call.args.id
                 : pendingTelemetry?.graphCaseId) ?? null
-              : locateSentinelCase(options.snapshotPath)?.caseId ?? null,
-            run_id: selectedCaseGraph
-              ? null
-              : readSentinelAssessment(options.snapshotPath)?.plan.runId ?? null,
+              : localCase || null,
+            run_id: selectedCaseGraph ? null : localRun?.plan.runId ?? null,
             asset_id: options.assignedTaskLeaseToken
               ? readAssignedModelReview(options)?.nodeId ?? null
               : null,
@@ -6532,7 +6541,24 @@ function createAgent(
             operating_constraints_digest: proof.digest,
           }
           : policyInput;
-        const result = await options.hookRunner.evaluateHook(
+        const hooks = name === "PRE_TOOL_CALL" && pin && templateRules
+          ? withPinnedReviewedToolRules(options.hookRunner, () => {
+            const current = readSentinelAssessment(options.snapshotPath);
+            if (
+              current?.plan.runId !== pin.runId ||
+              current.revision !== localRun?.revision ||
+              (options.assessmentRevision !== undefined &&
+                current.revision !== options.assessmentRevision)
+            ) {
+              throw new Error("Sentinel template rule scope changed");
+            }
+            return {
+              runId: pin.runId,
+              rules: templateRules.map((rule) => ({ ...rule, ...pin })),
+            };
+          })
+          : options.hookRunner;
+        const result = await hooks.evaluateHook(
           name,
           metadata
             ? {

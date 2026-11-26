@@ -1212,6 +1212,11 @@ Deno.test("standalone Sentinel start binds the reviewed template version and exa
     childDescription: description,
     childGoal: objective,
     category,
+    interceptRules: [{
+      effect: "block" as const,
+      enabled: true,
+      tool: "sentinel_graph_overview",
+    }],
   };
   const selected = { id: templateId, version: 1 };
   const criteria = [goal("configure", "future-configuration")];
@@ -1286,6 +1291,10 @@ Deno.test("standalone Sentinel start binds the reviewed template version and exa
         approved?.assessmentTemplate,
       );
       assertEquals(state?.plan.inventoryCoverageEnabled, false);
+      assertEquals(
+        state?.plan.assessmentTemplate?.interceptRules,
+        templateRequest.interceptRules,
+      );
     }, (registry) => {
       registry.register({
         name: "template-goal-draft",
@@ -1329,6 +1338,40 @@ Deno.test("standalone Sentinel start binds the reviewed template version and exa
         async () => true,
       ),
     );
+    let toolReply: string | undefined;
+    await withSentinelGoalSocket(path, async (turn) => {
+      await turn("Summarize this saved case graph");
+      assert(toolReply);
+      assertMatch(toolReply, /blocked|denied/i);
+    }, (registry) => {
+      registry.register({
+        name: "template-tool-check",
+        supportsStreaming: false,
+        complete(messages, tools) {
+          const usage = { inputTokens: 1, outputTokens: 1 };
+          const reply = messages.findLast(({ role }) => role === "tool");
+          if (reply) {
+            toolReply = String(reply.content);
+            return Promise.resolve({
+              content: "Reviewed.",
+              toolCalls: [],
+              usage,
+            });
+          }
+          assert(JSON.stringify(tools).includes("sentinel_graph_overview"));
+          return Promise.resolve({
+            content: "",
+            toolCalls: [{
+              id: crypto.randomUUID(),
+              type: "function",
+              function: { name: "sentinel_graph_overview", arguments: "{}" },
+            }],
+            usage,
+          });
+        },
+      });
+      registry.setDefault("template-tool-check");
+    });
     await withSentinelGoalSocket(path, async (turn) => {
       const replay = JSON.parse(await turn(start()));
       assertEquals(replay.duplicate, true);

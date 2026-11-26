@@ -1,4 +1,8 @@
 import {
+  parseReviewedToolRule,
+  type ReviewedToolRule,
+} from "../core/policy/reviewed_tool_rules.ts";
+import {
   readSentinelIncidentRecommendationEvidence,
   sentinelIncidentDispositions,
   type SentinelIncidentRecommendationEvidence,
@@ -153,28 +157,54 @@ export type AssessmentPlan =
     readonly goalSupersessions?: readonly SentinelGoalSupersession[];
   };
 
-interface SentinelAssessmentTemplateBinding {
+type TemplateToolRule = Omit<ReviewedToolRule, "caseId" | "runId">;
+
+/** Templates use relative selectors bound to the admitted case and run. */
+export function parseSentinelTemplateToolRules(
+  raw: unknown,
+): readonly TemplateToolRule[] | undefined {
+  if (!Array.isArray(raw) || raw.length > 8) return;
+  const rules: TemplateToolRule[] = [];
+  for (const value of raw) {
+    if (
+      !value || typeof value !== "object" || Array.isArray(value) ||
+      "caseId" in value || "runId" in value
+    ) return;
+    const parsed = parseReviewedToolRule({ ...value, caseId: "main" });
+    if (!parsed) return;
+    const { caseId: _caseId, runId: _runId, ...relative } = parsed;
+    rules.push(relative);
+  }
+  return rules;
+}
+
+export interface SentinelAssessmentTemplateBinding {
   readonly id: string;
   readonly version: number;
   readonly digest: string;
+  readonly interceptRules?: readonly TemplateToolRule[];
 }
 
 export function parseSentinelAssessmentTemplateBinding(
   raw: unknown,
 ): SentinelAssessmentTemplateBinding | undefined {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return;
-  const { id, version, digest } = raw as Partial<
+  const { id, version, digest, interceptRules } = raw as Partial<
     SentinelAssessmentTemplateBinding
   >;
+  const rules = parseSentinelTemplateToolRules(interceptRules);
   if (
     typeof id !== "string" ||
     !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(id) ||
     typeof version !== "number" || !Number.isSafeInteger(version) ||
     version < 1 ||
     typeof digest !== "string" || !/^[a-f0-9]{64}$/.test(digest) ||
-    Object.keys(raw).length !== 3
+    (interceptRules !== undefined && !rules) ||
+    Object.keys(raw).some((key) =>
+      !["id", "version", "digest", "interceptRules"].includes(key)
+    )
   ) return;
-  return { id, version, digest };
+  return { id, version, digest, ...(rules && { interceptRules: rules }) };
 }
 
 type FormalGoalPlan = Pick<
@@ -1586,6 +1616,7 @@ export function startSentinelAssessment(
     childDescription?: string;
     category?: OperatorRunCategorySelection;
     templateKey?: string;
+    templateBinding?: SentinelAssessmentTemplateBinding;
     timeoutSeconds?: number;
     modelProfile?: SelectedModelProfile;
     modelFallbackProfiles?: readonly SelectedModelProfile[];
@@ -1608,6 +1639,14 @@ export function startSentinelAssessment(
   ) {
     throw new Error("Invalid Sentinel admission category");
   }
+  const templateBinding = parseSentinelAssessmentTemplateBinding(
+    linkedStart?.templateBinding,
+  );
+  if (
+    plan.assessmentTemplate !== undefined ||
+    (linkedStart?.templateBinding !== undefined &&
+      (!templateBinding || templateBinding.digest !== linkedStart.templateKey))
+  ) throw new Error("Invalid linked Sentinel template binding");
   const childDescription = linkedStart?.childDescription;
   if (
     plan.childDescription !== undefined ||
@@ -1732,6 +1771,7 @@ export function startSentinelAssessment(
             ...(modelFallbackProfiles && { modelFallbackProfiles }),
             ...(linkedCaseSources && { linkedCaseSources }),
             ...(childDescription !== undefined && { childDescription }),
+            ...(templateBinding && { assessmentTemplate: templateBinding }),
             ...(formal && {
               goal: plan.goal ?? formal.goals[0].title,
               formalGoals: formal.goals,

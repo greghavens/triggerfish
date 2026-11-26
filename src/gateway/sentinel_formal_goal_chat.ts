@@ -286,6 +286,9 @@ export async function handleSentinelFormalGoalChat(
           ...selected.selection,
           digest: createHash("sha256").update(JSON.stringify(selected.template))
             .digest("hex"),
+          ...(selected.template.interceptRules && {
+            interceptRules: selected.template.interceptRules,
+          }),
         },
       }),
     }

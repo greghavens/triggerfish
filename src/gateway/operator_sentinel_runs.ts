@@ -1,3 +1,4 @@
+import type { SentinelAssessmentTemplateBinding } from "../sentinel/assessment_store.ts";
 import type {
   OperatorRunCategory,
   OperatorRunCategorySelection,
@@ -125,6 +126,7 @@ export function createOperatorSentinelRuns(
       membership?: SentinelCaseMembershipProof;
       childDescription?: string;
       templateKey?: string;
+      templateBinding?: SentinelAssessmentTemplateBinding;
       category?: OperatorRunCategorySelection;
       seedTask?: SentinelLinkedSeedTask;
       timeoutSeconds?: number;

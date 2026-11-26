@@ -1046,6 +1046,21 @@ export const operatorRunTool: ToolDefinition = {
       description:
         "Exact template version to start, or expected version to edit (0 creates).",
     },
+    interceptRules: {
+      type: "array",
+      description:
+        "Reviewed relative tool restrictions for a Sentinel template",
+      items: {
+        type: "object",
+        properties: {
+          effect: { type: "string", enum: ["ask", "block"] },
+          enabled: { type: "boolean" },
+          tool: { type: "string" },
+          assetId: { type: "string" },
+        },
+        required: ["effect", "enabled"],
+      },
+    },
     childDescription: {
       type: "string",
       description: "Optional display title for a linked Sentinel assessment.",
@@ -14907,6 +14922,15 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
                 childGoal,
                 childDescription,
                 templateKey,
+                templateBinding: template && selection && templateKey
+                  ? {
+                    ...selection,
+                    digest: templateKey,
+                    ...(template.interceptRules && {
+                      interceptRules: template.interceptRules,
+                    }),
+                  }
+                  : undefined,
                 category,
                 goalApproval,
                 membership,

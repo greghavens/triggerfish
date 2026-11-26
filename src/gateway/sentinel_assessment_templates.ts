@@ -1,3 +1,4 @@
+import { parseSentinelTemplateToolRules } from "../sentinel/assessment_store.ts";
 import {
   parseOperatorRunAdmissionCategory,
   parseOperatorRunCategorySelection,
@@ -64,6 +65,7 @@ function open(baseDir: string) {
         objective TEXT NOT NULL,
         requestId TEXT NOT NULL UNIQUE,
         category TEXT,
+        interceptRules TEXT,
         PRIMARY KEY(id, version)
       ) STRICT;
       CREATE TABLE IF NOT EXISTS assessment_template_withdrawals (
@@ -73,15 +75,16 @@ function open(baseDir: string) {
         at TEXT NOT NULL
       ) STRICT;
     `);
-    const hasCategoryColumn = () =>
+    const hasColumn = (column: string) =>
       db.prepare(
         "PRAGMA table_info(assessment_templates)",
-      ).all().some(({ name }) => name === "category");
-    if (!hasCategoryColumn()) {
+      ).all().some(({ name }) => name === column);
+    for (const column of ["category", "interceptRules"] as const) {
+      if (hasColumn(column)) continue;
       db.exec("BEGIN IMMEDIATE");
       try {
-        if (!hasCategoryColumn()) {
-          db.exec("ALTER TABLE assessment_templates ADD COLUMN category TEXT");
+        if (!hasColumn(column)) {
+          db.exec(`ALTER TABLE assessment_templates ADD COLUMN ${column} TEXT`);
         }
         db.exec("COMMIT");
       } catch (error) {
@@ -106,6 +109,10 @@ function project(row?: Record<string, unknown>) {
     ? parseOperatorRunAdmissionCategory(JSON.parse(row.category))
     : undefined;
   if (row.category != null && !category) return;
+  const interceptRules = typeof row.interceptRules === "string"
+    ? parseSentinelTemplateToolRules(JSON.parse(row.interceptRules))
+    : undefined;
+  if (row.interceptRules != null && !interceptRules) return;
   return {
     id: row.id,
     version: row.version,
@@ -113,6 +120,7 @@ function project(row?: Record<string, unknown>) {
     description: row.description,
     objective: row.objective,
     ...(category && { category }),
+    ...(interceptRules && { interceptRules }),
   };
 }
 
@@ -292,6 +300,8 @@ export async function executeAssessmentTemplates(
   }
   const selectedCategory = parseOperatorRunCategorySelection(args.category);
   if (args.category !== undefined && !selectedCategory) return;
+  const interceptRules = parseSentinelTemplateToolRules(args.interceptRules);
+  if (args.interceptRules !== undefined && !interceptRules) return;
   const { title, childDescription, childGoal, requestId } = args;
   if (
     action !== "set_assessment_template" || typeof templateId !== "string" ||
@@ -311,6 +321,7 @@ export async function executeAssessmentTemplates(
         "childGoal",
         "requestId",
         "category",
+        "interceptRules",
       ].includes(key)
     )
   ) return;
@@ -320,6 +331,7 @@ export async function executeAssessmentTemplates(
     name: title,
     description: childDescription,
     objective: childGoal,
+    ...(interceptRules && { interceptRules }),
   };
   const request = requestId.toLowerCase();
   const db = open(baseDir);
@@ -389,8 +401,8 @@ export async function executeAssessmentTemplates(
           )
         ) return;
         db.prepare(`
-          INSERT INTO assessment_templates (id, version, name, description, objective, requestId, category)
-          VALUES (?, ?, ?, ?, ?, ?, ?)
+          INSERT INTO assessment_templates (id, version, name, description, objective, requestId, category, interceptRules)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         `).run(
           proposal.id,
           proposal.version,
@@ -399,6 +411,7 @@ export async function executeAssessmentTemplates(
           proposal.objective,
           request,
           category ? JSON.stringify(category) : null,
+          interceptRules ? JSON.stringify(interceptRules) : null,
         );
         db.exec("COMMIT");
         committed = true;
