@@ -38,13 +38,23 @@ export type ManagedNotificationSource =
   | ManagedSentinelIncidentSource
   | ManagedSentinelFindingSource;
 
+export const managedNotificationProviders = [
+  "webhook",
+  "dingtalk",
+  "feishu",
+  "wecom",
+] as const;
+export type ManagedNotificationProvider =
+  typeof managedNotificationProviders[number];
+
 export interface ManagedNotificationChannel {
   readonly id: string;
   readonly version: number;
   readonly name: string;
-  readonly provider: "webhook";
+  readonly provider: ManagedNotificationProvider;
   readonly destinationOrigin: string;
   readonly endpointRef: string;
+  readonly signingSecretRef?: string;
   readonly endpointFingerprint?: string;
   readonly classification: ClassificationLevel;
   readonly enabled: boolean;
@@ -53,7 +63,13 @@ export interface ManagedNotificationChannel {
   readonly sentinelFindings?: ManagedSentinelFindingScope;
 }
 
-type DeliveryState = "in_flight" | "delivered" | "blocked" | "uncertain";
+type DeliveryState =
+  | "in_flight"
+  | "delivered"
+  | "blocked"
+  | "rejected"
+  | "uncertain";
+export type ManagedNotificationOutcome = Exclude<DeliveryState, "in_flight">;
 
 interface ManagedNotificationAttempt {
   readonly requestId: string;
@@ -145,7 +161,7 @@ export function createManagedNotificationChannels(storage: StorageProvider) {
       id: string,
       transport: (
         stillCurrent: () => Promise<boolean>,
-      ) => Promise<"delivered" | "blocked" | "uncertain">,
+      ) => Promise<ManagedNotificationOutcome>,
       options?: {
         readonly source?: ManagedNotificationDelivery["source"];
         readonly retry?: {
@@ -206,7 +222,7 @@ export function createManagedNotificationChannels(storage: StorageProvider) {
           ? completed
           : undefined;
       }
-      let state: Exclude<DeliveryState, "in_flight"> = "uncertain";
+      let state: ManagedNotificationOutcome = "uncertain";
       try {
         state = await stillCurrent()
           ? await transport(stillCurrent)

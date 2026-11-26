@@ -1,7 +1,10 @@
+import { isDeepStrictEqual } from "node:util";
 import {
   managedFindingEvents,
   type ManagedNotificationChannel,
   type ManagedNotificationChannels,
+  type ManagedNotificationOutcome,
+  managedNotificationProviders,
   type ManagedSentinelFindingSource,
   type ManagedSentinelIncidentScope,
   type ManagedSentinelIncidentSource,
@@ -53,15 +56,17 @@ export interface OperatorNotificationChannels {
     channel: ManagedNotificationChannel,
     body: string,
     authorize: () => Promise<boolean>,
-  ) => Promise<"delivered" | "blocked" | "uncertain">;
+  ) => Promise<ManagedNotificationOutcome>;
 }
 
 const idPattern = /^[a-z0-9][a-z0-9_-]{0,63}$/;
+const secretRefPattern = /^notification_[a-z0-9_]{1,64}$/;
 const deliveryIdPattern = /^[a-z0-9][a-z0-9:_-]{0,159}$/;
 export const managedDeliveryStates = [
   "in_flight",
   "delivered",
   "blocked",
+  "rejected",
   "uncertain",
 ] as const;
 export const managedEventKinds = [
@@ -99,19 +104,32 @@ function parseChannelSettings(raw: unknown) {
     name,
     destinationOrigin,
     endpointRef,
+    provider: rawProvider,
+    signingSecretRef,
     classification,
     enabled,
     sentinelIncidents,
     sentinelFindings,
   } = raw as Record<string, unknown>;
+  const provider = managedNotificationProviders.find((name) =>
+    name === (rawProvider ?? "webhook")
+  );
   if (
     Object.keys(raw).length !== 5 +
+        Number(rawProvider !== undefined) +
+        Number(signingSecretRef !== undefined) +
         Number(sentinelIncidents !== undefined) +
         Number(sentinelFindings !== undefined) ||
     typeof name !== "string" || !/^[a-zA-Z0-9 _.-]{1,64}$/.test(name) ||
     typeof destinationOrigin !== "string" ||
     typeof endpointRef !== "string" ||
-    !/^notification_[a-z0-9_]{1,64}$/.test(endpointRef) ||
+    !secretRefPattern.test(endpointRef) || !provider ||
+    (signingSecretRef !== undefined && (
+      (provider !== "dingtalk" && provider !== "feishu") ||
+      typeof signingSecretRef !== "string" ||
+      !secretRefPattern.test(signingSecretRef) ||
+      signingSecretRef === endpointRef
+    )) ||
     (classification !== "PUBLIC" && classification !== "INTERNAL") ||
     typeof enabled !== "boolean"
   ) return;
@@ -136,6 +154,8 @@ function parseChannelSettings(raw: unknown) {
     name,
     destinationOrigin,
     endpointRef,
+    provider,
+    ...(typeof signingSecretRef === "string" && { signingSecretRef }),
     classification,
     enabled,
     ...(incidentScope && { sentinelIncidents: incidentScope }),
@@ -379,7 +399,6 @@ export async function executeOperatorNotificationChannel(
     channel = {
       id,
       version: expectedVersion + 1,
-      provider: "webhook",
       ...settings,
     };
   } else {
@@ -394,7 +413,7 @@ export async function executeOperatorNotificationChannel(
   const visible = publicChannel(channel);
   if (
     current &&
-    JSON.stringify(publicChannel(current)) === JSON.stringify(visible)
+    isDeepStrictEqual(publicChannel(current), visible)
   ) {
     return { channel: visible };
   }

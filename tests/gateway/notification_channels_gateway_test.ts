@@ -50,6 +50,37 @@ Deno.test("gateway reviews notification subscriptions and durably deduplicates s
   const origin = "https://notifications.example";
   const privatePath = "/synthetic-credential";
   let endpoint = origin + privatePath;
+  const providerFixtures = [
+    {
+      provider: "dingtalk",
+      url:
+        "https://oapi.dingtalk.com/robot/send?access_token=synthetic-dingtalk-token",
+      signing: "synthetic-dingtalk-signing",
+    },
+    {
+      provider: "feishu",
+      url: "https://open.feishu.cn/open-apis/bot/v2/hook/synthetic-feishu-hook",
+      signing: "synthetic-feishu-signing",
+    },
+    {
+      provider: "wecom",
+      url:
+        "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=synthetic-wecom-key",
+    },
+  ];
+  const providerDomains = providerFixtures.map(({ url }) =>
+    new URL(url).hostname
+  );
+  const providerSecrets = new Map<string, string>(
+    providerFixtures.flatMap(({ provider, url, signing }) => [
+      [`notification_${provider}`, url] as const,
+      ...signing
+        ? [[`notification_${provider}_signing`, signing] as const]
+        : [],
+    ]),
+  );
+  let providerRejected = false;
+  const providerRequests: { url: URL; body: Record<string, unknown> }[] = [];
   let preDenied = false;
   let outputDenied = false;
   let denyIncident = true;
@@ -133,28 +164,51 @@ Deno.test("gateway reviews notification subscriptions and durably deduplicates s
       ...createNotificationWebhookTransport(
         {
           getSecret(name) {
-            assertEquals(name, "notification_fixture");
-            return Promise.resolve({ ok: true, value: endpoint });
+            const value = name === "notification_fixture"
+              ? endpoint
+              : providerSecrets.get(name);
+            return Promise.resolve(
+              value
+                ? { ok: true, value }
+                : { ok: false, error: "Fixture secret missing" },
+            );
           },
         },
         createDomainPolicy({
-          allowlist: ["notifications.example"],
+          allowlist: ["notifications.example", ...providerDomains],
           denylist: [],
-          classificationMap: [{
-            pattern: "notifications.example",
+          classificationMap: ["notifications.example", ...providerDomains].map((
+            pattern,
+          ) => ({
+            pattern,
             classification: "INTERNAL",
-          }],
+          })),
         }),
         () => Promise.resolve({ ok: true, value: "192.0.2.1" }),
         (target, options) => {
           calls++;
-          assertEquals(target.url, origin + privatePath);
+          const url = new URL(target.url);
+          assertEquals(options?.method, "POST");
           assertEquals(options?.redirect, "manual");
-          payloads.push(JSON.parse(String(options?.body)));
+          const body = JSON.parse(String(options?.body));
+          if (url.origin !== origin) {
+            providerRequests.push({ url, body });
+            const code = providerRejected ? 1234 : 0;
+            return Promise.resolve(
+              new Response(JSON.stringify(
+                url.hostname === "open.feishu.cn"
+                  ? { StatusCode: code }
+                  : { errcode: code },
+              )),
+            );
+          }
+          assertEquals(target.url, origin + privatePath);
+          payloads.push(body);
           return responseLost
             ? Promise.reject(new Error("Synthetic response loss"))
             : Promise.resolve(new Response(null, { status: 204 }));
         },
+        () => 1795708800000,
       ),
     };
     gateway = createGatewayServer({
@@ -683,6 +737,74 @@ Deno.test("gateway reviews notification subscriptions and durably deduplicates s
       "unavailable",
     );
     assertEquals(calls, 6);
+
+    for (const { provider, url, signing } of providerFixtures) {
+      const add = {
+        ...mutation,
+        notificationChannelId: provider,
+        notificationChannelSettings: {
+          ...mutation.notificationChannelSettings,
+          provider,
+          destinationOrigin: new URL(url).origin,
+          endpointRef: `notification_${provider}`,
+          ...(signing &&
+            { signingSecretRef: `notification_${provider}_signing` }),
+        },
+      };
+      assertEquals(JSON.parse(await turn(add)).channel.provider, provider);
+      const probeProvider = {
+        action: "test_notification_channel",
+        notificationChannelId: provider,
+        expectedVersion: 1,
+        requestId: `send-${provider}`,
+      };
+      const result = await turn(probeProvider);
+      assertEquals(JSON.parse(result).delivery.state, "delivered");
+      assertEquals(await turn(probeProvider), result);
+      providerRejected = true;
+      assertEquals(
+        JSON.parse(
+          await turn({
+            ...probeProvider,
+            requestId: `reject-${provider}`,
+          }),
+        ).delivery.state,
+        "rejected",
+      );
+      providerRejected = false;
+    }
+    assertEquals(providerRequests.length, 6);
+    const dingtalk = providerRequests[0];
+    assertEquals(
+      dingtalk.url.searchParams.get("access_token"),
+      "synthetic-dingtalk-token",
+    );
+    assertEquals(dingtalk.url.searchParams.get("timestamp"), "1795708800000");
+    assertEquals(
+      dingtalk.url.searchParams.get("sign"),
+      "UuPOybReZExkz4LpJ7lIoOyxba/vbPlU5qbxRuD47nM=",
+    );
+    assertEquals(dingtalk.body.msgtype, "markdown");
+    const feishu = providerRequests[2];
+    assertEquals(feishu.url.href, providerFixtures[1].url);
+    assertEquals(feishu.body.timestamp, "1795708800");
+    assertEquals(
+      feishu.body.sign,
+      "2XZLTaiRhcdXrYektpudO2E+j1jXMamLhYXRPSHayQM=",
+    );
+    assertEquals(feishu.body.msg_type, "interactive");
+    const wecom = providerRequests[4];
+    assertEquals(wecom.url.href, providerFixtures[2].url);
+    assertEquals(wecom.body.msgtype, "markdown");
+    assert(!("sign" in wecom.body));
+    for (const key of await storage.list()) {
+      const value = await storage.get(key);
+      assert(!value?.includes("synthetic-dingtalk-token"));
+      assert(!value?.includes("synthetic-dingtalk-signing"));
+      assert(!value?.includes("synthetic-feishu-hook"));
+      assert(!value?.includes("synthetic-feishu-signing"));
+      assert(!value?.includes("synthetic-wecom-key"));
+    }
   } finally {
     await disconnect();
     await Deno.remove(baseDir, { recursive: true });

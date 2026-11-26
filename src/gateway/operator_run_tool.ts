@@ -966,7 +966,7 @@ export const operatorRunTool: ToolDefinition = {
     notificationChannelSettings: {
       type: "object",
       description:
-        "Complete webhook settings: name, destinationOrigin, endpointRef, classification and enabled. Use only an existing notification secret reference. Optionally subscribe to incident increases with sentinelIncidents {caseId, runId, afterRevision} matching an active assessment, or to retained finding events with sentinelFindings {caseId, runId, afterRevision, events}.",
+        "Complete settings: name, destinationOrigin, endpointRef, classification and enabled. Optional provider defaults to webhook. DingTalk and Feishu accept signingSecretRef. Use only an existing notification secret reference. Optionally subscribe to incident increases with sentinelIncidents {caseId, runId, afterRevision} matching an active assessment, or to retained finding events with sentinelFindings {caseId, runId, afterRevision, events}.",
     },
     expectedVersion: {
       type: "integer",
