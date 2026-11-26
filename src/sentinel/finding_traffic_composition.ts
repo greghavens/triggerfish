@@ -2,7 +2,8 @@
 import { createHash } from "node:crypto";
 import { isSentinelCaseId } from "./cases.ts";
 
-export const MAX_TRAFFIC_COMPOSITION_LINKS = 32;
+export const MAX_TRAFFIC_COMPOSITION_LINKS = 4096;
+export const MAX_TRAFFIC_COMPOSITION_JOURNAL_BYTES = 8 * 1024 * 1024;
 export const trafficCompositionTable = "traffic_link_composition";
 
 const uuid = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i;
@@ -21,7 +22,14 @@ type CompositionChange =
     readonly requestId: string;
   }
   & (
-    | { readonly operation: "reorder"; readonly linkIds: readonly string[] }
+    | {
+      readonly operation: "reorder";
+      readonly linkIds: readonly string[];
+      readonly move?: {
+        readonly linkId: string;
+        readonly beforeLinkId?: string;
+      };
+    }
     | { readonly operation: "withdraw"; readonly linkId: string }
   );
 
@@ -30,6 +38,25 @@ export type SentinelTrafficCompositionReceipt = CompositionChange & {
   readonly id: string;
   readonly recordedAt: string;
 };
+
+export function parseTrafficCompositionMove(
+  linkId: unknown,
+  beforeLinkId: unknown,
+) {
+  if (
+    typeof linkId !== "string" || !linkIdPattern.test(linkId) ||
+    (beforeLinkId !== undefined &&
+      (typeof beforeLinkId !== "string" || !linkIdPattern.test(beforeLinkId) ||
+        beforeLinkId === linkId))
+  ) return;
+  return { linkId, ...(typeof beforeLinkId === "string" && { beforeLinkId }) };
+}
+
+export function trafficCompositionOrderDigest(
+  linkIds: readonly string[],
+): string {
+  return createHash("sha256").update(JSON.stringify(linkIds)).digest("hex");
+}
 
 export function parseSentinelTrafficComposition(
   raw: Record<string, unknown>,
@@ -45,7 +72,15 @@ export function parseSentinelTrafficComposition(
     operation,
     linkIds,
     linkId,
+    move: rawMove,
   } = raw;
+  const move = rawMove && typeof rawMove === "object" && "linkId" in rawMove
+    ? parseTrafficCompositionMove(
+      rawMove.linkId,
+      "beforeLinkId" in rawMove ? rawMove.beforeLinkId : undefined,
+    )
+    : undefined;
+  if (rawMove !== undefined && !move) return;
   if (
     !isSentinelCaseId(caseId) || typeof runId !== "string" ||
     !uuid.test(runId) ||
@@ -69,16 +104,20 @@ export function parseSentinelTrafficComposition(
   if (
     operation === "withdraw" && typeof linkId === "string" &&
     linkIdPattern.test(linkId) &&
-    linkIds === undefined
+    linkIds === undefined && rawMove === undefined
   ) return { ...scope, operation, linkId };
   if (
     operation === "reorder" && linkId === undefined &&
     Array.isArray(linkIds) && linkIds.length > 0 &&
     linkIds.length <= MAX_TRAFFIC_COMPOSITION_LINKS &&
     new Set(linkIds).size === linkIds.length &&
-    linkIds.every((id) => typeof id === "string" && linkIdPattern.test(id))
+    linkIds.every((id) => typeof id === "string" && linkIdPattern.test(id)) &&
+    (!move || (linkIds.includes(move.linkId) &&
+      (move.beforeLinkId
+        ? linkIds[linkIds.indexOf(move.linkId) + 1] === move.beforeLinkId
+        : linkIds.at(-1) === move.linkId)))
   ) {
-    return { ...scope, operation, linkIds };
+    return { ...scope, operation, linkIds, ...(move && { move }) };
   }
 }
 

@@ -348,9 +348,14 @@ Authorized reads and saved finding exports show the amendment history
 and the original attachment.
 
 `operator_runs reorder_finding_traffic` takes a full permutation of the
-current `trafficLinkIds` when there are at most 32 active links. New links
-append to the reviewed order. `withdraw_finding_traffic` takes one exact
-`trafficLinkId` and also works on larger sets. Both require confirmation and the exact current report
+current `trafficLinkIds`, up to the case journal's 4,096-link limit.
+If a model cannot send the full list, use `moveTrafficLinkId` and optionally
+`beforeTrafficLinkId` to move one exact link and save the resulting full
+order. Omit `beforeTrafficLinkId` to move the link to the end. Large
+requests show the count and order digest for approval. Use
+`finding_traffic_set_receipt` with the saved receipt ID to page the exact
+ordered IDs, even after later edits. New links append to the reviewed
+order. `withdraw_finding_traffic` takes one exact `trafficLinkId`. Both require confirmation and the exact current report
 and evidence versions. A withdrawal removes the link from active reads. An
 owner can reopen its original metadata and withdrawal receipt with
 `finding_traffic` and `includeWithdrawn: true`. Saved exports retain

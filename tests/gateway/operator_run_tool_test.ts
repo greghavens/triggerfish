@@ -1875,6 +1875,125 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
         );
         denied = undefined;
       });
+      const largeJournal = openSentinelFindingTrafficLinks(peerPath);
+      const largeIds: string[] = [];
+      try {
+        for (let index = 0; index < 35; index++) {
+          const generated = largeJournal.record({
+            ...trafficLink,
+            findingId: later.id,
+            evidenceNote: `Reviewed attachment ${index}`,
+            requestId: crypto.randomUUID(),
+          }, () => true);
+          assert(generated);
+          largeIds.push(generated.id);
+        }
+      } finally {
+        largeJournal.close();
+      }
+      const largeList = { ...trafficAction, receiptId: later.id };
+      const beforeLarge = JSON.parse((await turn(largeList)).result).page;
+      const completeOrder = {
+        ...largeList,
+        action: "reorder_finding_traffic",
+        reportVersion: 1,
+        evidenceVersion: beforeLarge.evidenceVersion,
+        trafficLinkIds: largeIds,
+        requestId: crypto.randomUUID(),
+      };
+      const beforeLargeApproval = confirmations.length;
+      assertStringIncludes(
+        (await turn({
+          ...completeOrder,
+          trafficLinkIds: largeIds.slice(0, -1),
+        })).result,
+        "unavailable",
+      );
+      assertEquals(confirmations.length, beforeLargeApproval);
+      const largeReceipt =
+        JSON.parse((await turn(completeOrder)).result).amendment;
+      assertEquals(largeReceipt.linkCount, 35);
+      assertEquals(largeReceipt.linkIds, undefined);
+      assertStringIncludes(confirmations.at(-1)!, largeReceipt.orderDigest);
+      assert(confirmations.at(-1)!.length < 1_500);
+      const afterLarge = JSON.parse((await turn(largeList)).result).page;
+      assertEquals(afterLarge.links[0].id, largeIds[0]);
+      const moveOne = {
+        ...largeList,
+        action: "reorder_finding_traffic",
+        reportVersion: 1,
+        evidenceVersion: afterLarge.evidenceVersion,
+        moveTrafficLinkId: largeIds.at(-1),
+        beforeTrafficLinkId: largeIds[0],
+        requestId: crypto.randomUUID(),
+      };
+      assertStringIncludes(
+        (await turn({
+          ...moveOne,
+          evidenceVersion: beforeLarge.evidenceVersion,
+        })).result,
+        "unavailable",
+      );
+      const moved = JSON.parse((await turn(moveOne)).result).amendment;
+      assertEquals(moved.linkCount, 35);
+      assert(moved.orderDigest !== largeReceipt.orderDigest);
+      await withGateway(async (reconnected) => {
+        assertEquals(
+          JSON.parse((await reconnected(completeOrder)).result).amendment,
+          largeReceipt,
+        );
+        assertEquals(
+          JSON.parse((await reconnected(moveOne)).result).amendment,
+          moved,
+        );
+        assertEquals(confirmations.length, beforeLargeApproval + 2);
+        const readOrder = {
+          ...largeList,
+          action: "finding_traffic_set_receipt",
+          trafficSetReceiptId: largeReceipt.id,
+        };
+        const firstAuditPage = JSON.parse(
+          (await reconnected(readOrder)).result,
+        );
+        const secondAuditPage = JSON.parse(
+          (await reconnected({
+            ...readOrder,
+            offset: firstAuditPage.page.nextOffset,
+          })).result,
+        );
+        assertEquals(
+          firstAuditPage.receipt.orderDigest,
+          largeReceipt.orderDigest,
+        );
+        assertEquals([
+          ...firstAuditPage.page.linkIds,
+          ...secondAuditPage.page.linkIds,
+        ], largeIds);
+        assertEquals(secondAuditPage.page.nextOffset, null);
+        const current = JSON.parse(
+          (await reconnected({
+            ...readOrder,
+            trafficSetReceiptId: moved.id,
+            limit: 40,
+          })).result,
+        );
+        assertEquals(current.page.linkIds, [
+          largeIds.at(-1),
+          ...largeIds.slice(0, -1),
+        ]);
+        assertStringIncludes(
+          (await reconnected({ ...readOrder, receiptId: original.id })).result,
+          "unavailable",
+        );
+        denied = "POST_TOOL_RESPONSE";
+        assertEquals(
+          (await reconnected(readOrder)).result,
+          "Tool response withheld by policy.",
+        );
+        denied = "PRE_OUTPUT";
+        assertEquals((await reconnected(readOrder)).response, undefined);
+        denied = undefined;
+      });
       const trafficResult = (await turn(followLink)).result;
       assertEquals(JSON.parse(trafficResult).receipt.digest, traffic.digest);
       assert(!trafficResult.includes(trafficSecret));

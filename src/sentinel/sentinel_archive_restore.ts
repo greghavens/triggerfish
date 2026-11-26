@@ -1,4 +1,7 @@
-import { decodeSentinelTrafficComposition } from "./finding_traffic_composition.ts";
+import {
+  decodeSentinelTrafficComposition,
+  MAX_TRAFFIC_COMPOSITION_JOURNAL_BYTES,
+} from "./finding_traffic_composition.ts";
 import { decodeSentinelTrafficLinkAnnotation } from "./finding_traffic_links.ts";
 import {
   parseSentinelModelRoute,
@@ -646,6 +649,15 @@ function validateAuxiliary(
         "input",
         "recorded_at",
       ]);
+      const budget = db.prepare(
+        "SELECT count(*) AS count, sum(length(input)) AS bytes FROM traffic_link_composition",
+      ).get();
+      if (
+        Number(budget?.count) > 4096 ||
+        Number(budget?.bytes ?? 0) > MAX_TRAFFIC_COMPOSITION_JOURNAL_BYTES
+      ) {
+        throw new Error("Invalid archived Sentinel traffic set budget");
+      }
       const rows = db.prepare(
         "SELECT * FROM traffic_link_composition LIMIT 4097",
       ).all();

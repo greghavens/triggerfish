@@ -9,6 +9,8 @@ import { locateSentinelCase } from "./cases.ts";
 import {
   composeFindingTrafficLinks,
   decodeSentinelTrafficComposition,
+  MAX_TRAFFIC_COMPOSITION_JOURNAL_BYTES,
+  MAX_TRAFFIC_COMPOSITION_LINKS,
   parseSentinelTrafficComposition,
   type SentinelTrafficCompositionChange,
   type SentinelTrafficCompositionReceipt,
@@ -23,7 +25,7 @@ import {
 
 const journalName = "sentinel-finding-traffic-links.db";
 const applicationId = 0x5346544c;
-const maxLinks = 4096;
+const maxLinks = MAX_TRAFFIC_COMPOSITION_LINKS;
 const maxRequestAliases = 8192;
 const uuid = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i;
 const digest = /^[a-f0-9]{64}$/;
@@ -411,6 +413,23 @@ function openLinks(snapshotPath: string, readOnly: boolean, now: () => number) {
     return rows.map(decodeSentinelTrafficComposition);
   }
 
+  function activeCompositionIds(
+    revision: number,
+    findingId: string,
+    assetId?: string,
+  ) {
+    const ids = db.prepare(
+      `SELECT id FROM traffic_links WHERE revision = ? AND finding_id = ?
+      AND (? IS NULL OR json_extract(input, '$.assetId') = ?) ORDER BY rowid DESC`,
+    )
+      .all(revision, findingId, assetId ?? null, assetId ?? null)
+      .map(({ id }) => String(id));
+    return composeFindingTrafficLinks(
+      ids,
+      compositionEdits(revision, findingId),
+    );
+  }
+
   function evidenceVersion(
     revision: number,
     findingId: string,
@@ -454,7 +473,23 @@ function openLinks(snapshotPath: string, readOnly: boolean, now: () => number) {
   }
 
   return {
+    activeCompositionIds,
     compositionEdits,
+    compositionRequest(requestId: string) {
+      if (!hasTable(db, trafficCompositionTable)) return;
+      const row = db.prepare(
+        "SELECT * FROM traffic_link_composition WHERE request_id = ?",
+      ).get(requestId);
+      return row && decodeSentinelTrafficComposition(row);
+    },
+    compositionReceipt(revision: number, findingId: string, id: string) {
+      if (!hasTable(db, trafficCompositionTable)) return;
+      const row = db.prepare(
+        "SELECT * FROM traffic_link_composition WHERE revision = ? AND finding_id = ? AND id = ?",
+      )
+        .get(revision, findingId, id);
+      return row && decodeSentinelTrafficComposition(row);
+    },
     reviewComposition(raw: SentinelTrafficCompositionChange, commit: boolean) {
       const input = parseSentinelTrafficComposition(raw);
       if (!input || input.caseId !== caseId) return;
@@ -472,30 +507,25 @@ function openLinks(snapshotPath: string, readOnly: boolean, now: () => number) {
               }
               : undefined;
           }
+          const budget = db.prepare(
+            "SELECT count(*) AS count, sum(length(input)) AS bytes FROM traffic_link_composition",
+          ).get();
           if (
-            Number(
-              db.prepare(
-                "SELECT count(*) AS count FROM traffic_link_composition",
-              ).get()?.count,
-            ) >= maxLinks
+            Number(budget?.count) >= maxLinks ||
+            Number(budget?.bytes ?? 0) + serialized.length >
+              MAX_TRAFFIC_COMPOSITION_JOURNAL_BYTES
           ) return;
         }
         const { evidenceRevision: revision, findingId } = input;
-        const ids = db.prepare(
-          `SELECT id FROM traffic_links WHERE revision = ? AND finding_id = ?
-          ORDER BY rowid DESC`,
-        ).all(revision, findingId).map(({ id }) => String(id));
-        const active = composeFindingTrafficLinks(
-          ids,
-          compositionEdits(revision, findingId),
-        );
+        const active = activeCompositionIds(revision, findingId);
+        const activeSet = new Set(active);
         if (
           input.evidenceVersion !==
             evidenceVersion(revision, findingId).digest ||
           (input.operation === "withdraw"
-            ? !active.includes(input.linkId)
+            ? !activeSet.has(input.linkId)
             : input.linkIds.length !== active.length ||
-              input.linkIds.some((id) => !active.includes(id)))
+              input.linkIds.some((id) => !activeSet.has(id)))
         ) return;
         if (!commit) return { saved: false, amendment: undefined };
         const id = trafficCompositionReceiptId(serialized);
@@ -842,6 +872,18 @@ export function sentinelFindingTrafficEvidenceVersion(
     (links) => links.evidenceVersion(revision, findingId, assetId),
   ) ??
     { digest: trafficEvidenceVersion(revision, findingId, [], []), count: 0 };
+}
+
+export function readSentinelTrafficCompositionReceipt(
+  snapshotPath: string,
+  revision: number,
+  findingId: string,
+  id: string,
+) {
+  return readFindingTrafficLinks(
+    snapshotPath,
+    (links) => links.compositionReceipt(revision, findingId, id),
+  );
 }
 
 export function readSentinelTrafficCompositionHistory(

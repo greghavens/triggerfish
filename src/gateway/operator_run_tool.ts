@@ -308,8 +308,10 @@ import {
 import {
   listSentinelFindingTrafficLinks,
   readSentinelTrafficCompositionHistory,
+  readSentinelTrafficCompositionReceipt,
   readSentinelTrafficLinkAnnotations,
 } from "../sentinel/finding_traffic_links.ts";
+import { trafficCompositionOrderDigest } from "../sentinel/finding_traffic_composition.ts";
 import { readSentinelTrafficReceipt } from "../sentinel/traffic_receipts.ts";
 import {
   executeSentinelTrafficTool,
@@ -430,6 +432,7 @@ export const operatorRunTool: ToolDefinition = {
         "attach_finding_traffic",
         "annotate_finding_traffic",
         "reorder_finding_traffic",
+        "finding_traffic_set_receipt",
         "withdraw_finding_traffic",
         "facts",
         "save_digest",
@@ -544,6 +547,19 @@ export const operatorRunTool: ToolDefinition = {
       description:
         "Complete ordered list of active links for reorder_finding_traffic.",
       items: { type: "string" },
+    },
+    moveTrafficLinkId: {
+      type: "string",
+      description:
+        "Move this exact active link instead of providing a full order.",
+    },
+    beforeTrafficLinkId: {
+      type: "string",
+      description: "Insert the moved link before this link. Omit to append.",
+    },
+    trafficSetReceiptId: {
+      type: "string",
+      description: "Exact saved traffic set amendment receipt to page.",
     },
     includeWithdrawn: {
       type: "boolean",
@@ -8151,6 +8167,61 @@ ${
           options.confirm,
         );
       }
+      if (action === "finding_traffic_set_receipt") {
+        const { receiptId, trafficSetReceiptId, offset = 0, limit = 20 } = args;
+        if (
+          ref.kind !== "sentinel" || ref.revision === undefined ||
+          !context?.authenticatedOwnerSessionId ||
+          !canFlowTo("INTERNAL", context.ceiling ?? "PUBLIC") ||
+          typeof receiptId !== "string" ||
+          !/^worker-finding:[a-f0-9]{64}$/.test(receiptId) ||
+          typeof trafficSetReceiptId !== "string" ||
+          !/^finding-traffic-set:[a-f0-9]{64}$/.test(trafficSetReceiptId) ||
+          typeof offset !== "number" || !Number.isSafeInteger(offset) ||
+          offset < 0 ||
+          typeof limit !== "number" || !Number.isSafeInteger(limit) ||
+          limit < 1 || limit > 40 ||
+          Object.keys(args).some((key) =>
+            ![
+              "action",
+              "kind",
+              "id",
+              "revision",
+              "receiptId",
+              "trafficSetReceiptId",
+              "offset",
+              "limit",
+            ].includes(key)
+          ) || !await controller.inspect(ref)
+        ) return unavailable;
+        const path = resolveSentinelCasePath(options.baseDir, ref.id);
+        const receipt = readSentinelTrafficCompositionReceipt(
+          path,
+          ref.revision,
+          receiptId,
+          trafficSetReceiptId,
+        );
+        if (
+          !receipt || receipt.caseId !== ref.id ||
+          receipt.runId !== readSentinelRunIdForRevision(path, ref.revision)
+        ) return unavailable;
+        if (receipt.operation !== "reorder") return safeProjection({ receipt });
+        const { linkIds, ...identity } = receipt;
+        const page = linkIds.slice(offset, offset + limit);
+        return safeProjection({
+          receipt: {
+            ...identity,
+            linkCount: linkIds.length,
+            orderDigest: trafficCompositionOrderDigest(linkIds),
+          },
+          page: {
+            linkIds: page,
+            nextOffset: offset + page.length < linkIds.length
+              ? offset + page.length
+              : null,
+          },
+        });
+      }
       if (
         action === "reorder_finding_traffic" ||
         action === "withdraw_finding_traffic"
@@ -8169,6 +8240,8 @@ ${
               "receiptId",
               "trafficLinkId",
               "trafficLinkIds",
+              "moveTrafficLinkId",
+              "beforeTrafficLinkId",
               "reportVersion",
               "evidenceVersion",
               "requestId",

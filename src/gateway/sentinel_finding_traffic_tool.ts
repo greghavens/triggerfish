@@ -16,7 +16,14 @@ import {
   sentinelTrafficEvidenceAnnotation,
   sentinelTrafficEvidenceRoles,
 } from "../sentinel/finding_traffic_links.ts";
-import { parseSentinelTrafficComposition } from "../sentinel/finding_traffic_composition.ts";
+import {
+  parseSentinelTrafficComposition,
+  parseTrafficCompositionMove,
+  type SentinelTrafficCompositionChange,
+  type SentinelTrafficCompositionReceipt,
+  trafficCompositionOrderDigest,
+  trafficCompositionReceiptId,
+} from "../sentinel/finding_traffic_composition.ts";
 import {
   readSentinelTrafficReceipt,
   type SentinelTrafficSource,
@@ -714,29 +721,41 @@ export async function editOperatorSentinelFindingTrafficSet(
   if (
     !caseId || typeof receiptId !== "string" || !findingPattern.test(receiptId)
   ) return unavailable;
-  const inspect = (approvedRunId?: string) =>
+  const { moveTrafficLinkId, beforeTrafficLinkId, trafficLinkIds } = args;
+  const move = parseTrafficCompositionMove(
+    moveTrafficLinkId,
+    beforeTrafficLinkId,
+  );
+  if (
+    (moveTrafficLinkId !== undefined || beforeTrafficLinkId !== undefined) &&
+    (!move || args.action !== "reorder_finding_traffic" ||
+      trafficLinkIds !== undefined || args.trafficLinkId !== undefined)
+  ) return unavailable;
+  const present = (receipt: SentinelTrafficCompositionReceipt): string => {
+    if (receipt.operation !== "reorder" || receipt.linkIds.length <= 32) {
+      return JSON.stringify({
+        _classification: "INTERNAL",
+        amendment: receipt,
+      });
+    }
+    const { linkIds, ...scope } = receipt;
+    return JSON.stringify({
+      _classification: "INTERNAL",
+      amendment: {
+        ...scope,
+        linkCount: linkIds.length,
+        orderDigest: trafficCompositionOrderDigest(linkIds),
+      },
+    });
+  };
+  const inspect = (approved?: SentinelTrafficCompositionChange) =>
     withSentinelAssessmentWriteLock(snapshotPath, (state) => {
       const runId = state?.plan.runId;
       if (
         !runId || !state.active || state.revision !== revision ||
-        (approvedRunId !== undefined && approvedRunId !== runId) ||
+        (approved !== undefined && approved.runId !== runId) ||
         !hasSentinelWorkerFindingJournal(snapshotPath)
       ) return;
-      const proposal = parseSentinelTrafficComposition({
-        caseId,
-        runId,
-        evidenceRevision: revision,
-        findingId: receiptId,
-        reportVersion: args.reportVersion,
-        evidenceVersion: args.evidenceVersion,
-        requestId: args.requestId,
-        operation: args.action === "reorder_finding_traffic"
-          ? "reorder"
-          : "withdraw",
-        linkId: args.trafficLinkId,
-        linkIds: args.trafficLinkIds,
-      });
-      if (!proposal) return;
       const findings = openSentinelWorkerFindingStore(snapshotPath);
       try {
         const report = findings.readFindingReport(receiptId, revision);
@@ -752,6 +771,54 @@ export async function editOperatorSentinelFindingTrafficSet(
         ) return;
         const links = openSentinelFindingTrafficLinks(snapshotPath);
         try {
+          const scopedIds = links.activeCompositionIds(
+            revision,
+            receiptId,
+            target,
+          );
+          let linkIds = trafficLinkIds;
+          if (move) {
+            const request = typeof args.requestId === "string"
+              ? links.compositionRequest(args.requestId.toLowerCase())
+              : undefined;
+            if (request) {
+              if (request.operation !== "reorder" || !request.move) return;
+              linkIds = request.linkIds;
+            } else {
+              if (
+                !scopedIds.includes(move.linkId) ||
+                (move.beforeLinkId && !scopedIds.includes(move.beforeLinkId))
+              ) return;
+              const order = scopedIds.filter((id) => id !== move.linkId);
+              order.splice(
+                move.beforeLinkId
+                  ? order.indexOf(move.beforeLinkId)
+                  : order.length,
+                0,
+                move.linkId,
+              );
+              linkIds = order;
+            }
+          }
+          const proposal = parseSentinelTrafficComposition({
+            caseId,
+            runId,
+            evidenceRevision: revision,
+            findingId: receiptId,
+            reportVersion: args.reportVersion,
+            evidenceVersion: args.evidenceVersion,
+            requestId: args.requestId,
+            operation: args.action === "reorder_finding_traffic"
+              ? "reorder"
+              : "withdraw",
+            linkId: args.trafficLinkId,
+            linkIds,
+            ...(move && { move }),
+          });
+          if (
+            !proposal ||
+            (approved && JSON.stringify(approved) !== JSON.stringify(proposal))
+          ) return;
           const prior = links.reviewComposition(proposal, false);
           if (!prior) return;
           if (prior.saved) {
@@ -761,18 +828,9 @@ export async function editOperatorSentinelFindingTrafficSet(
           const ids = proposal.operation === "withdraw"
             ? [proposal.linkId]
             : proposal.linkIds;
-          for (const id of ids) {
-            if (
-              !links.list({
-                id,
-                findingId: receiptId,
-                evidenceRevision: revision,
-                assetId: target,
-                limit: 1,
-              }).length
-            ) return;
-          }
-          const committed = approvedRunId
+          const currentScope = new Set(scopedIds);
+          if (ids.some((id) => !currentScope.has(id))) return;
+          const committed = approved
             ? links.reviewComposition(proposal, true)
             : prior;
           return committed &&
@@ -786,21 +844,30 @@ export async function editOperatorSentinelFindingTrafficSet(
     });
   const preview = inspect();
   if (!preview) return unavailable;
-  if (preview.amendment) {
-    return JSON.stringify({
-      _classification: "INTERNAL",
-      amendment: preview.amendment,
-    });
-  }
+  if (preview.amendment) return present(preview.amendment);
+  const review = preview.proposal.operation === "reorder" &&
+      preview.proposal.linkIds.length > 32
+    ? (() => {
+      const { linkIds, ...scope } = preview.proposal;
+      return {
+        ...scope,
+        linkCount: linkIds.length,
+        first: linkIds.slice(0, 2),
+        last: linkIds.slice(-2),
+        orderDigest: trafficCompositionOrderDigest(linkIds),
+        receiptId: trafficCompositionReceiptId(
+          JSON.stringify(preview.proposal),
+        ),
+      };
+    })()
+    : preview.proposal;
   if (
     !await confirm(
       `Review this exact retained traffic set change?\n${
-        JSON.stringify({ targetAssetId: preview.target, ...preview.proposal })
+        JSON.stringify({ targetAssetId: preview.target, ...review })
       }`,
     )
   ) return "Error: The operator declined the traffic set change.";
-  const saved = inspect(preview.proposal.runId)?.amendment;
-  return saved
-    ? JSON.stringify({ _classification: "INTERNAL", amendment: saved })
-    : unavailable;
+  const saved = inspect(preview.proposal)?.amendment;
+  return saved ? present(saved) : unavailable;
 }
