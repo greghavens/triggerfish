@@ -1697,6 +1697,10 @@ interface ActiveTurn {
     string,
     { stepIndex: number; sha256: string }
   >;
+  readonly approvedNarrativeSources: Map<string, {
+    readonly isCurrent: () => boolean;
+    readonly authorize: () => Promise<boolean>;
+  }>;
   narrativeSearchFence?: { response: string; isCurrent: () => boolean };
   readonly stagedGraphFacts: ReturnType<typeof stageSentinelGraphFacts>;
   reads: number;
@@ -6200,6 +6204,8 @@ function createAgent(
             isSentinelPinnedSourceRead(toolName) ||
             isSentinelWorkerFindingTool(toolName) ||
             isSentinelGraphFactTool(toolName) ||
+            toolName === SENTINEL_WORKER_NARRATIVE_READ ||
+            toolName === SENTINEL_WORKER_NARRATIVE_COMMIT ||
             toolName === proposeWorkerGoalTool.name ||
             toolName === proveWorkerGoalTool.name ||
             toolName === assignedExecutionEvidenceTool.name ||
@@ -6260,6 +6266,7 @@ function createAgent(
                 toolName === proveWorkerGoalTool.name ||
                 toolName === sentinelFindingTrafficAttachTool.name ||
                 toolName === sentinelPublishGraphFact.name ||
+                toolName === SENTINEL_WORKER_NARRATIVE_COMMIT ||
                 sentinelFindingWriteTools.some(({ name }) => name === toolName)
                 ? "write"
                 : "read",
@@ -6640,56 +6647,43 @@ function createAgent(
           const permits = (asset: string) =>
             canReadPlannerCase
               ? currentPlannerReceiptScope(turn, asset)
-              : task?.nodeId === asset;
-          const receiptIds = isWorkerNarrativeId(response.id)
+              : !!task && readAssignedModelReview(options)?.id === task.id &&
+                task.nodeId === asset;
+          const entries = isWorkerNarrativeId(response.id)
             ? [response]
             : response.observations;
-          if (
-            !revision || !runId || !Array.isArray(receiptIds) ||
-            !receiptIds.every(({ id, targetId }) =>
-              permits(targetId) && !!currentWorkerNarrative(
-                options.snapshotPath,
-                runId,
-                revision,
-                id,
-                targetId,
-              )
-            )
-          ) return { ...result, allowed: false, action: "BLOCK" };
-          for (const { id, targetId } of receiptIds) {
-            const selected = currentWorkerNarrative(
+          if (!revision || !runId || !Array.isArray(entries)) {
+            return { ...result, allowed: false, action: "BLOCK" };
+          }
+          const checked: ActiveTurn["approvedNarrativeSources"] = new Map();
+          for (const { id, targetId } of entries) {
+            const record = permits(targetId) && currentWorkerNarrative(
               options.snapshotPath,
               runId,
               revision,
               id,
               targetId,
             );
+            if (!record) return { ...result, allowed: false, action: "BLOCK" };
+            const fence = narrativeSourceFence(
+              turn,
+              runId,
+              revision,
+              record,
+              () => permits(targetId),
+            );
             if (
-              (selected?.receipt.trafficDigest ||
-                selected?.receipt.upstreamCheck) &&
-              !await authorizeWorkerNarrative(
-                runId,
-                revision,
-                targetId,
-                selected.receipt.evidenceId,
-                turn.signal,
-                () =>
-                  permits(targetId) &&
-                  isDeepStrictEqual(
-                    selected,
-                    currentWorkerNarrative(
-                      options.snapshotPath,
-                      runId,
-                      revision,
-                      id,
-                      targetId,
-                    ),
-                  ),
-                selected.receipt.trafficDigest,
-                selected.receipt.upstreamCheck,
-                selected.receipt.sourceSha256,
-              )
+              (record.receipt.trafficDigest || record.receipt.upstreamCheck ||
+                record.receipt.conclusion || record.receipt.facts) &&
+              !await fence.authorize()
             ) return { ...result, allowed: false, action: "BLOCK" };
+            checked.set(id, fence);
+          }
+          for (const [id, fence] of checked) {
+            if (!fence.isCurrent()) {
+              return { ...result, allowed: false, action: "BLOCK" };
+            }
+            turn.approvedNarrativeSources.set(id, fence);
           }
         }
         if (
@@ -6733,6 +6727,17 @@ function createAgent(
           ((workerApprovalContext && (!turn || !approvalIsCurrent(turn))) ||
             (await turn?.workerBoundary?.("before_tool"))?.stop)
         ) return { ...result, allowed: false, action: "BLOCK" };
+        if (name === "PRE_OUTPUT" && turn && result.allowed) {
+          const sources = [...turn.approvedNarrativeSources.values()];
+          for (const source of sources) {
+            if (!await source.authorize()) {
+              return { ...result, allowed: false, action: "BLOCK" };
+            }
+          }
+          if (sources.some((source) => !source.isCurrent())) {
+            return { ...result, allowed: false, action: "BLOCK" };
+          }
+        }
         if (options.assignedTaskLeaseToken && turn && result.allowed) {
           const response = context.input.tool_response;
           if (
@@ -9916,6 +9921,41 @@ function createAgent(
     return true;
   }
 
+  function narrativeSourceFence(
+    turn: ActiveTurn,
+    runId: string,
+    revision: number,
+    record: NonNullable<ReturnType<typeof currentWorkerNarrative>>,
+    permits: () => boolean,
+  ) {
+    const isCurrent = () =>
+      !turn.signal.aborted && permits() && isDeepStrictEqual(
+        record,
+        currentWorkerNarrative(
+          options.snapshotPath,
+          runId,
+          revision,
+          record.id,
+          record.targetId,
+        ),
+      );
+    return {
+      isCurrent,
+      authorize: () =>
+        authorizeWorkerNarrative(
+          runId,
+          revision,
+          record.targetId,
+          record.receipt.evidenceId,
+          turn.signal,
+          isCurrent,
+          record.receipt.trafficDigest,
+          record.receipt.upstreamCheck,
+          record.receipt.sourceSha256,
+        ),
+    };
+  }
+
   async function workerNarrative(
     turn: ActiveTurn,
     name: string,
@@ -10466,6 +10506,7 @@ function createAgent(
               digest: approvalConstraints.digest,
             },
           }),
+          approvedNarrativeSources: new Map(),
           approvedTrafficReads: new Map(),
           narrativeAlertReads: new Map(),
           stagedGraphFacts: [],
@@ -10818,18 +10859,13 @@ function createAgent(
                     );
                     const selecting =
                       call.name === SENTINEL_WORKER_NARRATIVE_READ;
-                    const current = () =>
-                      !!readAssignedModelReview(options) &&
-                      isDeepStrictEqual(
-                        record,
-                        currentWorkerNarrative(
-                          options.snapshotPath,
-                          state.plan.runId!,
-                          revision,
-                          response.id,
-                          task.nodeId!,
-                        ),
-                      );
+                    const fence = record && narrativeSourceFence(
+                      turn,
+                      state.plan.runId,
+                      revision,
+                      record,
+                      () => readAssignedModelReview(options)?.id === task.id,
+                    );
                     if (
                       !args || !record ||
                       (selecting
@@ -10847,18 +10883,9 @@ function createAgent(
                           _classification: "INTERNAL",
                           ...record,
                         }) ||
-                      !await authorizeWorkerNarrative(
-                        state.plan.runId,
-                        revision,
-                        task.nodeId,
-                        record.receipt.evidenceId,
-                        signal,
-                        current,
-                        record.receipt.trafficDigest,
-                        record.receipt.upstreamCheck,
-                        record.receipt.sourceSha256,
-                      )
+                      !fence || !await fence.authorize()
                     ) return false;
+                    turn.approvedNarrativeSources.set(record.id, fence);
                     continue;
                   }
                   if (call.name === SENTINEL_SHARED_WORKER_REVIEW) {

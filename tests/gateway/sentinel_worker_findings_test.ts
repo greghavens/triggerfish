@@ -229,7 +229,11 @@ async function workerTurn(
       name: string;
       hook: "PRE_TOOL_CALL" | "POST_TOOL_RESPONSE";
     };
-    beforeHook?: (hook: string, name: string) => void;
+    beforeHook?: (
+      hook: string,
+      name: string,
+      input: Readonly<Record<string, unknown>>,
+    ) => void;
   },
 ) {
   const receiptHooks: string[] = [];
@@ -242,7 +246,7 @@ async function workerTurn(
         input.tool_name ??
           (input.tool_call as { name?: string } | undefined)?.name,
       );
-      execution?.beforeHook?.(hook, name);
+      execution?.beforeHook?.(hook, name, input);
       const writing = [report, recheck, amend, INCONCLUSIVE_RECHECK_TOOL]
         .includes(name);
       if (name === findings) receiptHooks.push(hook);
@@ -7545,6 +7549,62 @@ Deno.test("Committed worker narrative reaches peers and planning while its sourc
       store.close();
     }
 
+    let scopedRead = false;
+    let revokedAtOutput = false;
+    const egress = await workerTurn(
+      path,
+      peer,
+      [[tool(reopen, selector)]],
+      undefined,
+      undefined,
+      undefined,
+      {
+        prompt: "Read the recorded conclusions.",
+        options: [],
+        beforeHook(hook, name, input) {
+          if (hook === "PRE_TOOL_CALL" && name === reopen) {
+            assertEquals(input.case_id, caseId);
+            assertEquals(input.evidence_revision, state.revision);
+            assertEquals(input.assignment_id, peer.assignedTaskId);
+            assertEquals(input.operation_type, "read");
+            scopedRead = true;
+          }
+          if (
+            hook === "PRE_OUTPUT" &&
+            String(input.content).includes(
+              "Reviewed the saved control evidence.",
+            )
+          ) {
+            const runId = state.plan.runId;
+            assert(runId);
+            revokedAtOutput = !!recordSentinelOperatingConstraints(path, {
+              runId,
+              evidenceRevision: state.revision,
+              expectedVersion: 1,
+              requestId: crypto.randomUUID(),
+              operatorScope: "owner",
+              constraints: { deniedKinds: [], allowedAssetIds: ["other"] },
+            });
+          }
+        },
+      },
+    );
+    assert(scopedRead && revokedAtOutput);
+    assertEquals(JSON.parse(egress.results[0][0]), committed);
+    assert(
+      !JSON.stringify(egress.events).includes(
+        "Reviewed the saved control evidence.",
+      ),
+    );
+    assertStringIncludes(JSON.stringify(egress.events), "policy");
+    assert(recordSentinelOperatingConstraints(path, {
+      runId: state.plan.runId!,
+      evidenceRevision: state.revision,
+      expectedVersion: 2,
+      requestId: crypto.randomUUID(),
+      operatorScope: "owner",
+      constraints: { deniedKinds: [], allowedAssetIds: ["app", "other"] },
+    }));
     const run = {
       kind: "sentinel",
       id: caseId,
