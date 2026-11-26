@@ -549,7 +549,7 @@ export const operatorRunTool: ToolDefinition = {
     reviewedRule: {
       type: "object",
       description:
-        "Exact restrictive rule with effect (ask or block), enabled, and optional tool, caseId, runId, and assetId selectors.",
+        "Exact restrictive rule with effect (ask or block), enabled, and optional tool, caseId, runId, and assetId selectors. A block can also select an exact destinationHost for an approved Sentinel GitHub Actions connector.",
     },
     action: {
       type: "string",
@@ -1123,6 +1123,11 @@ export const operatorRunTool: ToolDefinition = {
           enabled: { type: "boolean" },
           tool: { type: "string" },
           assetId: { type: "string" },
+          destinationHost: {
+            type: "string",
+            description:
+              "Exact approved Sentinel GitHub Actions hostname for a block rule.",
+          },
         },
         required: ["effect", "enabled"],
       },

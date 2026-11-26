@@ -1,3 +1,4 @@
+import { withReviewedToolRules } from "../../src/core/policy/reviewed_tool_rules.ts";
 import { createSentinelLiveWorkflowReader } from "../../src/gateway/sentinel_live_workflow.ts";
 import { createHash } from "node:crypto";
 import { ModelFailoverExhausted } from "../../src/agent/providers/retry.ts";
@@ -8,7 +9,12 @@ import {
   createToolApprovalService,
   type ToolApprovalService,
 } from "../../src/core/tool_approval_service.ts";
-import { assert, assertEquals, assertFalse } from "@std/assert";
+import {
+  assert,
+  assertEquals,
+  assertFalse,
+  assertStringIncludes,
+} from "@std/assert";
 import { dirname, join } from "@std/path";
 import { createProviderRegistry } from "../../src/agent/llm.ts";
 import type { HookRunner } from "../../src/core/policy/hooks/hooks.ts";
@@ -917,8 +923,10 @@ async function verifyPausedGraphWorker(
     | "adaptive-finding"
     | "workflow"
     | "live-workflow",
+  blockDestinationOnResume = false,
 ) {
   const baseDir = await Deno.makeTempDir();
+  const destinationRuleId = crypto.randomUUID();
   const caseId = cold ? "portable-worker" : "main";
   const path = resolveSentinelCasePath(baseDir, caseId);
   const trafficFixture = {
@@ -1272,7 +1280,7 @@ async function verifyPausedGraphWorker(
             }).finally(() => journal.close());
           },
         }),
-        hookRunner,
+        hookRunner: withReviewedToolRules(hookRunner, baseDir),
         providerRegistry: registry,
         allowModelAccess: true,
       });
@@ -1486,6 +1494,28 @@ async function verifyPausedGraphWorker(
         store.close();
       }
       advanceAdaptiveSentinel(path, initial);
+    }
+    if (blockDestinationOnResume) {
+      await withOwnerControl(baseDir, async (request, approvals) => {
+        const result = JSON.parse(
+          await request({
+            action: "set_reviewed_tool_rule",
+            id: destinationRuleId,
+            requestId: crypto.randomUUID(),
+            expectedVersion: 0,
+            reviewedRule: {
+              effect: "block",
+              enabled: true,
+              caseId,
+              runId: initial.plan.runId,
+              assetId: heldAsset,
+              destinationHost: "unrelated.example",
+            },
+          }),
+        ).result;
+        assertEquals(result.version, 1);
+        assertEquals(approvals.length, 1);
+      });
     }
     const first = startPlanner();
     first.advance(initial);
@@ -1800,6 +1830,35 @@ async function verifyPausedGraphWorker(
         db.close();
       }
     }
+    if (blockDestinationOnResume) {
+      await withOwnerControl(baseDir, async (request, approvals) => {
+        const change = {
+          action: "set_reviewed_tool_rule",
+          id: destinationRuleId,
+          requestId: crypto.randomUUID(),
+          expectedVersion: 1,
+          reviewedRule: {
+            effect: "block",
+            enabled: true,
+            caseId,
+            runId: initial.plan.runId,
+            assetId: heldAsset,
+            destinationHost: "API.GitHub.Com.",
+          },
+        };
+        assertStringIncludes(
+          await request({
+            ...change,
+            reviewedRule: { ...change.reviewedRule, effect: "ask" },
+          }),
+          "unavailable",
+        );
+        const result = JSON.parse(await request(change)).result;
+        assertEquals(result.version, 2);
+        assertEquals(result.rule.destinationHost, "api.github.com");
+        assertEquals(approvals.length, 1);
+      });
+    }
     const resumed = startPlanner();
     const resume = {
       ...pause,
@@ -1836,8 +1895,18 @@ async function verifyPausedGraphWorker(
     });
     enforceReadRevocation = denySavedRead;
     const priorMetadataChecks = sourceMetadataChecks;
+    const priorCredentialReads = credentialReads;
     if (workflowCheckpoint) releasePeer.resolve();
     resumed.advance(readSentinelAssessment(path)!);
+    if (blockDestinationOnResume) {
+      await until(() => !resumed.hasInFlightWork());
+      assertEquals(reused, false);
+      assertEquals(sourceCalls.get(heldAsset), 1);
+      assertEquals(sourceMetadataChecks, priorMetadataChecks);
+      assertEquals(credentialReads, priorCredentialReads);
+      assertEquals(repeatedResultFetches, 1);
+      return;
+    }
     if (denySavedRead && workflowCheckpoint) {
       await until(() => sourceMetadataChecks > priorMetadataChecks);
       await until(() => !resumed.hasInFlightWork());
@@ -2040,6 +2109,18 @@ Deno.test("Portable Sentinel worker restores an approved original live workflow 
     "live-workflow",
   );
 });
+
+Deno.test("Reviewed Sentinel destination block revokes a live workflow checkpoint before connector access", () =>
+  verifyPausedGraphWorker(
+    true,
+    false,
+    undefined,
+    true,
+    "approved",
+    false,
+    "live-workflow",
+    true,
+  ));
 
 Deno.test("Owner gateway restores a portable paused graph worker before reusing its checkpoint", () =>
   verifyPausedGraphWorker(true));

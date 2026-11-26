@@ -2,7 +2,10 @@ import {
   sentinelGitHubWorkflowMetadataUrl,
   sentinelGitHubWorkflowRunsUrl,
 } from "../sentinel/github_workflow_runs.ts";
-import { withPinnedReviewedToolRules } from "../core/policy/reviewed_tool_rules.ts";
+import {
+  reviewedDestinationHostname,
+  withPinnedReviewedToolRules,
+} from "../core/policy/reviewed_tool_rules.ts";
 import { withAgentProfileRuntime } from "../agent/orchestrator/agent_profile_runtime.ts";
 import { readAgentProfile } from "../core/agent_profiles.ts";
 import {
@@ -6651,6 +6654,18 @@ function createAgent(
         const pin = templateRules?.length && localCase && localRun?.plan.runId
           ? { caseId: localCase, runId: localRun.plan.runId }
           : undefined;
+        const assignedAsset = options.assignedTaskLeaseToken
+          ? readAssignedModelReview(options)?.nodeId
+          : undefined;
+        const workflowDestination = name === "PRE_TOOL_CALL" &&
+            toolName === liveWorkflowStatusTool.name && localCase &&
+            assignedAsset
+          ? assignedWorkflowDestination(options, localCase, assignedAsset)
+          : undefined;
+        const destinationHost = workflowDestination &&
+          reviewedDestinationHostname(
+            new URL(workflowDestination.metadataUrl).hostname,
+          );
         const policyInput = scoped || selectedCaseCall || pin ||
             (typeof toolName === "string" && !!options.assignedTaskLeaseToken)
           ? {
@@ -6661,9 +6676,9 @@ function createAgent(
                 : pendingTelemetry?.graphCaseId) ?? null
               : localCase || null,
             run_id: selectedCaseGraph ? null : localRun?.plan.runId ?? null,
-            asset_id: options.assignedTaskLeaseToken
-              ? readAssignedModelReview(options)?.nodeId ?? null
-              : null,
+            asset_id: assignedAsset ?? null,
+            ...(destinationHost &&
+              { reviewed_destination_host: destinationHost }),
             evidence_revision: evidenceRevision ?? null,
             assignment_id: options.assignedTaskId ??
               (plannerControl && typeof call?.args?.taskId === "string" &&

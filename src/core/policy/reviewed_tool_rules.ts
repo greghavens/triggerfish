@@ -11,6 +11,7 @@ export interface ReviewedToolRule {
   readonly caseId?: string;
   readonly runId?: string;
   readonly assetId?: string;
+  readonly destinationHost?: string;
 }
 
 export interface ReviewedRuleChange {
@@ -30,6 +31,15 @@ export const reviewedRuleActions = [
   "reviewed_tool_advice",
 ] as const;
 const fields = ["tool", "caseId", "runId", "assetId"] as const;
+const hostnameLabel = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
+
+export function reviewedDestinationHostname(value: string): string | undefined {
+  const hostname = value.toLowerCase().replace(/\.$/, "");
+  if (
+    hostname.length <= 253 && hostname.includes(".") &&
+    hostname.split(".").every((label) => hostnameLabel.test(label))
+  ) return hostname;
+}
 
 export function parseReviewedToolRule(
   value: unknown,
@@ -38,7 +48,7 @@ export function parseReviewedToolRule(
   const rule = value as Record<string, unknown>;
   if (
     Object.keys(rule).some((key) =>
-      !["effect", "enabled", ...fields].includes(key)
+      !["effect", "enabled", "destinationHost", ...fields].includes(key)
     ) || (rule.effect !== "ask" && rule.effect !== "block") ||
     typeof rule.enabled !== "boolean"
   ) return;
@@ -50,7 +60,19 @@ export function parseReviewedToolRule(
     scope[field] = selector;
   }
   if ((scope.assetId || scope.runId) && !scope.caseId) return;
-  return { effect: rule.effect, enabled: rule.enabled, ...scope };
+  const destinationHost = typeof rule.destinationHost === "string"
+    ? reviewedDestinationHostname(rule.destinationHost)
+    : undefined;
+  if (
+    rule.destinationHost !== undefined &&
+    (!destinationHost || rule.effect !== "block")
+  ) return;
+  return {
+    effect: rule.effect,
+    enabled: rule.enabled,
+    ...scope,
+    ...(destinationHost && { destinationHost }),
+  };
 }
 
 interface RuleRecord extends ReviewedRuleChange {
@@ -218,6 +240,7 @@ function applyReviewedRules(
         case_id: caseId,
         run_id: runId,
         asset_id: assetId,
+        reviewed_destination_host: destinationHost,
       } = context.input;
       const call = context.input.tool_call as
         | { args?: Record<string, unknown> }
@@ -230,6 +253,8 @@ function applyReviewedRules(
       try {
         const visible = read().filter(({ rule }) =>
           rule?.enabled &&
+          (rule.destinationHost === undefined ||
+            rule.destinationHost === destinationHost) &&
           fields.every((field) =>
             rule[field] === undefined || rule[field] === input[field]
           )
