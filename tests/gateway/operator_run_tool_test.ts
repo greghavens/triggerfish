@@ -6001,6 +6001,16 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
         assertEquals(titled.label, childDescription);
       }
       const newestCancel = { ...cancelSentinel, revision: 2 };
+      duringConfirmation = () => {
+        denied = "PRE_TOOL_CALL";
+      };
+      try {
+        assertStringIncludes((await turn(newestCancel)).result, "unavailable");
+      } finally {
+        duringConfirmation = undefined;
+        denied = undefined;
+      }
+      assert(readSentinelAssessment(childPath)?.active);
       assertEquals(
         JSON.parse((await turn(newestCancel)).result).run.status,
         "stopped",
@@ -6842,6 +6852,20 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
           ).run.status,
           "paused",
         );
+        duringConfirmation = () => {
+          denied = "PRE_TOOL_CALL";
+        };
+        try {
+          assertStringIncludes(
+            (await cancelTurn(cancelled)).result,
+            "unavailable",
+          );
+        } finally {
+          duringConfirmation = undefined;
+          denied = undefined;
+        }
+        assertEquals(cancelAdapter.inspect(started.ref.id)?.status, "paused");
+        assert(cancelRegistry.getActiveRun(started.ref.id));
         assertEquals(
           JSON.parse((await cancelTurn(cancelled)).result).run.status,
           "cancelled",

@@ -12052,10 +12052,9 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
         const { runId } = args;
         const sentinel = ref.kind === "sentinel";
         const authorize = context?.authorizeOwnerRunCall;
-        if (
-          backgroundRole &&
-          (!authorize || !context?.authenticatedOwnerSessionId)
-        ) return unavailable;
+        if (!authorize || !context?.authenticatedOwnerSessionId) {
+          return unavailable;
+        }
         if (
           Object.keys(args).some((key) =>
             !(sentinel
@@ -12103,6 +12102,7 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
             }`,
           )
         ) return "Error: The operator declined the run action.";
+        if (!backgroundRole && !await authorize(args)) return unavailable;
         if (backgroundRole) {
           const journal = openExecutionTraces(backgroundTracePath);
           try {
