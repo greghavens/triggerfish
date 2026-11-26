@@ -1606,12 +1606,27 @@ Deno.test("gateway reopens a cold remediation receipt separately from its origin
           }),
         );
       }
-      if (outputs.length === 1) {
-        assert(
-          JSON.parse(outputs[0]).page.members.some(({ id }: { id: string }) =>
+      const latest = JSON.parse(outputs.at(-1)!);
+      if (latest.page) {
+        const { digest, members, nextCursor } = latest.page;
+        if (
+          !members.some(({ id }: { id: string }) =>
             id === `observation:adaptive:${receiptId}`
-          ),
-        );
+          )
+        ) {
+          assert(
+            nextCursor,
+            "The retained digest must contain the exact recheck",
+          );
+          return Promise.resolve(
+            completion("", "sentinel_expand_evidence_digest", {
+              revision: digest.scope.evidenceRevision,
+              digestId: digest.id,
+              limit: 10,
+              cursor: nextCursor,
+            }),
+          );
+        }
         return Promise.resolve(
           completion("", "sentinel_worker_findings", { receiptId }),
         );
@@ -1861,9 +1876,10 @@ Deno.test("gateway reopens a cold remediation receipt separately from its origin
         expanded.reject(new Error("Planner did not reopen the cold recheck")),
       2500,
     );
-    const [page, exact] = await expanded.promise.finally(() =>
-      clearTimeout(timeout)
-    );
+    const reads = await expanded.promise.finally(() => clearTimeout(timeout));
+    const page = reads[0];
+    const exact = reads.at(-1)!;
+    const exactOrdinal = reads.length;
     assertEquals(JSON.parse(exact).record.id, receiptId);
     assertEquals(JSON.parse(exact).record.findingId, originalId);
     const deadline = Date.now() + 2000;
@@ -1905,7 +1921,7 @@ Deno.test("gateway reopens a cold remediation receipt separately from its origin
     await withArchivedPlannerRead(directory, async (read) => {
       assertEquals(JSON.parse(await read(selection)).result, JSON.parse(page));
       assertEquals(
-        JSON.parse(await read({ ...selection, ordinal: 2 })).result,
+        JSON.parse(await read({ ...selection, ordinal: exactOrdinal })).result,
         JSON.parse(exact),
       );
       assert((await read(selection, true)).includes("unavailable"));
@@ -1919,7 +1935,9 @@ Deno.test("gateway reopens a cold remediation receipt separately from its origin
       }));
       assert((await read(selection)).includes("unavailable"));
       assert(
-        (await read({ ...selection, ordinal: 2 })).includes("unavailable"),
+        (await read({ ...selection, ordinal: exactOrdinal })).includes(
+          "unavailable",
+        ),
       );
     });
   } finally {
@@ -2840,6 +2858,217 @@ Deno.test("Sentinel plans from an exact published case finding and keeps its evi
   } finally {
     selectedPlanner?.stop();
     planner?.stop();
+    await Deno.remove(directory, { recursive: true });
+  }
+});
+
+Deno.test("Planner input and commit honor mid-flight source asset revocation", async () => {
+  const directory = await Deno.makeTempDir();
+  const caseId = "scope-planner-evidence";
+  const path = resolveSentinelCasePath(directory, caseId);
+  const assets = [
+    "allowed",
+    ...Array.from({ length: 4 }, (_, i) => `denied-${i}`),
+  ];
+  const allowedMarker = "Approved evidence from the allowed asset.";
+  const privateMarker = "Evidence outside the later approved asset scope.";
+  const firstInput = Promise.withResolvers<string>();
+  const scopedInput = Promise.withResolvers<string>();
+  const held = Promise.withResolvers<void>();
+  let narrower = false;
+  let allowedTaskId = "";
+  let deniedTaskId = "";
+  const deniedTaskIds: string[] = [];
+  let clock = Date.now();
+  const providers = createProviderRegistry();
+  providers.register({
+    name: "planner-scope",
+    supportsStreaming: false,
+    async complete(messages) {
+      const lastTool = messages.findLast(({ role }) => role === "tool");
+      if (lastTool) {
+        assertStringIncludes(String(lastTool.content), allowedMarker);
+        return completion(JSON.stringify([{
+          kind: "trace",
+          nodeId: "allowed",
+          depth: 2,
+          sourceTaskId: allowedTaskId,
+          sourceKind: "worker_result",
+        }]));
+      }
+      const prompt = String(
+        messages.findLast(({ role }) => role === "user")?.content,
+      );
+      if (!narrower) {
+        firstInput.resolve(prompt);
+        await held.promise;
+        return completion(JSON.stringify([{
+          kind: "trace",
+          nodeId: "allowed",
+          depth: 1,
+          sourceTaskId: deniedTaskId,
+          sourceKind: "worker_result",
+        }]));
+      }
+      scopedInput.resolve(prompt);
+      return completion("", "sentinel_worker_observation", {
+        task: allowedTaskId,
+      });
+    },
+  });
+  providers.setDefault("planner-scope");
+  const planner = createSentinelModelPlanner(
+    path,
+    (state, taskId) =>
+      taskId
+        ? { execute: () => Promise.resolve(), clear() {} }
+        : createSentinelSubagent({
+          snapshotPath: path,
+          assessmentRevision: state.revision,
+          plannerExecutionEvidenceRunId: state.plan.runId,
+          providerRegistry: providers,
+          hookRunner: allowHooks,
+          allowModelAccess: true,
+        }),
+    undefined,
+    () => clock,
+  );
+  const wait = async (condition: () => boolean) => {
+    const end = Date.now() + 3000;
+    while (!condition() && Date.now() < end) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    assert(condition());
+  };
+  try {
+    await Deno.mkdir(dirname(path), { recursive: true, mode: 0o700 });
+    await Deno.writeTextFile(
+      path,
+      JSON.stringify({
+        version: 1,
+        nodes: assets.map((id) => ({ id, kind: "asset", label: id })),
+        edges: [],
+      }),
+      { mode: 0o600 },
+    );
+    const state = startSentinelAssessment(path);
+    const runId = state.plan.runId;
+    assert(runId);
+    const revision = adaptiveRevision(state);
+    const store = openSentinelAdaptiveStore(
+      join(dirname(path), "sentinel-adaptive.db"),
+    );
+    try {
+      store.sync(
+        revision,
+        assets.map((nodeId) => ({
+          kind: "impact",
+          nodeId,
+          reason: "Existing defensive result.",
+        })),
+        null,
+        {
+          number: state.revision,
+          goal: { id: runId, label: "Review saved results" },
+        },
+      );
+      for (const asset of assets) {
+        const claimed = store.claim(revision);
+        assert(claimed);
+        assertEquals(claimed.task.nodeId, asset);
+        if (asset === "allowed") allowedTaskId = claimed.task.id;
+        else {
+          deniedTaskId = claimed.task.id;
+          deniedTaskIds.push(claimed.task.id);
+        }
+        assert(store.complete({
+          taskId: claimed.task.id,
+          leaseToken: claimed.leaseToken,
+          observation: {
+            relatedNodeIds: [asset, "allowed"],
+            summary: asset === "allowed" ? allowedMarker : privateMarker,
+          },
+        }));
+      }
+    } finally {
+      store.close();
+    }
+    planner.advance(state);
+    const initial = await Promise.race([
+      firstInput.promise,
+      new Promise<string>((resolve) => setTimeout(() => resolve(""), 2000)),
+    ]);
+    assertStringIncludes(initial, privateMarker);
+    await withArchivedPlannerRead(directory, async (read) => {
+      const narrowed = JSON.parse(
+        await read({
+          action: "narrow_constraints",
+          kind: "sentinel",
+          id: caseId,
+          revision: state.revision,
+          runId,
+          expectedVersion: 0,
+          requestId: crypto.randomUUID(),
+          deniedKinds: [],
+          allowedAssetIds: ["allowed"],
+        }),
+      );
+      assertEquals(narrowed.record.constraints.allowedAssetIds, ["allowed"]);
+    });
+    narrower = true;
+    held.resolve();
+    await wait(() => !planner.hasInFlightWork());
+    assert(
+      !readAdaptiveSentinel(path, state)?.tasks.some((
+        { kind, depth, nodeId, prerequisites },
+      ) =>
+        kind === "trace" && depth === 1 && nodeId === "allowed" &&
+        prerequisites.includes(deniedTaskId)
+      ),
+    );
+
+    clock += 61_000;
+    planner.advance(readSentinelAssessment(path)!);
+    const prompt = await Promise.race([
+      scopedInput.promise,
+      new Promise<string>((resolve) => setTimeout(() => resolve(""), 2000)),
+    ]);
+    const input = JSON.parse(prompt.slice(prompt.lastIndexOf("\n") + 1));
+    assert(!prompt.includes(privateMarker));
+    assertEquals(
+      input.workerObservations.map(({ taskId }: { taskId: string }) => taskId),
+      [allowedTaskId],
+    );
+    assertStringIncludes(prompt, allowedMarker);
+    const digests = openSentinelEvidenceDigests(directory);
+    try {
+      for (const { id } of input.coldHistoryDigests ?? []) {
+        const page = digests.expand(
+          { caseId, runId, evidenceRevision: state.revision },
+          id,
+          20,
+        );
+        assert(page);
+        assert(
+          !page.members.some(({ id }) =>
+            deniedTaskIds.some((excluded) => id.includes(excluded))
+          ),
+        );
+      }
+    } finally {
+      digests.close();
+    }
+
+    const followup = () =>
+      readAdaptiveSentinel(path, state)?.tasks.find(({ kind, depth, nodeId }) =>
+        kind === "trace" && depth === 2 && nodeId === "allowed"
+      );
+    await wait(() => !!followup());
+    assertEquals(followup()?.prerequisites, [allowedTaskId]);
+  } finally {
+    held.resolve();
+    planner.stop();
+    await wait(() => !planner.hasInFlightWork());
     await Deno.remove(directory, { recursive: true });
   }
 });

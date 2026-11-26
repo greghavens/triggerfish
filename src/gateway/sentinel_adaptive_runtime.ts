@@ -344,7 +344,7 @@ function committedPlannerHistory(snapshotPath: string, state: State) {
     if (!adaptive || adaptive.goal.id !== state.plan.runId) return [];
     const constraints = operatingConstraints(snapshotPath, state)?.constraints;
     const snapshot = state.result?.sharedGraph.snapshot;
-    const allowsTarget = (nodeId: string) =>
+    const allowsTarget = (nodeId: string | undefined) =>
       sentinelOperatingConstraintsAllow(
         constraints,
         { kind: "review_evidence", nodeId },
@@ -354,10 +354,15 @@ function committedPlannerHistory(snapshotPath: string, state: State) {
       sentinelGraphFactScopeFilter(snapshot, allowsTarget);
     const facts = new Map(adaptive.graphFacts.map((fact) => [fact.id, fact]));
     const graph = buildSentinelProvenance(state.result, adaptive).snapshot();
+    const allowedTasks = new Set(
+      adaptive.tasks.filter(({ nodeId }) => allowsTarget(nodeId)).map((
+        { id },
+      ) => id),
+    );
     const completed = new Set(
       graph.nodes.flatMap((node) =>
         node.origin === "adaptive" && node.kind === "task" &&
-          node.status === "completed"
+          node.status === "completed" && allowedTasks.has(node.sourceId)
           ? [node.id]
           : []
       ),
@@ -6074,7 +6079,17 @@ export function createSentinelModelPlanner(
         number,
         ReturnType<typeof readSentinelAssessmentRevision>
       >();
-      return store.plannerObservations(revision).map((entry) => {
+      const controls = operatingConstraints(snapshotPath, state)?.constraints;
+      const snapshot = state.result?.sharedGraph.snapshot;
+      const eligible = controls &&
+        store.list(revision).filter(({ nodeId }) =>
+          sentinelOperatingConstraintsAllow(
+            controls,
+            { kind: "review_evidence", nodeId },
+            snapshot,
+          )
+        ).map(({ id }) => id);
+      return store.plannerObservations(revision, eligible).map((entry) => {
         if (!entry.priorAssignedTargetCitations?.length) return entry;
         const priorAssignedTargetCitations = entry.priorAssignedTargetCitations
           .filter((citation) => {

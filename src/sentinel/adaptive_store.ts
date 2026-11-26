@@ -6717,13 +6717,16 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
       }));
     },
 
-    plannerObservations(revision: string) {
+    plannerObservations(revision: string, allowedTaskIds?: readonly string[]) {
       const hasTrace = db.prepare(
         "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'adaptive_note_steps'",
       ).get();
       const evidenceRevision = hasTrace
         ? recordedEvidenceNumber(revision)
         : NaN;
+      const scope = allowedTaskIds === undefined
+        ? null
+        : JSON.stringify(allowedTaskIds);
       return db.prepare(`WITH saved AS (
         SELECT t.id, t.kind, t.nodeId, t.evidenceIds, t.observation, note.note AS reviewSummary,
           json_extract(t.plannerRound, '$.priorAssignedTargetCitations') AS priorAssignedTargetCitations,
@@ -6742,6 +6745,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
       }
         WHERE t.revision = ? AND t.status = 'completed'
           AND t.observation IS NOT NULL
+          AND (? IS NULL OR t.id IN (SELECT value FROM json_each(?)))
       )
       SELECT id, kind, nodeId, evidenceIds, reviewSummary, priorAssignedTargetCitations,
         ${
@@ -6767,7 +6771,12 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
         substr(json_extract(observation, '$.summary'), 1, 180) AS summary,
         CASE WHEN json_type(observation, '$.relatedNodeIds') = 'array'
           THEN json_extract(observation, '$.relatedNodeIds') END AS relatedNodeIds
-      FROM saved ORDER BY position LIMIT ?`).all(revision, MAX_ADAPTIVE_TASKS)
+      FROM saved ORDER BY position LIMIT ?`).all(
+        revision,
+        scope,
+        scope,
+        MAX_ADAPTIVE_TASKS,
+      )
         .map((row) => {
           const githubWorkflowReads = savedGitHubWorkflowReads(
             row.githubWorkflowReads,
