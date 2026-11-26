@@ -367,6 +367,9 @@ Deno.test("Reviewed event subscription dispatches committed case metadata only o
     assertEquals(settled?.status, "timed_out");
     const timedRunId = settled?.discovery?.runId;
     assert(timedRunId);
+    const afterTimeout = startSentinelAssessment(timeoutPath);
+    assert(afterTimeout.plan.runId !== timedRunId);
+    assertEquals(readSentinelCaseStatus(timeoutPath, true)?.status, "running");
     scheduler.start();
     // The authenticated owner waits for the scheduler's durable delivery ledger.
     const deliveries = await manage({ action: "agent_event_subscriptions" });

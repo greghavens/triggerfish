@@ -4,9 +4,9 @@ import { openExecutionTraces } from "../core/execution_traces.ts";
 import type { AgentEventSchedulerConfig } from "../scheduler/service_agent_events.ts";
 import {
   readSentinelAssessment,
-  readSentinelCaseStatus,
   readSentinelGoalCompletionEvents,
   readSentinelRunStartEvents,
+  readSentinelTimeoutEvents,
 } from "../sentinel/assessment_store.ts";
 import {
   listSentinelCaseIds,
@@ -40,21 +40,15 @@ export function sentinelAgentEventSources(
         );
         const kinds = new Set(selected.flatMap((s) => s.kinds));
         const path = resolveSentinelCasePath(baseDir, caseId);
-        const status = readSentinelCaseStatus(path, true);
-        const runId = status?.discovery?.runId;
-        if (!status || !runId) continue;
         if (kinds.has("task_created")) {
           for (const start of readSentinelRunStartEvents(path)) {
             publish({ kind: "task_created", caseId, ...start });
           }
         }
-        if (status.status === "timed_out" && kinds.has("timeout")) {
-          publish({
-            kind: "timeout",
-            receipt: runId,
-            caseId,
-            recordedAt: Date.parse(status.updatedAt),
-          });
+        if (kinds.has("timeout")) {
+          for (const timeout of readSentinelTimeoutEvents(path)) {
+            publish({ kind: "timeout", caseId, ...timeout });
+          }
         }
         if (kinds.has("finding")) {
           for (const finding of readSentinelWorkerFindingHistory(path)) {

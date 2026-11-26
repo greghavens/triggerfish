@@ -1773,7 +1773,11 @@ export function startSentinelAssessment(
             );
           }
           if (row) {
-            saveAssessmentRunRevision(db, row.revision, JSON.parse(row.plan));
+            const priorPlan = JSON.parse(row.plan) as AssessmentPlan;
+            saveAssessmentRunRevision(db, row.revision, priorPlan);
+            if (row.active === SENTINEL_ASSESSMENT_TIMED_OUT) {
+              saveAssessmentTimeout(db, priorPlan.runId, row.updatedAt);
+            }
           }
           const startedAt = Date.now();
           const asJson = JSON.stringify({
@@ -3766,6 +3770,22 @@ function saveAssessmentGoalCompletion(
   }
 }
 
+function saveAssessmentTimeout(
+  db: DatabaseSync,
+  runId: string | undefined,
+  at: string,
+) {
+  const recordedAt = Date.parse(at);
+  if (!runId || !constraintUuid.test(runId) || !Number.isFinite(recordedAt)) {
+    return;
+  }
+  db.exec(`CREATE TABLE IF NOT EXISTS assessment_run_timeouts (
+    runId TEXT PRIMARY KEY, recordedAt INTEGER NOT NULL
+  ) STRICT`);
+  db.prepare("INSERT OR IGNORE INTO assessment_run_timeouts VALUES (?, ?)")
+    .run(runId, recordedAt);
+}
+
 /** Apply the cutoff exactly once using a trusted local evidence review. */
 export function settleSentinelAssessmentDeadline(
   path: string,
@@ -3795,6 +3815,7 @@ export function settleSentinelAssessmentDeadline(
       } else {
         db.prepare("UPDATE assessment SET active = ? WHERE id = 1")
           .run(SENTINEL_ASSESSMENT_TIMED_OUT);
+        saveAssessmentTimeout(db, plan.runId, row.updatedAt);
       }
       return true;
     });
@@ -4063,6 +4084,44 @@ export function readSentinelRunStartEvents(path: string) {
     if (current) {
       const plan = JSON.parse(current.plan) as AssessmentPlan;
       retain(plan.runId, plan.runStartedAt);
+    }
+    return Array.from(
+      events,
+      ([receipt, recordedAt]) => ({ receipt, recordedAt }),
+    );
+  } finally {
+    db.close();
+  }
+}
+
+/** Read settled timeout receipts, including the current outcome of legacy cases. */
+export function readSentinelTimeoutEvents(path: string) {
+  const db = openStore(path, false);
+  if (!db) return [];
+  try {
+    const events = new Map<string, number>();
+    if (hasTable(db, "assessment_run_timeouts")) {
+      for (
+        const { runId, recordedAt } of db.prepare(
+          "SELECT runId, recordedAt FROM assessment_run_timeouts ORDER BY recordedAt, runId",
+        ).all()
+      ) {
+        if (
+          typeof runId === "string" && constraintUuid.test(runId) &&
+          typeof recordedAt === "number" && Number.isSafeInteger(recordedAt)
+        ) {
+          events.set(runId, recordedAt);
+        }
+      }
+    }
+    const current = getRow(db);
+    if (current?.active === SENTINEL_ASSESSMENT_TIMED_OUT) {
+      const plan = JSON.parse(current.plan) as AssessmentPlan;
+      const at = Date.parse(current.updatedAt);
+      if (
+        plan.runId && constraintUuid.test(plan.runId) && Number.isFinite(at) &&
+        !events.has(plan.runId)
+      ) events.set(plan.runId, at);
     }
     return Array.from(
       events,

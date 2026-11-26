@@ -101,6 +101,7 @@ const assessmentTables = new Set([
   "assessment_review_steps",
   "assessment_formal_goal_history",
   "assessment_run_revisions",
+  "assessment_run_timeouts",
   "assessment_notification_settings",
   "assessment_incident_notification",
   "assessment_notification_retry_receipts",
