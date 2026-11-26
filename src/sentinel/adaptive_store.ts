@@ -20,11 +20,11 @@ import type { TodoItem, TodoList } from "../tools/todo_defs.ts";
 import { createEvidenceTaskSettler } from "../core/evidence_task_progression.ts";
 import { createAssignmentObservationJournal } from "../core/assignment_observations.ts";
 import {
+  isSentinelLiveRepositoryRead,
   projectRepositoryVisibility,
   repositoryVisibilityReceipt,
   repositoryVisibilityRecheckBinding,
   repositoryVisibilityReference,
-  SENTINEL_LIVE_REPOSITORY_VISIBILITY,
   SENTINEL_SAVED_REPOSITORY_VISIBILITY,
   type SentinelRepositoryVisibilityReceipt,
   type SentinelRepositoryVisibilityRecheckBinding,
@@ -445,7 +445,7 @@ function normalizeWorkerCheckpoint(
         if (!input) return;
         const reference = name === SENTINEL_TRAFFIC_BLOB
           ? "sentinel-traffic-blob"
-          : name === SENTINEL_LIVE_REPOSITORY_VISIBILITY ||
+          : isSentinelLiveRepositoryRead(name) ||
               name === SENTINEL_SAVED_REPOSITORY_VISIBILITY
           ? "sentinel-repository-visibility"
           : name === SENTINEL_CASE_INVENTORY_READ && input.view !== "coverage"
@@ -8651,6 +8651,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
         FROM adaptive_repository_visibility_results AS receipt
         JOIN adaptive_tasks AS task ON task.id = receipt.taskId AND task.revision = receipt.revision
         WHERE receipt.revision = ? AND receipt.evidenceRevision = ?
+        AND json_type(receipt.receipt, '$.branch') IS NULL
         AND receipt.sourceStepIndex IS NOT NULL AND task.nodeId IS NOT NULL
         ORDER BY receipt.rowid DESC LIMIT ?`).all(
         revision,

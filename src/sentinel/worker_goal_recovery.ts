@@ -1,5 +1,5 @@
 import {
-  SENTINEL_LIVE_REPOSITORY_VISIBILITY,
+  isSentinelLiveRepositoryRead,
   SENTINEL_SAVED_REPOSITORY_VISIBILITY,
 } from "./github_repository_visibility.ts";
 import {
@@ -576,7 +576,7 @@ export function isSentinelGoalReceiptRead(tool: unknown) {
 }
 
 export function isRepeatableSentinelReceiptRead(tool: unknown) {
-  return tool === SENTINEL_LIVE_REPOSITORY_VISIBILITY ||
+  return (typeof tool === "string" && isSentinelLiveRepositoryRead(tool)) ||
     tool === SENTINEL_SAVED_REPOSITORY_VISIBILITY ||
     tool === SENTINEL_WORKER_NARRATIVE_READ ||
     tool === SENTINEL_WORKER_NARRATIVE_COMMIT ||
@@ -863,7 +863,7 @@ export function sentinelGoalReceiptReadArguments(
 ): GoalReceiptReadArguments | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) return;
   const args = value as Record<string, unknown>;
-  if (tool === SENTINEL_LIVE_REPOSITORY_VISIBILITY) {
+  if (isSentinelLiveRepositoryRead(tool)) {
     return Object.keys(args).length === 0 ? {} : undefined;
   }
   if (tool === SENTINEL_SAVED_REPOSITORY_VISIBILITY) {

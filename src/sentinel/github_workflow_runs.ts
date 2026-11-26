@@ -1,4 +1,5 @@
 /** Read minimized evidence from one operator-configured GitHub Actions workflow. */
+import { isApprovedHistoryBranchName } from "../core/execution_traces.ts";
 import {
   safeFetchWithRedirects,
   type SsrfChecker,
@@ -259,6 +260,37 @@ export function readSentinelGitHubRepositoryVisibility(
         );
       }
       return visibility;
+    },
+  );
+}
+
+export function sentinelGitHubBranchUrl(
+  owner: string,
+  repo: string,
+  branch: string,
+) {
+  if (!isApprovedHistoryBranchName(branch)) {
+    throw new Error("Invalid configured GitHub branch.");
+  }
+  return `${sentinelGitHubRepositoryUrl(owner, repo)}/branches/${
+    encodeURIComponent(branch)
+  }`;
+}
+
+/** Read only the positive, exact branch protection signal. */
+export function readSentinelGitHubBranchProtection(
+  target: { owner: string; repo: string; branch: string },
+  options: SentinelGitHubWorkflowOptions,
+) {
+  return readSentinelGitHubJson(
+    sentinelGitHubBranchUrl(target.owner, target.repo, target.branch),
+    options,
+    (body) => {
+      const { name, protected: enabled } = record(body);
+      if (name !== target.branch || typeof enabled !== "boolean") {
+        throw new Error("GitHub branch protection is unavailable.");
+      }
+      return enabled;
     },
   );
 }

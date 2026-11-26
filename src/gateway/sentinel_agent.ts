@@ -5,8 +5,11 @@ import {
   workerNarrativeEvidenceCall,
 } from "./sentinel_worker_narratives.ts";
 import {
+  isSentinelLiveRepositoryRead,
+  matchesRepositoryControlSource,
   nativeRepositoryVisibilityEvidenceId,
   projectRepositoryVisibility,
+  SENTINEL_LIVE_BRANCH_PROTECTION,
   SENTINEL_LIVE_REPOSITORY_VISIBILITY,
   SENTINEL_SAVED_REPOSITORY_VISIBILITY,
   type SentinelRepositoryVisibilityReference,
@@ -1179,6 +1182,13 @@ const liveRepositoryVisibilityTool: ToolDefinition = {
   parameters: {},
 };
 
+const liveBranchProtectionTool: ToolDefinition = {
+  name: SENTINEL_LIVE_BRANCH_PROTECTION,
+  description:
+    "Read protection status of the exact GitHub branch in this operator-reviewed recheck assignment.",
+  parameters: {},
+};
+
 const savedRepositoryVisibilityTool: ToolDefinition = {
   name: SENTINEL_SAVED_REPOSITORY_VISIBILITY,
   description:
@@ -2277,13 +2287,14 @@ async function authorizeRepositoryVisibilityDestination(
     input: {
       ...metadata,
       tool_call: {
-        name: SENTINEL_LIVE_REPOSITORY_VISIBILITY,
+        name: metadata.tool_name,
         args: { url: destination.url },
       },
     },
     auditInput: metadata,
   });
-  return decision.allowed && current();
+  return decision.allowed &&
+    (!destination.branch || decision.action === "ALLOW") && current();
 }
 
 async function readLiveRepositoryVisibility(
@@ -2292,6 +2303,7 @@ async function readLiveRepositoryVisibility(
   args: Record<string, unknown>,
   session: SessionState,
   resumeOnly = false,
+  branchProtection = false,
 ) {
   const unavailable =
     "Error: Live repository visibility is unavailable for this assignment.";
@@ -2345,6 +2357,7 @@ async function readLiveRepositoryVisibility(
   const replay = resumeOnly || hasPreviousValue;
   const reviewed = task.plannerRound?.findingFollowup
     ?.nativeRepositoryVisibility;
+  if (branchProtection !== !!reviewed?.branch) return unavailable;
   const result = await callback({
     caseId: location.caseId,
     assetId,
@@ -2352,6 +2365,7 @@ async function readLiveRepositoryVisibility(
     signal: turn.signal,
     isCurrent: current,
     resumeOnly: replay,
+    branch: reviewed?.branch,
     loadSaved: () =>
       withStore((store) =>
         store.readLeasedRepositoryVisibility(
@@ -2373,7 +2387,8 @@ async function readLiveRepositoryVisibility(
       ),
     authorize: (destination) =>
       reviewed && (destination.repository !== reviewed.repository ||
-          destination.repositoryId !== reviewed.repositoryId)
+          destination.repositoryId !== reviewed.repositoryId ||
+          destination.branch !== reviewed.branch)
         ? Promise.resolve(false)
         : authorizeRepositoryVisibilityDestination(
           options,
@@ -2400,6 +2415,7 @@ async function reopenRepositoryVisibility(
   assetId: string,
   signal: AbortSignal,
   authorized: () => boolean,
+  allowBranch = true,
 ) {
   const current = () => {
     if (signal.aborted || !authorized()) return false;
@@ -2427,7 +2443,7 @@ async function reopenRepositoryVisibility(
       true,
     );
   const stored = lookup();
-  if (!stored?.reference) return;
+  if (!stored?.reference || (!allowBranch && stored.receipt.branch)) return;
   const result = await callback({
     caseId: location.caseId,
     assetId,
@@ -2454,7 +2470,9 @@ async function reopenRepositoryVisibility(
     signal.aborted || !current() || !isDeepStrictEqual(stored, lookup())
   ) return;
   const metadata = {
-    tool_name: SENTINEL_LIVE_REPOSITORY_VISIBILITY,
+    tool_name: stored.receipt.branch
+      ? SENTINEL_LIVE_BRANCH_PROTECTION
+      : SENTINEL_LIVE_REPOSITORY_VISIBILITY,
     operation_type: "read",
     resource_classification: "INTERNAL",
     sentinel_case_id: location.caseId,
@@ -5160,7 +5178,10 @@ function createAgent(
         : []),
       ...(options.readRepositoryVisibility
         ? [
-          liveRepositoryVisibilityTool,
+          readAssignedModelReview(options)?.plannerRound?.findingFollowup
+              ?.nativeRepositoryVisibility?.branch
+            ? liveBranchProtectionTool
+            : liveRepositoryVisibilityTool,
           ...(readAssignedModelReview(options)?.plannerRound
               ?.repositoryVisibility
             ? [savedRepositoryVisibilityTool]
@@ -5246,6 +5267,7 @@ function createAgent(
       (nativeRepositoryRecheck &&
         [
           SENTINEL_LIVE_REPOSITORY_VISIBILITY,
+          SENTINEL_LIVE_BRANCH_PROTECTION,
           SENTINEL_ASSIGNED_EXECUTION_EVIDENCE,
           SENTINEL_RECHECK_CONTEXT_TOOL,
           "sentinel_record_finding_recheck",
@@ -6675,10 +6697,10 @@ function createAgent(
             !task?.nodeId || !state?.plan.runId ||
             args.findingId !== findingFollowup.findingId ||
             args.evidenceId !== nativeRepositoryVisibilityEvidenceId(task.id) ||
-            original?.kind !== "github_repository_status" ||
-            original.repo.toLowerCase() !==
-              nativeRepositoryRecheck.repository ||
-            original.repositoryId !== nativeRepositoryRecheck.repositoryId ||
+            !original || !matchesRepositoryControlSource(
+              original,
+              nativeRepositoryRecheck,
+            ) ||
             executionEvidenceDigest(original) !==
               nativeRepositoryRecheck.originalSha256
           ) {
@@ -6730,7 +6752,10 @@ function createAgent(
             turn.signal,
             current,
           );
-          if (!exact || !current()) return unavailable;
+          if (
+            !exact || exact.branch !== nativeRepositoryRecheck.branch ||
+            !current()
+          ) return unavailable;
           nativeReference = exact.reference;
         }
         const result = executeSentinelWorkerFindingTool(
@@ -6890,8 +6915,15 @@ function createAgent(
       if (name === liveWorkflowStatusTool.name) {
         return await readLiveWorkflowStatus(options, turn, args, session);
       }
-      if (name === SENTINEL_LIVE_REPOSITORY_VISIBILITY) {
-        return await readLiveRepositoryVisibility(options, turn, args, session);
+      if (isSentinelLiveRepositoryRead(name)) {
+        return await readLiveRepositoryVisibility(
+          options,
+          turn,
+          args,
+          session,
+          false,
+          name === SENTINEL_LIVE_BRANCH_PROTECTION,
+        );
       }
       if (name === SENTINEL_SAVED_REPOSITORY_VISIBILITY) {
         const selected = sentinelGoalReceiptReadArguments(name, args);
@@ -6936,6 +6968,7 @@ function createAgent(
             asset,
             turn.signal,
             current,
+            false,
           );
         if (
           !result || (worker &&
@@ -7722,7 +7755,7 @@ function createAgent(
       const failed = result.startsWith("Error:");
       if (
         !failed && turn && assignedReview &&
-        name === SENTINEL_LIVE_REPOSITORY_VISIBILITY &&
+        isSentinelLiveRepositoryRead(name) &&
         options.assessmentRevision && options.assignedTaskLeaseToken
       ) {
         const published = withSentinelAssessmentWriteLock(
@@ -8152,7 +8185,7 @@ function createAgent(
             ? redactCredentialText(result) === result &&
               JSON.parse(result).evidenceId === goalArgs.node &&
               JSON.parse(result).evidenceRevision === options.assessmentRevision
-            : name === SENTINEL_LIVE_REPOSITORY_VISIBILITY
+            : isSentinelLiveRepositoryRead(name)
             ? !!assignedReview &&
               JSON.parse(result).taskId === assignedReview.id &&
               JSON.parse(result).targetId === assignedReview.nodeId &&
@@ -8888,10 +8921,7 @@ function createAgent(
       proof.original.evidenceId,
       assetId,
     );
-    if (
-      !original || original.payload.kind !== "github_repository_status" ||
-      original.payload.visibility === "private" || !current()
-    ) return;
+    if (!original || !current()) return;
     const call = executionTracePayloadCall(original.payload);
     if (
       !await authorizeSavedToolCalls(
@@ -8924,8 +8954,7 @@ function createAgent(
       current,
     );
     if (
-      !fresh || fresh.repositoryId !== original.payload.repositoryId ||
-      fresh.repository !== original.payload.repo.toLowerCase() ||
+      !fresh || !matchesRepositoryControlSource(original.payload, fresh) ||
       !isDeepStrictEqual(fresh.reference, proof.source) || !current()
     ) return;
     return {
@@ -9338,6 +9367,10 @@ function createAgent(
         signal,
         current,
       ) {
+        const assignment = readAssignedModelReview(options);
+        const reviewedBranch = assignment?.id === reference.taskId &&
+          !!assignment.plannerRound?.findingFollowup?.nativeRepositoryVisibility
+            ?.branch;
         const saved = reference.verdictId
           ? await reopenRepositoryVisibilityVerdict(
             runId,
@@ -9357,6 +9390,7 @@ function createAgent(
             assetId,
             signal,
             current,
+            reviewedBranch,
           );
         return !!saved && isDeepStrictEqual(saved.reference, reference);
       },
@@ -9683,7 +9717,7 @@ function createAgent(
                     !readAssignedModelReview(options)
                   ) return false;
                   if (
-                    call.name === SENTINEL_LIVE_REPOSITORY_VISIBILITY
+                    isSentinelLiveRepositoryRead(call.name)
                   ) {
                     const reopened = await readLiveRepositoryVisibility(
                       options,
@@ -9691,6 +9725,7 @@ function createAgent(
                       call.args,
                       session,
                       true,
+                      call.name === SENTINEL_LIVE_BRANCH_PROTECTION,
                     );
                     if (!reopened.startsWith("{") || saved !== reopened) {
                       return false;

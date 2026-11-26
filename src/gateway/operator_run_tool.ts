@@ -2,7 +2,13 @@ import type {
   createSentinelRepositoryVisibilityReader,
   SentinelRepositoryVisibilityDestination,
 } from "./sentinel_repository_visibility.ts";
-import { SENTINEL_LIVE_REPOSITORY_VISIBILITY } from "../sentinel/github_repository_visibility.ts";
+import {
+  isSentinelLiveRepositoryRead,
+  matchesRepositoryControlSource,
+  repositoryControlOutcome,
+  SENTINEL_LIVE_BRANCH_PROTECTION,
+  SENTINEL_LIVE_REPOSITORY_VISIBILITY,
+} from "../sentinel/github_repository_visibility.ts";
 import { isWorkerNarrativeId } from "../sentinel/worker_narratives.ts";
 import {
   readLinkedSentinelWorkerReview,
@@ -366,6 +372,7 @@ import {
   executeOperatorEvidenceDigest,
 } from "./operator_evidence_digests.ts";
 import {
+  branchExecutionEvidenceId,
   nativeWorkflowControlCandidate,
   readCaseExecutionEvidence,
 } from "../sentinel/case_execution_evidence.ts";
@@ -1167,6 +1174,11 @@ export const operatorRunTool: ToolDefinition = {
       type: "boolean",
       description:
         "Approve a fresh configured repository visibility recheck of this exact repository-visibility finding.",
+    },
+    nativeBranchProtectionRecheck: {
+      type: "boolean",
+      description:
+        "Approve a fresh read of the exact configured branch from the original branch-protection finding.",
     },
     passingRecheckForFindingId: {
       type: "string",
@@ -2748,7 +2760,9 @@ export async function reopenOwnedSentinelRepositoryVisibility(
     !!expected && isCurrent() && policy() === expected &&
     isDeepStrictEqual(stored, lookup());
   const traceScope = { caseId, revision, taskId };
-  const tool = SENTINEL_LIVE_REPOSITORY_VISIBILITY;
+  const tool = stored.receipt.branch
+    ? SENTINEL_LIVE_BRANCH_PROTECTION
+    : SENTINEL_LIVE_REPOSITORY_VISIBILITY;
   if (!current() || !await authorizeTrace(traceScope, tool, {}) || !current()) {
     return;
   }
@@ -6688,6 +6702,7 @@ ${request}`)
           node,
           recheckFindingId,
           nativeRepositoryVisibilityRecheck,
+          nativeBranchProtectionRecheck,
           passingRecheckForFindingId,
           graphRelationship,
           prioritizeNext,
@@ -6711,6 +6726,7 @@ ${request}`)
               "node",
               "recheckFindingId",
               "nativeRepositoryVisibilityRecheck",
+              "nativeBranchProtectionRecheck",
               "passingRecheckForFindingId",
               "graphRelationship",
               "prioritizeNext",
@@ -6752,8 +6768,11 @@ ${request}`)
         ) return unavailable;
         const finding = parseReviewedFindingFollowup(receiptId, note, context);
         if (
-          nativeRepositoryVisibilityRecheck !== undefined &&
-          (nativeRepositoryVisibilityRecheck !== true || !finding)
+          (nativeRepositoryVisibilityRecheck !== undefined &&
+            (nativeRepositoryVisibilityRecheck !== true || !finding ||
+              nativeBranchProtectionRecheck !== undefined)) ||
+          (nativeBranchProtectionRecheck !== undefined &&
+            (nativeBranchProtectionRecheck !== true || !finding))
         ) return unavailable;
         if (
           (receiptId !== undefined || note !== undefined && !hasRecheckNote) &&
@@ -6846,7 +6865,8 @@ ${request}`)
         const nativeSource = async () => {
           if (
             !baseFindingFollowup ||
-            nativeRepositoryVisibilityRecheck !== true ||
+            (nativeRepositoryVisibilityRecheck !== true &&
+              nativeBranchProtectionRecheck !== true) ||
             !context
           ) return;
           const saved = await readAuthorizedCaseEvidence(
@@ -6862,18 +6882,55 @@ ${request}`)
                 latest.plan.runId === runId.toLowerCase();
             },
           );
-          if (
-            saved?.payload.kind !== "github_repository_status" ||
+          if (!saved) return;
+          let branch: string | undefined;
+          if (nativeBranchProtectionRecheck) {
+            if (saved.payload.kind !== "github_branch_protection") return;
+            const original = readSentinelAssessmentRevision(
+              path,
+              baseFindingFollowup.sourceRevision,
+            )?.result.sharedGraph.snapshot?.nodes.find(({ id }) =>
+              id === baseFindingFollowup.evidenceId
+            );
+            if (
+              original?.kind !== "evidence" || !original.executionSource ||
+              original.controlVerification?.outcome !== "fail"
+            ) return;
+            const { executionSource, controlVerification } = original;
+            const finding = readSentinelCaseFindingReceipts(
+              path,
+              [baseFindingFollowup.findingId],
+            ).get(baseFindingFollowup.findingId);
+            if (finding?.kind !== "finding") return;
+            const branches = saved.payload.approvedBranches?.filter((entry) =>
+              !entry.protected && branchExecutionEvidenceId(
+                  runId.toLowerCase(),
+                  node,
+                  finding.controlId,
+                  executionSource,
+                  entry.name,
+                  controlVerification.validUntil,
+                ) === original.id
+            );
+            if (branches?.length !== 1) return;
+            branch = branches[0].name;
+          } else if (
+            saved.payload.kind !== "github_repository_status" ||
             saved.payload.visibility === "private"
           ) return;
           return {
             repository: saved.payload.repo.toLowerCase(),
             repositoryId: saved.payload.repositoryId,
             originalSha256: saved.resultSha256,
+            ...(branch && { branch }),
           };
         };
         const nativeRepositoryVisibility = await nativeSource();
-        if (nativeRepositoryVisibilityRecheck && !nativeRepositoryVisibility) {
+        if (
+          (nativeRepositoryVisibilityRecheck ||
+            nativeBranchProtectionRecheck) &&
+          !nativeRepositoryVisibility
+        ) {
           return unavailable;
         }
         const findingFollowup = baseFindingFollowup && {
@@ -10347,7 +10404,7 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
                 result: JSON.parse(text),
               });
             }
-            if (step?.tool === SENTINEL_LIVE_REPOSITORY_VISIBILITY) {
+            if (step && isSentinelLiveRepositoryRead(step.tool)) {
               const task = history?.tasks.find(({ id }) => id === taskId);
               const revision = ref.revision;
               const assetId = task?.nodeId;
@@ -12003,14 +12060,10 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
               current,
             );
             if (
-              oldEvidence?.payload.kind !== "github_repository_status" ||
-              oldEvidence.payload.visibility === "private" ||
               !fresh ||
-              fresh.repositoryId !== oldEvidence.payload.repositoryId ||
-              fresh.repository !== oldEvidence.payload.repo.toLowerCase() ||
+              !matchesRepositoryControlSource(oldEvidence?.payload, fresh) ||
               fresh.observedAt !== record.observedAt ||
-              (fresh.visibility === "private" ? "pass" : "fail") !==
-                record.outcome ||
+              repositoryControlOutcome(fresh) !== record.outcome ||
               !current()
             ) return false;
             return true;

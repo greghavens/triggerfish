@@ -125,3 +125,48 @@ Deno.test("Repository visibility retains only an opaque credential reference and
   assertEquals(await restarted(replay), undefined);
   assertEquals(calls, 2);
 });
+
+Deno.test("Revoking branch access during repository identity lookup prevents the branch request", async () => {
+  const secrets = createMemorySecretStore();
+  assert((await secrets.setSecret("github-pat", "ghp_fixture")).ok);
+  let branchAllowed = true;
+  let branchCalls = 0;
+  const reader = createSentinelRepositoryVisibilityReader({
+    scopes: [{
+      case: "main",
+      asset: "app",
+      owner: "fixture",
+      repo: "approved",
+      repository_id: 42,
+    }],
+    branchNames: { "fixture/approved": ["release/2026"] },
+    ssrfChecker: () =>
+      Promise.resolve({ ok: true as const, value: "192.0.2.1" }),
+    resolveCredential: resolveSentinelRepositoryCredential(() => secrets),
+    readVisibility: () => {
+      branchAllowed = false;
+      return Promise.resolve("public");
+    },
+    request: () => {
+      branchCalls++;
+      return Promise.resolve({
+        ok: true,
+        value: Response.json({ name: "release/2026", protected: true }),
+      });
+    },
+  });
+  const result = await reader({
+    caseId: "main",
+    assetId: "app",
+    branch: "release/2026",
+    evidenceRevision: 1,
+    signal: new AbortController().signal,
+    isCurrent: () => true,
+    authorize: ({ url }) =>
+      Promise.resolve(!url.includes("/branches/") || branchAllowed),
+    loadSaved: () => undefined,
+    saveResult: (receipt) => receipt,
+  });
+  assertEquals(result, undefined);
+  assertEquals(branchCalls, 0);
+});

@@ -1,4 +1,5 @@
 /** Project a retained control-check verdict independently of analyst disposition. */
+import { repositoryControlOutcome } from "./github_repository_visibility.ts";
 import { dirname, join } from "@std/path";
 import { isDeepStrictEqual } from "node:util";
 import {
@@ -148,8 +149,7 @@ export function createSentinelFindingRemediationReader(
       native &&
       (!observation || !isDeepStrictEqual(observation.reference, native) ||
         observation.receipt.observedAt !== latest.observedAt ||
-        (observation.receipt.visibility === "private" ? "pass" : "fail") !==
-          latest.outcome ||
+        repositoryControlOutcome(observation.receipt) !== latest.outcome ||
         latest.observedAt <= original.observedAt ||
         Date.parse(latest.validUntil) - Date.parse(latest.observedAt) !==
           Date.parse(original.validUntil) - Date.parse(original.observedAt))

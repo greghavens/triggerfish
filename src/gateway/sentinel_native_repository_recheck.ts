@@ -1,6 +1,7 @@
 /** Verify a fresh, same-assignment repository observation against reviewed control evidence. */
 import { isDeepStrictEqual } from "node:util";
 import { dirname, join } from "@std/path";
+import { branchExecutionEvidenceId } from "../sentinel/case_execution_evidence.ts";
 import {
   type AdaptiveTask,
   readAdaptiveRepositoryVisibility,
@@ -14,6 +15,7 @@ import { locateSentinelCase } from "../sentinel/cases.ts";
 import { createSentinelFindingRemediationReader } from "../sentinel/finding_remediation.ts";
 import {
   nativeRepositoryVisibilityEvidenceId,
+  repositoryControlOutcome,
   type SentinelRepositoryVisibilityReference,
 } from "../sentinel/github_repository_visibility.ts";
 import { sentinelOperatingConstraintsAllow } from "../sentinel/operating_constraints.ts";
@@ -167,7 +169,15 @@ export function verifySentinelNativeRepositoryRecheck(
   const original = snapshot.nodes.find(({ id }) => id === finding.evidenceId);
   if (
     original?.kind !== "evidence" ||
-    original.executionSource?.resultSha256 !== binding.originalSha256
+    original.executionSource?.resultSha256 !== binding.originalSha256 ||
+    (binding.branch && branchExecutionEvidenceId(
+          finding.runId,
+          finding.targetId,
+          finding.controlId,
+          original.executionSource,
+          binding.branch,
+          finding.validUntil,
+        ) !== original.id)
   ) return;
   const stored = readAdaptiveRepositoryVisibility(
     join(dirname(path), "sentinel-adaptive.db"),
@@ -182,6 +192,7 @@ export function verifySentinelNativeRepositoryRecheck(
     !receipt || !isDeepStrictEqual(authorized, stored.reference) ||
     receipt.repository !== binding.repository ||
     receipt.repositoryId !== binding.repositoryId ||
+    receipt.branch !== binding.branch ||
     receipt.observedAt <= finding.observedAt
   ) return;
   const observedAt = receipt.observedAt;
@@ -191,9 +202,7 @@ export function verifySentinelNativeRepositoryRecheck(
   const evaluatedAt = new Date().toISOString();
   if (!Number.isFinite(expiry) || expiry <= Date.parse(evaluatedAt)) return;
   const controlVerification = {
-    outcome: receipt.visibility === "private"
-      ? "pass" as const
-      : "fail" as const,
+    outcome: repositoryControlOutcome(receipt),
     observedAt,
     validUntil: new Date(expiry).toISOString(),
   };

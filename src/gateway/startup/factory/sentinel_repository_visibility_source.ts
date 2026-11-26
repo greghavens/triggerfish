@@ -46,7 +46,7 @@ export function resolveSentinelRepositoryCredential(store: () => SecretStore) {
 }
 
 export function configuredSentinelRepositoryVisibilityReader(
-  config: Pick<TriggerFishConfig, "github" | "sentinel">,
+  config: Pick<TriggerFishConfig, "github" | "sentinel" | "agent_recovery">,
   baseDir: string,
   secretStore: () => SecretStore,
 ) {
@@ -59,6 +59,9 @@ export function configuredSentinelRepositoryVisibilityReader(
   ) return;
   return createSentinelRepositoryVisibilityReader({
     scopes,
+    branchNames: config.agent_recovery?.github_branch_protection
+      ? config.agent_recovery.github_branch_names
+      : undefined,
     classificationOverrides: config.github?.classification_overrides as
       | Readonly<Record<string, ClassificationLevel>>
       | undefined,

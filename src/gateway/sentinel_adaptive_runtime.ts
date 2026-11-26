@@ -20,8 +20,9 @@ import {
 } from "../sentinel/traffic_receipts.ts";
 import { notifyCommittedEvidence } from "../core/evidence_task_progression.ts";
 import {
+  isSentinelLiveRepositoryRead,
   nativeRepositoryVisibilityEvidenceId,
-  SENTINEL_LIVE_REPOSITORY_VISIBILITY,
+  SENTINEL_LIVE_BRANCH_PROTECTION,
   SENTINEL_SAVED_REPOSITORY_VISIBILITY,
   type SentinelRepositoryVisibilityRecheckBinding,
   type SentinelRepositoryVisibilityReference,
@@ -4153,7 +4154,7 @@ function currentRepositoryVisibility(
   assetId: string,
   sourceTaskId: string,
 ) {
-  return state.active && !state.paused && state.plan.runId &&
+  const source = state.active && !state.paused && state.plan.runId &&
       caseOperatingScope(path, state.revision)({
         kind: "review_evidence",
         nodeId: assetId,
@@ -4167,6 +4168,7 @@ function currentRepositoryVisibility(
       true,
     )
     : undefined;
+  return source && !source.receipt.branch ? source : undefined;
 }
 
 function currentRepositoryVisibilityReference(
@@ -6124,7 +6126,7 @@ export function createSentinelModelPlanner(
         targetId,
         evidenceRevision: current.revision,
       };
-      if (tool === SENTINEL_LIVE_REPOSITORY_VISIBILITY && requestId === "{}") {
+      if (isSentinelLiveRepositoryRead(tool) && requestId === "{}") {
         const receipt = readAdaptiveRepositoryVisibility(
           storePath(snapshotPath),
           runId,
@@ -6132,7 +6134,11 @@ export function createSentinelModelPlanner(
           taskId,
           targetId,
         );
-        return receipt && {
+        if (
+          !receipt || !!receipt.receipt.branch !==
+            (tool === SENTINEL_LIVE_BRANCH_PROTECTION)
+        ) return;
+        return {
           id: taskId,
           args: {},
           result: JSON.stringify(receipt.projection),
@@ -7202,7 +7208,7 @@ export function createSentinelModelPlanner(
                       call.name === SENTINEL_SHARED_WORKER_REVIEW ||
                       call.name === SENTINEL_WORKER_NARRATIVE_READ ||
                       call.name === SENTINEL_WORKER_NARRATIVE_COMMIT ||
-                      call.name === SENTINEL_LIVE_REPOSITORY_VISIBILITY ||
+                      isSentinelLiveRepositoryRead(call.name) ||
                       call.name === SENTINEL_SAVED_REPOSITORY_VISIBILITY
                     )
                   ) {
@@ -7618,7 +7624,7 @@ export function createSentinelModelPlanner(
                   ...acceptedReview,
                   ...(acceptedReview.steps?.some(({ tool, outcome }) =>
                     outcome === "returned" &&
-                    (tool === SENTINEL_LIVE_REPOSITORY_VISIBILITY ||
+                    (isSentinelLiveRepositoryRead(tool) ||
                       tool === SENTINEL_SAVED_REPOSITORY_VISIBILITY)
                   ) &&
                     {

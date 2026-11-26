@@ -1,8 +1,10 @@
 import {
   projectRepositoryVisibility,
+  repositoryControlOutcome,
   repositoryVisibilityReceipt,
   repositoryVisibilityRecheckBinding,
   repositoryVisibilityReference,
+  SENTINEL_LIVE_BRANCH_PROTECTION,
   SENTINEL_LIVE_REPOSITORY_VISIBILITY,
 } from "./github_repository_visibility.ts";
 import { isDeepStrictEqual } from "node:util";
@@ -53,6 +55,7 @@ import {
 } from "./archive_asset_discoveries.ts";
 import { retainArchivedWorkerTraceMetadata } from "./case_archive_capture.ts";
 import {
+  branchExecutionEvidenceId,
   sentinelExecutionEvidenceFile,
   validateCaseExecutionEvidence,
 } from "./case_execution_evidence.ts";
@@ -864,7 +867,10 @@ function validateArchivedRepositoryVisibility(
       // The result may have committed just before its trace was recorded.
       if (step === undefined) continue;
       if (
-        step?.tool !== SENTINEL_LIVE_REPOSITORY_VISIBILITY ||
+        step?.tool !==
+          (receipt.branch
+            ? SENTINEL_LIVE_BRANCH_PROTECTION
+            : SENTINEL_LIVE_REPOSITORY_VISIBILITY) ||
         step.outcome !== "returned"
       ) throw invalid();
       const proof = step.goalReceiptRead?.sha256 ?? step.resultSha256;
@@ -924,6 +930,7 @@ function validateArchivedRepositoryVisibilityCitations(
       : undefined;
     if (
       !receipt || source?.nodeId !== nodeId ||
+      (!!receipt.branch && !reference.verdictId) ||
       receipt.evidenceRevision !== source.evidenceRevision ||
       reference.resultSha256 !== createHash("sha256").update(
           JSON.stringify(
@@ -1472,14 +1479,22 @@ function validateArchivedRepositoryRechecks(
             recheck.nativeRepositoryVisibility.resultSha256 ||
           source.receipt.repository !== binding.repository ||
           source.receipt.repositoryId !== binding.repositoryId ||
+          source.receipt.branch !== binding.branch ||
           !snapshot ||
           digestSentinelSnapshot(snapshot) !== recheck.snapshotDigest ||
           originalEvidence?.kind !== "evidence" ||
           originalEvidence.executionSource?.resultSha256 !==
             binding.originalSha256 ||
+          (binding.branch && branchExecutionEvidenceId(
+                original.runId,
+                original.targetId,
+                original.controlId,
+                originalEvidence.executionSource,
+                binding.branch,
+                original.validUntil,
+              ) !== original.evidenceId) ||
           source.receipt.observedAt !== recheck.observedAt ||
-          (source.receipt.visibility === "private" ? "pass" : "fail") !==
-            recheck.outcome ||
+          repositoryControlOutcome(source.receipt) !== recheck.outcome ||
           recheck.observedAt <= original.observedAt ||
           Date.parse(recheck.validUntil) - Date.parse(recheck.observedAt) !==
             Date.parse(original.validUntil) - Date.parse(original.observedAt)
