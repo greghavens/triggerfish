@@ -199,7 +199,7 @@ export async function recoverSentinelArchivePurges(
           continue;
         }
         const approval = journal.readPurgeAuthorization(archiveId);
-        if (!staged && approval?.kind !== "standalone") continue;
+        if (!staged && !approval) continue;
         const group = approval?.kind === "batch"
           ? reviewedPurgeBatch(
             journal,

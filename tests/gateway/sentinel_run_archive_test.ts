@@ -202,6 +202,7 @@ async function withGateway(
     onFrame: (frame: string) => void;
   },
   denyStartupPurge?: string | readonly string[],
+  denyStartupPurgeGroup?: string,
 ) {
   const approvals: string[] = [];
   const policy = {
@@ -233,7 +234,7 @@ async function withGateway(
     ),
     evaluateHook(hook, { input }) {
       const call = input.tool_call as
-        | { args?: { action?: string; id?: string } }
+        | { args?: { action?: string; id?: string; requestId?: string } }
         | undefined;
       const workerSource = input.tool_name === "sentinel_shared_asset" ||
         input.tool_name === "sentinel_shared_asset_links" ||
@@ -294,6 +295,9 @@ async function withGateway(
           (typeof denyStartupPurge === "string"
             ? denyStartupPurge === call.args.id
             : denyStartupPurge?.includes(call.args.id))) &&
+        !(denyStartupPurgeGroup && hook === "PRE_TOOL_CALL" &&
+          call?.args?.action === "purge_archives" &&
+          call.args.requestId === denyStartupPurgeGroup) &&
         !(policy.denyReportAmendment && hook === "PRE_TOOL_CALL" &&
           call?.args?.action === "amend_finding_report") &&
         !(policy.denyDispositionReview && hook === "PRE_TOOL_CALL" &&
@@ -6748,6 +6752,7 @@ Deno.test("Owner gateway reviews exact single and batch archive purge and resume
       "purge-unmoved",
       "purge-approved-live",
       "purge-batch-live",
+      "purge-batch-unadmitted",
     ]
       .map(
         (id) => ({ kind: "sentinel", id, archiveId: crypto.randomUUID() }),
@@ -6786,8 +6791,16 @@ Deno.test("Owner gateway reviews exact single and batch archive purge and resume
         assertEquals(archived.receipt.status, "succeeded");
       }
     });
-    const [one, two, recovering, current, unmoved, approvedLive, batchLive] =
-      targets;
+    const [
+      one,
+      two,
+      recovering,
+      current,
+      unmoved,
+      approvedLive,
+      batchLive,
+      batchUnadmitted,
+    ] = targets;
     let child: typeof two | undefined;
     let unarchivedChild: typeof two | undefined;
     await withGateway(baseDir, async (turn) => {
@@ -6861,7 +6874,15 @@ Deno.test("Owner gateway reviews exact single and batch archive purge and resume
     const { archiveId: lateArchiveId, ...lateChild } = unarchivedChild;
     const childTarget = child;
     for (
-      const target of [one, two, recovering, unmoved, approvedLive, batchLive]
+      const target of [
+        one,
+        two,
+        recovering,
+        unmoved,
+        approvedLive,
+        batchLive,
+        batchUnadmitted,
+      ]
     ) {
       const state = startSentinelAssessment(
         resolveSentinelCasePath(baseDir, target.id),
@@ -6876,7 +6897,7 @@ Deno.test("Owner gateway reviews exact single and batch archive purge and resume
     const batchBeforeCrash = {
       action: "purge_archives",
       requestId: crypto.randomUUID(),
-      runTargets: [batchLive],
+      runTargets: [batchLive, batchUnadmitted],
     };
     const single = {
       action: "purge_archive",
@@ -6987,9 +7008,14 @@ Deno.test("Owner gateway reviews exact single and batch archive purge and resume
       };
       try {
         assert(!(await turn(approvedBeforeCrash)).includes("succeeded"));
-        assertEquals(
-          JSON.parse(await turn(batchBeforeCrash)).outcomes[0].receipt,
-          undefined,
+        policy.afterConfirmation = () => {
+          policy.denyPurgeMember = batchUnadmitted.id;
+        };
+        const pendingBatch = JSON.parse(await turn(batchBeforeCrash));
+        assert(
+          pendingBatch.outcomes.every((item: { receipt?: unknown }) =>
+            !item.receipt
+          ),
         );
       } finally {
         Deno.renameSync = rename;
@@ -7008,6 +7034,11 @@ Deno.test("Owner gateway reviews exact single and batch archive purge and resume
           kind: "batch",
           batchRequestId: batchBeforeCrash.requestId,
         });
+        assertEquals(pending.readBatch(batchBeforeCrash.requestId)?.eligible, [
+          batchLive.archiveId,
+          batchUnadmitted.archiveId,
+        ]);
+        assertEquals(pending.readPurge(batchUnadmitted.archiveId), undefined);
       } finally {
         pending.close();
       }
@@ -7063,6 +7094,14 @@ Deno.test("Owner gateway reviews exact single and batch archive purge and resume
             denied.readPurge(approvedLive.archiveId)?.status,
             "pending",
           );
+          assertEquals(
+            denied.readPurge(batchLive.archiveId)?.status,
+            "pending",
+          );
+          assert(
+            (await Deno.lstat(join(directory, batchLive.archiveId)))
+              .isDirectory,
+          );
           assert(
             (await Deno.lstat(join(directory, approvedLive.archiveId)))
               .isDirectory,
@@ -7073,66 +7112,96 @@ Deno.test("Owner gateway reviews exact single and batch archive purge and resume
       },
       undefined,
       [recovering.id, approvedLive.id],
+      batchBeforeCrash.requestId,
     );
-    await withGateway(baseDir, async (turn, approvals) => {
-      await assertRejects(
-        () => Deno.lstat(join(directory, `.purge-${recovering.archiveId}`)),
-        Deno.errors.NotFound,
-      );
-      let batchMemberRequest: string | undefined;
-      const reopened = openRunArchiveActions(join(directory, "actions.db"));
-      try {
-        assertEquals(
-          reopened.readPurge(recovering.archiveId)?.status,
-          "succeeded",
-        );
-        assertEquals(reopened.readPurge(unmoved.archiveId)?.status, "pending");
-        assertEquals(
-          reopened.readPurge(approvedLive.archiveId)?.status,
-          "succeeded",
-        );
+    await withGateway(
+      baseDir,
+      async (turn, approvals) => {
         await assertRejects(
-          () => Deno.lstat(join(directory, approvedLive.archiveId)),
+          () => Deno.lstat(join(directory, `.purge-${recovering.archiveId}`)),
           Deno.errors.NotFound,
         );
-        const batchMember = reopened.readPurge(batchLive.archiveId);
-        assertEquals(batchMember?.status, "pending");
-        batchMemberRequest = batchMember?.requestId;
+        let batchMemberRequest: string | undefined;
+        const reopened = openRunArchiveActions(join(directory, "actions.db"));
+        try {
+          assertEquals(
+            reopened.readPurge(recovering.archiveId)?.status,
+            "succeeded",
+          );
+          assertEquals(
+            reopened.readPurge(unmoved.archiveId)?.status,
+            "pending",
+          );
+          assertEquals(
+            reopened.readPurge(approvedLive.archiveId)?.status,
+            "succeeded",
+          );
+          await assertRejects(
+            () => Deno.lstat(join(directory, approvedLive.archiveId)),
+            Deno.errors.NotFound,
+          );
+          const batchMember = reopened.readPurge(batchLive.archiveId);
+          assertEquals(batchMember?.status, "pending");
+          batchMemberRequest = batchMember?.requestId;
+          assert(
+            (await Deno.lstat(join(directory, batchLive.archiveId)))
+              .isDirectory,
+          );
+          assert(
+            (await Deno.lstat(join(directory, unmoved.archiveId))).isDirectory,
+          );
+          assert((await Deno.lstat(orphanQuarantine)).isDirectory);
+        } finally {
+          reopened.close();
+        }
+        assert(batchMemberRequest);
+        assert(
+          !(await turn({
+            action: "purge_archive",
+            ...batchLive,
+            requestId: batchMemberRequest,
+          })).includes("succeeded"),
+        );
         assert(
           (await Deno.lstat(join(directory, batchLive.archiveId))).isDirectory,
         );
-        assert(
-          (await Deno.lstat(join(directory, unmoved.archiveId))).isDirectory,
+        assertEquals(
+          JSON.parse(await turn(resume)).receipt.status,
+          "succeeded",
         );
-        assert((await Deno.lstat(orphanQuarantine)).isDirectory);
+        assertEquals(
+          JSON.parse(await turn(approvedBeforeCrash)).receipt.status,
+          "succeeded",
+        );
+        assertEquals(approvals.length, 0);
+      },
+      undefined,
+      batchLive.id,
+    );
+    await withGateway(baseDir, async (turn, approvals) => {
+      const reopened = openRunArchiveActions(join(directory, "actions.db"));
+      try {
+        assertEquals(
+          reopened.readPurge(batchLive.archiveId)?.status,
+          "succeeded",
+        );
+        assertEquals(reopened.readPurge(batchUnadmitted.archiveId), undefined);
+        await assertRejects(
+          () => Deno.lstat(join(directory, batchLive.archiveId)),
+          Deno.errors.NotFound,
+        );
+        assert(
+          (await Deno.lstat(join(directory, batchUnadmitted.archiveId)))
+            .isDirectory,
+        );
       } finally {
         reopened.close();
       }
-      assert(batchMemberRequest);
-      assert(
-        !(await turn({
-          action: "purge_archive",
-          ...batchLive,
-          requestId: batchMemberRequest,
-        })).includes("succeeded"),
-      );
-      assert(
-        (await Deno.lstat(join(directory, batchLive.archiveId))).isDirectory,
-      );
-      assertEquals(JSON.parse(await turn(resume)).receipt.status, "succeeded");
-      assertEquals(
-        JSON.parse(await turn(approvedBeforeCrash)).receipt.status,
-        "succeeded",
-      );
-      assertEquals(
-        JSON.parse(await turn(batchBeforeCrash)).outcomes[0].receipt.status,
-        "succeeded",
-      );
       assertEquals(approvals.length, 0);
       const result = JSON.parse(await turn({ action: "archive_catalog" }));
       assertEquals(
         result.archives.map((item: { archiveId: string }) => item.archiveId),
-        [lateArchiveId, current.archiveId],
+        [lateArchiveId, batchUnadmitted.archiveId, current.archiveId],
       );
     });
   } finally {
