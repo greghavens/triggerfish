@@ -7839,6 +7839,18 @@ Deno.test("Interactive Sentinel recheck context rejects withdrawn case access", 
     assert(original);
     let result = "";
     let revokeOnResponse = false;
+    let denyHistoryPre = false;
+    const retainedFindingMarker = "Authorized original observation.";
+    const memorySeen: boolean[] = [];
+    const setPolicy = (expectedVersion: number, asset: string) =>
+      assert(recordSentinelOperatingConstraints(path, {
+        runId: state.plan.runId!,
+        evidenceRevision: state.revision,
+        expectedVersion,
+        requestId: crypto.randomUUID(),
+        operatorScope: "owner",
+        constraints: { allowedAssetIds: [asset], deniedKinds: [] },
+      }));
     let permitted = 0;
     const registry = createProviderRegistry();
     registry.register({
@@ -7846,8 +7858,15 @@ Deno.test("Interactive Sentinel recheck context rejects withdrawn case access", 
       supportsStreaming: false,
       complete(messages) {
         const last = messages.at(-1);
-        const response = last?.role === "tool";
-        if (response) result = String(last.content);
+        const memoryCheck = last?.role === "user" &&
+          String(last.content).includes("Check prior context");
+        if (memoryCheck) {
+          memorySeen.push(
+            JSON.stringify(messages).includes(retainedFindingMarker),
+          );
+        }
+        const response = memoryCheck || last?.role === "tool";
+        if (last?.role === "tool") result = String(last.content);
         return Promise.resolve({
           content: response ? "Reviewed the retained context." : "",
           usage: { inputTokens: 1, outputTokens: 1 },
@@ -7881,19 +7900,14 @@ Deno.test("Interactive Sentinel recheck context rejects withdrawn case access", 
           ) {
             permitted++;
             if (revokeOnResponse) {
-              assert(recordSentinelOperatingConstraints(path, {
-                runId: state.plan.runId!,
-                evidenceRevision: state.revision,
-                expectedVersion: 0,
-                requestId: crypto.randomUUID(),
-                operatorScope: "owner",
-                constraints: { allowedAssetIds: ["other"], deniedKinds: [] },
-              }));
+              setPolicy(2, "other");
             }
           }
+          const allowed = !(denyHistoryPre && hook === "PRE_TOOL_CALL" &&
+            input.tool_name === context);
           return Promise.resolve({
-            allowed: true,
-            action: "ALLOW",
+            allowed,
+            action: allowed ? "ALLOW" : "BLOCK",
             ruleId: null,
             duration: 0,
           });
@@ -7936,6 +7950,19 @@ Deno.test("Interactive Sentinel recheck context rejects withdrawn case access", 
       await turn("/sentinel on");
       await turn("Read this retained finding for remediation.");
       assertEquals(JSON.parse(result).finding.id, original.id);
+      await turn("Check prior context while the saved read remains allowed.");
+      denyHistoryPre = true;
+      await turn("Check prior context after the read policy denies replay.");
+      denyHistoryPre = false;
+      await turn("Reopen this retained finding for remediation.");
+      assertEquals(JSON.parse(result).finding.id, original.id);
+      setPolicy(0, "other");
+      await turn("Check prior context after case membership narrows.");
+      assertEquals(memorySeen, [true, false, false]);
+
+      setPolicy(1, "app");
+      await turn("/sentinel off");
+      await turn("/sentinel on");
       revokeOnResponse = true;
       await turn("Review the same finding again.");
       assertEquals(result, "Tool response withheld by policy.");
@@ -7949,7 +7976,7 @@ Deno.test("Interactive Sentinel recheck context rejects withdrawn case access", 
       await turn("/sentinel on");
       await turn("Read the earlier run's exact finding.");
       assertStringIncludes(result, "unavailable");
-      assertEquals(permitted, 2);
+      assertEquals(permitted, 4);
     } finally {
       socket.close();
       await closed.promise;

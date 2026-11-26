@@ -4441,6 +4441,10 @@ function createAgent(
         options.assignedTaskLeaseToken === undefined
       ? options.operatorRunReader
       : undefined);
+  const fenceFindingContextHistory = options.snapshotOverride === undefined &&
+    options.assessmentRevision === undefined &&
+    options.assignedTaskId === undefined &&
+    options.assignedTaskLeaseToken === undefined;
   const availableTools = canDelegate
     ? [
       ...tools,
@@ -4923,7 +4927,7 @@ function createAgent(
         );
         if (
           result.allowed && name === "PRE_CONTEXT_INJECTION" && turn &&
-          directTelemetryReader
+          (directTelemetryReader || fenceFindingContextHistory)
         ) {
           const retained = retainedTelemetry;
           if (retained) {
@@ -5621,6 +5625,65 @@ function createAgent(
             : undefined,
           turn.approvedReporterTraffic,
         );
+        if (
+          name === SENTINEL_RECHECK_CONTEXT_TOOL &&
+          fenceFindingContextHistory &&
+          result.startsWith("{")
+        ) {
+          const revision = turn.findingContextRevision;
+          const caseId = locateSentinelCase(options.snapshotPath)?.caseId;
+          const read = sentinelRecheckContextArgs(args);
+          if (!caseId || !revision || !read) {
+            return "Error: The requested finding context is unavailable.";
+          }
+          const isCurrent = () =>
+            currentSentinelFindingContext(options, result, revision);
+          const sourceSession = session;
+          const policy = {
+            tool_name: name,
+            session_taint: sourceSession.taint,
+            case_id: caseId,
+            evidence_revision: revision,
+            assignment_id: null,
+            resource_classification: "INTERNAL",
+            operation_type: "read",
+          };
+          turn.pendingTelemetryFence = {
+            tool: name,
+            revision,
+            sources: [{
+              key: JSON.stringify([name, caseId, revision, read.findingId]),
+              isCurrent,
+              async authorize() {
+                if (!isCurrent()) return false;
+                const pre = await options.hookRunner.evaluateHook(
+                  "PRE_TOOL_CALL",
+                  {
+                    session: sourceSession,
+                    input: { ...policy, tool_call: { name, args: read } },
+                    auditInput: policy,
+                  },
+                );
+                if (!pre.allowed || pre.action !== "ALLOW" || !isCurrent()) {
+                  return false;
+                }
+                const post = await options.hookRunner.evaluateHook(
+                  "POST_TOOL_RESPONSE",
+                  {
+                    session: sourceSession,
+                    input: {
+                      ...policy,
+                      response_length: result.length,
+                      tool_response: result,
+                    },
+                    auditInput: policy,
+                  },
+                );
+                return post.allowed && post.action === "ALLOW" && isCurrent();
+              },
+            }],
+          };
+        }
         return !plannerRead || currentPlannerReceiptScope(turn)
           ? result
           : "Error: The planner case is unavailable.";
