@@ -24,10 +24,21 @@ function count(value: unknown): number {
     : 0;
 }
 
-/** Resolve the reviewed process-wide model retry settings. */
-export function readReviewedModelRetryPolicy(baseDir: string) {
+type RetryScope = "provider" | "assignment";
+
+function retryTable(scope: RetryScope) {
+  return scope === "assignment"
+    ? "assignment_retry_edits"
+    : "model_retry_edits";
+}
+
+/** Resolve reviewed retry settings for the specified execution scope. */
+export function readReviewedModelRetryPolicy(
+  baseDir: string,
+  scope: RetryScope = "provider",
+) {
   try {
-    const policy = modelMonitor(baseDir).retryPolicy();
+    const policy = modelMonitor(baseDir).retryPolicy(scope);
     const { retries, delayMs } = policy;
     if (
       typeof retries !== "number" || !Number.isSafeInteger(retries) ||
@@ -80,6 +91,10 @@ export function modelMonitor(baseDir: string) {
       db.exec(`
         PRAGMA busy_timeout=3000;
         CREATE TABLE IF NOT EXISTS model_retry_edits(
+          version INTEGER PRIMARY KEY, requestId TEXT NOT NULL UNIQUE,
+          retries INTEGER NOT NULL, delayMs INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS assignment_retry_edits(
           version INTEGER PRIMARY KEY, requestId TEXT NOT NULL UNIQUE,
           retries INTEGER NOT NULL, delayMs INTEGER NOT NULL
         );
@@ -213,22 +228,37 @@ export function modelMonitor(baseDir: string) {
   }
 
   return {
-    retryPolicy() {
-      return access((db) =>
-        db.prepare(
-          "SELECT * FROM model_retry_edits ORDER BY version DESC LIMIT 1",
-        ).get() ?? { version: 0, retries: 2, delayMs: 1000 }
-      );
+    retryPolicy(scope: RetryScope = "provider") {
+      return access<Record<string, unknown>>((db) => {
+        const latest = (selected: RetryScope) =>
+          db.prepare(
+            `SELECT * FROM ${
+              retryTable(selected)
+            } ORDER BY version DESC LIMIT 1`,
+          ).get();
+        const current = latest(scope);
+        if (current) return current;
+        const defaults = { version: 0, retries: 2, delayMs: 1000 };
+        if (scope === "provider") return defaults;
+        const provider = latest("provider") ?? defaults;
+        return {
+          version: 0,
+          retries: provider.retries,
+          delayMs: provider.delayMs,
+        };
+      });
     },
     setRetry(
       version: number,
       requestId: string,
       retries: number,
       delayMs: number,
+      scope: RetryScope = "provider",
     ) {
+      const table = retryTable(scope);
       return transaction((db) => {
         const prior = db.prepare(
-          "SELECT * FROM model_retry_edits WHERE requestId=?",
+          `SELECT * FROM ${table} WHERE requestId=?`,
         ).get(requestId);
         if (prior) {
           return prior.version === version + 1 && prior.retries === retries &&
@@ -237,10 +267,10 @@ export function modelMonitor(baseDir: string) {
             : undefined;
         }
         const current = db.prepare(
-          "SELECT max(version) AS version FROM model_retry_edits",
+          `SELECT max(version) AS version FROM ${table}`,
         ).get();
         if ((current?.version ?? 0) !== version) return;
-        db.prepare("INSERT INTO model_retry_edits VALUES (?,?,?,?)")
+        db.prepare(`INSERT INTO ${table} VALUES (?,?,?,?)`)
           .run(version + 1, requestId, retries, delayMs);
         return { version: version + 1, requestId, retries, delayMs };
       });

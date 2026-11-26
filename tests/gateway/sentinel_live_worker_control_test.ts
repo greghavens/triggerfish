@@ -4955,6 +4955,7 @@ for (
     "exhausted",
     "policy-off",
     "policy-one",
+    "assignment-policy-one",
     "approved-provenance",
     "revoked-provenance",
     "approved-traffic",
@@ -4986,9 +4987,10 @@ for (
     const toolApprovalInbox = provenance || traffic
       ? createToolApprovalService(join(baseDir, "saved-read-approvals.db"))
       : undefined;
+    const independentPolicy = scenario === "assignment-policy-one";
     const reviewedPolicy = scenario === "policy-off"
       ? { retries: 0, delayMs: 0 }
-      : scenario === "policy-one"
+      : scenario === "policy-one" || independentPolicy
       ? { retries: 1, delayMs: 160 }
       : undefined;
     const failureTimes: number[] = [];
@@ -5205,14 +5207,69 @@ for (
             action: "set_model_retry_policy",
             expectedVersion: 0,
             requestId: crypto.randomUUID(),
-            modelRetryCount: reviewedPolicy.retries,
-            modelRetryDelayMs: reviewedPolicy.delayMs,
+            modelRetryCount: independentPolicy ? 0 : reviewedPolicy.retries,
+            modelRetryDelayMs: independentPolicy ? 0 : reviewedPolicy.delayMs,
           });
           assert(!response.startsWith("Error:"), response);
           assertEquals(approvals.length, 1);
           const { retryPolicy } = JSON.parse(response);
-          assertEquals(retryPolicy.retries, reviewedPolicy.retries);
-          assertEquals(retryPolicy.delayMs, reviewedPolicy.delayMs);
+          assertEquals(
+            retryPolicy.retries,
+            independentPolicy ? 0 : reviewedPolicy.retries,
+          );
+          assertEquals(
+            retryPolicy.delayMs,
+            independentPolicy ? 0 : reviewedPolicy.delayMs,
+          );
+          if (!independentPolicy) return;
+          const inherited = JSON.parse(
+            await owner({
+              action: "assignment_retry_policy",
+            }),
+          ).retryPolicy;
+          assertEquals(inherited, { version: 0, retries: 0, delayMs: 0 });
+          const edit = {
+            action: "set_assignment_retry_policy",
+            expectedVersion: 0,
+            requestId: crypto.randomUUID(),
+            modelRetryCount: reviewedPolicy.retries,
+            modelRetryDelayMs: reviewedPolicy.delayMs,
+          };
+          const update = JSON.parse(await owner(edit)).retryPolicy;
+          assertEquals(update, {
+            version: 1,
+            requestId: edit.requestId,
+            retries: 1,
+            delayMs: 160,
+          });
+          assertEquals(JSON.parse(await owner(edit)).retryPolicy, update);
+          assertEquals(approvals.length, 2);
+        });
+      }
+      if (independentPolicy) {
+        // Recreate the owner gateway against the same durable state.
+        await withOwnerControl(baseDir, async (owner, approvals) => {
+          const provider = JSON.parse(
+            await owner({
+              action: "model_retry_policy",
+            }),
+          ).retryPolicy;
+          const assignment = JSON.parse(
+            await owner({
+              action: "assignment_retry_policy",
+            }),
+          ).retryPolicy;
+          assertEquals([provider.version, provider.retries, provider.delayMs], [
+            1,
+            0,
+            0,
+          ]);
+          assertEquals([
+            assignment.version,
+            assignment.retries,
+            assignment.delayMs,
+          ], [1, 1, 160]);
+          assertEquals(approvals.length, 0);
         });
       }
       planner.advance(state);
@@ -5306,13 +5363,15 @@ for (
       assert(savedResults.every((saved) => saved === savedResults[0]));
       assertEquals(
         modelTurns,
-        recover || scenario === "policy-one"
+        recover || reviewedPolicy?.retries === 1
           ? 2
           : scenario === "exhausted"
           ? 3
           : 1,
       );
-      if (recover || scenario === "exhausted" || scenario === "policy-one") {
+      if (
+        recover || scenario === "exhausted" || reviewedPolicy?.retries === 1
+      ) {
         assert(
           savedChecks >= modelTurns,
           "Each saved result must be reauthorized",

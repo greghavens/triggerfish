@@ -1198,11 +1198,13 @@ export const operatorRunTool: ToolDefinition = {
     },
     modelRetryCount: {
       type: "integer",
-      description: "Maximum provider retries per call.",
+      description:
+        "Maximum retries per provider call or leased assignment, depending on the retry policy action.",
     },
     modelRetryDelayMs: {
       type: "integer",
-      description: "Initial provider retry delay in milliseconds.",
+      description:
+        "Initial delay in milliseconds for the selected retry policy.",
     },
     modelRecordId: {
       type: "integer",

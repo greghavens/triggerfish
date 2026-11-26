@@ -31,6 +31,8 @@ function modelCallMetadata(record: Record<string, unknown>) {
 export const modelMonitoringActions = [
   "model_retry_policy",
   "set_model_retry_policy",
+  "assignment_retry_policy",
+  "set_assignment_retry_policy",
   "model_health",
   "reset_model_health",
   "model_usage",
@@ -191,14 +193,17 @@ export async function executeOperatorModelMonitor(
     modelProfileAfter,
     toolUsageAfter,
   } = args;
+  const retryFields = [
+    "expectedVersion",
+    "requestId",
+    "modelRetryCount",
+    "modelRetryDelayMs",
+  ];
   const fields: Record<typeof action, readonly string[]> = {
     model_retry_policy: [],
-    set_model_retry_policy: [
-      "expectedVersion",
-      "requestId",
-      "modelRetryCount",
-      "modelRetryDelayMs",
-    ],
+    set_model_retry_policy: retryFields,
+    assignment_retry_policy: [],
+    set_assignment_retry_policy: retryFields,
     model_health: [],
     reset_model_health: ["expectedVersion"],
     model_usage: ["modelUsageDays"],
@@ -212,22 +217,28 @@ export async function executeOperatorModelMonitor(
     model_call_record: ["modelRecordId"],
     delete_model_call_record: ["modelRecordId"],
   };
-  const retry = action === "model_retry_policy" ||
-    action === "set_model_retry_policy";
+  const readRetry = action === "model_retry_policy" ||
+    action === "assignment_retry_policy";
+  const writeRetry = action === "set_model_retry_policy" ||
+    action === "set_assignment_retry_policy";
+  const retryScope = action === "assignment_retry_policy" ||
+      action === "set_assignment_retry_policy"
+    ? "assignment"
+    : "provider";
   const allowed = new Set([
     "action",
     ...fields[action],
-    ...(retry
+    ...(readRetry || writeRetry
       ? []
       : action === "model_usage_totals" || action === "tool_usage_totals"
       ? ["modelRouteClassification"]
       : ["modelProfile", "modelRouteModel", "modelRouteClassification"]),
   ]);
   if (Object.keys(args).some((key) => !allowed.has(key))) return;
-  if (action === "model_retry_policy") {
-    return { retryPolicy: monitor.retryPolicy() };
+  if (readRetry) {
+    return { retryPolicy: monitor.retryPolicy(retryScope) };
   }
-  if (action === "set_model_retry_policy") {
+  if (writeRetry) {
     if (
       !exactInteger(expectedVersion, 0, Number.MAX_SAFE_INTEGER - 1) ||
       typeof requestId !== "string" ||
@@ -235,7 +246,7 @@ export async function executeOperatorModelMonitor(
       !exactInteger(modelRetryCount, 0, 8) ||
       !exactInteger(modelRetryDelayMs, 0, 5000)
     ) return;
-    const current = monitor.retryPolicy();
+    const current = monitor.retryPolicy(retryScope);
     const request = requestId.toLowerCase();
     if (current.version !== expectedVersion) {
       const same = current.version === expectedVersion + 1 &&
@@ -246,7 +257,7 @@ export async function executeOperatorModelMonitor(
     }
     if (
       !await confirm(
-        `Approve provider retry policy ${JSON.stringify(args)}?`,
+        `Approve ${retryScope} retry policy ${JSON.stringify(args)}?`,
       ) ||
       !await authorize(args)
     ) return;
@@ -255,6 +266,7 @@ export async function executeOperatorModelMonitor(
       request,
       modelRetryCount,
       modelRetryDelayMs,
+      retryScope,
     );
     return retryPolicy ? { retryPolicy } : undefined;
   }

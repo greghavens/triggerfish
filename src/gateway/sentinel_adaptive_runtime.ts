@@ -8066,7 +8066,7 @@ export function createSentinelModelPlanner(
         };
         const retryPolicy = () =>
           location
-            ? readReviewedModelRetryPolicy(location.baseDir) ??
+            ? readReviewedModelRetryPolicy(location.baseDir, "assignment") ??
               { maxRetries: 0, baseDelayMs: 0 }
             : {
               maxRetries: DEFAULT_MAX_RETRIES,
