@@ -4,6 +4,7 @@ import {
   canonicalAssetDomain,
   canonicalAssetIp,
   canonicalAssetUrl,
+  parseSentinelAppDescription,
   parseSentinelAssetProperties,
 } from "./asset_properties.ts";
 import {
@@ -80,6 +81,7 @@ function candidates(value: unknown, kind: Kind): Asset[] {
       assetType = "application";
       fields = {
         appName: optional(row.name),
+        appDescription: optional(row.description, parseSentinelAppDescription),
         category: optional(row.category),
         registrationId: optional(row.icp),
         appRegistrationId: optional(row.icp),

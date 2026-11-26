@@ -199,6 +199,8 @@ async function verifyInventoryImport(transport: "stdio" | "native HTTPS") {
       if (hook === "MCP_TOOL_CALL") mcpInvocations++;
       const blocked = deny === "pre" && hook === "PRE_TOOL_CALL" &&
           (call?.name === connectorTool || call?.name === projectTool) ||
+        deny === "inventory" && hook === "PRE_TOOL_CALL" &&
+          call?.name === tool ||
         deny === "response" && hook === "POST_TOOL_RESPONSE" &&
           (context.input.tool_name === connectorTool ||
             context.input.tool_name === projectTool) ||
@@ -412,7 +414,7 @@ async function verifyInventoryImport(transport: "stdio" | "native HTTPS") {
       assertEquals(await Deno.readTextFile(path), initial);
       deny = "";
       const result = JSON.parse(await turn(request));
-      assertEquals(result.imported, 3);
+      assertEquals(result.imported, 4);
       assertEquals(result.receipt.status, "succeeded");
       assert(readSentinelAssessment(path)!.revision > state.revision);
       const saved = await Deno.readTextFile(path);
@@ -421,6 +423,8 @@ async function verifyInventoryImport(transport: "stdio" | "native HTTPS") {
           "public.safe.example",
           "api.safe.example",
           "Fiber client",
+          "Reviewed second client",
+          "Curated optics administration",
           "ScopeSentry project",
         ]
       ) {
@@ -428,6 +432,9 @@ async function verifyInventoryImport(transport: "stdio" | "native HTTPS") {
       }
       assert(!saved.includes("unrelated.example"));
       assert(!saved.includes("synthetic-inventory-fixture"));
+      assert(!saved.includes("Do not import this private connector field"));
+      assert(!saved.includes("fixture-sensitive-value"));
+      assert(!saved.includes("Outside client"));
       const assetMetadata = JSON.parse(saved).nodes.map(
         ({ properties }: { properties?: Record<string, string[]> }) =>
           properties,
@@ -439,9 +446,55 @@ async function verifyInventoryImport(transport: "stdio" | "native HTTPS") {
       assert(assetMetadata.some(
         (properties: Record<string, string[]> | undefined) =>
           properties?.appName?.[0] === "Fiber client" &&
+          properties.appDescription?.[0] === "Curated optics administration" &&
           properties.category?.[0] === "operator application" &&
           properties.appRegistrationId?.[0] === "fixture-registration",
       ));
+      const inventory = {
+        action: "inventory",
+        kind: "sentinel",
+        id: caseId,
+        revision: readSentinelAssessment(path)!.revision,
+        scope: "membership",
+      };
+      for (const dsl of ["optics", 'app_description="OPTICS"']) {
+        const response = JSON.parse(
+          await turn({
+            ...inventory,
+            assetQuery: { dsl },
+          }),
+        );
+        assertEquals(
+          response.page.assets.map(({ label }: { label: string }) => label),
+          ["Fiber client"],
+        );
+      }
+      assertEquals(
+        JSON.parse(
+          await turn({
+            ...inventory,
+            revision: state.revision,
+            assetQuery: { dsl: "optics" },
+          }),
+        ).page.assets,
+        [],
+      );
+      assertStringIncludes(
+        await turn({
+          ...inventory,
+          id: "not-the-approved-case",
+          assetQuery: { dsl: "optics" },
+        }),
+        "unavailable",
+      );
+      deny = "inventory";
+      const blocked = await turn({
+        ...inventory,
+        assetQuery: { dsl: "optics" },
+      });
+      assert(!blocked.includes("Curated optics administration"));
+      assertStringIncludes(blocked, "policy");
+      deny = "";
       assertEquals((await calls()).length, 4);
       assertEquals(mcpInvocations, 4);
       assertEquals(classificationsSeen, 4);

@@ -75,11 +75,25 @@ export function fixtureInventoryResult(
         },
         { url: "https://unrelated.example/", domain: "safe.example" },
       ]
-      : [{
-        name: "Fiber client",
-        icp: "fixture-registration",
-        category: "Operator application",
-      }];
+      : [
+        {
+          name: "Fiber client",
+          icp: "fixture-registration",
+          category: "Operator application",
+          description: "Curated optics administration",
+          privateNote: "Do not import this private connector field",
+        },
+        {
+          name: "Reviewed second client",
+          icp: "fixture-registration",
+          description: "password=fixture-sensitive-value",
+        },
+        {
+          name: "Outside client",
+          icp: "unapproved-registration",
+          description: "Outside optics administration",
+        },
+      ];
     return { content: [{ type: "text", text: JSON.stringify({ list }) }] };
   }
   return {};

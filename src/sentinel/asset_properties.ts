@@ -13,6 +13,7 @@ const textFields = [
   "registrationId",
   "rootDomain",
   "appName",
+  "appDescription",
   "bundleId",
   "category",
   "appRegistrationId",
@@ -92,6 +93,23 @@ export function canonicalAssetUrl(value: string): string | undefined {
   }
 }
 
+/** Keep bounded descriptive metadata and omit strings that could carry credentials. */
+export function parseSentinelAppDescription(
+  value: unknown,
+): string | undefined {
+  const text = assetText(value);
+  if (
+    !text ||
+    /\b(?:password|passwd|secret|token|api[ _-]?key|authorization|cookie|credential)[s]?["']?\s*[:=]/i
+      .test(text) ||
+    /\b(?:bearer|basic)\s+[A-Za-z0-9+/._=-]{8,}/i.test(text) ||
+    (text.match(/\bhttps?:\/\/[^\s<>"']+/gi) ?? []).some((url) =>
+      !canonicalAssetUrl(url)
+    )
+  ) return;
+  return text;
+}
+
 function textProperty(field: TextField, value: unknown) {
   const text = assetText(value);
   if (!text) return;
@@ -104,6 +122,8 @@ function textProperty(field: TextField, value: unknown) {
     case "url":
       return canonicalAssetUrl(text);
     case "title":
+    case "appDescription":
+      return parseSentinelAppDescription(text);
     case "appName":
     case "bundleId":
       return text;
@@ -165,6 +185,7 @@ const dslFields = new Map<string, TextField | NumericField | ContextField>([
   ["status_code", "status"],
   ["root_domain", "rootDomain"],
   ["app_name", "appName"],
+  ["app_description", "appDescription"],
   ["bundle_id", "bundleId"],
   ["app_icp", "appRegistrationId"],
   ["service_type", "serviceType"],
@@ -308,7 +329,9 @@ export function parseSentinelAssetQuery(
       (op !== "contains" && op !== "not_contains" && op !== "eq" && op !== "ne")
     ) return;
     const text = op === "contains" || op === "not_contains"
-      ? assetText(operand)?.toLowerCase()
+      ? (textField === "appDescription"
+        ? parseSentinelAppDescription(operand)
+        : assetText(operand))?.toLowerCase()
       : textProperty(textField, operand);
     return text === undefined
       ? undefined
