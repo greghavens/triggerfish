@@ -775,14 +775,23 @@ export function openSentinelWorkerFindingStore(
       runId: string,
       revision: number,
       limit: number,
+      graphFindingId?: string,
     ) {
       return db.prepare(
         `SELECT id FROM receipts
          WHERE revision <= ? AND findingId IS NULL AND reportVersion IS NULL
            AND json_extract(input, '$.caseId') = ?
            AND json_extract(input, '$.runId') = ?
+           AND (? IS NULL OR json_extract(input, '$.graphFindingId') = ?)
          ORDER BY rowid DESC LIMIT ?`,
-      ).all(revision, caseId, runId, limit).map(({ id }) => String(id));
+      ).all(
+        revision,
+        caseId,
+        runId,
+        graphFindingId ?? null,
+        graphFindingId ?? null,
+        limit,
+      ).map(({ id }) => String(id));
     },
     listFindingRechecks(findingId: string, revision: number) {
       return db.prepare(

@@ -1,3 +1,4 @@
+import { sentinelFindingTrafficEvidenceVersion } from "../../src/sentinel/finding_traffic_links.ts";
 import { recordOperatorSentinelRunHint } from "../../src/gateway/sentinel_adaptive_runtime.ts";
 import { createChatSession } from "../../src/gateway/chat.ts";
 import { createOperatorRunToolExecutor } from "../../src/gateway/operator_run_tool.ts";
@@ -591,6 +592,45 @@ Deno.test("Leased workers attach only exact saved traffic and authenticated Tide
     assert(record);
     assertEquals(JSON.parse(attached.responses[2][1]).link, record);
     assertEquals(JSON.parse(attached.responses[2][2]).links, [record]);
+    const nodeRequest = {
+      action: "node",
+      kind: "sentinel",
+      id: "main",
+      revision,
+      node: "finding:case-finding",
+    };
+    const [plainNode, linkedNode, outOfScope] = await readTrafficThroughGateway(
+      baseDir,
+      [
+        nodeRequest,
+        { ...nodeRequest, includeFindingTraffic: true },
+        {
+          ...nodeRequest,
+          node: "asset:" + assetId,
+          includeFindingTraffic: true,
+        },
+      ],
+    );
+    const discovered = JSON.parse(linkedNode);
+    assertEquals(discovered.page, JSON.parse(plainNode).page);
+    assertEquals(discovered.findingTraffic, {
+      graphFindingId: "case-finding",
+      revision,
+      links: [{
+        findingId,
+        assetId,
+        trafficLinkId: record.id,
+        evidenceVersion: sentinelFindingTrafficEvidenceVersion(
+          path,
+          revision,
+          findingId,
+          assetId,
+        ).digest,
+      }],
+      nextOffset: null,
+    });
+    assert(!linkedNode.includes(reviewedBody));
+    assert(outOfScope.startsWith("Error:"));
     assertEquals(record.reportVersion, 1);
     assertEquals(record.trafficDigest, exact.digest);
     assertEquals(record.evidenceRole, mutation.evidenceRole);

@@ -1,3 +1,4 @@
+import { discoverSentinelFindingNodeTraffic } from "./sentinel_finding_traffic_tool.ts";
 import { isSentinelHintTrafficReference } from "../sentinel/traffic_receipts.ts";
 import type {
   CategorizedOperatorRun,
@@ -1033,6 +1034,16 @@ export const operatorRunTool: ToolDefinition = {
       type: "string",
       description: "Search text for graph records or worker history",
     },
+    includeFindingTraffic: {
+      type: "boolean",
+      description:
+        "Include active attachment IDs for an exact graph finding with node.",
+    },
+    trafficOffset: {
+      type: "integer",
+      description:
+        "Next attachment metadata offset from the previous graph finding page.",
+    },
     node: {
       type: "string",
       description:
@@ -1167,6 +1178,8 @@ export const sentinelOperatorCaseReadParameters = [
   "id",
   "revision",
   "node",
+  "includeFindingTraffic",
+  "trafficOffset",
   "query",
   "offset",
   "limit",
@@ -2297,6 +2310,10 @@ export function createOperatorRunToolExecutor(options: {
           canFlowTo(classification, context?.ceiling ?? "PUBLIC"));
     }
     const action = args.action;
+    if (
+      (args.includeFindingTraffic !== undefined ||
+        args.trafficOffset !== undefined) && action !== "node"
+    ) return unavailable;
     if (args.trafficReference !== undefined && action !== "hint") {
       return unavailable;
     }
@@ -9046,6 +9063,20 @@ ${
           ...(args.limit !== undefined && { limit: args.limit }),
         };
         const query = args.query !== undefined ? { query: args.query } : {};
+        const { includeFindingTraffic, trafficOffset = 0 } = args;
+        if (
+          (includeFindingTraffic !== undefined &&
+            includeFindingTraffic !== true) ||
+          ((includeFindingTraffic !== undefined ||
+            args.trafficOffset !== undefined) &&
+            (action !== "node" ||
+              !canFlowTo("INTERNAL", context?.ceiling ?? "PUBLIC"))) ||
+          (args.trafficOffset !== undefined &&
+            includeFindingTraffic !== true) ||
+          typeof trafficOffset !== "number" ||
+          !Number.isSafeInteger(trafficOffset) ||
+          trafficOffset < 0 || trafficOffset > 4096
+        ) return unavailable;
         const response = action === "node"
           ? inspectSentinelProvenance(scope, { ...page, node: args.node })
           : action === "traces"
@@ -9061,9 +9092,26 @@ ${
             ...query,
             ...(action === "findings" && { kind: "finding" }),
           });
-        return response.startsWith("Error:")
-          ? response
-          : safeProjection({ run: ref, page: JSON.parse(response) });
+        if (response.startsWith("Error:")) return response;
+        const graphPage = JSON.parse(response);
+        if (!includeFindingTraffic) {
+          return safeProjection({ run: ref, page: graphPage });
+        }
+        if (
+          graphPage.node?.kind !== "finding" ||
+          typeof graphPage.node.sourceId !== "string"
+        ) return unavailable;
+        const findingTraffic = discoverSentinelFindingNodeTraffic(
+          scope.snapshotPath,
+          ref.id,
+          ref.revision,
+          graphPage.node.sourceId,
+          trafficOffset,
+          5,
+        );
+        return findingTraffic
+          ? safeProjection({ run: ref, page: graphPage, findingTraffic })
+          : unavailable;
       }
       if (action === "inspect") {
         if (
@@ -10038,6 +10086,9 @@ ${
         )
       ) {
         return "Error: The operator declined the run action.";
+      }
+      if (authorizeTrafficHint && !await authorizeTrafficHint()) {
+        return unavailable;
       }
       const run = await controller.mutate(action, ref, control);
       return run ? safeProjection({ run }) : unavailable;

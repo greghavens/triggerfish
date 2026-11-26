@@ -2,9 +2,10 @@
 import { createHash } from "node:crypto";
 import type { ToolDefinition } from "../core/types/tool.ts";
 import {
-  type readSentinelAssessment,
+  readSentinelAssessment,
   readSentinelAssessmentRevision,
   readSentinelOperatingConstraints,
+  readSentinelRunIdForRevision,
   withSentinelAssessmentWriteLock,
 } from "../sentinel/assessment_store.ts";
 import { isSentinelCaseId, locateSentinelCase } from "../sentinel/cases.ts";
@@ -1035,4 +1036,89 @@ export async function attachOperatorSentinelFindingTrafficBatch(
   return links
     ? JSON.stringify({ _classification: "INTERNAL", links })
     : unavailable;
+}
+
+/** Offer discovery metadata for reports anchored to one authorized graph finding. */
+export function discoverSentinelFindingNodeTraffic(
+  path: string,
+  caseId: string,
+  revision: number,
+  graphFindingId: string,
+  offset: number,
+  limit: number,
+) {
+  const runId = readSentinelRunIdForRevision(path, revision);
+  const state = readSentinelAssessment(path);
+  const saved = readSentinelAssessmentRevision(path, revision);
+  if (
+    !runId || state?.plan.runId !== runId ||
+    !saved?.result.sharedGraph.snapshot?.nodes.some(
+      ({ id, kind }) => id === graphFindingId && kind === "finding",
+    )
+  ) return;
+  const allowed = readSentinelOperatingConstraints(path, runId)?.constraints
+    .allowedAssetIds;
+  const entries: {
+    findingId: string;
+    assetId: string;
+    trafficLinkId: string;
+    recheckId?: string;
+    evidenceVersion: string;
+  }[] = [];
+  if (hasSentinelWorkerFindingJournal(path)) {
+    const findings = openSentinelWorkerFindingStore(path);
+    try {
+      const ids = findings.listFindingIds(
+        caseId,
+        runId,
+        revision,
+        129,
+        graphFindingId,
+      );
+      if (ids.length > 128) return;
+      for (const findingId of ids) {
+        const finding = findings.readFinding(findingId);
+        if (
+          !finding ||
+          (allowed && !allowed.includes(finding.targetId))
+        ) continue;
+        const count = offset + limit + 1 - entries.length;
+        if (count <= 0) break;
+        const links = [];
+        for (let linkOffset = 0; linkOffset < count; linkOffset += 100) {
+          const page = listSentinelFindingTrafficLinks(path, {
+            findingId,
+            assetId: finding.targetId,
+            evidenceRevision: revision,
+            limit: Math.min(100, count - linkOffset),
+            offset: linkOffset,
+          });
+          links.push(...page.filter((link) => link.caseId === caseId));
+          if (page.length < 100) break;
+        }
+        if (!links.length) continue;
+        const evidenceVersion = sentinelFindingTrafficEvidenceVersion(
+          path,
+          revision,
+          findingId,
+          finding.targetId,
+        ).digest;
+        entries.push(...links.map((link) => ({
+          findingId,
+          assetId: finding.targetId,
+          trafficLinkId: link.id,
+          ...(link.recheckId && { recheckId: link.recheckId }),
+          evidenceVersion,
+        })));
+      }
+    } finally {
+      findings.close();
+    }
+  }
+  return {
+    graphFindingId,
+    revision,
+    links: entries.slice(offset, offset + limit),
+    nextOffset: entries.length > offset + limit ? offset + limit : null,
+  };
 }
