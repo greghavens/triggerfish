@@ -7331,6 +7331,24 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
           (await reopen({ ...pendingInspect, kind: "delegated" })).result,
           "unavailable",
         );
+        const priorPauseReviews = confirmations.length;
+        duringConfirmation = () => {
+          denied = "PRE_TOOL_CALL";
+        };
+        try {
+          assertStringIncludes(
+            (await reopen({ ...pendingInspect, action: "pause" })).result,
+            "unavailable",
+          );
+        } finally {
+          duringConfirmation = undefined;
+          denied = undefined;
+        }
+        assertEquals(confirmations.length, priorPauseReviews + 1);
+        assertEquals(
+          JSON.parse((await reopen(pendingInspect)).result).recovery,
+          pending.recovery,
+        );
         denied = "PRE_TOOL_CALL";
         assert(
           !(await reopen(pendingInspect)).result.includes("authorize_dispatch"),

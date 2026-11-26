@@ -1278,9 +1278,11 @@ Deno.test("Owner gateway resumes a team delivery checklist without repeating a c
       runTeamRecoveryCommand?: ReturnType<
         typeof makeManager
       >["runRecoveryCommand"],
+      revokeOnConfirmation = false,
     ) => {
       const registry = createProviderRegistry();
       let observed: string | undefined;
+      let denied = denyArchive;
       registry.register({
         name: "fixture",
         supportsStreaming: false,
@@ -1325,7 +1327,7 @@ Deno.test("Owner gateway resumes a team delivery checklist without repeating a c
             ...runner,
             evaluateHook(hook, args) {
               if (
-                denyArchive && hook === "PRE_TOOL_CALL" &&
+                denied && hook === "PRE_TOOL_CALL" &&
                 args.input.tool_name === "operator_runs"
               ) {
                 return Promise.resolve({
@@ -1342,6 +1344,7 @@ Deno.test("Owner gateway resumes a team delivery checklist without repeating a c
             baseDir: root,
             confirm: () => {
               approvals++;
+              if (revokeOnConfirmation) denied = true;
               return Promise.resolve(true);
             },
           }),
@@ -1578,6 +1581,7 @@ Deno.test("Owner gateway resumes a team delivery checklist without repeating a c
       actor = parent,
       originalTask = instructions,
       deny = false,
+      revokeOnConfirmation = false,
     ) =>
       archiveTool(
         cleanRoot,
@@ -1596,6 +1600,7 @@ Deno.test("Owner gateway resumes a team delivery checklist without repeating a c
           assert(resume);
           return resume(...args);
         },
+        revokeOnConfirmation,
       );
     const restoredRecovery = new AgentRecoveryStore(
       join(cleanRoot, "agent-recovery.db"),
@@ -1608,8 +1613,15 @@ Deno.test("Owner gateway resumes a team delivery checklist without repeating a c
       await resumeWithModel(parent, instructions, true);
       assertEquals(approvals, priorApprovals);
       assertEquals(resumeInvocations, 0);
-      assertStringIncludes(await resumeWithModel(), "unavailable");
+      assertStringIncludes(
+        await resumeWithModel(parent, instructions, false, true),
+        "unavailable",
+      );
       assertEquals(approvals, priorApprovals + 1);
+      assertEquals(resumeInvocations, 0);
+      assertEquals(restoredRecovery.read(pausedKey)?.status, "paused");
+      assertStringIncludes(await resumeWithModel(), "unavailable");
+      assertEquals(approvals, priorApprovals + 2);
       assertEquals(resumeInvocations, 1);
       assertStringIncludes(
         await resume(),

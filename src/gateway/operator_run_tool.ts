@@ -11087,6 +11087,10 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
         });
       }
       if (backgroundRole && (action === "pause" || action === "resume")) {
+        const authorize = context?.authorizeOwnerRunCall;
+        if (!authorize || !context?.authenticatedOwnerSessionId) {
+          return unavailable;
+        }
         const pausing = action === "pause";
         const delegated = !pausing && backgroundRole === "delegated";
         const { executionId, originalTask } = args;
@@ -11128,7 +11132,8 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
         try {
           const initial = journal.readRun(backgroundRole, ref.id, "INTERNAL");
           if (
-            initial?.status !== "running" || !canReadBackgroundTrace(initial)
+            initial?.status !== "running" || initial.operatorCancelled ||
+            !canReadBackgroundTrace(initial)
           ) return unavailable;
           let resumeDelegated: (() => Promise<void>) | undefined;
           if (delegated && typeof originalTask === "string") {
@@ -11177,9 +11182,11 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
               }`,
             )
           ) return "Error: The operator declined the run action.";
+          if (!await authorize(args)) return unavailable;
           const current = journal.readRun(backgroundRole, ref.id, "INTERNAL");
           if (
-            current?.status !== "running" || !canReadBackgroundTrace(current) ||
+            current?.status !== "running" || current.operatorCancelled ||
+            !canReadBackgroundTrace(current) ||
             !isDeepStrictEqual(current.scope, initial.scope)
           ) return unavailable;
           if (!pausing) {
