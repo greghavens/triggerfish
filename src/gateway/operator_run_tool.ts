@@ -1,6 +1,8 @@
 import type { ManagedSentinelIncidentSource } from "../core/managed_notification_channels.ts";
 import {
   executeOperatorNotificationChannel,
+  managedDeliveryStates,
+  managedEventKinds,
   notificationChannelActions,
   type OperatorNotificationChannels,
 } from "./notifications/operator_channels.ts";
@@ -944,6 +946,17 @@ export const operatorRunTool: ToolDefinition = {
       type: "string",
       description:
         "Exact managed notification delivery ID from delivery history.",
+    },
+    notificationDeliveryState: {
+      type: "string",
+      enum: [...managedDeliveryStates],
+      description: "Filter managed notification delivery history by state.",
+    },
+    notificationEventKind: {
+      type: "string",
+      enum: [...managedEventKinds],
+      description:
+        "Filter managed notification delivery history by event kind.",
     },
     notificationChannelSettings: {
       type: "object",

@@ -19,6 +19,7 @@ export const notificationChannelActions = [
   "retire_notification_channel",
   "test_notification_channel",
   "notification_deliveries",
+  "notification_delivery",
   "retry_notification_delivery",
 ] as const;
 type Action = typeof notificationChannelActions[number];
@@ -42,6 +43,17 @@ export interface OperatorNotificationChannels {
 }
 
 const idPattern = /^[a-z0-9][a-z0-9_-]{0,63}$/;
+const deliveryIdPattern = /^[a-z0-9][a-z0-9:_-]{0,159}$/;
+export const managedDeliveryStates = [
+  "in_flight",
+  "delivered",
+  "blocked",
+  "uncertain",
+] as const;
+export const managedEventKinds = [
+  "test",
+  "sentinel_incident_increase",
+] as const;
 const testMessage = JSON.stringify({
   type: "triggerfish.notification.test",
   message: "Triggerfish notification channel test",
@@ -129,7 +141,14 @@ export async function executeOperatorNotificationChannel(
       "expectedVersion",
       "requestId",
     ],
-    notification_deliveries: ["notificationChannelId"],
+    notification_deliveries: [
+      "notificationChannelId",
+      "notificationDeliveryState",
+      "notificationEventKind",
+      "limit",
+      "cursor",
+    ],
+    notification_delivery: ["notificationChannelId", "notificationDeliveryId"],
     retry_notification_delivery: [
       "notificationChannelId",
       "notificationDeliveryId",
@@ -153,8 +172,61 @@ export async function executeOperatorNotificationChannel(
   }
   const { notificationChannelId: id, expectedVersion, requestId } = args;
   if (typeof id !== "string" || !idPattern.test(id)) return;
+  if (action === "notification_delivery") {
+    const deliveryId = args.notificationDeliveryId;
+    if (typeof deliveryId !== "string" || !deliveryIdPattern.test(deliveryId)) {
+      return;
+    }
+    const delivery = await store.delivery(id, deliveryId);
+    return delivery && await authorize(args) ? { delivery } : undefined;
+  }
   if (action === "notification_deliveries") {
-    return { deliveries: (await store.deliveries(id)).slice(0, 100) };
+    const {
+      notificationDeliveryState: state,
+      notificationEventKind: kind,
+      limit = 25,
+      cursor,
+    } = args;
+    if (
+      (state !== undefined &&
+        !managedDeliveryStates.some((value) => value === state)) ||
+      (kind !== undefined &&
+        !managedEventKinds.some((value) => value === kind)) ||
+      typeof limit !== "number" || !Number.isSafeInteger(limit) ||
+      limit < 1 || limit > 100
+    ) return;
+    const prefix = `${id}:${state ?? "all"}:${kind ?? "all"}:`;
+    if (
+      cursor !== undefined && (
+        typeof cursor !== "string" || !cursor.startsWith(prefix) ||
+        !deliveryIdPattern.test(cursor.slice(prefix.length))
+      )
+    ) return;
+    const rows = (await store.deliveries(id)).filter((delivery) =>
+      (state === undefined || delivery.state === state) &&
+      (kind === undefined || (delivery.source?.kind ?? "test") === kind)
+    );
+    const previous = cursor === undefined
+      ? -1
+      : rows.findIndex((row) => row.id === cursor.slice(prefix.length));
+    if ((cursor !== undefined && previous < 0) || !await authorize(args)) {
+      return;
+    }
+    const start = previous + 1;
+    const deliveries = [];
+    let remaining = 6500;
+    for (const row of rows.slice(start, start + limit)) {
+      remaining -= JSON.stringify(row).length + 1;
+      if (remaining < 0) break;
+      deliveries.push(row);
+    }
+    const last = deliveries.at(-1);
+    return {
+      deliveries,
+      total: rows.length,
+      ...(last && start + deliveries.length < rows.length &&
+        { nextCursor: prefix + last.id }),
+    };
   }
   if (
     typeof expectedVersion !== "number" ||
@@ -181,7 +253,7 @@ export async function executeOperatorNotificationChannel(
     const deliveryId = retrying ? args.notificationDeliveryId : requestId;
     if (
       typeof deliveryId !== "string" ||
-      !/^[a-z0-9][a-z0-9:_-]{0,159}$/.test(deliveryId)
+      !deliveryIdPattern.test(deliveryId)
     ) return;
     const existing = await store.delivery(id, deliveryId);
     if (existing && existing.channelVersion !== current.version) return;

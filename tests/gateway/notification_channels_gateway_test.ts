@@ -353,6 +353,39 @@ Deno.test("gateway reviews notification subscriptions and durably deduplicates s
     assertStringIncludes(await turn(retryUnknown), "unavailable");
     const records = await turn(history);
     assertEquals(JSON.parse(records).deliveries.length, 5);
+    const filter = {
+      ...history,
+      notificationDeliveryState: "blocked",
+      notificationEventKind: "test",
+      limit: 1,
+    };
+    const firstPage = JSON.parse(await turn(filter));
+    assertEquals(firstPage.total, 3);
+    assertEquals(firstPage.deliveries.length, 1);
+    const secondPage = JSON.parse(
+      await turn({ ...filter, cursor: firstPage.nextCursor }),
+    );
+    assertEquals(secondPage.total, 3);
+    assertEquals(secondPage.deliveries.length, 1);
+    assert(secondPage.deliveries[0].id !== firstPage.deliveries[0].id);
+    assertStringIncludes(
+      await turn({
+        ...filter,
+        notificationDeliveryState: "delivered",
+        cursor: firstPage.nextCursor,
+      }),
+      "unavailable",
+    );
+    assertEquals(
+      JSON.parse(
+        await turn({
+          action: "notification_delivery",
+          notificationChannelId: selector.notificationChannelId,
+          notificationDeliveryId: secondPage.deliveries[0].id,
+        }),
+      ).delivery,
+      secondPage.deliveries[0],
+    );
     assert(!records.includes(privatePath));
     for (const key of await storage.list()) {
       assert(!(await storage.get(key))?.includes(privatePath));
