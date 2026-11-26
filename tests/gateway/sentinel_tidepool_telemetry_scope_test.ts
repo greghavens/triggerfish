@@ -1,3 +1,5 @@
+import { advanceAdaptiveSentinel } from "../../src/gateway/sentinel_adaptive_runtime.ts";
+import { adaptiveRevision } from "../../src/sentinel/adaptive_planner.ts";
 import {
   sentinelAlertKey,
   type TelemetryAlert,
@@ -131,6 +133,22 @@ Deno.test("Authenticated Tidepool hides revoked retained alert records and mixed
     assertExists(next);
     assert(next.revision > saved.revision);
     assertEquals(next.plan.runId, runId);
+    advanceAdaptiveSentinel(path, next);
+    const assignment = { revision: adaptiveRevision(next), kind: "trace" };
+    assertEquals(
+      (await request("assign", {
+        ...assignment,
+        nodeId: "app",
+      })).type,
+      "sentinel_state",
+    );
+    const beforeScope = await request("assign", {
+      ...assignment,
+      nodeId: "private",
+    });
+    assertEquals(beforeScope.type, "sentinel_state");
+    assert(JSON.stringify(beforeScope).includes('"nodeId":"private"'));
+
     assert(recordSentinelOperatingConstraints(path, {
       runId,
       evidenceRevision: next.revision,
@@ -139,6 +157,24 @@ Deno.test("Authenticated Tidepool hides revoked retained alert records and mixed
       operatorScope: "fixture-owner",
       constraints: { deniedKinds: [], allowedAssetIds: ["app", "proxy"] },
     }));
+
+    const live = await request("status", { includeRevisions: true });
+    assertEquals(live.type, "sentinel_state");
+    assertEquals(live.scopeRestricted, true);
+    assertEquals(live.revisions, undefined);
+    assertEquals((live.assessment as { active: boolean }).active, true);
+    assert(!JSON.stringify(live).includes('"private"'));
+    const visibleTasks = (live.adaptive as {
+      tasks: { nodeId: string; status: string }[];
+    }).tasks;
+    assert(
+      visibleTasks.some(({ nodeId, status }) =>
+        nodeId === "app" && typeof status === "string"
+      ),
+    );
+    const updated = await request("assign", { ...assignment, nodeId: "proxy" });
+    assertEquals(updated.type, "sentinel_state");
+    assert(!JSON.stringify(updated).includes('"private"'));
 
     const comparison = await request("revision", {
       revision: next.revision,

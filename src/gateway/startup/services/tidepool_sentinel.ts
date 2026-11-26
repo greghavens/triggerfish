@@ -1,3 +1,4 @@
+import { readSentinelWorkerEvidenceScope } from "../../sentinel_worker_evidence_scope.ts";
 import { scopedSentinelInventoryGraph } from "../../sentinel_agent.ts";
 import { sentinelOperatingConstraintsAllow } from "../../../sentinel/operating_constraints.ts";
 import type { ChatSession } from "../../chat_session_interface.ts";
@@ -2476,25 +2477,89 @@ export function createTidepoolSentinelHandler(
         default:
           return;
       }
+      const topologyAuto = await sentinelTopologyAutoEnabled(path);
       const assessment = readSentinelAssessment(path) ?? null;
+      const scope = assessment &&
+        retainedTelemetryScope(path, assessment.revision);
+      const retained = scope && assessment
+        ? readSentinelAssessmentRevision(path, assessment.revision)
+        : undefined;
+      const projected = retained
+        ? scopedRetainedAssessment(path, retained)
+        : undefined;
       const adaptive = assessment
-        ? readAdaptiveSentinel(path, assessment)
+        ? readAdaptiveSentinel(path, assessment, scope ? "revision" : "case")
         : null;
+      const visibleAdaptive = scope && adaptive && assessment
+        ? (() => {
+          const allowed = readSentinelWorkerEvidenceScope(
+            path,
+            assessment.revision,
+          );
+          const ids = new Set(
+            allowed?.runId === adaptive.goal.id ? allowed.allowedTaskIds : [],
+          );
+          return {
+            revision: adaptive.revision,
+            evidenceRevision: assessment.revision,
+            taskLimit: adaptive.taskLimit,
+            tasks: adaptive.tasks.filter(({ id }) => ids.has(id)).map(({
+              id,
+              kind,
+              nodeId,
+              status,
+              attempts,
+              depth,
+              prerequisites,
+              retryable,
+              prioritized,
+              plannerPriority,
+            }) => ({
+              id,
+              kind,
+              nodeId,
+              status,
+              attempts,
+              depth,
+              prerequisites: prerequisites.filter((dependency) =>
+                ids.has(dependency)
+              ),
+              retryable,
+              prioritized,
+              plannerPriority,
+            })),
+            modelReviewStates: adaptive.modelReviewStates.filter(({ taskId }) =>
+              ids.has(taskId)
+            ).map(({
+              taskId,
+              attempts,
+              status,
+              retryable,
+            }) => ({ taskId, attempts, status, retryable })),
+          };
+        })()
+        : adaptive;
       const incidentReviews = assessment
-        ? readSentinelIncidentReviews(path, assessment.revision)
+        ? readSentinelIncidentReviews(path, assessment.revision).filter(
+          ({ incidentId }) => !scope || scope.allowIncident(incidentId),
+        )
         : [];
       const findingReviews = assessment
-        ? readSentinelFindingReviews(path, assessment.revision)
+        ? readSentinelFindingReviews(path, assessment.revision).filter(
+          ({ findingId }) => !scope || scope.allowFinding(findingId),
+        )
         : [];
       let provenance;
       if (assessment?.result) {
-        provenance = buildSentinelProvenance(
-          assessment.result,
-          adaptive ?? undefined,
+        provenance = scope && !projected ? null : buildSentinelProvenance(
+          projected?.result ?? assessment.result,
+          scope ? undefined : adaptive ?? undefined,
           undefined,
           incidentReviews,
           findingReviews,
         ).snapshot();
+      } else if (scope) {
+        provenance = null;
       } else {
         try {
           provenance = loadSentinelGraph(await readSentinelChatSnapshot(path))
@@ -2509,7 +2574,7 @@ export function createTidepoolSentinelHandler(
         ? readSentinelModelSettings(path)
         : undefined;
       const cases = listSentinelCaseIds(bootstrap.baseDir);
-      const goalProof = assessment &&
+      const goalProof = !scope && assessment &&
         readSentinelGoalCompletionForState(path, assessment);
       const { admissionAt: _admissionAt, ...publicPlan } = assessment?.plan ??
         {};
@@ -2522,10 +2587,22 @@ export function createTidepoolSentinelHandler(
           message.type === "case_lifecycle") && {
           caseOverview: readCaseOverview(cases),
         }),
-        ...(message.includeRevisions === true && {
+        ...(!scope && message.includeRevisions === true && {
           revisions: readSentinelAssessmentRevisionIndex(path),
         }),
-        assessment: assessment && { ...assessment, plan: publicPlan },
+        ...(scope && { scopeRestricted: true }),
+        assessment: assessment && (scope
+          ? {
+            revision: assessment.revision,
+            updatedAt: assessment.updatedAt,
+            active: assessment.active,
+            paused: assessment.paused,
+            deadlineReviewPending: assessment.deadlineReviewPending,
+            plan: { runId: assessment.plan.runId },
+            reviews: [],
+            result: projected?.result ?? null,
+          }
+          : { ...assessment, plan: publicPlan }),
         goalProof: goalProof && assessment?.plan.runId
           ? {
             runId: assessment.plan.runId,
@@ -2547,12 +2624,16 @@ export function createTidepoolSentinelHandler(
         incidentReviews,
         findingReviews,
         alertFeedAvailable: assessment
-          ? hasSavedSentinelAlerts(path, assessment.revision)
+          ? scope
+            ? readSentinelAssessmentAlerts(path, assessment.revision)?.some(
+              scope.allowAlert,
+            ) === true
+            : hasSavedSentinelAlerts(path, assessment.revision)
           : false,
-        adaptive,
+        adaptive: visibleAdaptive,
         interactiveModelUsage: readSentinelInteractiveModelUsage(path),
-        caseHints: readSentinelCaseHints(path, 10),
-        topologyAuto: await sentinelTopologyAutoEnabled(path),
+        caseHints: scope ? [] : readSentinelCaseHints(path, 10),
+        topologyAuto,
         notificationSettings: {
           gatewayEnabled: sentinelConfig?.notify_incident_increases === true,
           ...readSentinelNotificationState(path),
