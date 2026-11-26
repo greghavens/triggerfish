@@ -60,6 +60,7 @@ import {
   addSentinelCaseHint,
   advanceAdaptiveSentinel,
   createSentinelModelPlanner,
+  createSentinelWorkerPool,
   hasSentinelCompletedFindingWork,
   readAdaptiveSentinel,
   readSentinelCaseHints,
@@ -13662,6 +13663,182 @@ async function verifyTidepoolTrafficDownload(
     revokeOnResponse = false;
   }, chat.readSentinelTrafficDownloadPage);
 }
+
+Deno.test("Sentinel finding reporters default to five workspace slots, with reviewed overrides bounded by the worker pool", async () => {
+  const baseDir = await Deno.makeTempDir();
+  const pool = createSentinelWorkerPool(6);
+  const reporters = new Set<string>();
+  const cases: {
+    state: State;
+    planner: ReturnType<typeof createSentinelModelPlanner>;
+  }[] = [];
+  const release = Promise.withResolvers<void>();
+  const now = Date.now();
+  const advance = () => {
+    for (const { state, planner } of cases) planner.advance(state);
+  };
+  const waitForReporters = async (count: number) => {
+    const end = Date.now() + 3_000;
+    while (reporters.size < count && Date.now() < end) {
+      advance();
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assertEquals(reporters.size, count);
+  };
+  try {
+    for (let index = 0; index < 7; index++) {
+      const caseId = `reporter-capacity-${index}`;
+      const path = resolveSentinelCasePath(baseDir, caseId);
+      await Deno.mkdir(dirname(path), { recursive: true });
+      await Deno.writeTextFile(
+        path,
+        JSON.stringify({
+          version: 1,
+          nodes: [
+            { id: "app", kind: "asset", label: "Application" },
+            {
+              id: "gap",
+              kind: "finding",
+              label: "Control gap",
+              severity: "high",
+            },
+            { id: "control", kind: "control", label: "Control" },
+            {
+              id: "evidence",
+              kind: "evidence",
+              label: "Failed verification",
+              controlVerification: {
+                outcome: "fail",
+                observedAt: new Date(now - 1_000).toISOString(),
+                validUntil: new Date(now + 60_000).toISOString(),
+              },
+            },
+          ],
+          edges: [
+            { from: "gap", to: "app", relation: "affects" },
+            { from: "control", to: "gap", relation: "mitigates" },
+            { from: "evidence", to: "app", relation: "observed_on" },
+            { from: "evidence", to: "control", relation: "verifies" },
+          ],
+        }),
+      );
+      const state = startSentinelAssessment(path);
+      const lease = assignedLease(path, state, "impact");
+      const published = await workerTurn(path, lease, [
+        [tool(assigned)],
+        [tool(report, {
+          graphFindingId: "gap",
+          controlId: "control",
+          evidenceId: "evidence",
+          title: "Verified control gap",
+          summary: "The case records a failed verification.",
+          requestId: crypto.randomUUID(),
+        })],
+      ]);
+      assert(JSON.parse(published.results[1][0]).record?.id);
+      advanceAdaptiveSentinel(path, state);
+      const registry = createProviderRegistry();
+      registry.register({
+        name: caseId,
+        supportsStreaming: false,
+        async complete() {
+          reporters.add(caseId);
+          await release.promise;
+          return {
+            content: '{"summary":"Reviewed the saved finding.","followUps":[]}',
+            usage: { inputTokens: 1, outputTokens: 1 },
+            toolCalls: [],
+          };
+        },
+      });
+      registry.setDefault(caseId);
+      const planner = createSentinelModelPlanner(
+        path,
+        (_state, taskId, token, role) => {
+          if (role !== "reporter") {
+            return {
+              execute(_prompt, send) {
+                send({ type: "response", text: "[]", taint: "INTERNAL" });
+                return Promise.resolve();
+              },
+              clear() {},
+            };
+          }
+          assert(taskId && token);
+          return createSentinelSubagent({
+            snapshotPath: path,
+            assessmentRevision: state.revision,
+            assignedTaskId: taskId,
+            assignedTaskLeaseToken: token,
+            providerRegistry: registry,
+            allowModelAccess: true,
+            hookRunner: {
+              evaluateHook: () =>
+                Promise.resolve({
+                  allowed: true,
+                  action: "ALLOW",
+                  ruleId: null,
+                  duration: 0,
+                }),
+            },
+          });
+        },
+        () => pool(path),
+      );
+      cases.push({ state, planner });
+    }
+    await waitForReporters(5);
+    advance();
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    assertEquals(reporters.size, 5);
+
+    const profile = {
+      action: "set_agent_profile",
+      id: "sentinel-reporter",
+      expectedVersion: 0,
+      requestId: crypto.randomUUID(),
+      profileSettings: {
+        name: "Finding reporter",
+        description: "Report verified findings.",
+        role: "reporter",
+        prompt: "Read and cite the assigned finding.",
+        automaticAdmission: { enabled: true, maxConcurrent: 7 },
+        tools: ["sentinel_worker_findings", "sentinel_update_finding_report"],
+      },
+    };
+    await withFindingAssignmentGateway(
+      baseDir,
+      () => Promise.resolve(false),
+      async (turn) => {
+        assertStringIncludes(await turn(profile), "unavailable");
+      },
+    );
+    advance();
+    assertEquals(reporters.size, 5);
+    await withFindingAssignmentGateway(
+      baseDir,
+      () => Promise.resolve(true),
+      async (turn) => {
+        assertEquals(JSON.parse(await turn(profile)).profile.version, 1);
+      },
+    );
+    await waitForReporters(6);
+    advance();
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    assertEquals(reporters.size, 6);
+  } finally {
+    for (const { planner } of cases) planner.stop();
+    release.resolve();
+    const end = Date.now() + 3_000;
+    while (
+      cases.some(({ planner }) => planner.hasInFlightWork()) && Date.now() < end
+    ) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert(!cases.some(({ planner }) => planner.hasInFlightWork()));
+    await Deno.remove(baseDir, { recursive: true });
+  }
+});
 
 async function testScopedReporterRestart(
   useBatch: boolean,

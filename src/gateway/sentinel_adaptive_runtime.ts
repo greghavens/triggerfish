@@ -6182,7 +6182,8 @@ function parsePlannerResponse(raw: string) {
   }
 }
 
-// Concurrent finding reporters share this limit across case coordinators in the gateway.
+const DEFAULT_FINDING_REPORTER_CONCURRENCY = 5;
+// Reporter slots are shared by every case coordinator in the same workspace.
 const activeReporters = new Map<string, number>();
 
 /** Run optional, bounded model planning against an immutable evidence revision. */
@@ -7086,8 +7087,10 @@ export function createSentinelModelPlanner(
         ? reporterProfile.automaticAdmission
         : undefined;
       const reporterCount = location && activeReporters.get(location.baseDir);
-      const mayReport = !reporterAdmission || reporterAdmission.enabled &&
-          (reporterCount ?? 0) < reporterAdmission.maxConcurrent;
+      const mayReport = reporterAdmission?.enabled !== false &&
+        (reporterCount ?? 0) <
+          (reporterAdmission?.maxConcurrent ??
+            DEFAULT_FINDING_REPORTER_CONCURRENCY);
       const currentTask = (task: AdaptiveTask) =>
         !reviewing.has(task.id) && permitsAssignmentLifecycle(current, task) &&
         allowed(task) &&
