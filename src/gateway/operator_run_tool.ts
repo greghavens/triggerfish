@@ -3734,7 +3734,8 @@ ${
         (action === "inspect" || action === "pause") &&
         args.kind === "owner_chat"
       ) {
-        const { ownerRecoverySessionId, ceiling } = context ?? {};
+        const { ownerRecoverySessionId, ceiling, authorizeOwnerRunCall } =
+          context ?? {};
         const id = args.id;
         if (
           !ownerRecoverySessionId ||
@@ -3757,7 +3758,7 @@ ${
             return project(state);
           }
           if (
-            state.committedBatch === 0 ||
+            !authorizeOwnerRunCall || state.committedBatch === 0 ||
             (state.status !== "ready" &&
               (state.status !== "pending" ||
                 (state.nextAction !== "retry_read" &&
@@ -3770,6 +3771,7 @@ ${
               }`,
             )
           ) return "Error: The operator declined the run action.";
+          if (!await authorizeOwnerRunCall(args)) return unavailable;
           using lock = lockAgentRecovery(recoveryPath, key);
           if (!lock) return "Error: The owner chat execution is active.";
           const current = recovery.inspectStatus(key);
@@ -11229,6 +11231,11 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
       if (action === "cancel") {
         const { runId } = args;
         const sentinel = ref.kind === "sentinel";
+        const authorize = context?.authorizeOwnerRunCall;
+        if (
+          backgroundRole &&
+          (!authorize || !context?.authenticatedOwnerSessionId)
+        ) return unavailable;
         if (
           Object.keys(args).some((key) =>
             !(sentinel
@@ -11260,6 +11267,7 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
           )
         ) return "Error: The operator declined the run action.";
         if (backgroundRole) {
+          if (!await authorize?.(args)) return unavailable;
           const journal = openExecutionTraces(
             join(options.baseDir, "execution-traces.db"),
           );

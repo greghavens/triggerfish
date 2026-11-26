@@ -61,6 +61,7 @@ Deno.test("Owner gateway steers and cancels a live scheduled model at real tool 
   let completeNormally = false;
   let confirmations = 0;
   let deny = false;
+  let revokeOnConfirmation = false;
   const hooks: HookRunner = {
     evaluateHook(hook, { input }) {
       const allowed = !(deny && hook === "PRE_TOOL_CALL" &&
@@ -202,6 +203,7 @@ Deno.test("Owner gateway steers and cancels a live scheduled model at real tool 
         baseDir,
         confirm: () => {
           confirmations++;
+          if (revokeOnConfirmation) deny = true;
           return Promise.resolve(true);
         },
       }),
@@ -286,11 +288,24 @@ Deno.test("Owner gateway steers and cancels a live scheduled model at real tool 
     );
     assert(applied?.appliedAt);
     assertEquals(applied.note, note);
+    revokeOnConfirmation = true;
+    try {
+      assertStringIncludes(
+        await turn({ action: "cancel", ...ref }),
+        "unavailable",
+      );
+    } finally {
+      revokeOnConfirmation = false;
+      deny = false;
+    }
+    assertEquals(confirmations, 2);
+    assertEquals((await controls()).stopped, false);
+    assertEquals(effects, ["2"]);
     assertEquals(
       JSON.parse(await turn({ action: "cancel", ...ref })).run.status,
       "cancelled",
     );
-    assertEquals(confirmations, 2);
+    assertEquals(confirmations, 3);
     finish.resolve();
     await (await delivery).body?.cancel();
     assertEquals(effects, ["2"]);
@@ -299,7 +314,7 @@ Deno.test("Owner gateway steers and cancels a live scheduled model at real tool 
       JSON.parse(await turn({ action: "cancel", ...ref })).run.status,
       "cancelled",
     );
-    assertEquals(confirmations, 2);
+    assertEquals(confirmations, 3);
     const replay = await fetch(deliveryUrl, request);
     assertEquals(replay.status, 409);
     await replay.body?.cancel();

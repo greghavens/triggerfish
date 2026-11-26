@@ -41,6 +41,7 @@ Deno.test("gateway resumes a saved credential-backed result and blocks revoked o
   const dir = await Deno.makeTempDir();
   const db = join(dir, "agent-recovery.db");
   let approvals = 0;
+  let revokeOnOperatorApproval = false;
   let allowOperatorApproval = true;
   let approvalRuleId: string | undefined;
   let approvalTool = "write_status";
@@ -432,6 +433,15 @@ Deno.test("gateway resumes a saved credential-backed result and blocks revoked o
           (await credential()).ok,
         confirm: () => {
           approvals++;
+          if (revokeOnOperatorApproval) {
+            engine.addRule({
+              id: "fixture-workflow-access-revoked-during-review",
+              priority: 100,
+              hook: "PRE_TOOL_CALL",
+              conditions: [],
+              action: "BLOCK",
+            });
+          }
           return Promise.resolve(allowOperatorApproval);
         },
       }),
@@ -887,6 +897,17 @@ Deno.test("gateway resumes a saved credential-backed result and blocks revoked o
       assertEquals((await readExecution(exactReadId))?.status, "ready");
     });
     allowOperatorApproval = true;
+    await withGateway("exact_resume", async (socket) => {
+      const priorReviews = approvals;
+      revokeOnOperatorApproval = true;
+      try {
+        assertStringIncludes(await turn(socket, pause), "unavailable");
+      } finally {
+        revokeOnOperatorApproval = false;
+      }
+      assertEquals(approvals, priorReviews + 1);
+      assertEquals((await readExecution(exactReadId))?.status, "ready");
+    });
     await withGateway("exact_resume", async (socket) => {
       const result = JSON.parse(await turn(socket, pause));
       assertEquals(result.run, {
