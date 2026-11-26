@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from "node:util";
 import {
   decodeStagedTrafficFinding,
   stagedTrafficItems,
@@ -1437,6 +1438,10 @@ export async function restoreVerifiedSentinelCaseArchive(
           receipt.runId !== runId ||
           receipt.evidenceRevision !== source.revision ||
           receipt.taskId !== source.taskId ||
+          !isDeepStrictEqual(
+            "analyst" in receipt ? receipt.analyst : undefined,
+            source.analyst,
+          ) ||
           receipt.evidenceId !== source.evidenceId ||
           receipt.snapshotDigest !== source.snapshotDigest ||
           receipt.targetId !== targetId;

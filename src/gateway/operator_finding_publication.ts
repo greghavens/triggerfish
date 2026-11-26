@@ -24,6 +24,8 @@ import {
   openSentinelWorkerFindingStore,
 } from "../sentinel/worker_finding_store.ts";
 
+import { readSentinelFindingReceiptScope } from "./sentinel_worker_findings.ts";
+
 const uuid = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i;
 const digest = /^[a-f0-9]{64}$/;
 const unavailable =
@@ -76,6 +78,7 @@ export async function executeOperatorFindingPublication(
     node: string,
     isCurrent: () => boolean,
   ) => Promise<{ payload: ExecutionTraceApprovedPayload } | undefined>,
+  reauthorize?: () => Promise<boolean>,
 ): Promise<Record<string, unknown> | string> {
   const { action, receiptId, requestId, reportVersion, evidenceVersion } = args;
   const preview = action === "preview_finding_publication";
@@ -104,6 +107,34 @@ export async function executeOperatorFindingPublication(
     : undefined;
   const path = resolveSentinelCasePath(baseDir, caseId);
 
+  function allowsExisting(publication: SentinelWorkerFindingPublication) {
+    const origin = publication.finding.workerFindingSource;
+    if (!origin || !hasSentinelWorkerFindingJournal(path)) return false;
+    const scope = readSentinelFindingReceiptScope(path, origin.revision);
+    if (scope?.runId !== origin.runId) return false;
+    const journal = openSentinelWorkerFindingStore(path);
+    try {
+      const record = journal.readFinding(origin.receiptId);
+      if (
+        !record || record.caseId !== caseId || record.runId !== origin.runId ||
+        record.evidenceRevision !== origin.revision ||
+        record.targetId !== publication.targetId ||
+        record.taskId !== origin.taskId ||
+        !isDeepStrictEqual(
+          "analyst" in record ? record.analyst : undefined,
+          origin.analyst,
+        ) ||
+        record.evidenceId !== origin.evidenceId ||
+        record.snapshotDigest !== origin.snapshotDigest
+      ) return false;
+      return scope.allows(record.targetId) &&
+        scope.allows(record.graphFindingId, "review_finding") &&
+        scope.allows(record.evidenceId);
+    } finally {
+      journal.close();
+    }
+  }
+
   function inspect(approved?: {
     readonly runId: string;
     readonly record: PublicationDraft;
@@ -126,7 +157,7 @@ export async function executeOperatorFindingPublication(
               replay.finding.workerFindingSource?.reportVersion ===
                 reportVersion &&
               replay.evidenceVersion === evidenceVersion);
-        return same
+        return same && (withdraw || allowsExisting(replay))
           ? { publication: replay, replay: true as const }
           : undefined;
       }
@@ -159,7 +190,11 @@ export async function executeOperatorFindingPublication(
         );
         return { publication };
       }
-      if (existing) return preview ? { publication: existing } : undefined;
+      if (existing) {
+        return preview && allowsExisting(existing)
+          ? { publication: existing }
+          : undefined;
+      }
       if (!hasSentinelWorkerFindingJournal(path)) return;
 
       const journal = openSentinelWorkerFindingStore(path);
@@ -167,7 +202,7 @@ export async function executeOperatorFindingPublication(
         const report = journal.readFindingReport(receiptId as string, revision);
         const finding = report?.finding;
         if (
-          !report || !finding?.taskId || finding.caseId !== caseId ||
+          !report || !finding || finding.caseId !== caseId ||
           finding.runId !== runId ||
           finding.evidenceRevision !== revision
         ) return;
@@ -207,6 +242,14 @@ export async function executeOperatorFindingPublication(
           !sentinelOperatingConstraintsAllow(policy?.constraints, {
             kind: "review_evidence",
             nodeId: finding.targetId,
+          }, snapshot) ||
+          !sentinelOperatingConstraintsAllow(policy?.constraints, {
+            kind: "review_finding",
+            nodeId: finding.graphFindingId,
+          }, snapshot) ||
+          !sentinelOperatingConstraintsAllow(policy?.constraints, {
+            kind: "review_evidence",
+            nodeId: finding.evidenceId,
           }, snapshot)
         ) return;
         const native = evidence.nativeWorkflowSource !== undefined;
@@ -229,7 +272,9 @@ export async function executeOperatorFindingPublication(
               caseId,
               runId,
               revision,
-              taskId: finding.taskId,
+              ...("analyst" in finding
+                ? { analyst: finding.analyst }
+                : { taskId: finding.taskId }),
               receiptId: finding.id,
               evidenceId: finding.evidenceId,
               snapshotDigest: finding.snapshotDigest,
@@ -315,6 +360,7 @@ export async function executeOperatorFindingPublication(
     ) {
       return "Error: The operator declined the run action.";
     }
+    if (reauthorize && !await reauthorize()) return unavailable;
     if (execution && await authorized() !== source) return unavailable;
     const committed = inspect({ runId, record, source });
     return committed?.publication

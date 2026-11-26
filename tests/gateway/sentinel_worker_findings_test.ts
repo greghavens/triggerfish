@@ -10297,3 +10297,236 @@ Deno.test("Interactive Sentinel recheck context rejects withdrawn case access", 
     await Deno.remove(baseDir, { recursive: true });
   }
 });
+
+Deno.test("Reviewed analyst publications retain exact actor provenance through gateway restore", async () => {
+  const baseDir = await Deno.makeTempDir();
+  const caseId = "analyst-publication";
+  const path = resolveSentinelCasePath(baseDir, caseId);
+  try {
+    const now = Date.now();
+    await Deno.mkdir(dirname(path), { recursive: true });
+    await Deno.writeTextFile(
+      path,
+      JSON.stringify({
+        version: 1,
+        nodes: [
+          { id: "app", kind: "asset", label: "Application" },
+          {
+            id: "gap",
+            kind: "finding",
+            label: "Control gap",
+            severity: "high",
+          },
+          { id: "control", kind: "control", label: "Required control" },
+          {
+            id: "check",
+            kind: "evidence",
+            label: "Retained failed check",
+            controlVerification: {
+              outcome: "fail",
+              observedAt: new Date(now - 60_000).toISOString(),
+              validUntil: new Date(now + 3_600_000).toISOString(),
+            },
+          },
+        ],
+        edges: [
+          { from: "check", to: "app", relation: "observed_on" },
+          { from: "gap", to: "app", relation: "affects" },
+          { from: "control", to: "gap", relation: "mitigates" },
+          { from: "check", to: "control", relation: "verifies" },
+        ],
+      }),
+    );
+    const state = startSentinelAssessment(path);
+    const runId = state.plan.runId;
+    assert(runId);
+    const ref = { kind: "sentinel", id: caseId, revision: state.revision };
+    const setReviewPolicy = (
+      deniedKinds: readonly ["review_finding"] | readonly [],
+    ) =>
+      assert(recordSentinelOperatingConstraints(path, {
+        runId,
+        evidenceRevision: state.revision,
+        operatorScope: "owner",
+        requestId: crypto.randomUUID(),
+        expectedVersion:
+          readSentinelOperatingConstraints(path, runId)?.version ?? 0,
+        constraints: { allowedAssetIds: ["app"], deniedKinds },
+      }));
+    setReviewPolicy([]);
+    let narrowOnApproval = false;
+    let revokeRootOnApproval = false;
+    let revokeRoot = false;
+    const policy = (hook: string, input: Record<string, unknown>) =>
+      !revokeRoot || hook !== "PRE_TOOL_CALL" ||
+      (input.tool_call as { args?: { action?: string } } | undefined)?.args
+          ?.action !== "publish_finding";
+    const confirm = () => {
+      if (narrowOnApproval) setReviewPolicy(["review_finding"]);
+      if (revokeRootOnApproval) revokeRoot = true;
+      return Promise.resolve(true);
+    };
+    let publish: Record<string, unknown> = {};
+    let preview: Record<string, unknown> = {};
+    let publication: unknown;
+    let linked: Record<string, unknown> = {};
+    let sharedSource: unknown;
+    const archiveId = crypto.randomUUID();
+    await withFindingAssignmentGateway(baseDir, confirm, async (turn) => {
+      const recorded = JSON.parse(
+        await turn({
+          ...ref,
+          runId,
+          action: "record_analyst_finding",
+          requestId: crypto.randomUUID(),
+          targetId: "app",
+          findingId: "gap",
+          controlId: "control",
+          evidenceId: "check",
+          title: "Retained required control failure",
+          summary: "The exact local verification failed.",
+        }),
+      ).receipt;
+      assertEquals(recorded.analyst, { operatorScope: "owner" });
+      preview = {
+        ...ref,
+        action: "preview_finding_publication",
+        receiptId: recorded.id,
+      };
+      const draft = JSON.parse(await turn(preview)).preview;
+      const origin = draft.finding.workerFindingSource;
+      assertEquals(origin.analyst, recorded.analyst);
+      assertEquals(origin.taskId, undefined);
+      assertEquals(origin.evidenceId, recorded.evidenceId);
+      assertEquals(origin.snapshotDigest, recorded.snapshotDigest);
+      publish = {
+        ...preview,
+        action: "publish_finding",
+        requestId: crypto.randomUUID(),
+        reportVersion: origin.reportVersion,
+        evidenceVersion: draft.evidenceVersion,
+      };
+      revokeRootOnApproval = true;
+      assertStringIncludes(await turn(publish), "unavailable");
+      assertEquals(readSentinelWorkerFindingPublications(path, caseId), []);
+      revokeRoot = false;
+      revokeRootOnApproval = false;
+      narrowOnApproval = true;
+      assertStringIncludes(await turn(publish), "unavailable");
+      assertEquals(readSentinelWorkerFindingPublications(path, caseId), []);
+      assertStringIncludes(await turn(preview), "unavailable");
+      narrowOnApproval = false;
+      setReviewPolicy([]);
+      publication = JSON.parse(await turn(publish)).publication;
+      assertEquals(JSON.parse(await turn(publish)).publication, publication);
+      const consumerCase = "analyst-publication-recipient";
+      const consumerPath = resolveSentinelCasePath(baseDir, consumerCase);
+      await Deno.mkdir(dirname(consumerPath), { recursive: true });
+      await Deno.writeTextFile(
+        consumerPath,
+        JSON.stringify({
+          version: 1,
+          nodes: [{ id: "app", kind: "asset", label: "Application" }],
+          edges: [],
+        }),
+      );
+      const consumer = JSON.parse(
+        await turn({
+          ...ref,
+          action: "spawn",
+          targetKind: "sentinel",
+          targetId: consumerCase,
+          requestId: crypto.randomUUID(),
+          sourceCases: [{ caseId, revision: state.revision }],
+        }),
+      ).run;
+      assertEquals(consumer.ref.id, consumerCase);
+      const consumerState = readSentinelAssessment(consumerPath);
+      assert(consumerState?.plan.runId);
+      const consumerRef = {
+        kind: "sentinel",
+        id: consumerCase,
+        revision: consumerState.revision,
+      };
+      const membership = resolveSentinelCaseMembership(
+        consumerState.result?.sharedGraph.snapshot,
+        {
+          caseId: consumerCase,
+          evidenceRevision: consumerState.revision,
+          selector: { kind: "assets", assetIds: ["app"] },
+        },
+      );
+      assert(membership);
+      assert(recordSentinelOperatingConstraints(consumerPath, {
+        runId: consumerState.plan.runId,
+        evidenceRevision: consumerState.revision,
+        expectedVersion: 0,
+        operatorScope: "owner",
+        requestId: crypto.randomUUID(),
+        constraints: { allowedAssetIds: membership.assetIds, deniedKinds: [] },
+        membership,
+      }));
+      const catalog = JSON.parse(
+        await turn({
+          ...consumerRef,
+          action: "linked_findings",
+          assetId: "app",
+          sourceCase: caseId,
+        }),
+      ).entries;
+      assertEquals(catalog.length, 1);
+      assertEquals(catalog[0].source, origin);
+      linked = {
+        ...consumerRef,
+        action: "linked_finding",
+        linkedFinding: catalog[0].selector,
+      };
+      const exact = JSON.parse(await turn(linked));
+      assertEquals(exact.source, origin);
+      assertEquals(exact.detail.finding.id, recorded.id);
+      sharedSource = exact.source;
+      assertEquals(
+        JSON.parse(await turn({ ...ref, runId, action: "cancel" })).run.status,
+        "stopped",
+      );
+      assertEquals(
+        JSON.parse(
+          await turn({
+            ...ref,
+            runId,
+            action: "archive",
+            requestId: archiveId,
+          }),
+        ).receipt.status,
+        "succeeded",
+      );
+    }, policy);
+    await Deno.rename(
+      dirname(path),
+      join(baseDir, "before-analyst-publication-restore"),
+    );
+    await withFindingAssignmentGateway(baseDir, confirm, async (turn) => {
+      assertEquals(
+        JSON.parse(
+          await turn({
+            ...ref,
+            runId,
+            action: "restore",
+            archiveId,
+            requestId: crypto.randomUUID(),
+          }),
+        ).receipt.status,
+        "succeeded",
+      );
+      assertEquals(JSON.parse(await turn(preview)).publication, publication);
+      assertEquals(JSON.parse(await turn(publish)).publication, publication);
+      assertEquals(JSON.parse(await turn(linked)).source, sharedSource);
+      setReviewPolicy(["review_finding"]);
+      assertStringIncludes(await turn(linked), "unavailable");
+      assertStringIncludes(await turn(preview), "unavailable");
+      assertStringIncludes(await turn(publish), "unavailable");
+    });
+  } finally {
+    await Deno.remove(baseDir, { recursive: true });
+  }
+});

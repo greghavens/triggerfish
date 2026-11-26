@@ -10989,6 +10989,9 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
         if (
           ref.kind !== "sentinel" || ref.revision === undefined ||
           !canFlowTo("INTERNAL", context?.ceiling ?? "PUBLIC") ||
+          (action !== "preview_finding_publication" &&
+            (!context?.authenticatedOwnerSessionId ||
+              !context.authorizeOwnerRunCall)) ||
           !await controller.inspect(ref)
         ) return unavailable;
         const revision = ref.revision;
@@ -11008,6 +11011,8 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
               context,
               isCurrent,
             )),
+          context?.authorizeOwnerRunCall &&
+            (() => context.authorizeOwnerRunCall!(args)),
         );
         return typeof result === "string" ? result : safeProjection(result);
       }

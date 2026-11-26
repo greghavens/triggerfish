@@ -2,6 +2,7 @@
 import { isDeepStrictEqual } from "node:util";
 import {
   readSentinelAssessmentRevision,
+  readSentinelOperatingConstraints,
   readSentinelOperatingConstraintsForRevision,
   readSentinelRunIdForRevision,
 } from "../sentinel/assessment_store.ts";
@@ -64,14 +65,7 @@ export function readLinkedFindingProof(
       path,
       origin.revision,
     );
-    if (
-      !snapshot || evidence?.kind !== "evidence" ||
-      !sentinelOperatingConstraintsAllow(
-        policy?.constraints,
-        { kind: "review_evidence", nodeId: assetId },
-        snapshot,
-      )
-    ) return undefined;
+    if (!snapshot || evidence?.kind !== "evidence") return undefined;
     const journal = openSentinelWorkerFindingStore(path);
     try {
       const report = journal.readFindingReport(
@@ -85,6 +79,10 @@ export function readLinkedFindingProof(
         receipt.evidenceRevision !== origin.revision ||
         receipt.targetId !== assetId ||
         receipt.taskId !== origin.taskId ||
+        !isDeepStrictEqual(
+          "analyst" in receipt ? receipt.analyst : undefined,
+          origin.analyst,
+        ) ||
         receipt.evidenceId !== origin.evidenceId ||
         receipt.snapshotDigest !== origin.snapshotDigest ||
         sentinelFindingTrafficEvidenceVersion(
@@ -94,6 +92,24 @@ export function readLinkedFindingProof(
           ).digest !==
           publication.evidenceVersion
       ) return undefined;
+      const currentPolicy = readSentinelOperatingConstraints(path, origin.runId)
+        ?.constraints;
+      for (const constraints of [policy?.constraints, currentPolicy]) {
+        if (
+          !sentinelOperatingConstraintsAllow(constraints, {
+            kind: "review_evidence",
+            nodeId: assetId,
+          }, snapshot) ||
+          !sentinelOperatingConstraintsAllow(constraints, {
+            kind: "review_finding",
+            nodeId: receipt.graphFindingId,
+          }, snapshot) ||
+          !sentinelOperatingConstraintsAllow(constraints, {
+            kind: "review_evidence",
+            nodeId: origin.evidenceId,
+          }, snapshot)
+        ) return undefined;
+      }
       const checked = verifyWorkerFindingRecheck(
         snapshot,
         {

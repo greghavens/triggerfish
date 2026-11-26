@@ -109,17 +109,52 @@ function readExecutionEvidenceSource(
   };
 }
 
-/** Exact lineage for an operator-approved local worker finding publication. */
-export interface SentinelPublishedFindingSource {
-  readonly caseId: string;
-  readonly runId: string;
-  readonly revision: number;
-  readonly taskId: string;
-  readonly receiptId: string;
-  readonly evidenceId: string;
-  readonly snapshotDigest: string;
-  readonly reportVersion: number;
+export interface SentinelFindingAnalyst {
+  readonly operatorScope: "owner";
+  readonly planner?: {
+    readonly identity: string;
+    readonly attempt: number;
+    readonly approvalId: string;
+  };
 }
+
+/** Normalize the recorded owner attribution for an owner or reviewed planner finding. */
+export function readSentinelFindingAnalyst(
+  value: unknown,
+): SentinelFindingAnalyst {
+  const { operatorScope, planner, ...extra } = record(value);
+  if (operatorScope !== "owner" || Object.keys(extra).length) {
+    throw new Error("Invalid Sentinel analyst finding attribution");
+  }
+  if (planner === undefined) return { operatorScope };
+  const { identity, attempt, approvalId, ...remaining } = record(planner);
+  if (
+    typeof identity !== "string" || identity.length > 224 ||
+    !/^[a-f0-9]{64}(?::[A-Za-z0-9:-]+)?$/.test(identity) ||
+    typeof attempt !== "number" || !Number.isSafeInteger(attempt) ||
+    attempt < 1 ||
+    typeof approvalId !== "string" ||
+    !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(approvalId) ||
+    Object.keys(remaining).length
+  ) throw new Error("Invalid Sentinel analyst finding attribution");
+  return { operatorScope, planner: { identity, attempt, approvalId } };
+}
+
+/** Exact lineage for an operator-approved local finding publication. */
+export type SentinelPublishedFindingSource =
+  & {
+    readonly caseId: string;
+    readonly runId: string;
+    readonly revision: number;
+    readonly receiptId: string;
+    readonly evidenceId: string;
+    readonly snapshotDigest: string;
+    readonly reportVersion: number;
+  }
+  & (
+    | { readonly taskId: string; readonly analyst?: never }
+    | { readonly analyst: SentinelFindingAnalyst; readonly taskId?: never }
+  );
 
 export function readSentinelPublishedFindingSource(
   value: unknown,
@@ -129,6 +164,7 @@ export function readSentinelPublishedFindingSource(
     runId,
     revision,
     taskId,
+    analyst,
     receiptId,
     evidenceId,
     snapshotDigest,
@@ -141,7 +177,9 @@ export function readSentinelPublishedFindingSource(
     !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(runId) ||
     typeof revision !== "number" || !Number.isSafeInteger(revision) ||
     revision < 1 ||
-    typeof taskId !== "string" || !/^adaptive:[a-f0-9]{64}$/.test(taskId) ||
+    (analyst === undefined
+      ? typeof taskId !== "string" || !/^adaptive:[a-f0-9]{64}$/.test(taskId)
+      : taskId !== undefined) ||
     typeof receiptId !== "string" ||
     !/^worker-finding:[a-f0-9]{64}$/.test(receiptId) ||
     typeof evidenceId !== "string" || !evidenceId.trim() ||
@@ -156,7 +194,9 @@ export function readSentinelPublishedFindingSource(
     caseId,
     runId,
     revision,
-    taskId,
+    ...(analyst === undefined
+      ? { taskId: taskId as string }
+      : { analyst: readSentinelFindingAnalyst(analyst) }),
     receiptId,
     evidenceId,
     snapshotDigest,

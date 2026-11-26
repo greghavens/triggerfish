@@ -1206,12 +1206,20 @@ export function reopenSentinelPlannerFindings(
   });
 }
 
-function sentinelLocalFindingAdmission(
+type FindingActorDraft = {
+  readonly operatorScope: "owner";
+  readonly planner?: Omit<
+    NonNullable<SentinelAnalystFindingInput["analyst"]["planner"]>,
+    "approvalId"
+  >;
+};
+
+function sentinelLocalFindingAdmission<Actor extends FindingActorDraft>(
   path: string,
   revision: number,
   args: Record<string, unknown>,
   isCurrent: () => boolean,
-  analyst: SentinelAnalystFindingInput["analyst"],
+  analyst: Actor,
 ) {
   const {
     runId,
@@ -1297,7 +1305,7 @@ export function readSentinelPlannerFindingDraft(
   revision: number,
   args: Record<string, unknown>,
   isCurrent: () => boolean,
-  planner: NonNullable<SentinelAnalystFindingInput["analyst"]["planner"]>,
+  planner: NonNullable<FindingActorDraft["planner"]>,
 ) {
   const admission = sentinelLocalFindingAdmission(
     path,
