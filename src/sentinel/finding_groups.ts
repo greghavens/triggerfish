@@ -87,6 +87,28 @@ function workerEntry(
   };
 }
 
+export type SentinelFindingOrder = "severity" | "time";
+
+type FindingRank = {
+  readonly severity?: typeof sentinelFindingSeverities[number];
+  readonly foundAt: string;
+  readonly id: string;
+};
+
+const severityRank = { critical: 4, high: 3, medium: 2, low: 1, info: 0 };
+
+export function compareSentinelFindingRank(
+  order: SentinelFindingOrder,
+  left: FindingRank,
+  right: FindingRank,
+): number {
+  const leftSeverity = left.severity ? severityRank[left.severity] : 0;
+  const rightSeverity = right.severity ? severityRank[right.severity] : 0;
+  return (order === "severity" ? rightSeverity - leftSeverity : 0) ||
+    right.foundAt.localeCompare(left.foundAt) ||
+    left.id.localeCompare(right.id);
+}
+
 export function readSentinelFindingGroup(
   path: string,
   caseId: string,
@@ -95,6 +117,7 @@ export function readSentinelFindingGroup(
   limit: number,
   categoryOffset?: number,
   filter?: FindingExportFilter,
+  order?: SentinelFindingOrder,
 ) {
   const state = readSentinelAssessmentRevision(path, revision);
   if (!state) return;
@@ -122,7 +145,7 @@ export function readSentinelFindingGroup(
     ? openSentinelWorkerFindingStore(path)
     : undefined;
   try {
-    if (filter) {
+    if (filter || order) {
       const saved = readSentinelOperatingConstraints(path, runId, revision)
         ?.constraints;
       const current = readSentinelOperatingConstraints(path, runId)
@@ -140,24 +163,32 @@ export function readSentinelFindingGroup(
         const disposition = reviews.get(finding.id) ?? "open";
         if (
           !allowed("review_finding", finding.id) ||
-          !matchesFindingFilter(filter, {
+          (filter && !matchesFindingFilter(filter, {
             kind: "imported",
             assets: finding.assets,
             title: finding.label,
             severity: finding.severity,
             disposition,
-          })
+          }))
         ) return false;
         facets?.add(finding.severity, disposition);
         return true;
       });
-      const workerIds = filter.kind === "imported"
+      const workerIds = filter?.kind === "imported"
         ? []
         : journal?.pageFindingIds(caseId, runId, revision, 0, 4097).ids ?? [];
       if (workerIds.length > 4096) return;
       const entries:
         (ReturnType<typeof graphEntry> | ReturnType<typeof workerEntry>)[] =
           filteredGraph.slice(offset, offset + limit).map(graphEntry);
+      const orderedEntries:
+        | ((typeof entries)[number] & { foundAt: string })[]
+        | undefined = order
+          ? filteredGraph.map((finding) => ({
+            ...graphEntry(finding),
+            foundAt: state.updatedAt,
+          }))
+          : undefined;
       let workerCount = 0;
       for (const id of workerIds) {
         const report = journal?.readFindingReport(id, revision);
@@ -167,7 +198,7 @@ export function readSentinelFindingGroup(
         ) return;
         if (
           !allowed("review_evidence", report.finding.targetId) ||
-          !matchesFindingFilter(filter, {
+          (filter && !matchesFindingFilter(filter, {
             kind: "worker",
             assets: [report.finding.targetId],
             title: report.title,
@@ -175,7 +206,7 @@ export function readSentinelFindingGroup(
             severity: report.severity,
             disposition: report.disposition,
             category: report.findingCategory,
-          })
+          }))
         ) continue;
         facets?.add(
           report.severity,
@@ -183,11 +214,34 @@ export function readSentinelFindingGroup(
           report.findingCategory,
         );
         const index = filteredGraph.length + workerCount++;
-        if (index >= offset && index < offset + limit) {
+        if (orderedEntries) {
+          orderedEntries.push({
+            ...workerEntry(report),
+            foundAt: report.finding.recordedAt,
+          });
+        } else if (index >= offset && index < offset + limit) {
           entries.push(workerEntry(report));
         }
       }
       const total = filteredGraph.length + workerCount;
+      if (order && orderedEntries) {
+        orderedEntries.sort((a, b) => compareSentinelFindingRank(order, a, b));
+      }
+      const page = orderedEntries
+        ? orderedEntries.slice(offset, offset + limit)
+        : entries;
+      const latest = orderedEntries?.reduce(
+        (time, entry) => entry.foundAt > time ? entry.foundAt : time,
+        "",
+      );
+      const highest = orderedEntries?.reduce<FindingRank["severity"]>(
+        (severity, entry) =>
+          entry.severity &&
+            (!severity || severityRank[entry.severity] > severityRank[severity])
+            ? entry.severity
+            : severity,
+        undefined,
+      );
       return {
         caseId,
         runId,
@@ -196,10 +250,10 @@ export function readSentinelFindingGroup(
         imported: filteredGraph.length,
         worker: workerCount,
         ...(facets && { facets: facets.page() }),
-        entries,
-        nextOffset: offset + entries.length < total
-          ? offset + entries.length
-          : null,
+        ...(orderedEntries &&
+          { latestFoundAt: latest ?? "", highestSeverity: highest }),
+        entries: page,
+        nextOffset: offset + page.length < total ? offset + page.length : null,
       };
     }
     const workers = journal?.pageFindingIds(

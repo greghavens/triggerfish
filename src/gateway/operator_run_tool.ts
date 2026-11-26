@@ -128,6 +128,7 @@ import {
   verifySentinelAssetDiscovery,
 } from "../sentinel/asset_discovery_evidence.ts";
 import {
+  compareSentinelFindingRank,
   readSentinelFindingAssetTree,
   readSentinelFindingGroup,
 } from "../sentinel/finding_groups.ts";
@@ -1239,6 +1240,11 @@ export const operatorRunTool: ToolDefinition = {
       description:
         "One to sixteen exact selected finding IDs for finding_asset_tree.",
       items: { type: "string" },
+    },
+    findingOrder: {
+      type: "string",
+      enum: ["severity", "time"],
+      description: "Optional finding_groups priority and page order.",
     },
     findingFilter: {
       type: "object",
@@ -3371,19 +3377,33 @@ ${
         return tree ? safeProjection({ tree }) : unavailable;
       }
       if (action === "finding_groups") {
-        const { scopes, limit = 1, includeFacets = false, findingFilter } =
-          args;
+        const {
+          scopes,
+          limit = 1,
+          includeFacets = false,
+          findingFilter,
+          findingOrder,
+        } = args;
         const filter = parseFindingExportFilter(findingFilter);
         if (
           !context?.authenticatedOwnerSessionId ||
           typeof includeFacets !== "boolean" ||
+          (findingOrder !== undefined && findingOrder !== "severity" &&
+            findingOrder !== "time") ||
           (findingFilter !== undefined && !filter) ||
           !canFlowTo("INTERNAL", context.ceiling ?? "PUBLIC") ||
           !Array.isArray(scopes) || scopes.length < 1 || scopes.length > 4 ||
           typeof limit !== "number" || !Number.isSafeInteger(limit) ||
           limit < 1 || limit > 3 ||
           Object.keys(args).some((key) =>
-            !["action", "scopes", "limit", "includeFacets", "findingFilter"]
+            ![
+              "action",
+              "scopes",
+              "limit",
+              "includeFacets",
+              "findingFilter",
+              "findingOrder",
+            ]
               .includes(key)
           )
         ) return unavailable;
@@ -3436,10 +3456,28 @@ ${
             limit,
             categoryOffset,
             filter,
+            findingOrder,
           );
           if (!group) return unavailable;
           groups.push(group);
           findingTotal += group.total;
+        }
+        if (findingOrder) {
+          groups.sort((left, right) =>
+            compareSentinelFindingRank(
+              findingOrder,
+              {
+                id: left.caseId,
+                severity: left.highestSeverity,
+                foundAt: left.latestFoundAt ?? "",
+              },
+              {
+                id: right.caseId,
+                severity: right.highestSeverity,
+                foundAt: right.latestFoundAt ?? "",
+              },
+            )
+          );
         }
         return safeProjection({ groups, findingTotal });
       }

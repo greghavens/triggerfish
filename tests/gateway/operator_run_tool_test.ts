@@ -1220,7 +1220,11 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
       } finally {
         trafficPlanner.stop();
       }
-      const journal = openSentinelWorkerFindingStore(peerPath);
+      let reportTime = Date.now();
+      const journal = openSentinelWorkerFindingStore(
+        peerPath,
+        () => reportTime++,
+      );
       const { original, later } = (() => {
         try {
           const original = journal.recordFinding({
@@ -1290,6 +1294,23 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
       assertEquals(secondFiltered.entries[0].id, later.id);
       assertEquals(secondFiltered.facets.total, 2);
       assertEquals(secondFiltered.nextOffset, null);
+      const orderedRequest = { ...filteredRequest, findingOrder: "time" };
+      const orderedFindings = JSON.parse((await turn(orderedRequest)).result);
+      assertEquals(
+        orderedFindings.groups.map(({ caseId }: { caseId: string }) => caseId),
+        [peer.id, exact.id],
+      );
+      assertEquals(orderedFindings.groups[0].entries[0].id, later.id);
+      assertEquals(orderedFindings.groups[0].latestFoundAt, later.recordedAt);
+      assertEquals(orderedFindings.groups[0].facets.total, 2);
+      const nextOrdered = JSON.parse(
+        (await turn({
+          ...orderedRequest,
+          scopes: [{ ...peer, offset: 1 }],
+        })).result,
+      ).groups[0];
+      assertEquals(nextOrdered.entries[0].id, original.id);
+      assertEquals(nextOrdered.nextOffset, null);
       const literal = JSON.parse(
         (await turn({
           ...filteredRequest,

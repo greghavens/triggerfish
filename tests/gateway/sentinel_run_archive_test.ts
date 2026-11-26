@@ -1475,6 +1475,12 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
         findingCategory: "RETAINED CONTROL COVERAGE",
       },
     };
+    const severityOrderedRequest = {
+      ...facetRequest,
+      findingOrder: "severity",
+      limit: 3,
+    };
+    let severityOrderedBefore: unknown;
     let pinnedFilteredFacets: unknown;
     const findingLineageRequest = {
       kind: exact.kind,
@@ -1715,6 +1721,14 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
       assertEquals(filtered.groups[0].entries[0].id, workerFinding.id);
       assertEquals(filtered.groups[0].entries[0].reportVersion, 2);
       pinnedFilteredFacets = filtered;
+      const severityOrdered =
+        JSON.parse(await turn(severityOrderedRequest)).groups[0];
+      assertEquals(severityOrdered.highestSeverity, "medium");
+      assertEquals(severityOrdered.entries[0].id, workerFinding.id);
+      assertEquals(severityOrdered.entries[0].severity, "medium");
+      assertEquals(severityOrdered.entries[1].id, findingId);
+      assertEquals(severityOrdered.facets, preArchiveFindingFacets);
+      severityOrderedBefore = severityOrdered;
       const offsetFacets = JSON.parse(
         await turn({
           ...facetRequest,
@@ -2780,6 +2794,10 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
         assertEquals(restoredLineage, originalPage);
         priorCursor = restoredLineage.nextCursor;
       }
+      assertEquals(
+        JSON.parse(await turn(severityOrderedRequest)).groups[0],
+        severityOrderedBefore,
+      );
       const restoredReportHistory = {
         ...trafficScope,
         action: "finding_report_history",

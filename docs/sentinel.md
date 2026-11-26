@@ -392,6 +392,10 @@ An optional `findingFilter` restricts entries, totals, and facets to the
 same authorized matching findings. It accepts source kind, asset ID,
 severity, disposition, category, and a literal query against redacted
 titles and worker summaries.
+`findingOrder: "severity"` ranks matching findings by severity and then
+recency, and ranks groups by their highest matching severity and latest
+finding. `findingOrder: "time"` ranks both by recency. Imported findings use
+the saved assessment timestamp and worker findings use their receipt time.
 For up to sixteen selected `findingIds`, use `operator_runs finding_asset_tree`
 with `kind: sentinel`, the case `id`, and a saved `revision`. It shows the
 affected assets and their declared in-scope ancestors. Aggregate counts count
