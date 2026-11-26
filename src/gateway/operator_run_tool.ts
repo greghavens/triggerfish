@@ -428,6 +428,7 @@ import {
 } from "./operator_execution_evidence.ts";
 import {
   executeOperatorScopeSentryImport,
+  listOperatorScopeSentrySources,
   type ScopeSentryConnector,
 } from "./operator_scopesentry_import.ts";
 import { executeOperatorInventoryAffiliation } from "./operator_inventory_affiliation.ts";
@@ -669,6 +670,7 @@ export const operatorRunTool: ToolDefinition = {
         "propose_graph_fact_discovery",
         "preview_inventory_withdrawal",
         "import_scopesentry_inventory",
+        "scopesentry_inventory_sources",
         "preview_inventory_affiliation",
         "affiliate_inventory_asset",
         "withdraw_inventory_host",
@@ -6174,6 +6176,19 @@ ${
           ref,
           args,
           options.confirm,
+        );
+        return typeof result === "string" ? result : safeProjection(result);
+      }
+      if (action === "scopesentry_inventory_sources") {
+        if (ref.kind !== "sentinel" || !await controller.inspect(ref)) {
+          return unavailable;
+        }
+        const result = await listOperatorScopeSentrySources(
+          options.baseDir,
+          ref,
+          args,
+          options.scopeSentryConnector,
+          context,
         );
         return typeof result === "string" ? result : safeProjection(result);
       }

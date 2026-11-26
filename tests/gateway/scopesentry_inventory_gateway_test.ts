@@ -1,4 +1,9 @@
-import { assert, assertEquals, assertExists } from "@std/assert";
+import {
+  assert,
+  assertEquals,
+  assertExists,
+  assertStringIncludes,
+} from "@std/assert";
 import { join } from "@std/path";
 import { createMemoryStorage } from "../../src/core/storage/memory.ts";
 import { createMemorySecretStore } from "../../src/core/secrets/mod.ts";
@@ -53,7 +58,9 @@ function operatorGateway(
         toolResult = String(last.content);
         return Promise.resolve({
           usage,
-          content: probe?.echo?.()
+          content: pendingInput.action === "scopesentry_inventory_sources"
+            ? "The retained source lookup finished."
+            : probe?.echo?.()
             ? toolResult
             : "The requested check finished.",
           toolCalls: [],
@@ -172,6 +179,7 @@ Deno.test("gateway imports exact retained connector inventory with live policy, 
   let deny = "";
   let classificationsSeen = 0;
   let mcpInvocations = 0;
+  const projectTool = "mcp_scopesentry_list_projects_data";
   const hookRunner: HookRunner = {
     evaluateHook(hook, context) {
       const call = context.input.tool_call as { name?: string } | undefined;
@@ -184,9 +192,10 @@ Deno.test("gateway imports exact retained connector inventory with live policy, 
       }
       if (hook === "MCP_TOOL_CALL") mcpInvocations++;
       const blocked = deny === "pre" && hook === "PRE_TOOL_CALL" &&
-          call?.name === connectorTool ||
+          (call?.name === connectorTool || call?.name === projectTool) ||
         deny === "response" && hook === "POST_TOOL_RESPONSE" &&
-          context.input.tool_name === connectorTool ||
+          (context.input.tool_name === connectorTool ||
+            context.input.tool_name === projectTool) ||
         deny === "output" && hook === "PRE_OUTPUT";
       return Promise.resolve({
         allowed: !blocked,
@@ -299,6 +308,60 @@ Deno.test("gateway imports exact retained connector inventory with live policy, 
     );
 
     await gateway(async (turn) => {
+      const sources = {
+        action: "scopesentry_inventory_sources",
+        kind: request.kind,
+        id: request.id,
+        revision: request.revision,
+        sourceDimension: "project",
+        query: "Fiber",
+      };
+      deny = "pre";
+      assertStringIncludes(await turn(sources), "unavailable");
+      assertEquals(await calls(), []);
+      deny = "response";
+      assertStringIncludes(await turn(sources), "unavailable");
+      assertEquals((await calls()).length, 1, "project response denial");
+      deny = "";
+      const projects = JSON.parse(await turn(sources));
+      assertEquals((await calls()).length, 2, "authorized project query");
+      assertEquals(projects.sources, [{
+        id: request.sourceSelection,
+        name: "Fiber",
+      }]);
+      const tasks = JSON.parse(
+        await turn({
+          ...sources,
+          sourceDimension: "task",
+        }),
+      );
+      assertEquals(tasks.sources, [{
+        id: "Fiber verification",
+        name: "Fiber verification",
+      }]);
+      assertEquals(
+        await calls(),
+        Array(3).fill({
+          pageIndex: 1,
+          pageSize: 50,
+          search: "Fiber",
+        }),
+      );
+      assertStringIncludes(
+        await turn({ ...sources, revision: state.revision + 1 }),
+        "unavailable",
+      );
+      assertEquals((await calls()).length, 3);
+      deny = "output";
+      frames.length = 0;
+      assertEquals(JSON.parse(await turn(sources)), projects);
+      assert(
+        !frames.some(({ type }) => type === "response" || type === "token"),
+      );
+      assertEquals((await calls()).length, 4);
+      deny = "";
+      await Deno.writeTextFile(callsPath, "");
+      mcpInvocations = 0;
       assert(
         (await turn({ ...request, sourceSelection: "*" })).includes(
           "unavailable",
@@ -370,6 +433,17 @@ Deno.test("gateway imports exact retained connector inventory with live policy, 
       });
       assertEquals(await Deno.readTextFile(path), saved);
       assert((await turn(request)).includes("unavailable"));
+      assertStringIncludes(
+        await turn({
+          action: "scopesentry_inventory_sources",
+          kind: "sentinel",
+          id: caseId,
+          revision: latest.revision,
+          sourceDimension: "project",
+        }),
+        "unavailable",
+      );
+      assertEquals((await calls()).length, 7);
     });
   } finally {
     await mcp.manager.disconnectAll();

@@ -2,6 +2,7 @@ import { reviewedRuleActions } from "./operator_reviewed_rules.ts";
 import { namedConversations } from "../core/named_records.ts";
 import { namedRecordActions } from "./operator_named_records.ts";
 import { startNamedConversationTurn } from "./named_conversation_turns.ts";
+import { inventoryConnectorTools } from "./operator_scopesentry_import.ts";
 import { readAgentProfile } from "../core/agent_profiles.ts";
 import { withAgentProfileRuntime } from "../agent/orchestrator/agent_profile_runtime.ts";
 import { isAgentProfileAction } from "./operator_agent_profiles.ts";
@@ -944,7 +945,8 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
       },
       async authorizeInventoryConnectorCall(call) {
         if (
-          !isCurrent() || call.name !== "mcp_scopesentry_list_assets" ||
+          !isCurrent() ||
+          !inventoryConnectorTools.some((name) => call.name === name) ||
           !existingTool(call.name)
         ) return false;
         return await authorizeSavedToolCalls([call], policy, session) &&

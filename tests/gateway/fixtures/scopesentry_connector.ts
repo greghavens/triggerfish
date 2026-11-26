@@ -13,11 +13,13 @@ for await (const line of createInterface({ input: stdin })) {
     };
   } else if (method === "tools/list") {
     result = {
-      tools: [{
-        name: "list_assets",
-        description: "Read retained assets for one exact source.",
+      tools: ["list_assets", "list_projects_data", "list_tasks"].map((
+        name,
+      ) => ({
+        name,
+        description: "Read retained inventory metadata.",
         inputSchema: { type: "object" },
-      }],
+      })),
     };
   } else if (method === "tools/call") {
     const { asset_type, filter, pageIndex, pageSize } = params.arguments;
@@ -26,10 +28,23 @@ for await (const line of createInterface({ input: stdin })) {
       JSON.stringify(params.arguments) + "\n",
       { append: true },
     );
-    const selected = filter.project?.[0] === "0123456789abcdef01234567" ||
-      filter.task?.[0] === "Fiber verification";
     const authorized =
       Deno.env.get("CONNECTOR_CREDENTIAL") === "synthetic-inventory-fixture";
+    if (params.name !== "list_assets") {
+      const page = !authorized || pageSize !== 50 || pageIndex !== 1 ? [] : [{
+        id: "0123456789abcdef01234567",
+        name: params.name === "list_tasks" ? "Fiber verification" : "Fiber",
+        extra: "private fixture field",
+      }];
+      const data = params.name === "list_tasks"
+        ? { list: page }
+        : { result: { All: page } };
+      result = { content: [{ type: "text", text: JSON.stringify(data) }] };
+      console.log(JSON.stringify({ jsonrpc: "2.0", id, result }));
+      continue;
+    }
+    const selected = filter.project?.[0] === "0123456789abcdef01234567" ||
+      filter.task?.[0] === "Fiber verification";
     const list = !selected || !authorized || pageSize !== 100 || pageIndex !== 1
       ? []
       : asset_type === "subdomain"

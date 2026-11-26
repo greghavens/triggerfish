@@ -32,6 +32,9 @@ import {
 import type { OperatorRunToolContext } from "./operator_run_tool.ts";
 
 const tool = "mcp_scopesentry_list_assets";
+const projectTool = "mcp_scopesentry_list_projects_data";
+const taskTool = "mcp_scopesentry_list_tasks";
+export const inventoryConnectorTools = [tool, projectTool, taskTool] as const;
 const unavailable =
   "Error: The selected inventory source or current case scope is unavailable.";
 const declined = "Error: The operator declined the run action.";
@@ -45,6 +48,79 @@ export interface ScopeSentryConnector {
     name: string,
     args: Record<string, unknown>,
   ) => Promise<string | null>;
+}
+
+export async function listOperatorScopeSentrySources(
+  baseDir: string,
+  ref: OperatorRunRef,
+  args: Record<string, unknown>,
+  connector: ScopeSentryConnector | undefined,
+  context: OperatorRunToolContext | undefined,
+) {
+  const { sourceDimension, page = 1, query } = args;
+  const authorize = context?.authorizeOwnerRunCall;
+  const name = sourceDimension === "project" ? projectTool : taskTool;
+  const search = assetText(query, 120);
+  const revision = ref.revision;
+  if (
+    !connector || !context?.authenticatedOwnerSessionId || !authorize ||
+    !context.authorizeInventoryConnectorCall ||
+    ref.kind !== "sentinel" || revision === undefined ||
+    (sourceDimension !== "project" && sourceDimension !== "task") ||
+    (query !== undefined && !search) ||
+    typeof page !== "number" || !Number.isSafeInteger(page) || page < 1 ||
+    page > 1000 ||
+    Object.keys(args).some((key) =>
+      !["action", "kind", "id", "revision", "sourceDimension", "page", "query"]
+        .includes(key)
+    ) ||
+    !canFlowTo("INTERNAL", context.ceiling ?? "PUBLIC")
+  ) return unavailable;
+  const path = resolveSentinelCasePath(baseDir, ref.id);
+  const runId = readSentinelRunIdForRevision(path, revision);
+  const classification = connector.lookup()?.classification;
+  if (
+    !runId || (classification !== "INTERNAL" && classification !== "PUBLIC") ||
+    !canFlowTo(context.inputClassification ?? "PUBLIC", classification)
+  ) return unavailable;
+  const current = async () => {
+    if (!await authorize(args)) return false;
+    const live = connector.lookup();
+    return live?.classification === classification &&
+      live.tools.includes(name) &&
+      readSentinelAssessment(path)?.revision === revision &&
+      readSentinelRunIdForRevision(path, revision) === runId;
+  };
+  const call = { pageIndex: page, pageSize: 50, ...(search && { search }) };
+  try {
+    if (
+      !await current() ||
+      !await context.authorizeInventoryConnectorCall({ name, args: call }) ||
+      !await current()
+    ) return unavailable;
+    const text = await connector.execute(name, call);
+    if (
+      !text || text.length > 500_000 || !await current() ||
+      !await context.authorizeSavedResponse(name, text, classification) ||
+      !await current()
+    ) return unavailable;
+    const data = JSON.parse(text);
+    const rows = sourceDimension === "project" ? data?.result?.All : data?.list;
+    if (!Array.isArray(rows) || rows.length > 50) return unavailable;
+    const sources = new Map<string, { id: string; name: string }>();
+    for (const row of rows) {
+      const name = assetText(row?.name, 160);
+      const id = sourceDimension === "project" ? row?.id : name;
+      if (
+        !name || typeof id !== "string" ||
+        (sourceDimension === "project" && !/^[a-f\d]{24}$/i.test(id))
+      ) continue;
+      sources.set(id, { id, name });
+    }
+    return { sources: [...sources.values()], page };
+  } catch {
+    return unavailable;
+  }
 }
 
 export async function executeOperatorScopeSentryImport(
