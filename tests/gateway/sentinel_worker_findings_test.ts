@@ -1965,6 +1965,126 @@ Deno.test("Leased Sentinel workers report, recheck, and amend findings visible i
   }
 });
 
+Deno.test("Sentinel recheck history preserves the original run's revocation after replacement", async () => {
+  const baseDir = await Deno.makeTempDir();
+  const path = resolveSentinelCasePath(baseDir);
+  try {
+    const snapshot = {
+      version: 1,
+      nodes: [{ id: "app", kind: "asset", label: "Reviewed asset" }],
+      edges: [],
+    };
+    await Deno.mkdir(dirname(path), { recursive: true });
+    await Deno.writeTextFile(path, JSON.stringify(snapshot));
+    const first = startSentinelAssessment(path);
+    const runId = first.plan.runId;
+    assert(runId);
+    const journal = openSentinelWorkerFindingStore(path);
+    const { finding, recheck } = (() => {
+      try {
+        const observedAt = new Date(Date.now() - 2_000).toISOString();
+        const evidence = {
+          caseId: "main",
+          runId,
+          evidenceRevision: first.revision,
+          taskId: "initial-review",
+          targetId: "app",
+          graphFindingId: "check-gap",
+          controlId: "check-control",
+          evidenceId: "initial-evidence",
+          snapshotDigest: digestSentinelSnapshot(
+            first.result!.sharedGraph.snapshot!,
+          ),
+          observedAt,
+          evaluatedAt: observedAt,
+          validUntil: new Date(Date.now() + 60_000).toISOString(),
+        };
+        const finding = journal.recordFinding({
+          ...evidence,
+          requestId: crypto.randomUUID(),
+          title: "Recorded control gap",
+          summary: "Retained evidence showed a gap.",
+        });
+        assert(finding);
+        const checkedAt = new Date(Date.now() - 1_000).toISOString();
+        const recheck = journal.recordRecheck({
+          ...evidence,
+          requestId: crypto.randomUUID(),
+          evidenceId: "recheck-evidence",
+          observedAt: checkedAt,
+          evaluatedAt: checkedAt,
+          taskId: "recheck-review",
+          findingId: finding.id,
+          outcome: "pass",
+          summary: "Control passed the later review.",
+        });
+        assert(recheck);
+        return { finding, recheck };
+      } finally {
+        journal.close();
+      }
+    })();
+    const selector = {
+      action: "finding_recheck_attempts",
+      kind: "sentinel",
+      id: "main",
+      revision: first.revision,
+      receiptId: finding.id,
+    };
+    const read = (allowed: boolean) =>
+      withFindingAssignmentGateway(
+        baseDir,
+        () => Promise.resolve(false),
+        async (turn) => {
+          const result = await turn(selector);
+          if (!allowed) {
+            assertStringIncludes(result, "unavailable");
+            assert(!result.includes(recheck.id));
+            return;
+          }
+          assertEquals(JSON.parse(result).page, {
+            runId,
+            findingId: finding.id,
+            evidenceRevision: first.revision,
+            entries: [{
+              taskId: recheck.taskId,
+              status: "result_recorded",
+              evidenceId: recheck.evidenceId,
+              attempts: null,
+              resultReceiptId: recheck.id,
+              outcome: "pass",
+            }],
+            nextCursor: null,
+          });
+        },
+      );
+    await read(true);
+    snapshot.nodes.push({
+      id: "other-asset",
+      kind: "asset",
+      label: "Other asset",
+    });
+    await Deno.writeTextFile(path, JSON.stringify(snapshot));
+    const narrowed = refreshSentinelAssessment(path);
+    assert(narrowed && narrowed.revision > first.revision);
+    assert(recordSentinelOperatingConstraints(path, {
+      runId,
+      evidenceRevision: narrowed.revision,
+      expectedVersion: 0,
+      requestId: crypto.randomUUID(),
+      operatorScope: "recheck-history-fixture",
+      constraints: { allowedAssetIds: ["other-asset"], deniedKinds: [] },
+    }));
+    await read(false);
+    assert(stopSentinelAssessment(path));
+    const replacement = startSentinelAssessment(path);
+    assert(replacement.plan.runId !== runId);
+    await read(false);
+  } finally {
+    await Deno.remove(baseDir, { recursive: true });
+  }
+});
+
 async function verifyHistoricalFindingChat(
   baseDir: string,
   path: string,

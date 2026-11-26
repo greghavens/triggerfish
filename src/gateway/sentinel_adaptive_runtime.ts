@@ -138,6 +138,7 @@ import {
   readSentinelAssessmentRevision,
   readSentinelFindingReviews,
   readSentinelIncidentReviews,
+  readSentinelLatestRunRevision,
   readSentinelLinkedStartSeed,
   readSentinelOperatingConstraints,
   readSentinelOperatingConstraintsForRevision,
@@ -1148,26 +1149,42 @@ export function readSentinelFindingRecheckAttempts(
   const journal = openSentinelWorkerFindingStore(path);
   try {
     const policy = readSentinelOperatingConstraintsForRevision(path, revision);
-    const currentScope = current?.plan.runId === runId &&
-        current.revision !== revision
-      ? caseOperatingScope(path, current.revision)
-      : undefined;
+    // A replacement assessment must not discard revocations for this run.
+    const latestPolicy = readSentinelOperatingConstraints(path, runId);
+    let latestSnapshot: typeof snapshot | null | undefined = snapshot;
+    if (current?.plan.runId === runId) {
+      latestSnapshot = current.result?.sharedGraph.snapshot;
+    } else if (latestPolicy?.constraints.allowedAssetIds !== undefined) {
+      const latestRevision = readSentinelLatestRunRevision(path, runId) ??
+        latestPolicy.evidenceRevision;
+      if (latestRevision !== revision) {
+        latestSnapshot = readSentinelRunIdForRevision(path, latestRevision) ===
+            runId
+          ? readSentinelAssessmentRevision(path, latestRevision)?.result
+            ?.sharedGraph.snapshot
+          : undefined;
+      }
+    }
+    const allowsReview = (nodeId: string) => {
+      const target = { kind: "review_evidence", nodeId } as const;
+      return sentinelOperatingConstraintsAllow(
+        policy?.constraints,
+        target,
+        snapshot,
+      ) &&
+        sentinelOperatingConstraintsAllow(
+          latestPolicy?.constraints,
+          target,
+          latestSnapshot,
+        );
+    };
     const originals = new Map<string, ReturnType<typeof journal.readFinding>>();
     const readOriginal = (id: string) => {
       if (originals.has(id)) return originals.get(id);
       const original = journal.readFinding(id);
-      const target = {
-        kind: "review_evidence",
-        nodeId: original?.targetId,
-      } as const;
       const visible = original && original.caseId === caseId &&
           original.runId === runId && original.evidenceRevision <= revision &&
-          sentinelOperatingConstraintsAllow(
-            policy?.constraints,
-            target,
-            snapshot,
-          ) &&
-          (!currentScope || currentScope(target))
+          allowsReview(original.targetId)
         ? original
         : undefined;
       originals.set(id, visible);
@@ -1220,11 +1237,7 @@ export function readSentinelFindingRecheckAttempts(
             if (
               task.kind !== "review_evidence" || !task.nodeId ||
               !source || (findingId && source !== findingId) ||
-              !sentinelOperatingConstraintsAllow(
-                policy?.constraints,
-                { kind: "review_evidence", nodeId: task.nodeId },
-                snapshot,
-              )
+              !allowsReview(task.nodeId)
             ) continue;
             const target = readOriginal(source);
             if (
@@ -1274,7 +1287,8 @@ export function readSentinelFindingRecheckAttempts(
         !original || result.caseId !== caseId || result.runId !== runId ||
         result.evidenceRevision !== revision ||
         result.targetId !== original.targetId ||
-        result.controlId !== original.controlId
+        result.controlId !== original.controlId ||
+        !allowsReview(result.evidenceId)
       ) continue;
       const linked = map.get(result.taskId);
       if (linked) {

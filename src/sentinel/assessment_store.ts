@@ -3185,6 +3185,27 @@ export function readSentinelRunIdForRevision(
   }
 }
 
+/** Resolve the latest retained evidence revision explicitly indexed to a run. */
+export function readSentinelLatestRunRevision(
+  path: string,
+  runId: string,
+): number | undefined {
+  if (!constraintUuid.test(runId)) return;
+  const db = openStore(path, false);
+  if (!db) return;
+  try {
+    if (!hasTable(db, "assessment_run_revisions")) return;
+    const row = db.prepare(
+      `SELECT saved.revision FROM assessment_run_revisions AS saved
+       JOIN assessment_history AS history ON saved.revision = history.revision
+       WHERE saved.runId = ? ORDER BY saved.revision DESC LIMIT 1`,
+    ).get(runId);
+    return row && Number(row.revision);
+  } finally {
+    db.close();
+  }
+}
+
 /** Reopen the reviewed read-only source cases for the exact child revision. */
 export function readSentinelLinkedSourcesForRevision(
   path: string,
