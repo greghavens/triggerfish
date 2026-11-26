@@ -1159,10 +1159,34 @@ export interface AdaptiveGraphRetryReceipt extends AdaptiveGraphRetryScope {
   readonly paused: boolean;
 }
 
+export interface AdaptiveAnalystObservation {
+  readonly evidenceId: string;
+  readonly confidence: "observed" | "inferred";
+  readonly sourceSha256: string;
+}
+
+function readAnalystObservation(
+  value: unknown,
+): AdaptiveAnalystObservation | undefined {
+  if (!value || typeof value !== "object") return;
+  const { evidenceId, confidence, sourceSha256 } = value as Record<
+    string,
+    unknown
+  >;
+  if (
+    typeof evidenceId !== "string" || !evidenceId.trim() ||
+    evidenceId.length > 256 || evidenceId.includes("\0") ||
+    (confidence !== "observed" && confidence !== "inferred") ||
+    typeof sourceSha256 !== "string" || !/^[a-f0-9]{64}$/.test(sourceSha256)
+  ) return;
+  return { evidenceId, confidence, sourceSha256 };
+}
+
 export interface AdaptiveOperatorHintSelection {
   readonly note: string;
   readonly assetIds?: readonly string[];
   readonly trafficReference?: SentinelHintTrafficSelection;
+  readonly analystObservation?: AdaptiveAnalystObservation;
 }
 
 export interface AdaptiveOperatorHintBatch {
@@ -3806,6 +3830,15 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
         "ALTER TABLE adaptive_case_hints ADD COLUMN trafficReference TEXT",
       );
     }
+    if (
+      !db.prepare("PRAGMA table_info(adaptive_case_hints)").all().some((
+        { name },
+      ) => name === "analystObservation")
+    ) {
+      db.exec(
+        "ALTER TABLE adaptive_case_hints ADD COLUMN analystObservation TEXT",
+      );
+    }
     db.exec(`CREATE TABLE IF NOT EXISTS adaptive_operator_case_hint_requests (
       requestId TEXT PRIMARY KEY,
       operatorScope TEXT NOT NULL,
@@ -3879,6 +3912,17 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
     return { trafficReference };
   }
 
+  function hintObservation(row: { analystObservation?: unknown }) {
+    if (row.analystObservation == null) return {};
+    const analystObservation = readAnalystObservation(
+      JSON.parse(String(row.analystObservation)),
+    );
+    if (!analystObservation) {
+      throw new Error("Invalid retained analyst observation");
+    }
+    return { analystObservation };
+  }
+
   function readOperatorCaseHint(
     hint: string,
     revision: number,
@@ -3887,9 +3931,10 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
     runId: string,
     anchors?: readonly string[],
     trafficReference?: SentinelHintTrafficSelection,
+    analystObservation?: AdaptiveAnalystObservation,
   ) {
     const existing = db.prepare(`
-      SELECT hint.id, hint.evidenceRevision, hint.at, hint.text, hint.assetIds, hint.trafficReference, request.runId, request.operatorScope
+      SELECT hint.id, hint.evidenceRevision, hint.at, hint.text, hint.assetIds, hint.trafficReference, hint.analystObservation, request.runId, request.operatorScope
       FROM adaptive_operator_case_hint_requests AS request
       JOIN adaptive_case_hints AS hint ON hint.id = request.hintId
       WHERE request.requestId = ?
@@ -3903,6 +3948,10 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
         !isDeepStrictEqual(
           hintTraffic(existing).trafficReference,
           trafficReference,
+        ) ||
+        !isDeepStrictEqual(
+          hintObservation(existing).analystObservation,
+          analystObservation,
         )
       ) return null;
       return {
@@ -3912,6 +3961,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
         text: hint,
         ...(anchors && { assetIds: anchors }),
         ...hintTraffic(existing),
+        ...hintObservation(existing),
       };
     }
   }
@@ -3940,18 +3990,21 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
     const { requestId, runId, revision, hints } = batch;
     if (
       !Array.isArray(hintIds) || hintIds.length !== hints.length ||
-      !hints.every(({ note, assetIds, trafficReference }, index) => {
-        const hint = readOperatorCaseHint(
-          note,
-          revision,
-          `${requestId}:${index}`,
-          "owner",
-          runId,
-          assetIds,
-          trafficReference,
-        );
-        return !!hint && hint.id === hintIds[index];
-      })
+      !hints.every(
+        ({ note, assetIds, trafficReference, analystObservation }, index) => {
+          const hint = readOperatorCaseHint(
+            note,
+            revision,
+            `${requestId}:${index}`,
+            "owner",
+            runId,
+            assetIds,
+            trafficReference,
+            analystObservation,
+          );
+          return !!hint && hint.id === hintIds[index];
+        },
+      )
     ) return null;
     return { requestId, runId, revision, hintIds };
   }
@@ -3962,15 +4015,17 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
     time: number,
     assetIds?: readonly string[],
     trafficReference?: SentinelHintTrafficSelection,
+    analystObservation?: AdaptiveAnalystObservation,
   ) {
     const result = db.prepare(
-      "INSERT INTO adaptive_case_hints (evidenceRevision, at, text, assetIds, trafficReference) VALUES (?, ?, ?, ?, ?)",
+      "INSERT INTO adaptive_case_hints (evidenceRevision, at, text, assetIds, trafficReference, analystObservation) VALUES (?, ?, ?, ?, ?, ?)",
     ).run(
       evidenceRevision,
       time,
       hint,
       assetIds ? JSON.stringify(assetIds) : null,
       trafficReference ? JSON.stringify(trafficReference) : null,
+      analystObservation ? JSON.stringify(analystObservation) : null,
     );
     const revision = activeRevision();
     if (revision) {
@@ -9366,7 +9421,9 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
         !operatorAssignmentRequestId(batch.requestId) ||
         !batch.hints.length || batch.hints.length > 8 ||
         !Number.isSafeInteger(batch.revision) || batch.revision < 1 ||
-        batch.hints.some(({ note, assetIds, trafficReference }) =>
+        batch.hints.some((
+          { note, assetIds, trafficReference, analystObservation },
+        ) =>
           typeof note !== "string" || !note.trim() || note.length > 1000 ||
           note.includes("\0") || redactCredentialText(note) !== note ||
           (assetIds !== undefined &&
@@ -9376,7 +9433,12 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
             )) ||
           (trafficReference !== undefined &&
             (assetIds?.length !== 1 ||
-              !isSentinelHintTrafficSelection(trafficReference)))
+              !isSentinelHintTrafficSelection(trafficReference))) ||
+          (analystObservation !== undefined && (assetIds?.length !== 1 ||
+            trafficReference !== undefined || !isDeepStrictEqual(
+              analystObservation,
+              readAnalystObservation(analystObservation),
+            )))
         )
       ) return;
       return transaction(db, () => {
@@ -9399,13 +9461,14 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
         const at = now();
         const { requestId, runId, revision } = batch;
         const hintIds = batch.hints.map(
-          ({ note, assetIds, trafficReference }, index) => {
+          ({ note, assetIds, trafficReference, analystObservation }, index) => {
             const { lastInsertRowid } = appendCaseHint(
               note,
               revision,
               at,
               assetIds,
               trafficReference,
+              analystObservation,
             );
             db.prepare(
               "INSERT INTO adaptive_operator_case_hint_requests VALUES (?, ?, ?, ?)",
@@ -9426,19 +9489,24 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
       });
     },
 
-    caseHintsById(ids: readonly number[]) {
+    caseHintsById(ids: readonly number[], runId?: string) {
       if (!ids.length) return [];
       return db.prepare(`
-        SELECT id, evidenceRevision, at, text, assetIds, trafficReference FROM adaptive_case_hints
+        SELECT id, evidenceRevision, at, text, assetIds, trafficReference, analystObservation FROM adaptive_case_hints
         WHERE id IN (SELECT value FROM json_each(?))
+          AND (? IS NULL OR EXISTS (
+            SELECT 1 FROM adaptive_operator_case_hint_requests AS request
+            WHERE request.hintId = adaptive_case_hints.id AND request.runId = ?
+          ))
         ORDER BY id
-      `).all(JSON.stringify(ids)).map((row) => ({
+      `).all(JSON.stringify(ids), runId ?? null, runId ?? null).map((row) => ({
         id: Number(row.id),
         revision: Number(row.evidenceRevision) || null,
         at: new Date(Number(row.at)).toISOString(),
         text: String(row.text),
         ...hintAssets(row),
         ...hintTraffic(row),
+        ...hintObservation(row),
       }));
     },
 
@@ -9482,6 +9550,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
           text: String(row.text),
           ...hintAssets(row),
           ...hintTraffic(row),
+          ...hintObservation(row),
         }));
     },
 

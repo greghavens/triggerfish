@@ -1696,6 +1696,95 @@ export function sentinelHintAssetsInScope(
   );
 }
 
+function analystObservationSource(
+  path: string,
+  runId: string,
+  snapshot: NonNullable<State["result"]>["sharedGraph"]["snapshot"],
+  assetId: string,
+  evidenceId: string,
+) {
+  const policy = readSentinelOperatingConstraints(path, runId)?.constraints;
+  if (
+    !snapshot ||
+    !snapshot.nodes.some(({ id, kind }) =>
+      id === assetId && kind === "asset"
+    ) ||
+    !sentinelOperatingConstraintsAllow(policy, {
+      kind: "review_evidence",
+      nodeId: assetId,
+    }, snapshot) ||
+    !sentinelOperatingConstraintsAllow(policy, {
+      kind: "review_evidence",
+      nodeId: evidenceId,
+    }, snapshot)
+  ) return;
+  const evidence = snapshot.nodes.find(({ id, kind }) =>
+    id === evidenceId && kind === "evidence"
+  );
+  const edge = snapshot.edges.find(({ from, to, relation }) =>
+    from === evidenceId && to === assetId && relation === "observed_on"
+  );
+  if (
+    evidence?.kind !== "evidence" || !edge ||
+    evidence.nativeWorkflowSource || evidence.executionSource ||
+    evidence.relationshipSources?.length
+  ) return;
+  return createHash("sha256").update(JSON.stringify([evidence, edge])).digest(
+    "hex",
+  );
+}
+
+export function readSentinelAnalystObservationSource(
+  path: string,
+  runId: string,
+  revision: number,
+  asset: string,
+  evidenceId: string,
+) {
+  const current = readSentinelAssessment(path);
+  if (
+    !current?.active || current.plan.runId !== runId ||
+    current.revision !== revision
+  ) return;
+  return analystObservationSource(
+    path,
+    runId,
+    current.result?.sharedGraph.snapshot ?? null,
+    asset,
+    evidenceId,
+  );
+}
+
+export function readRetainedSentinelAnalystObservation(
+  path: string,
+  runId: string,
+  revision: number,
+  id: number,
+) {
+  if (readSentinelRunIdForRevision(path, revision) !== runId) return;
+  const saved = readSentinelAssessmentRevision(path, revision);
+  if (!saved) return;
+  const store = openSentinelAdaptiveStore(storePath(path));
+  try {
+    const [entry] = store.caseHintsById([id], runId);
+    const observation = entry?.analystObservation;
+    if (
+      !entry || !observation || entry.revision !== revision ||
+      entry.assetIds?.length !== 1 ||
+      analystObservationSource(
+          path,
+          runId,
+          saved.result.sharedGraph.snapshot,
+          entry.assetIds[0],
+          observation.evidenceId,
+        ) !== observation.sourceSha256
+    ) return;
+    return entry;
+  } finally {
+    store.close();
+  }
+}
+
 /** Save owner guidance against the exact current evidence revision. */
 export function recordOperatorSentinelRunHint(
   snapshotPath: string,
@@ -1754,8 +1843,16 @@ export function reviewSentinelOperatorHintBatch(
     if (
       !state?.active || state.plan.runId !== batch.runId ||
       state.revision !== batch.revision ||
-      batch.hints.some(({ assetIds, trafficReference }) =>
+      batch.hints.some(({ assetIds, trafficReference, analystObservation }) =>
         (assetIds && !sentinelHintAssetsInScope(path, state, assetIds)) ||
+        (analystObservation &&
+          (assetIds?.length !== 1 || analystObservationSource(
+                path,
+                batch.runId,
+                state.result?.sharedGraph.snapshot ?? null,
+                assetIds[0],
+                analystObservation.evidenceId,
+              ) !== analystObservation.sourceSha256)) ||
         (trafficReference && (assetIds?.length !== 1 ||
           sentinelHintTrafficReferences(trafficReference).some((ref) =>
             !readSentinelTrafficReceipt(path, batch.revision, ref, assetIds[0])
@@ -6801,6 +6898,7 @@ export function createSentinelModelPlanner(
       let presentedIncidents: typeof incidentContext = [];
       let presentedGraphFacts: typeof graphFacts = [];
       const presentedCancellations = new Map<string, string>();
+      const presentedAnalystObservations = new Map<number, string>();
       let presentedFindingRechecks: typeof findingRechecks = [];
       const openedRecheckFindings = new Map<string, string>();
       const openedPassingRechecks = new Map<string, string>();
@@ -7015,6 +7113,13 @@ export function createSentinelModelPlanner(
               "Report verified criteria in goalObservations as {criterionId,evidence:[{source,reference,detail}]}. Read other criteria with sentinel_goal_state (offset, limit). For an adaptive_task, match the required kind, depth and node and cite the completed ID (coverage must pass if required). For finding_recheck, cite the exact passing receipt for the original finding. For graph_fact, cite the exact receipt, matching any specified directed edge. Omit missing or uncertain proof.",
             ]
             : []),
+          ...(hints.some(({ analystObservation }) =>
+              analystObservation !== undefined
+            )
+            ? [
+              "An analystObservation in operatorAssetHints is reviewed operator context for its exact asset and evidence ID. On a trace or impact proposal for the same asset, set analystObservationHintId to its exact hint ID. The observation supplies context and cannot prove a criterion or satisfy a task as a verified fact.",
+            ]
+            : []),
           "A trafficReference in operatorAssetHints identifies an exact retained source or ordered set of sources. Reopen it only with the case-scoped traffic reader and use it only for the anchored asset.",
           "For a follow-up supported by githubWorkflowReads, use sourceTaskId, sourceKind model_review and sourceWorkflowResultSha256. Keep the exact target.",
           ...(state.plan.linkedCaseSources
@@ -7028,10 +7133,26 @@ export function createSentinelModelPlanner(
           goalCompletion?.observations.map(({ criterionId }) => criterionId),
         );
         const assetHints = hints.flatMap((
-          { id, revision, text, assetIds, trafficReference },
+          {
+            id,
+            revision,
+            text,
+            assetIds,
+            trafficReference,
+            analystObservation,
+          },
         ) =>
           assetIds &&
             sentinelHintAssetsInScope(snapshotPath, state, assetIds) &&
+            (!analystObservation ||
+              (revision === state.revision && assetIds.length === 1 &&
+                analystObservationSource(
+                    snapshotPath,
+                    state.plan.runId ?? "",
+                    snapshot,
+                    assetIds[0],
+                    analystObservation.evidenceId,
+                  ) === analystObservation.sourceSha256)) &&
             (!trafficReference ||
               (revision === state.revision && assetIds.length === 1 &&
                 sentinelHintTrafficReferences(trafficReference).every((ref) =>
@@ -7047,6 +7168,7 @@ export function createSentinelModelPlanner(
               text,
               assetIds,
               ...(trafficReference && { trafficReference }),
+              ...(analystObservation && { analystObservation }),
             }]
             : []
         );
@@ -7355,6 +7477,14 @@ export function createSentinelModelPlanner(
         const store = openSentinelAdaptiveStore(storePath(snapshotPath), now);
         try {
           presentedGraphFacts = inputs.graphFacts ?? [];
+          for (
+            const { id, assetIds, analystObservation }
+              of inputs.operatorAssetHints ?? []
+          ) {
+            if (analystObservation && assetIds.length === 1) {
+              presentedAnalystObservations.set(id, assetIds[0]);
+            }
+          }
           for (
             const { requestId, nodeId }
               of inputs.operatorDecisions.cancelledTasks ?? []
@@ -7966,6 +8096,7 @@ export function createSentinelModelPlanner(
                   ]),
                   worker.permitsFutureWorkflow,
                   presentedCancellations,
+                  presentedAnalystObservations,
                 );
               const existingById = new Map(
                 currentTasks.map((task) => [task.id, task]),
@@ -8050,10 +8181,13 @@ export function createSentinelModelPlanner(
               const plannerRound = {
                 identity: roundIdentity,
                 attempt: claim,
-                hintId: hints[0]?.id,
+                hintId: hints.find(({ analystObservation }) =>
+                  !analystObservation
+                )?.id,
               };
               const additions = newTasks.map((
                 {
+                  analystObservationHintId,
                   cancelledTaskRequestId,
                   sourceKind,
                   upstreamCheckId,
@@ -8075,6 +8209,7 @@ export function createSentinelModelPlanner(
                 ...task,
                 plannerRound: {
                   ...plannerRound,
+                  hintId: analystObservationHintId ?? plannerRound.hintId,
                   cancelledTaskRequestId,
                   sourceKind,
                   upstreamCheckId,

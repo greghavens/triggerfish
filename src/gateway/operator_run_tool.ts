@@ -315,7 +315,9 @@ import {
   hasSentinelAssignmentIntent,
   previewSentinelQueueControl,
   readHistoricalAdaptiveSentinel,
+  readRetainedSentinelAnalystObservation,
   readSentinelAdaptiveEvidenceMapping,
+  readSentinelAnalystObservationSource,
   readSentinelFindingFollowup,
   readSentinelFindingRecheckAttempts,
   readSentinelIntermediateWorkflowObservations,
@@ -563,6 +565,7 @@ export const operatorRunTool: ToolDefinition = {
         "resume_runs",
         "assign_batch",
         "hint_batch",
+        "analyst_observation",
         "retry_graph_tasks",
         "enroll_goal_workflow",
         "completed_graph_followup",
@@ -1042,10 +1045,15 @@ export const operatorRunTool: ToolDefinition = {
       ],
       description: "Filter the Sentinel task queue by durable execution status",
     },
+    hintId: {
+      type: "integer",
+      description:
+        "Exact retained analyst observation ID from the reviewed hint receipt.",
+    },
     hints: {
       type: "array",
       description:
-        "Up to eight ordered case-wide or asset-scoped Sentinel planner hints for one review.",
+        "Up to eight ordered Sentinel planner hints or sourced analyst observations for one review.",
       items: {
         type: "object",
         required: ["note"],
@@ -1053,6 +1061,17 @@ export const operatorRunTool: ToolDefinition = {
         properties: {
           note: { type: "string" },
           assetIds: { type: "array", items: { type: "string" } },
+          analystObservation: {
+            type: "object",
+            description:
+              "Record reviewed analyst context for one asset with an existing observed_on evidence node. Use note for the observation. It does not establish a verified fact.",
+            required: ["evidenceId", "confidence"],
+            additionalProperties: false,
+            properties: {
+              evidenceId: { type: "string" },
+              confidence: { type: "string", enum: ["observed", "inferred"] },
+            },
+          },
           trafficReferences: {
             type: "array",
             items: { type: "object" },
@@ -1421,6 +1440,7 @@ export const sentinelOperatorCaseReadActions = [
   "list_trace_workers",
   "worker_trace_progress",
   "worker_trace_result",
+  "analyst_observation",
 ] as const;
 
 export const sentinelOperatorCaseReadParameters = [
@@ -1452,6 +1472,7 @@ export const sentinelOperatorCaseReadParameters = [
   "asOf",
   "cursor",
   "factId",
+  "hintId",
   "receiptId",
   "incidentId",
   "alertId",
@@ -5938,6 +5959,51 @@ ${request}`)
             : null,
         });
       }
+      if (action === "analyst_observation") {
+        const { runId, hintId } = args;
+        const authorize = context?.authorizeOwnerRunCall;
+        if (
+          !authorize || !context?.authenticatedOwnerSessionId ||
+          ref.kind !== "sentinel" || ref.revision === undefined ||
+          !canFlowTo("INTERNAL", context.ceiling ?? "PUBLIC") ||
+          typeof runId !== "string" || !digestPattern.test(runId) ||
+          typeof hintId !== "number" || !Number.isSafeInteger(hintId) ||
+          hintId < 1 ||
+          Object.keys(args).some((key) =>
+            !["action", "kind", "id", "revision", "runId", "hintId"].includes(
+              key,
+            )
+          ) || !await controller.inspect(ref)
+        ) return unavailable;
+        const path = resolveSentinelCasePath(options.baseDir, ref.id);
+        const revision = ref.revision;
+        const read = () =>
+          readRetainedSentinelAnalystObservation(
+            path,
+            runId.toLowerCase(),
+            revision,
+            hintId,
+          );
+        const observation = read();
+        if (!observation?.analystObservation) return unavailable;
+        const source = {
+          action: "node",
+          kind: "sentinel",
+          id: ref.id,
+          revision,
+          node: `evidence:${observation.analystObservation.evidenceId}`,
+        };
+        const text = safeProjection({ run: ref, observation });
+        return await authorize(source) &&
+            await context.authorizeSavedResponse(
+              operatorRunTool.name,
+              text,
+              "INTERNAL",
+            ) &&
+            isDeepStrictEqual(read(), observation)
+          ? text
+          : unavailable;
+      }
       if (action === "hint_batch") {
         const { runId, requestId, hints } = args;
         if (
@@ -5960,7 +6026,8 @@ ${request}`)
           if (!hint || typeof hint !== "object" || Array.isArray(hint)) {
             return unavailable;
           }
-          const { note, assetIds: rawAssets } = hint;
+          const { note, assetIds: rawAssets, analystObservation: selector } =
+            hint;
           const trafficReference = parseOperatorHintTraffic(hint);
           const assetIds = normalizeSentinelHintAssets(rawAssets);
           if (
@@ -5970,18 +6037,74 @@ ${request}`)
             trafficReference === null ||
             (trafficReference !== undefined && assetIds?.length !== 1) ||
             Object.keys(hint).some((key) =>
-              !["note", "assetIds", "trafficReference", "trafficReferences"]
+              ![
+                "note",
+                "assetIds",
+                "trafficReference",
+                "trafficReferences",
+                "analystObservation",
+              ]
                 .includes(key)
             )
           ) return unavailable;
+          let analystObservation;
+          if (selector !== undefined) {
+            if (
+              !selector || typeof selector !== "object" ||
+              Array.isArray(selector) ||
+              assetIds?.length !== 1 || trafficReference !== undefined ||
+              Object.keys(selector).some((key) =>
+                !["evidenceId", "confidence"].includes(key)
+              )
+            ) return unavailable;
+            const { evidenceId, confidence } = selector;
+            if (
+              typeof evidenceId !== "string" || !evidenceId.trim() ||
+              evidenceId.length > 256 ||
+              evidenceId.includes("\0") ||
+              (confidence !== "observed" && confidence !== "inferred")
+            ) return unavailable;
+            const sourceSha256 = readSentinelAnalystObservationSource(
+              path,
+              runId.toLowerCase(),
+              revision,
+              assetIds[0],
+              evidenceId,
+            );
+            if (!sourceSha256) return unavailable;
+            analystObservation = { evidenceId, confidence, sourceSha256 };
+          }
           selected.push({
             note: note.trim(),
             ...(assetIds && { assetIds }),
             ...(trafficReference && { trafficReference }),
+            ...(analystObservation && { analystObservation }),
           });
         }
         const authorize = async () => {
-          for (const { assetIds, trafficReference } of selected) {
+          for (
+            const { assetIds, trafficReference, analystObservation } of selected
+          ) {
+            if (
+              analystObservation && (
+                !await context.authorizeOwnerRunCall?.({
+                  action: "node",
+                  kind: "sentinel",
+                  id: ref.id,
+                  revision,
+                  node: `evidence:${analystObservation.evidenceId}`,
+                }) ||
+                !await context.authorizeSavedResponse(
+                  operatorRunTool.name,
+                  safeProjection({
+                    caseId: ref.id,
+                    revision,
+                    analystObservation,
+                  }),
+                  "INTERNAL",
+                )
+              )
+            ) return false;
             for (
               const source of sentinelHintTrafficReferences(trafficReference)
             ) {

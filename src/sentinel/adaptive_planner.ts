@@ -828,8 +828,10 @@ export function validateSentinelPlanSuggestions(
     selector: SentinelFutureWorkflowOutcome,
   ) => boolean,
   cancelledTasks: ReadonlyMap<string, string> = new Map(),
+  analystObservations: ReadonlyMap<number, string> = new Map(),
 ):
   | (AdaptiveTaskRequest & {
+    analystObservationHintId?: number;
     cancelledTaskRequestId?: string;
     sourceKind?: AdaptiveSourceKind;
     workerSources?: readonly AdaptiveWorkerSource[];
@@ -869,6 +871,7 @@ export function validateSentinelPlanSuggestions(
   }
   const explicitScope = state.plan.traceNode ?? state.plan.impactAsset;
   const tasks: (AdaptiveTaskRequest & {
+    analystObservationHintId?: number;
     cancelledTaskRequestId?: string;
     sourceKind?: AdaptiveSourceKind;
     workerSources?: readonly AdaptiveWorkerSource[];
@@ -890,6 +893,19 @@ export function validateSentinelPlanSuggestions(
         item.nodeId.includes("\x00"))
     ) continue;
     const { nodeId, kind } = item;
+    const analystObservationHintId = item.analystObservationHintId;
+    if (
+      analystObservationHintId !== undefined &&
+      (typeof analystObservationHintId !== "number" ||
+        !Number.isSafeInteger(analystObservationHintId) ||
+        analystObservations.get(analystObservationHintId) !== nodeId ||
+        (kind !== "trace" && kind !== "impact") ||
+        item.graphFactOnly === true ||
+        item.requiredWorkflowOutcome !== undefined ||
+        item.futureWorkflowOutcome !== undefined ||
+        item.passingRecheckId !== undefined ||
+        item.passingRecheckForFindingId !== undefined)
+    ) continue;
     const cancelledTaskRequestId = item.cancelledTaskRequestId;
     if (
       cancelledTaskRequestId !== undefined &&
@@ -1245,6 +1261,8 @@ export function validateSentinelPlanSuggestions(
       }
       tasks.push({
         ...task,
+        ...(typeof analystObservationHintId === "number" &&
+          { analystObservationHintId }),
         ...(typeof cancelledTaskRequestId === "string" &&
           { cancelledTaskRequestId }),
         ...(typeof passingRecheckId === "string" && { passingRecheckId }),
