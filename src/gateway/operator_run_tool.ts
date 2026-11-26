@@ -10700,6 +10700,29 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
           finding.source.receiptId !== selector.finding ||
           !allowed(selected.revision)
         ) return unavailable;
+        const isCurrent = () =>
+          allowed(selected.revision) && finding.isCurrent();
+        if (finding.execution) {
+          const source = finding.execution;
+          const evidence = await readAuthorizedCaseEvidence(
+            selected.caseId,
+            source.path,
+            source.revision,
+            source.evidence.id,
+            context,
+            isCurrent,
+          );
+          if (
+            !evidence || !executionReceiptSupportsCheck(
+              source.evidence,
+              source.runId,
+              source.assetId,
+              source.controlId,
+              "fail",
+              executionControlReceipt(evidence.payload),
+            ) || !isCurrent()
+          ) return unavailable;
+        }
         const projection = projectSentinelSharedFindingSource(
           finding.graph,
           revision,
@@ -10712,8 +10735,7 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
             projection,
             "INTERNAL",
           ) ||
-          !allowed(finding.source.revision) ||
-          !isDeepStrictEqual(await exact(), finding)
+          !isCurrent()
         ) return unavailable;
         return safeProjection({
           run: ref,

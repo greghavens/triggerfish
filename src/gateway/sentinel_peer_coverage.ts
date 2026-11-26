@@ -61,7 +61,7 @@ export async function reopenSentinelSelectedFinding(
     );
   const proof = currentProof();
   const source = proof?.publication.finding.workerFindingSource;
-  if (!proof || !source || proof.execution) return;
+  if (!proof || !source) return;
   const originPath = resolveSentinelCasePath(location.baseDir, caseId);
   const origin = readSentinelAssessmentRevision(originPath, source.revision)
     ?.result.sharedGraph.snapshot;
@@ -72,6 +72,19 @@ export async function reopenSentinelSelectedFinding(
       origin,
     );
   if (!origin || !sourceAllows()) return;
+  const isCurrent = () =>
+    readSentinelRunIdForRevision(path, revision) === runId &&
+    isDeepStrictEqual(
+      readSentinelAssessmentRevision(path, revision)?.result.sharedGraph
+        .snapshot,
+      graph,
+    ) &&
+    isDeepStrictEqual(
+      readSentinelLinkedSourcesForRevision(path, revision),
+      selected,
+    ) &&
+    !!localAllows() && sourceAllows() &&
+    isDeepStrictEqual(currentProof(), proof);
   try {
     const retained = await readPinnedSentinelSharedFindingSource(
       location.baseDir,
@@ -87,9 +100,8 @@ export async function reopenSentinelSelectedFinding(
       path,
     );
     if (
-      retained && localAllows() && sourceAllows() &&
-      isDeepStrictEqual(currentProof(), proof)
-    ) return { graph: retained, source };
+      retained && isCurrent()
+    ) return { graph: retained, source, execution: proof.execution, isCurrent };
   } catch {
     return;
   }
@@ -102,7 +114,7 @@ export async function reopenSentinelPeerCoverage(
   expected?: SentinelPeerCoverageReceipt,
 ) {
   const exact = await reopenSentinelSelectedFinding(path, revision, selector);
-  if (!exact) return;
+  if (!exact || exact.execution) return;
   const receipt = readSentinelPeerCoverageReceipt({
     selector,
     source: exact.source,

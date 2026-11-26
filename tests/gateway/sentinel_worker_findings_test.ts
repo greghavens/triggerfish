@@ -74,6 +74,7 @@ import {
   digestSentinelGoalProposal,
   type SentinelFormalGoal,
 } from "../../src/sentinel/formal_goals.ts";
+import { resolveSentinelCaseMembership } from "../../src/sentinel/case_membership.ts";
 import { resolveSentinelCasePath } from "../../src/sentinel/cases.ts";
 import { importSentinelHar } from "../../src/sentinel/har.ts";
 import {
@@ -3298,7 +3299,7 @@ async function verifyConnectorFindingPublication(
       socket.addEventListener("open", () => resolve(), { once: true });
       socket.addEventListener("error", reject, { once: true });
     });
-    const turn = async (request: Record<string, unknown>) => {
+    const turn = async (request: Record<string, unknown>): Promise<string> => {
       command = {
         kind: "sentinel",
         id: "main",
@@ -3452,7 +3453,25 @@ async function verifyConnectorFindingPublication(
     ).run;
     assertEquals(started.ref.id, consumerCase);
     const consumerState = readSentinelAssessment(consumerPath);
-    assert(consumerState?.active);
+    assert(consumerState?.active && consumerState.plan.runId);
+    const membership = resolveSentinelCaseMembership(
+      consumerState.result?.sharedGraph.snapshot,
+      {
+        caseId: consumerCase,
+        evidenceRevision: consumerState.revision,
+        selector: { kind: "assets", assetIds: ["app"] },
+      },
+    );
+    assert(membership);
+    assert(recordSentinelOperatingConstraints(consumerPath, {
+      runId: consumerState.plan.runId,
+      evidenceRevision: consumerState.revision,
+      expectedVersion: 0,
+      requestId: crypto.randomUUID(),
+      operatorScope: "fixture-connector-owner",
+      constraints: { allowedAssetIds: membership.assetIds, deniedKinds: [] },
+      membership,
+    }));
     const consumer = assignedLease(consumerPath, consumerState, "impact");
     const selectedExecution: NonNullable<Parameters<typeof workerTurn>[6]> = {
       prompt: "Review the exact selected source.",
@@ -3501,6 +3520,28 @@ async function verifyConnectorFindingPublication(
     assert(!exact.results[1][0].startsWith("Error:"));
     assertStringIncludes(exact.results[1][0], finding.id);
     assert(!exact.results[1][0].includes(credential));
+
+    const linked = {
+      id: consumerCase,
+      revision: consumerState.revision,
+      action: "linked_finding",
+      linkedFinding: exactSelected.args,
+    };
+    const ownerRead = await turn(linked);
+    assert(!ownerRead.startsWith("Error:"), ownerRead);
+    const ownerFinding = JSON.parse(ownerRead);
+    assertEquals(ownerFinding.source, publication.finding.workerFindingSource);
+    assertEquals(ownerFinding.detail.finding.id, finding.id);
+    assert(
+      !ownerRead.includes("owner/repo") && !ownerRead.includes(credential),
+    );
+    for (const hook of ["PRE_TOOL_CALL", "POST_TOOL_RESPONSE"] as const) {
+      blockSource = hook;
+      const before = checks;
+      assertStringIncludes(await turn(linked), "unavailable");
+      assertEquals(checks === before, hook === "PRE_TOOL_CALL");
+    }
+    blockSource = undefined;
 
     if (attempt) {
       for (const hook of ["PRE_TOOL_CALL", "POST_TOOL_RESPONSE"] as const) {
@@ -3625,6 +3666,7 @@ async function verifyConnectorFindingPublication(
     }
 
     access = false;
+    assertStringIncludes(await turn(linked), "unavailable");
     const revokedSelected = await workerTurn(
       consumerPath,
       consumer,
