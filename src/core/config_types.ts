@@ -223,6 +223,8 @@ export interface ConfiguredMcpServer {
   readonly max_retries?: number;
 }
 
+export const MAX_SENTINEL_ASSESSMENT_CONCURRENCY = 12;
+
 export interface TriggerFishConfig {
   readonly tool_approval?: readonly string[];
   readonly operator_workflows?: readonly {
@@ -288,6 +290,7 @@ export interface TriggerFishConfig {
     readonly notify_incident_increases?: boolean;
     readonly output_language?: SentinelOutputLanguage;
     readonly model_worker_limit?: number;
+    readonly assessment_concurrency?: number;
     readonly planner_heartbeat_seconds?: number;
     readonly model_profile_allowlists?: ModelProfileAllowlists;
     readonly capture_origins?: readonly string[];

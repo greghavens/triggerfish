@@ -21,6 +21,7 @@ export type {
   TriggerFishConfig,
 } from "./config_types.ts";
 import {
+  MAX_SENTINEL_ASSESSMENT_CONCURRENCY,
   scheduledObservationGrantSource,
   selectSentinelDelegatedObservationRead,
   selectSentinelScheduledObservationRead,
@@ -116,6 +117,19 @@ export function enforceConfig(
     return {
       ok: false,
       error: "sentinel.model_worker_limit must be a positive safe integer",
+    };
+  }
+  const assessmentConcurrency = sentinel?.assessment_concurrency;
+  if (
+    assessmentConcurrency !== undefined &&
+    (typeof assessmentConcurrency !== "number" ||
+      !Number.isSafeInteger(assessmentConcurrency) ||
+      assessmentConcurrency < 1 ||
+      assessmentConcurrency > MAX_SENTINEL_ASSESSMENT_CONCURRENCY)
+  ) {
+    return {
+      ok: false,
+      error: "sentinel.assessment_concurrency must be an integer from 1 to 12",
     };
   }
   const plannerHeartbeat = sentinel?.planner_heartbeat_seconds;

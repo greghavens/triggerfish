@@ -818,7 +818,7 @@ export function reportSentinelGoalCompletion(
 }
 
 /** Settle a timed assessment from its already committed automatic decision. */
-function reconcileSentinelDeadlineGoal(snapshotPath: string): boolean {
+export function reconcileSentinelDeadlineGoal(snapshotPath: string): boolean {
   return settleSentinelAssessmentDeadline(
     snapshotPath,
     (state, deadlineAt) => {

@@ -689,7 +689,10 @@ export async function startServicesAndChannels(
         },
       };
     },
-    { isActiveCase: needsSentinelAssessmentCoordinator },
+    {
+      concurrency: bootstrap.config.sentinel?.assessment_concurrency,
+      isActiveCase: needsSentinelAssessmentCoordinator,
+    },
   );
   caseManagerRef.current = caseManager;
   return {
