@@ -579,6 +579,287 @@ async function withFindingAssignmentGateway(
   }
 }
 
+Deno.test("A reviewed assignment question reaches only its leased worker and survives archive restore", async () => {
+  const baseDir = await Deno.makeTempDir();
+  const caseId = "assignment-question";
+  const path = resolveSentinelCasePath(baseDir, caseId);
+  const questions = [
+    "Which retained records show the first application control?",
+    "Which retained records show the second application control?",
+  ];
+  const seen: { taskId: string; question: string; prompt: string }[] = [];
+  const plannerInputs: string[] = [];
+  let pauseFirst = true;
+  const entered = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  const createPlanner = () =>
+    createSentinelModelPlanner(path, (state, taskId, lease) => {
+      if (!taskId || !lease) {
+        return {
+          execute(prompt, send) {
+            plannerInputs.push(String(prompt));
+            send({ type: "response", text: "[]", taint: "INTERNAL" });
+            return Promise.resolve();
+          },
+          clear() {},
+        };
+      }
+      const providers = createProviderRegistry();
+      providers.register({
+        name: "reviewed-question-worker",
+        supportsStreaming: false,
+        async complete(messages) {
+          const prompt = String(
+            messages.findLast(({ role }) => role === "user")?.content,
+          );
+          const payload = JSON.parse(prompt.split("\n").at(-1)!);
+          seen.push({ taskId, question: payload.operatorQuestion, prompt });
+          if (pauseFirst) {
+            entered.resolve();
+            await release.promise;
+          }
+          return {
+            content: JSON.stringify({
+              summary:
+                `Reviewed retained records for ${payload.operatorQuestion}`,
+              followUps: [],
+            }),
+            usage: { inputTokens: 1, outputTokens: 1 },
+            toolCalls: [],
+          };
+        },
+      });
+      providers.setDefault("reviewed-question-worker");
+      return createSentinelSubagent({
+        snapshotPath: path,
+        assessmentRevision: state.revision,
+        assignedTaskId: taskId,
+        assignedTaskLeaseToken: lease,
+        providerRegistry: providers,
+        allowModelAccess: true,
+        hookRunner: {
+          evaluateHook: () =>
+            Promise.resolve({
+              allowed: true,
+              action: "ALLOW",
+              duration: 0,
+              ruleId: null,
+            }),
+        },
+      });
+    });
+  let planner: ReturnType<typeof createPlanner> | undefined;
+  try {
+    await Deno.mkdir(dirname(path), { recursive: true });
+    await Deno.writeTextFile(
+      path,
+      JSON.stringify({
+        version: 1,
+        nodes: [{ id: "app", kind: "asset", label: "Reviewed application" }],
+        edges: [],
+      }),
+    );
+    const state = startSentinelAssessment(path);
+    const runId = state.plan.runId;
+    assert(runId);
+    advanceAdaptiveSentinel(path, state);
+    const ref = { kind: "sentinel", id: caseId, revision: state.revision };
+    const batch = {
+      ...ref,
+      action: "assign_batch",
+      runId,
+      adaptiveRevision: adaptiveRevision(state),
+      requestId: crypto.randomUUID(),
+      assignments: questions.map((question) => ({
+        taskKind: "trace",
+        node: "app",
+        question,
+      })),
+    };
+    let reviews = 0;
+    let denyWrite = true;
+    const confirm = () => {
+      reviews++;
+      return Promise.resolve(true);
+    };
+    const refs: { taskId: string; question: string }[] = [];
+    let receipt: unknown;
+    await withFindingAssignmentGateway(baseDir, confirm, async (turn) => {
+      assertStringIncludes(await turn(batch), "policy");
+      denyWrite = false;
+      assertStringIncludes(
+        await turn({
+          ...batch,
+          assignments: [{ ...batch.assignments[0], question: "\u0001invalid" }],
+        }),
+        "unavailable",
+      );
+      assertEquals(reviews, 0);
+      const admitted = JSON.parse(await turn(batch)).receipt;
+      receipt = admitted;
+      refs.push(
+        ...admitted.receipts.map((
+          { taskId, question }: typeof refs[number],
+        ) => ({ taskId, question })),
+      );
+      assertEquals(refs.map(({ question }) => question), questions);
+      assert(refs[0].taskId !== refs[1].taskId);
+      assertEquals(JSON.parse(await turn(batch)).receipt, receipt);
+      assertStringIncludes(
+        await turn({
+          ...batch,
+          assignments: [{
+            ...batch.assignments[0],
+            question: "Different approved text?",
+          }],
+        }),
+        "unavailable",
+      );
+      assertEquals(reviews, 1);
+    }, (hook, input) =>
+      !denyWrite || hook !== "PRE_TOOL_CALL" ||
+      (input.tool_call as { args?: { action?: string } } | undefined)?.args
+          ?.action !== "assign_batch");
+    const archiveId = crypto.randomUUID();
+    planner = createPlanner();
+    planner.advance(state);
+    const startTimeout = setTimeout(
+      () => entered.reject(new Error("No question-bearing lease")),
+      3_000,
+    );
+    try {
+      await entered.promise;
+    } finally {
+      clearTimeout(startTimeout);
+    }
+    assertEquals(seen.length, 1);
+    const interrupted = seen[0];
+    const initial = refs.find(({ taskId }) => taskId === interrupted.taskId);
+    assertEquals(interrupted.question, initial?.question);
+    planner.stop();
+    release.resolve();
+    await waitForCondition(() => !planner?.hasInFlightWork(), () => {});
+    await withFindingAssignmentGateway(baseDir, confirm, async (turn) => {
+      assertEquals(
+        JSON.parse(await turn({ ...ref, runId, action: "cancel" })).run.status,
+        "stopped",
+      );
+      assertEquals(
+        JSON.parse(
+          await turn({
+            ...ref,
+            runId,
+            action: "archive",
+            requestId: archiveId,
+          }),
+        ).receipt.status,
+        "succeeded",
+      );
+    });
+    await Deno.rename(dirname(path), join(baseDir, "before-question-restore"));
+    await withFindingAssignmentGateway(baseDir, confirm, async (turn) => {
+      assertEquals(
+        JSON.parse(
+          await turn({
+            ...ref,
+            runId,
+            action: "restore",
+            archiveId,
+            requestId: crypto.randomUUID(),
+          }),
+        ).receipt.status,
+        "succeeded",
+      );
+      assertEquals(JSON.parse(await turn(batch)).receipt, receipt);
+      assertEquals(
+        JSON.parse(await turn({ ...ref, action: "resume" })).run.status,
+        "running",
+      );
+      const listing = await turn({ ...ref, action: "tasks" });
+      assert(questions.every((question) => !listing.includes(question)));
+    });
+    const restored = readSentinelAssessment(path);
+    assert(restored);
+    pauseFirst = false;
+    planner = createPlanner();
+    const completed = () =>
+      readAdaptiveSentinel(path, restored)?.modelReviews
+        .filter(({ taskId }) =>
+          refs.some((record) => record.taskId === taskId)
+        ) ?? [];
+    await waitForCondition(
+      () => completed().length === 2,
+      () => planner!.advance(restored),
+      4_000,
+    );
+    assertEquals(
+      seen.filter(({ taskId }) => taskId === interrupted.taskId).length,
+      2,
+    );
+    assertEquals(seen.length, 3);
+    for (const entry of seen) {
+      const owner = refs.find(({ taskId }) => taskId === entry.taskId);
+      assertEquals(entry.question, owner?.question);
+      assert(
+        questions.filter((question) => question !== entry.question).every((
+          other,
+        ) => !entry.prompt.includes(other)),
+      );
+    }
+    await waitForCondition(
+      () => plannerInputs.length > 0,
+      () => planner!.advance(restored),
+    );
+    assert(
+      plannerInputs.every((prompt) =>
+        questions.every((question) => !prompt.includes(question))
+      ),
+    );
+    assert(
+      completed().every(({ summary }) =>
+        questions.every((question) => !summary.includes(question))
+      ),
+    );
+    assert(recordSentinelOperatingConstraints(path, {
+      runId,
+      evidenceRevision: state.revision,
+      operatorScope: "owner",
+      requestId: crypto.randomUUID(),
+      expectedVersion: 0,
+      constraints: { deniedKinds: ["trace"] },
+    }));
+    await withFindingAssignmentGateway(baseDir, confirm, async (turn) => {
+      assertStringIncludes(await turn(batch), "unavailable");
+      const longBatch = {
+        ...batch,
+        requestId: crypto.randomUUID(),
+        assignments: Array.from({ length: 8 }, (_, index) => ({
+          taskKind: "impact",
+          node: "app",
+          question: `Review retained control ${index}. ${
+            "Recorded observation. ".repeat(26).trim()
+          }`,
+        })),
+      };
+      const compact = JSON.parse(await turn(longBatch)).receipt;
+      assertEquals(compact.requestId, longBatch.requestId);
+      assertEquals(compact.receipts.length, 8);
+      assert(
+        compact.receipts.every((
+          { questionSha256 }: { questionSha256: string },
+        ) => /^[a-f0-9]{64}$/.test(questionSha256)),
+      );
+      const reviewed = reviews;
+      assertEquals(JSON.parse(await turn(longBatch)).receipt, compact);
+      assertEquals(reviews, reviewed);
+    });
+  } finally {
+    release.resolve();
+    planner?.stop();
+    await Deno.remove(baseDir, { recursive: true });
+  }
+});
+
 Deno.test("Reviewed analyst finding uses exact local failing evidence and survives gateway restore", async () => {
   const baseDir = await Deno.makeTempDir();
   const caseId = "reviewed-analyst";

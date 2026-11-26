@@ -31,8 +31,11 @@ import {
 import { executeCompletedSentinelGraphFollowup } from "../sentinel/completed_graph_followup.ts";
 import {
   type AdaptiveGraphAssignment,
+  type AdaptiveGraphAssignmentBatchReceipt,
   type AdaptiveOperatorHintSelection,
+  normalizeSentinelAssignmentQuestion,
   normalizeSentinelHintAssets,
+  sentinelAssignmentQuestionDigest,
 } from "../sentinel/adaptive_store.ts";
 import { applyOperatorRunBatch } from "./operator_run_batch_control.ts";
 import {
@@ -1112,6 +1115,11 @@ export const operatorRunTool: ToolDefinition = {
           node: { type: "string" },
           prioritizeNext: { type: "boolean" },
           priorityRank: { type: "integer" },
+          question: {
+            type: "string",
+            description:
+              "Optional reviewed question for this assignment's worker only, at most 600 characters.",
+          },
           sourceIds: {
             type: "array",
             description:
@@ -6307,12 +6315,24 @@ ${request}`)
           if (!item || typeof item !== "object" || Array.isArray(item)) {
             return unavailable;
           }
-          const { taskKind, node, prioritizeNext, priorityRank, sourceIds } =
-            item;
+          const {
+            taskKind,
+            node,
+            prioritizeNext,
+            priorityRank,
+            sourceIds,
+            question: rawQuestion,
+          } = item;
+          const question = normalizeSentinelAssignmentQuestion(rawQuestion);
           if (
             (taskKind !== "trace" && taskKind !== "impact") ||
             typeof node !== "string" || !node.trim() || node.length > 100 ||
             node.includes("\0") ||
+            (rawQuestion !== undefined && (!question ||
+              !canFlowTo(
+                context.inputClassification ?? "PUBLIC",
+                "INTERNAL",
+              ))) ||
             (prioritizeNext !== undefined &&
               typeof prioritizeNext !== "boolean") ||
             (priorityRank !== undefined &&
@@ -6336,6 +6356,7 @@ ${request}`)
                 "prioritizeNext",
                 "priorityRank",
                 "sourceIds",
+                "question",
               ].includes(
                 key,
               )
@@ -6365,6 +6386,7 @@ ${request}`)
           selected.push({
             kind: taskKind,
             nodeId: node,
+            ...(question && { question }),
             ...(sourceEvidence && { sourceEvidence }),
             ...(prioritizeNext === true && { prioritizeNext: true }),
             ...(typeof priorityRank === "number" &&
@@ -6380,9 +6402,42 @@ ${request}`)
         };
         const selectedCase = context.authorizeSelectedSentinelCase;
         if (selectedCase && !selectedCase()) return unavailable;
+        const projectReceipt = (
+          receipt: AdaptiveGraphAssignmentBatchReceipt,
+        ) => {
+          const full = safeProjection({ run: ref, receipt });
+          if (
+            !full.startsWith("Error:") ||
+            !selected.some(({ question }) => question)
+          ) {
+            return full;
+          }
+          return safeProjection({
+            run: ref,
+            receipt: {
+              requestId: receipt.requestId,
+              runId: receipt.runId,
+              evidenceRevision: receipt.evidenceRevision,
+              adaptiveRevision: receipt.adaptiveRevision,
+              receipts: receipt.receipts.map((
+                { requestId, taskId, kind, nodeId, question, disposition },
+              ) => ({
+                requestId,
+                taskId,
+                kind,
+                nodeId,
+                disposition,
+                ...(question &&
+                  {
+                    questionSha256: sentinelAssignmentQuestionDigest(question),
+                  }),
+              })),
+            },
+          });
+        };
         const before = reviewSentinelAssignmentBatch(path, batch);
         if (before?.receipt) {
-          return safeProjection({ run: ref, receipt: before.receipt });
+          return projectReceipt(before.receipt);
         }
         if (!before?.eligible) return unavailable;
         if (
@@ -6408,7 +6463,7 @@ ${request}`)
         if (selectedCase && !selectedCase()) return unavailable;
         const committed = reviewSentinelAssignmentBatch(path, batch, true);
         return committed?.receipt
-          ? safeProjection({ run: ref, receipt: committed.receipt })
+          ? projectReceipt(committed.receipt)
           : unavailable;
       }
       if (action === "assign") {

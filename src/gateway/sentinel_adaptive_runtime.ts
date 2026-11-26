@@ -118,6 +118,7 @@ import {
   formatSentinelWorkerSteering,
   MAX_ADAPTIVE_TASK_ATTEMPTS,
   MAX_ADAPTIVE_TASKS,
+  normalizeSentinelAssignmentQuestion,
   openSentinelAdaptiveStore,
   querySentinelWorkerObservations,
   readAdaptiveAssetSnapshotCitations,
@@ -128,6 +129,7 @@ import {
   selectAdaptiveGraphRetries,
   SentinelAdaptiveQueueChanged,
   sentinelAdaptiveTaskId,
+  sentinelAssignmentQuestionDigest,
   type SentinelQueuedCancellation,
   taskUpstreamCitations,
   taskWorkerSources,
@@ -3031,7 +3033,12 @@ export function reviewSentinelAssignmentBatch(
     try {
       const revision = revisionForStore(state, store);
       if (revision !== batch.adaptiveRevision) return;
+      const allows = caseOperatingScope(path, batch.evidenceRevision);
       for (const selection of batch.assignments) {
+        if (
+          selection.question !== undefined &&
+          !allows({ kind: selection.kind, nodeId: selection.nodeId })
+        ) return;
         const sources = selection.sourceEvidence;
         if (
           sources && (selection.kind !== "trace" || !isDeepStrictEqual(
@@ -3088,17 +3095,41 @@ export function reviewSentinelAssignmentBatch(
             },
           };
         }
-        const current = queue.get(sentinelAdaptiveTaskId(revision, task));
         const token = createHash("sha256").update(JSON.stringify([
           "sentinel-reviewed-assignment-batch",
           batch.requestId,
           index,
         ])).digest("hex").slice(0, 32);
+        const requestId = token.replace(
+          /^(........)(....)(....)(....)(............)$/,
+          "$1-$2-$3-$4-$5",
+        );
+        if (selection.question !== undefined) {
+          if (
+            normalizeSentinelAssignmentQuestion(selection.question) !==
+              selection.question
+          ) {
+            throw new SentinelAssignmentError(
+              "Select a bounded defensive assignment question.",
+            );
+          }
+          task = {
+            ...task,
+            plannerRound: {
+              identity: `operator:${batch.requestId}`,
+              attempt: 1,
+              ...task.plannerRound,
+              assignmentQuestion: {
+                requestId,
+                sha256: sentinelAssignmentQuestionDigest(selection.question),
+              },
+            },
+          };
+        }
+        const current = queue.get(sentinelAdaptiveTaskId(revision, task));
         return {
-          requestId: token.replace(
-            /^(........)(....)(....)(....)(............)$/,
-            "$1-$2-$3-$4-$5",
-          ),
+          requestId,
+          ...(selection.question && { question: selection.question }),
           runId: batch.runId,
           evidenceRevision: batch.evidenceRevision,
           adaptiveRevision: revision,
@@ -4596,6 +4627,10 @@ export function advanceAdaptiveSentinel(snapshotPath: string, state: State) {
           return [];
         }
         const pending = isPendingHere(task);
+        if (task.plannerRound?.assignmentQuestion) {
+          if (pending) unavailableAssignments.push(task.id);
+          return [];
+        }
         if (
           task.status !== "completed" && !pending ||
           task.plannerRound?.graphFactOnly && !pending
@@ -5318,7 +5353,8 @@ function parseModelReview(
     if (
       !task.plannerRound?.findingFollowup &&
       !(task.reason === OPERATOR_ASSIGNMENT_REASON &&
-        task.plannerRound?.sourceEvidence) &&
+        (task.plannerRound?.sourceEvidence ||
+          task.plannerRound?.assignmentQuestion)) &&
       Array.isArray(output.followUps) &&
       output.followUps.length <= 2
     ) {
@@ -6109,6 +6145,29 @@ export function createSentinelModelPlanner(
       let review = "";
       const steps: SentinelReviewStep[] = [];
       const inspectedEvidence = new Set<string>();
+      const binding = task.plannerRound?.assignmentQuestion;
+      let question: string | undefined;
+      if (binding) {
+        const journal = openSentinelAdaptiveStore(storePath(snapshotPath));
+        try {
+          const receipt = journal.readOperatorAssignmentIntent(
+            binding.requestId,
+          );
+          const recorded = receipt?.question;
+          if (
+            receipt?.taskId !== task.id ||
+            receipt.adaptiveRevision !== revision ||
+            receipt.runId !== latest.plan.runId ||
+            receipt.evidenceRevision !== latest.revision ||
+            typeof recorded !== "string" ||
+            normalizeSentinelAssignmentQuestion(recorded) !== recorded ||
+            sentinelAssignmentQuestionDigest(recorded) !== binding.sha256
+          ) return;
+          question = recorded;
+        } finally {
+          journal.close();
+        }
+      }
       const worker = createWorker(state, task.id, token);
       try {
         const protectedSources =
@@ -6146,6 +6205,11 @@ export function createSentinelModelPlanner(
           : undefined;
         const instructions = [
           "Review this assigned defensive Sentinel task. Summarize the saved observation, limitations, and relevant coverage in under 1,500 characters.",
+          ...(question
+            ? [
+              "Address the reviewed operator question for this assignment using only the scoped evidence and tools. Do not repeat the question in review notes or any tool query.",
+            ]
+            : []),
           "If sentinel_live_workflow_status is available, use it to check the assigned asset's approved workflow control evidence when relevant.",
           "For an asset assignment, use sentinel_shared_asset_discoveries to find approved shared evidence and open an exact discovery ID before using it. Submit a verified discovery only if sentinel_assigned_target returned its exact supporting evidence.",
           ...(task.nodeId && state.result?.sharedGraph.snapshot?.nodes.some(
@@ -6257,6 +6321,7 @@ export function createSentinelModelPlanner(
           recheckNote: task.plannerRound?.recheckNote,
           findingFollowup: task.plannerRound?.findingFollowup,
           sourceEvidence: task.plannerRound?.sourceEvidence,
+          ...(question && { operatorQuestion: question }),
           committedObservation: task.plannerRound?.committedObservation,
           peerFindingCitations: task.plannerRound?.peerFindingCitations?.map(
             ({ mappingSources: _mappingSources, ...citation }) => citation,
@@ -6328,6 +6393,17 @@ export function createSentinelModelPlanner(
           const pendingFinding = pendingRequest && task.nodeId &&
             lookupPendingTrafficFinding(task.id, task.nodeId, pendingRequest);
           if (pendingRequest && (!resume || !pendingFinding)) return;
+          if (
+            question && (
+              !currentSource() ||
+              !readAssignedSentinelModelReview(
+                snapshotPath,
+                state.revision,
+                task.id,
+                token,
+              )
+            )
+          ) return;
           await worker.execute(
             prompt,
             (event) => {
@@ -6732,7 +6808,18 @@ export function createSentinelModelPlanner(
           steps,
           inspectedEvidence,
         );
-        return parsed && task.plannerRound?.stoppedRetry
+        if (!parsed) return;
+        if (question) {
+          return {
+            ...parsed,
+            note: parsed.note.replaceAll(question, "[reviewed question]").slice(
+              0,
+              1500,
+            ),
+            followUps: [],
+          };
+        }
+        return task.plannerRound?.stoppedRetry
           ? { ...parsed, followUps: [] }
           : parsed;
       } finally {
