@@ -12225,6 +12225,10 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
         return run ? safeProjection({ run }) : unavailable;
       }
       if (action === "spawn") {
+        const authorize = context?.authorizeOwnerRunCall;
+        if (!authorize || !context?.authenticatedOwnerSessionId) {
+          return unavailable;
+        }
         const {
           targetKind,
           targetId,
@@ -12253,6 +12257,9 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
             version: templateVersion,
           })
           : undefined;
+        const authorizeAdmission = async () =>
+          (!selection || await authorize({ action: "assessment_templates" })) &&
+          await authorize(args);
         if (
           templated && (
             !selection || targetKind !== "sentinel" ||
@@ -12512,15 +12519,19 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
               other.id !== targetId || other.revision === undefined
             ) return unavailable;
             if (emptyCreationDigest) {
-              await withSentinelSourceSnapshotLock(
+              const allowed = await withSentinelSourceSnapshotLock(
                 options.baseDir,
                 true,
-                () =>
+                async () => {
+                  if (!await authorizeAdmission()) return false;
                   providers.sentinel.finishEmptyStart(
                     other,
                     emptyCreationDigest,
-                  ),
+                  );
+                  return true;
+                },
               );
+              if (!allowed) return unavailable;
             }
             const admissionCategory = providers.sentinel.startCategory(other);
             if (
@@ -12675,18 +12686,8 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
                 linkedCaseSources,
               });
             const start = async () => {
-              if (!selection) {
-                if (category && !await context?.authorizeOwnerRunCall?.(args)) {
-                  return;
-                }
-                return admit();
-              }
-              if (
-                !await context?.authorizeOwnerRunCall?.(args) ||
-                !await context?.authorizeOwnerRunCall?.({
-                  action: "assessment_templates",
-                })
-              ) return;
+              if (!await authorizeAdmission()) return;
+              if (!selection) return admit();
               return withCurrentAssessmentTemplate(
                 options.baseDir,
                 selection,
@@ -12700,7 +12701,7 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
                 start,
               );
             } else await start();
-          } else {
+          } else if (await authorizeAdmission()) {
             workflows?.start(target.id, ceiling, childRequest, link);
           }
         } catch {

@@ -4327,6 +4327,36 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
       assertEquals(confirmations.length, initialApprovals);
       assertEquals(restarted.list().length, initialChildren);
       denied = undefined;
+      const rejectSpawnAfterReview = async (request: typeof spawn) => {
+        const beforeReview = confirmations.length;
+        duringConfirmation = () => {
+          denied = "PRE_TOOL_CALL";
+        };
+        try {
+          assertStringIncludes((await turn(request)).result, "unavailable");
+        } finally {
+          duringConfirmation = undefined;
+          denied = undefined;
+        }
+        assertEquals(confirmations.length, beforeReview + 1);
+        const journal = openOperatorRunLinkStore(
+          join(baseDir, "operator-run-links.db"),
+        );
+        try {
+          assertEquals(
+            journal.readRequest(
+              "workspace-operator",
+              "owner",
+              request.requestId,
+            ),
+            undefined,
+          );
+        } finally {
+          journal.close();
+        }
+      };
+      await rejectSpawnAfterReview(spawn);
+      assertEquals(restarted.list().length, initialChildren);
 
       const collision = { ...spawn, requestId: crypto.randomUUID() };
       duringConfirmation = () => {
@@ -4745,6 +4775,8 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
       assertEquals(confirmations.length, beforeChildGoalApproval);
       assertEquals(readSentinelAssessment(childPath), undefined);
       denied = undefined;
+      await rejectSpawnAfterReview(sentinelSpawn);
+      assertEquals(readSentinelAssessment(childPath), undefined);
       approved = false;
       assertStringIncludes(
         (await turn(sentinelSpawn)).result,
