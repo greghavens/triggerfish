@@ -84,6 +84,12 @@ export function teamAdmissionArchive(
   return {
     async read() {
       if (!await exactBinding()) return;
+      try {
+        Deno.lstatSync(path);
+      } catch (error) {
+        if (error instanceof Deno.errors.NotFound) return;
+        throw error;
+      }
       return withTeamRecoveryStore(
         path,
         (store) => parse(store.delivery(delivery)),

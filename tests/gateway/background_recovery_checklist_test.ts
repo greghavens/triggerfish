@@ -1069,8 +1069,8 @@ Deno.test("Authenticated scheduler gateway resumes the exact classified checklis
       action: "archive",
       requestId: archiveId,
     }, () => Promise.resolve(true));
-    assert(typeof result !== "string");
-    assertEquals((result.receipt as { status: string }).status, "succeeded");
+    assert(typeof result !== "string" && "receipt" in result);
+    assertEquals(result.receipt.status, "succeeded");
     for (
       const name of [
         "agent-recovery.db",
@@ -1086,8 +1086,8 @@ Deno.test("Authenticated scheduler gateway resumes the exact classified checklis
       requestId: crypto.randomUUID(),
       archiveId,
     }, () => Promise.resolve(true));
-    assert(typeof restored !== "string");
-    assertEquals((restored.receipt as { status: string }).status, "succeeded");
+    assert(typeof restored !== "string" && "receipt" in restored);
+    assertEquals(restored.receipt.status, "succeeded");
     state.interruption = undefined;
     await chooseBackgroundRoute(baseDir, "alternate");
     state.providerCalls.length = 0;
@@ -1402,6 +1402,30 @@ Deno.test("Owner gateway resumes a team delivery checklist without repeating a c
       id: [team.value.id, member.sessionId, interruptedDelivery].join(":"),
       requestId: pausedArchiveId,
     };
+    const inspectDelivery = {
+      action: "inspect",
+      kind: "team_delivery",
+      id: pausedArchiveArgs.id,
+    };
+    const sourceStatus = JSON.parse(
+      await archiveTool(baseDir, parent, inspectDelivery),
+    );
+    assertEquals(sourceStatus.run.ref, {
+      kind: "team_delivery",
+      id: pausedArchiveArgs.id,
+    });
+    assertEquals(sourceStatus.run.status, "running");
+    assertEquals(sourceStatus.recovery.status, "ready");
+    assert(sourceStatus.recovery.committedBatch > 0);
+    assert(
+      !(await archiveTool(baseDir, parent, inspectDelivery, true)).includes(
+        '"committedBatch"',
+      ),
+    );
+    assertStringIncludes(
+      await archiveTool(baseDir, foreign, inspectDelivery),
+      "unavailable",
+    );
     const checkpointRunId = await teamDeliveryExecutionId(
       parent.id,
       member.sessionId,
@@ -1504,6 +1528,29 @@ Deno.test("Owner gateway resumes a team delivery checklist without repeating a c
       JSON.parse(await archiveTool(cleanRoot, parent, restorePausedArgs))
         .receipt.status,
       "succeeded",
+    );
+    const importedStatus = JSON.parse(
+      await archiveTool(cleanRoot, parent, inspectDelivery),
+    );
+    assertEquals(importedStatus.run.ref, sourceStatus.run.ref);
+    assertEquals(importedStatus.run.status, "paused");
+    assertEquals(importedStatus.recovery, {
+      ...sourceStatus.recovery,
+      status: "paused",
+    });
+    assertEquals(importedStatus._classification, "INTERNAL");
+    assert(
+      !JSON.stringify(importedStatus).includes(instructions) &&
+        !JSON.stringify(importedStatus).includes(todo.content),
+    );
+    assertStringIncludes(
+      await archiveTool(cleanRoot, parent, {
+        ...inspectDelivery,
+        id: [crypto.randomUUID(), member.sessionId, interruptedDelivery].join(
+          ":",
+        ),
+      }),
+      "unavailable",
     );
     await chooseBackgroundRoute(cleanRoot, "alternate");
     const target = backgroundFixture(cleanRoot, "team", true);
@@ -1640,6 +1687,12 @@ Deno.test("Owner gateway resumes a team delivery checklist without repeating a c
       const completed = JSON.parse(await resumeWithModel());
       assertEquals(completed.run.ref.id, checkpointRunId);
       assertEquals(completed.run.status, "completed");
+      const settled = JSON.parse(
+        await archiveTool(cleanRoot, parent, inspectDelivery),
+      );
+      assertEquals(settled.run.ref, sourceStatus.run.ref);
+      assertEquals(settled.run.status, "completed");
+      assertEquals(settled.recovery, undefined);
       const approvedResumes = approvals;
       assertStringIncludes(await resumeWithModel(), "unavailable");
       assertEquals(approvals, approvedResumes);

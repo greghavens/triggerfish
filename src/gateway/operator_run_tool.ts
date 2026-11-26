@@ -4,6 +4,7 @@ import {
   stopSentinelInteractiveTurn,
 } from "./sentinel_interactive_turns.ts";
 import { readSentinelWorkerEvidenceScope } from "./sentinel_worker_evidence_scope.ts";
+import { teamAdmissionArchive } from "./startup/factory/team_admission_archive.ts";
 import {
   INCONCLUSIVE_RECHECK_ID,
   INCONCLUSIVE_RECHECK_TOOL,
@@ -2624,10 +2625,12 @@ export function createOperatorRunToolExecutor(options: {
       args.kind === "delegated" || args.kind === "scheduled"
         ? args.kind
         : undefined;
+    const inspectTeamDelivery = action === "inspect" &&
+      args.kind === "team_delivery";
     if (
-      action === "approval_history" &&
-      (args.kind === "owner_chat" || args.kind === "team_delivery" ||
-        backgroundRole)
+      inspectTeamDelivery || (action === "approval_history" &&
+        (args.kind === "owner_chat" || args.kind === "team_delivery" ||
+          backgroundRole))
     ) {
       const { id, offset = 0, limit = 10 } = args;
       const ownerRun = args.kind === "owner_chat";
@@ -2651,7 +2654,12 @@ export function createOperatorRunToolExecutor(options: {
         typeof limit !== "number" || !Number.isSafeInteger(limit) ||
         limit < 1 || limit > 10 ||
         Object.keys(args).some((key) =>
-          !["action", "kind", "id", "offset", "limit"].includes(key)
+          ![
+            "action",
+            "kind",
+            "id",
+            ...(inspectTeamDelivery ? [] : ["offset", "limit"]),
+          ].includes(key)
         )
       ) return unavailable;
       const publicId = ownerRun || teamRun ? id.toLowerCase() : id;
@@ -2669,6 +2677,14 @@ export function createOperatorRunToolExecutor(options: {
         : teamRun
         ? "delegated"
         : backgroundRole!;
+      if (inspectTeamDelivery) {
+        try {
+          Deno.lstatSync(backgroundTracePath);
+        } catch (error) {
+          if (error instanceof Deno.errors.NotFound) return unavailable;
+          throw error;
+        }
+      }
       const journal = openExecutionTraces(backgroundTracePath);
       try {
         const run = journal.readRun(role, runId, "INTERNAL");
@@ -2685,6 +2701,22 @@ export function createOperatorRunToolExecutor(options: {
             ? run.scope.sessionId !== session || run.scope.sourceId !== publicId
             : !canReadBackgroundTrace(run))
         ) return unavailable;
+        if (inspectTeamDelivery) {
+          const admission = teamAdmissionArchive(options.baseDir, run.scope);
+          if (!await admission?.read()) return unavailable;
+          const current = journal.readRun(role, runId, "INTERNAL");
+          if (!current || !isDeepStrictEqual(current.scope, run.scope)) {
+            return unavailable;
+          }
+          const recovery = inspectBackgroundRecovery(current);
+          return safeProjection({
+            run: {
+              ...projectBackgroundRun(backgroundRunSummary(current, recovery)),
+              ref: { kind: "team_delivery", id: publicId },
+            },
+            ...(recovery && { recovery }),
+          });
+        }
         const history = journal.readToolDecisions(run.scope, "INTERNAL");
         if (!history) return unavailable;
         const decisions = history.slice(offset, offset + limit).map((
