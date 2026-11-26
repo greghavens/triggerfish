@@ -1262,11 +1262,16 @@ export function createTidepoolSentinelHandler(
                 provenance.nodes.some((node) => node.id === message.focusId)
             ? message.focusId
             : undefined;
+          const { admissionAt: _admissionAt, ...historicalPlan } =
+            historical.plan ?? {};
           send({
             topic: "sentinel",
             type: "sentinel_revision",
             caseId,
-            historical,
+            historical: {
+              ...historical,
+              ...(historical.plan && { plan: historicalPlan }),
+            },
             incidentReviews,
             findingReviews,
             alertFeedAvailable: hasSavedSentinelAlerts(path, revision),
@@ -2106,6 +2111,8 @@ export function createTidepoolSentinelHandler(
       const cases = listSentinelCaseIds(bootstrap.baseDir);
       const goalProof = assessment &&
         readSentinelGoalCompletionForState(path, assessment);
+      const { admissionAt: _admissionAt, ...publicPlan } = assessment?.plan ??
+        {};
       send({
         topic: "sentinel",
         type: "sentinel_state",
@@ -2118,7 +2125,7 @@ export function createTidepoolSentinelHandler(
         ...(message.includeRevisions === true && {
           revisions: readSentinelAssessmentRevisionIndex(path),
         }),
-        assessment,
+        assessment: assessment && { ...assessment, plan: publicPlan },
         goalProof: goalProof && assessment?.plan.runId
           ? {
             runId: assessment.plan.runId,
