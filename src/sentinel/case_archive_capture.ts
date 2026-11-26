@@ -1,3 +1,4 @@
+import { SENTINEL_LIVE_REPOSITORY_VISIBILITY } from "./github_repository_visibility.ts";
 import { readSentinelCaseFindingReceipts } from "./worker_finding_store.ts";
 import { retainPortablePausedGraphCheckpoints } from "./adaptive_store.ts";
 import { isDeepStrictEqual } from "node:util";
@@ -689,6 +690,18 @@ function retainedTraceReceiptFields(
     }
   }
   if (digest(step.resultSha256)) fields.resultSha256 = step.resultSha256;
+  if (
+    step.tool === SENTINEL_LIVE_REPOSITORY_VISIBILITY && !fields.resultSha256
+  ) {
+    const receipt = step.goalReceiptRead as {
+      args?: Record<string, unknown>;
+      sha256?: unknown;
+    } | undefined;
+    if (
+      receipt?.args && Object.keys(receipt.args).length === 0 &&
+      digest(receipt.sha256)
+    ) fields.resultSha256 = receipt.sha256;
+  }
   if (step.tool === "sentinel_assigned_target" && !fields.resultSha256) {
     const snapshot = step.resultSnapshot as { sha256?: unknown } | undefined;
     if (digest(snapshot?.sha256)) fields.resultSha256 = snapshot?.sha256;

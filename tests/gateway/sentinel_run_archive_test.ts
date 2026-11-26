@@ -1,3 +1,9 @@
+import {
+  projectRepositoryVisibility,
+  SENTINEL_LIVE_REPOSITORY_VISIBILITY,
+  SENTINEL_SAVED_REPOSITORY_VISIBILITY,
+} from "../../src/sentinel/github_repository_visibility.ts";
+import { createSentinelRepositoryVisibilityReader } from "../../src/gateway/sentinel_repository_visibility.ts";
 import { querySentinelAssetInventory } from "../../src/sentinel/inventory_queries.ts";
 import { openApprovalInbox } from "../../src/core/approval_inbox.ts";
 import { createToolApprovalService } from "../../src/core/tool_approval_service.ts";
@@ -83,7 +89,10 @@ import {
   MODEL_ASSIGNMENT_REASON,
   sentinelIncidentCandidates,
 } from "../../src/sentinel/adaptive_planner.ts";
-import { openSentinelAdaptiveStore } from "../../src/sentinel/adaptive_store.ts";
+import {
+  openSentinelAdaptiveStore,
+  readAdaptiveRepositoryVisibility,
+} from "../../src/sentinel/adaptive_store.ts";
 import {
   applySentinelFormalGoals,
   claimSentinelAssessmentReview,
@@ -548,6 +557,358 @@ Deno.test("A restored Sentinel case exposes terminal tool decisions without recr
     } finally {
       freshInbox.close();
     }
+  } finally {
+    await Deno.remove(baseDir, { recursive: true });
+  }
+});
+
+Deno.test("Repository visibility archives validate canonical scope before installing a case", async () => {
+  const baseDir = await Deno.makeTempDir();
+  const caseId = "repository-archive-proof";
+  const path = resolveSentinelCasePath(baseDir, caseId);
+  const database = join(dirname(path), "sentinel-adaptive.db");
+  try {
+    await Deno.mkdir(dirname(path), { recursive: true });
+    await Deno.writeTextFile(
+      path,
+      JSON.stringify({
+        version: 1,
+        nodes: [
+          { id: "app", kind: "asset", label: "Application" },
+          { id: "consumer", kind: "asset", label: "Unrelated application" },
+          { id: "check", kind: "evidence", label: "Saved evidence" },
+        ],
+        edges: [{ from: "check", to: "app", relation: "observed_on" }],
+      }),
+    );
+    const state = startSentinelAssessment(path);
+    const runId = state.plan.runId!;
+    const adaptive = adaptiveRevision(state);
+    advanceAdaptiveSentinel(path, state);
+    const journal = openSentinelAdaptiveStore(database);
+    let source: string;
+    let provisionalTask: string;
+    let foreignTask: string;
+    let consumer: string;
+    let foreignConsumer: string;
+    try {
+      const tasks = journal.sync(adaptive, [
+        { kind: "trace", nodeId: "app", depth: 1, reason: "Allowed citation" },
+        {
+          kind: "trace",
+          nodeId: "consumer",
+          depth: 1,
+          reason: "Foreign citation",
+        },
+        { kind: "trace", nodeId: "app", depth: 7, reason: "Archive source" },
+        {
+          kind: "trace",
+          nodeId: "app",
+          depth: 8,
+          reason: "Provisional archive source",
+        },
+        {
+          kind: "review_evidence",
+          nodeId: "check",
+          reason: "Non-asset assignment",
+        },
+      ], adaptive);
+      source = tasks.find((task) => task.reason === "Archive source")!.id;
+      provisionalTask = tasks.find((task) =>
+        task.reason === "Provisional archive source"
+      )!.id;
+      foreignTask = tasks.find((task) =>
+        task.reason === "Non-asset assignment"
+      )!.id;
+      consumer = tasks.find((task) => task.reason === "Allowed citation")!.id;
+      foreignConsumer = tasks.find((task) =>
+        task.reason === "Foreign citation"
+      )!.id;
+    } finally {
+      journal.close();
+    }
+    advanceAdaptiveSentinel(path, state);
+    assert(stopSentinelAssessment(path));
+    const ref = {
+      kind: "sentinel",
+      id: caseId,
+      revision: state.revision,
+      runId,
+    };
+    const raw = {
+      repository: "owner/approved",
+      repositoryId: 987,
+      visibility: "public" as const,
+      observedAt: "2026-11-01T01:00:00.000Z",
+      evidenceRevision: state.revision,
+      credentialRef: crypto.randomUUID(),
+    };
+    const projection = projectRepositoryVisibility(raw, source, "app");
+    const digest = createHash("sha256").update(JSON.stringify(projection))
+      .digest("hex");
+    const archives: { variant: string; archiveId: string }[] = [];
+    for (
+      const variant of [
+        "schema",
+        "foreign-assignment",
+        "revision",
+        "unapproved-field",
+        "wrong-step",
+        "wrong-digest",
+        "foreign-citation",
+        "valid",
+      ]
+    ) {
+      const archiveId = crypto.randomUUID();
+      const db = new DatabaseSync(database);
+      try {
+        db.exec(`DROP TABLE IF EXISTS adaptive_repository_visibility_results;
+          CREATE TABLE IF NOT EXISTS adaptive_archived_worker_traces (
+            revision TEXT NOT NULL,
+            taskId TEXT NOT NULL REFERENCES adaptive_tasks(id),
+            steps TEXT NOT NULL,
+            PRIMARY KEY(revision, taskId)
+          );
+          DELETE FROM adaptive_archived_worker_traces;
+          UPDATE adaptive_tasks SET plannerRound = NULL;
+        `);
+        if (variant === "schema") {
+          db.exec(
+            "CREATE TABLE adaptive_repository_visibility_results (taskId TEXT PRIMARY KEY)",
+          );
+        } else {
+          db.exec(`CREATE TABLE adaptive_repository_visibility_results (
+            revision TEXT NOT NULL,
+            taskId TEXT NOT NULL REFERENCES adaptive_tasks(id),
+            evidenceRevision INTEGER NOT NULL,
+            receipt TEXT NOT NULL,
+            controlClaimSha256 TEXT,
+            sourceStepIndex INTEGER,
+            PRIMARY KEY(revision, taskId, evidenceRevision)
+          )`);
+          const insert = db.prepare(
+            "INSERT INTO adaptive_repository_visibility_results VALUES (?, ?, ?, ?, ?, ?)",
+          );
+          const taskId = variant === "foreign-assignment"
+            ? foreignTask
+            : source;
+          const revision = variant === "revision"
+            ? state.revision + 1
+            : state.revision;
+          const value = variant === "unapproved-field"
+            ? { ...raw, token: "invalid-extra-fixture-field" }
+            : raw;
+          insert.run(
+            adaptive,
+            taskId,
+            revision,
+            JSON.stringify(value),
+            null,
+            0,
+          );
+          db.prepare(
+            "INSERT INTO adaptive_archived_worker_traces VALUES (?, ?, ?)",
+          )
+            .run(
+              adaptive,
+              source,
+              JSON.stringify([{
+                tool: variant === "wrong-step"
+                  ? "sentinel_assigned_target"
+                  : SENTINEL_LIVE_REPOSITORY_VISIBILITY,
+                outcome: "returned",
+                goalReceiptRead: {
+                  args: {},
+                  sha256: variant === "wrong-digest" ? "f".repeat(64) : digest,
+                },
+              }]),
+            );
+          if (variant === "valid" || variant === "foreign-citation") {
+            db.prepare(
+              "UPDATE adaptive_tasks SET plannerRound = ? WHERE id = ?",
+            )
+              .run(
+                JSON.stringify({
+                  identity: adaptive,
+                  attempt: 1,
+                  repositoryVisibility: {
+                    taskId: source,
+                    sourceStepIndex: 0,
+                    resultSha256: digest,
+                  },
+                }),
+                variant === "valid" ? consumer : foreignConsumer,
+              );
+          }
+          if (variant === "valid") {
+            insert.run(
+              adaptive,
+              provisionalTask,
+              state.revision,
+              JSON.stringify(raw),
+              null,
+              null,
+            );
+          }
+        }
+      } finally {
+        db.close();
+      }
+      await withGateway(baseDir, async (turn) => {
+        const result = JSON.parse(
+          await turn({ ...ref, action: "archive", requestId: archiveId }),
+        );
+        assertEquals(result.receipt.status, "succeeded");
+      });
+      archives.push({ variant, archiveId });
+    }
+
+    await Deno.rename(
+      dirname(path),
+      join(baseDir, "visibility-case-before-restore"),
+    );
+    const sibling = resolveSentinelCasePath(baseDir, "independent");
+    await Deno.mkdir(dirname(sibling), { recursive: true });
+    const untouched = JSON.stringify({
+      version: 1,
+      nodes: [{ id: "unrelated", kind: "asset", label: "Unrelated case data" }],
+      edges: [],
+    });
+    await Deno.writeTextFile(sibling, untouched);
+    for (const { variant, archiveId } of archives) {
+      await withGateway(baseDir, async (turn) => {
+        const response = JSON.parse(
+          await turn({
+            ...ref,
+            action: "restore",
+            requestId: crypto.randomUUID(),
+            archiveId,
+          }),
+        );
+        if (variant !== "valid") {
+          assertEquals(response.receipt.status, "failed", variant);
+          await assertRejects(
+            () => Deno.stat(dirname(path)),
+            Deno.errors.NotFound,
+          );
+          assertEquals(await Deno.readTextFile(sibling), untouched);
+          return;
+        }
+        assertEquals(response.receipt.status, "succeeded");
+        assertEquals(readSentinelAssessment(path)?.paused, true);
+        assertEquals(
+          readAdaptiveRepositoryVisibility(
+            database,
+            runId,
+            state.revision,
+            source,
+            "app",
+            true,
+          )?.projection,
+          projection,
+        );
+        assertEquals(
+          readAdaptiveRepositoryVisibility(
+            database,
+            runId,
+            state.revision,
+            provisionalTask,
+            "app",
+            false,
+          ),
+          undefined,
+        );
+        assertEquals(
+          JSON.parse(await turn({ ...ref, action: "resume" })).run.status,
+          "running",
+        );
+      });
+    }
+
+    let tokenAllowed = false;
+    let fetches = 0;
+    let credentialChecks = 0;
+    const reader = createSentinelRepositoryVisibilityReader({
+      scopes: [{
+        case: caseId,
+        asset: "app",
+        owner: "owner",
+        repo: "approved",
+        repository_id: raw.repositoryId,
+      }],
+      resolveCredential(ref) {
+        credentialChecks++;
+        if (ref !== raw.credentialRef) {
+          throw new Error("Unexpected credential reference");
+        }
+        return Promise.resolve(
+          tokenAllowed ? { ref, token: "synthetic-restore-token" } : undefined,
+        );
+      },
+      ssrfChecker: () => Promise.resolve({ ok: true, value: "192.0.2.1" }),
+      readVisibility() {
+        fetches++;
+        throw new Error("A restored visibility result must not refetch");
+      },
+    });
+    const readSaved = async () => {
+      let response: string | undefined;
+      const providers = createProviderRegistry();
+      providers.register({
+        name: "archive-visibility-restore",
+        supportsStreaming: false,
+        complete(messages) {
+          const tool = messages.findLast(({ role }) => role === "tool");
+          if (tool) response = String(tool.content);
+          return Promise.resolve({
+            content: tool ? "Reviewed the saved visibility." : "",
+            usage: { inputTokens: 1, outputTokens: 1 },
+            toolCalls: tool ? [] : [{
+              id: crypto.randomUUID(),
+              type: "function",
+              function: {
+                name: SENTINEL_SAVED_REPOSITORY_VISIBILITY,
+                arguments: JSON.stringify({ taskId: source, asset: "app" }),
+              },
+            }],
+          });
+        },
+      });
+      providers.setDefault("archive-visibility-restore");
+      const worker = createSentinelSubagent({
+        snapshotPath: path,
+        assessmentRevision: state.revision,
+        plannerExecutionEvidenceRunId: runId,
+        allowModelAccess: true,
+        providerRegistry: providers,
+        readRepositoryVisibility: reader,
+        hookRunner: {
+          evaluateHook: () =>
+            Promise.resolve({
+              allowed: true,
+              action: "ALLOW",
+              duration: 0,
+              ruleId: null,
+            }),
+        },
+      });
+      try {
+        await worker.execute(
+          "Open the exact retained repository visibility.",
+          () => {},
+        );
+        return response;
+      } finally {
+        worker.clear();
+      }
+    };
+    assertStringIncludes(await readSaved() ?? "", "unavailable");
+    tokenAllowed = true;
+    assertEquals(JSON.parse(await readSaved() ?? ""), {
+      ...projection,
+      reference: { taskId: source, sourceStepIndex: 0, resultSha256: digest },
+    });
+    assertEquals([fetches, credentialChecks], [0, 2]);
   } finally {
     await Deno.remove(baseDir, { recursive: true });
   }

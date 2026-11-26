@@ -1,3 +1,9 @@
+import {
+  projectRepositoryVisibility,
+  repositoryVisibilityReceipt,
+  repositoryVisibilityReference,
+  SENTINEL_LIVE_REPOSITORY_VISIBILITY,
+} from "./github_repository_visibility.ts";
 import { isDeepStrictEqual } from "node:util";
 import {
   decodeStagedTrafficFinding,
@@ -709,6 +715,211 @@ function validateArchivedWorkerNarratives(
   }
 }
 
+const visibilityResultsTable = "adaptive_repository_visibility_results";
+
+/** Validate preserved receipts without reopening the connector or resolving credentials. */
+function validateArchivedRepositoryVisibility(
+  db: DatabaseSync,
+  tables: ReadonlySet<string>,
+  assessment: string,
+  retained: readonly number[],
+) {
+  const invalid = () =>
+    new Error("Invalid archived Sentinel repository visibility");
+  const columns: Record<
+    string,
+    { type: string; key: number; required: number }
+  > = {
+    revision: { type: "TEXT", key: 1, required: 1 },
+    taskId: { type: "TEXT", key: 2, required: 1 },
+    evidenceRevision: { type: "INTEGER", key: 3, required: 1 },
+    receipt: { type: "TEXT", key: 0, required: 1 },
+    controlClaimSha256: { type: "TEXT", key: 0, required: 0 },
+    sourceStepIndex: { type: "INTEGER", key: 0, required: 0 },
+  };
+  const schema = db.prepare(
+    "PRAGMA table_xinfo(adaptive_repository_visibility_results)",
+  ).all();
+  if (
+    schema.length !== Object.keys(columns).length ||
+    schema.some(({ name, type, pk, hidden, notnull }) => {
+      const column = typeof name === "string" && Object.hasOwn(columns, name)
+        ? columns[name]
+        : undefined;
+      return !column || column.type !== type || column.key !== pk ||
+        column.required !== notnull || hidden !== 0;
+    })
+  ) throw invalid();
+  const assignment = db.prepare(`
+    SELECT task.nodeId, mapping.goalId
+    FROM adaptive_tasks AS task
+    JOIN adaptive_evidence_revisions AS mapping ON mapping.revision = task.revision
+    WHERE task.id = ? AND task.revision = ? AND task.status = 'completed'
+      AND mapping.evidenceNumber = ?
+  `);
+  const archivedSteps = tables.has("adaptive_archived_worker_traces")
+    ? db.prepare(
+      `SELECT steps FROM adaptive_archived_worker_traces WHERE taskId = ? AND revision = ?`,
+    )
+    : undefined;
+  const completedSteps = tables.has("adaptive_note_steps") &&
+      tables.has("adaptive_model_reviews")
+    ? db.prepare(`SELECT trace.steps
+      FROM adaptive_model_reviews AS review
+      JOIN adaptive_note_steps AS trace ON trace.note_id = review.noteId
+      WHERE review.taskId = ?`)
+    : undefined;
+  const rows = db.prepare(
+    `SELECT rowid AS position, * FROM adaptive_repository_visibility_results
+    WHERE ? IS NULL OR rowid > ? ORDER BY rowid LIMIT 256`,
+  );
+  type Snapshot = ReturnType<ReturnType<typeof loadSentinelGraph>["snapshot"]>;
+  let exact:
+    | { revision: number; runId: string; snapshot: Snapshot }
+    | undefined;
+  let after: number | null = null;
+  for (;;) {
+    const page: ReturnType<typeof rows.all> = rows.all(after, after);
+    if (!page.length) break;
+    for (const row of page) {
+      const {
+        position,
+        revision,
+        taskId,
+        evidenceRevision,
+        sourceStepIndex,
+        controlClaimSha256,
+        receipt: encoded,
+      } = row;
+      if (
+        typeof position !== "number" || !Number.isSafeInteger(position) ||
+        typeof revision !== "string" ||
+        !/^[A-Za-z\d._:-]{1,224}$/.test(revision) ||
+        typeof taskId !== "string" || !/^adaptive:[a-f0-9]{64}$/.test(taskId) ||
+        typeof evidenceRevision !== "number" ||
+        !retained.includes(evidenceRevision) ||
+        typeof encoded !== "string" ||
+        (controlClaimSha256 !== null &&
+          (typeof controlClaimSha256 !== "string" ||
+            !/^[a-f0-9]{64}$/.test(controlClaimSha256))) ||
+        (sourceStepIndex !== null &&
+          (typeof sourceStepIndex !== "number" ||
+            !Number.isSafeInteger(sourceStepIndex) ||
+            sourceStepIndex < 0 || sourceStepIndex >= 16))
+      ) throw invalid();
+      after = position;
+      const receipt = repositoryVisibilityReceipt(JSON.parse(encoded));
+      if (
+        !receipt || receipt.evidenceRevision !== evidenceRevision ||
+        JSON.stringify(receipt) !== encoded
+      ) throw invalid();
+      if (exact?.revision !== evidenceRevision) {
+        const snapshot = readSentinelAssessmentRevision(
+          assessment,
+          evidenceRevision,
+        )
+          ?.result.sharedGraph.snapshot;
+        const runId = readSentinelRunIdForRevision(
+          assessment,
+          evidenceRevision,
+        );
+        if (!snapshot || !runId) throw invalid();
+        exact = { revision: evidenceRevision, runId, snapshot };
+      }
+      const source = assignment.get(taskId, revision, evidenceRevision);
+      const target = source?.nodeId;
+      if (
+        source?.goalId !== exact.runId || typeof target !== "string" ||
+        !exact.snapshot.nodes.some(({ id, kind }) =>
+          id === target && kind === "asset"
+        )
+      ) throw invalid();
+      if (sourceStepIndex === null) continue;
+      const encodedSteps = completedSteps?.get(taskId)?.steps ??
+        archivedSteps?.get(taskId, revision)?.steps;
+      if (encodedSteps === undefined) continue;
+      if (typeof encodedSteps !== "string") throw invalid();
+      const steps = JSON.parse(encodedSteps);
+      if (
+        !Array.isArray(steps) || steps.length > 16 ||
+        sourceStepIndex > steps.length
+      ) {
+        throw invalid();
+      }
+      const step = steps[sourceStepIndex];
+      // The result may have committed just before its trace was recorded.
+      if (step === undefined) continue;
+      if (
+        step?.tool !== SENTINEL_LIVE_REPOSITORY_VISIBILITY ||
+        step.outcome !== "returned"
+      ) throw invalid();
+      const proof = step.goalReceiptRead?.sha256 ?? step.resultSha256;
+      if (
+        proof !== undefined && proof !== createHash("sha256").update(
+            JSON.stringify(
+              projectRepositoryVisibility(receipt, taskId, target),
+            ),
+          ).digest("hex")
+      ) throw invalid();
+    }
+  }
+  validateArchivedRepositoryVisibilityCitations(db, true);
+}
+
+function validateArchivedRepositoryVisibilityCitations(
+  db: DatabaseSync,
+  hasResults: boolean,
+) {
+  if (
+    !db.prepare(
+      "SELECT name FROM pragma_table_info('adaptive_tasks') WHERE name = 'plannerRound'",
+    ).get()
+  ) return;
+  const invalid = () =>
+    new Error("Invalid archived Sentinel repository visibility citation");
+  const cited = db.prepare(`
+    SELECT id, nodeId, revision, kind, depth, plannerRound
+    FROM adaptive_tasks WHERE json_valid(plannerRound)
+      AND json_type(plannerRound, '$.repositoryVisibility') IS NOT NULL
+  `).all();
+  if (!cited.length) return;
+  if (!hasResults) throw invalid();
+  const receiptFor = db.prepare(`
+    SELECT result.receipt, result.evidenceRevision, task.nodeId
+    FROM adaptive_repository_visibility_results AS result
+    JOIN adaptive_tasks AS task ON task.id = result.taskId AND task.revision = result.revision
+    WHERE result.revision = ? AND result.taskId = ? AND result.sourceStepIndex = ?
+  `);
+  for (const { id, nodeId, revision, kind, depth, plannerRound } of cited) {
+    const reference = typeof plannerRound === "string"
+      ? repositoryVisibilityReference(
+        JSON.parse(plannerRound).repositoryVisibility,
+      )
+      : undefined;
+    if (
+      !reference || reference.taskId === id || typeof nodeId !== "string" ||
+      kind !== "trace" || depth !== 1
+    ) throw invalid();
+    const source = receiptFor.get(
+      revision,
+      reference.taskId,
+      reference.sourceStepIndex,
+    );
+    const receipt = typeof source?.receipt === "string"
+      ? repositoryVisibilityReceipt(JSON.parse(source.receipt))
+      : undefined;
+    if (
+      !receipt || source?.nodeId !== nodeId ||
+      receipt.evidenceRevision !== source.evidenceRevision ||
+      reference.resultSha256 !== createHash("sha256").update(
+          JSON.stringify(
+            projectRepositoryVisibility(receipt, reference.taskId, nodeId),
+          ),
+        ).digest("hex")
+    ) throw invalid();
+  }
+}
+
 function restoreAdaptive(
   path: string,
   assessment: string,
@@ -764,6 +975,14 @@ function restoreAdaptive(
       }
       validateArchivedWorkerNarratives(db, assessment, revision);
     }
+    if (tables.has(visibilityResultsTable)) {
+      if (!hasMapping) {
+        throw new Error("Invalid archived Sentinel repository revision");
+      }
+      validateArchivedRepositoryVisibility(db, tables, assessment, retained);
+    } else {
+      validateArchivedRepositoryVisibilityCitations(db, false);
+    }
     const predecessor = mapping && mapping.evidenceNumber !== revision
       ? mapping.revision
       : undefined;
@@ -818,6 +1037,11 @@ function restoreAdaptive(
       }
       retainArchivedWorkerTraceMetadata(db, caseId);
       retainPortablePausedGraphCheckpoints(db, revision, true);
+      if (tables.has(visibilityResultsTable)) {
+        db.exec(
+          "DELETE FROM adaptive_repository_visibility_results WHERE sourceStepIndex IS NULL",
+        );
+      }
       for (
         const table of [
           "adaptive_assigned_target_batch_receipts",
