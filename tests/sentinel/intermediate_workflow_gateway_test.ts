@@ -964,9 +964,13 @@ Deno.test("Gateway workers cite an intermediate observation while its source rev
       );
       planningClock += 61_000;
       planner.advance(state);
-      await waitFor(() =>
-        (queueForRewrite()?.modelPlannerHistory.length ?? 0) > previous
-      );
+      await waitFor(() => {
+        const rounds = queueForRewrite()?.modelPlannerHistory ?? [];
+        return rounds.length > previous && rounds.at(-1)?.outcome !== "running";
+      });
+      const settled = queueForRewrite()?.modelPlannerHistory.at(-1);
+      assert(settled?.inputManifest);
+      return settled;
     };
     const dependentChain: { id: string; prerequisites: readonly string[] }[] =
       [];
@@ -999,7 +1003,25 @@ Deno.test("Gateway workers cite an intermediate observation while its source rev
     );
     assertEquals(heldTask()?.dependencyRecommendation, undefined);
     assertEquals(rewriteGate(), undefined);
-    await planRevision([...heldImpact.prerequisites]);
+    const priorRound = queueForRewrite()?.modelPlannerHistory.at(-1);
+    const hidden = completed.tasks.find(({ id, status }) =>
+      status === "completed" && !heldImpact.prerequisites.includes(id) &&
+      !priorRound?.inputManifest?.investigationIds.includes(id)
+    );
+    assert(hidden);
+    const hiddenIntroduction = await planRevision([
+      ...heldImpact.prerequisites,
+      hidden.id,
+    ]);
+    assert(
+      !hiddenIntroduction.inputManifest!.investigationIds.includes(hidden.id),
+    );
+    assertEquals(hiddenIntroduction.outcome, "proposal_rejected");
+    assertEquals(heldTask()?.dependencyRecommendation, undefined);
+    assertEquals(rewriteGate(), undefined);
+    const retained = await planRevision([...heldImpact.prerequisites]);
+    assert(!retained.inputManifest!.investigationIds.includes(source.id));
+    assert(retained.inputManifest!.investigationIds.includes(heldImpact.id));
     await waitFor(() => heldTask()?.dependencyRecommendation !== undefined);
     for (const entry of dependentChain) {
       const current = queueForRewrite()?.tasks.find(({ id }) =>

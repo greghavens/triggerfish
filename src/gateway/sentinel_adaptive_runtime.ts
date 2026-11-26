@@ -7342,7 +7342,9 @@ export function createSentinelModelPlanner(
                   reprioritizable && !operatorAssignments.has(id)
                 ).map(({ id }) => id),
               );
-              const shown = new Set(existing.map(({ id }) => id));
+              // Displayed prerequisites remain valid even when their own rows
+              // were omitted from the bounded planner prompt.
+              const shown = new Map(existing.map((task) => [task.id, task]));
               const revokedSource = selected && [...peerFindings].some(
                 ([key, cited]) =>
                   !sourceBase || !checkedPeers.has(key) ||
@@ -7365,7 +7367,9 @@ export function createSentinelModelPlanner(
                 response?.dependencies?.some(({ id, prerequisites }) =>
                   !eligible.has(id) ||
                   prerequisites.some((dependency) =>
-                    !shown.has(dependency) && !/^new:[0-7]$/.test(dependency)
+                    !shown.has(dependency) &&
+                    !shown.get(id)?.prerequisites.includes(dependency) &&
+                    !/^new:[0-7]$/.test(dependency)
                   ) ||
                   response.priorities?.includes(id) ||
                   response.retirements?.some((item) => item.id === id)
