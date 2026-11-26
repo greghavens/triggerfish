@@ -70,6 +70,16 @@ Deno.test("Authenticated Sentinel chat reads exact approved cross-case graph fin
             id: `asset-${name}`,
             label: name === "a" ? inventoryLabel : `Asset ${name}`,
             assetType: name === "c" ? "application" : "service",
+            properties: {
+              service: ["https"],
+              port: [443],
+              status: [name === "b" ? 503 : 200],
+              technology: ["Reverse Proxy"],
+              url: [`https://${name}.example.test/health`],
+              title: ["Health status"],
+              ip: [`192.0.2.${name.charCodeAt(0)}`],
+              domain: [`${name}.example.test`],
+            },
             aliases: [
               `${name}.example`,
               ...(id === "unregistered" ? ["hidden-only.example"] : []),
@@ -1060,6 +1070,66 @@ Deno.test("Authenticated Sentinel chat reads exact approved cross-case graph fin
       assetText: "%",
     });
     assertEquals(JSON.parse(result).page.assets, []);
+
+    const typedSearch = {
+      ...inventory,
+      limit: 1,
+      assetQuery: {
+        and: [
+          { field: "service", op: "eq", value: "HTTPS" },
+          { field: "port", op: "eq", value: 443 },
+          { field: "technology", op: "contains", value: "PROXY" },
+          { field: "url", op: "contains", value: "/health" },
+          { field: "title", op: "eq", value: "Health status" },
+          { field: "ip", op: "contains", value: "192.0.2." },
+          { field: "domain", op: "contains", value: ".example.test" },
+          {
+            or: [
+              { field: "status", op: "eq", value: 200 },
+              { field: "status", op: "gte", value: 500 },
+            ],
+          },
+        ],
+      },
+    };
+    await turn("Read a first typed asset page", typedSearch);
+    const typedPage = JSON.parse(result).page;
+    assertEquals(typedPage.assets.map(({ id }: { id: string }) => id), [
+      "asset-a",
+    ]);
+    assert(typedPage.nextCursor);
+    await turn("Read the second typed asset page", {
+      ...typedSearch,
+      cursor: typedPage.nextCursor,
+    });
+    assertEquals(
+      JSON.parse(result).page.assets.map(({ id }: { id: string }) => id),
+      ["asset-b"],
+    );
+    assertEquals(JSON.parse(result).page.nextCursor, null);
+    await turn("Do not reveal out-of-scope property matches", {
+      ...typedSearch,
+      assetQuery: { field: "domain", op: "eq", value: "c.example.test" },
+    });
+    assertEquals(JSON.parse(result).page.assets, []);
+    for (
+      const bad of [
+        {
+          ...typedSearch,
+          assetQuery: { field: "port", op: "eq", value: 443 },
+          cursor: typedPage.nextCursor,
+        },
+        { ...typedSearch, id: "unregistered" },
+        { ...typedSearch, revision: approved.revision + 1 },
+        {
+          ...typedSearch,
+          assetQuery: { field: "port", op: "eq", value: "443" },
+        },
+      ]
+    ) {
+      await turn("Deny a bad typed inventory request", bad);
+      assertStringIncludes(result, "unavailable");
+    }
 
     await turn("List member organizations", {
       ...inventory,

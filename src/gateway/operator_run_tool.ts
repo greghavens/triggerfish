@@ -1261,6 +1261,11 @@ export const operatorRunTool: ToolDefinition = {
       description:
         "Exact retained traffic evidenceId and digest to anchor a planner hint. Requires one assetIds entry.",
     },
+    assetQuery: {
+      type: "object",
+      description:
+        "Typed Boolean assets filter. Use {and:[...]}, {or:[...]}, {not:...}, or {field,op,value}. Text fields service, technology, url, title, ip, domain and registrationId accept contains/eq/ne. Numeric port and status accept eq/ne/gt/gte/lt/lte. Omit exact assetIds.",
+    },
     assetText: {
       type: "string",
       description:
@@ -1536,6 +1541,7 @@ export const sentinelOperatorCaseReadParameters = [
   "assetId",
   "assetIds",
   "assetText",
+  "assetQuery",
   "organizationId",
   "organizationText",
   "includeMembers",
@@ -3136,7 +3142,8 @@ export function createOperatorRunToolExecutor(options: {
       return unavailable;
     }
     if (
-      (args.assetText !== undefined || args.organizationText !== undefined ||
+      (args.assetText !== undefined || args.assetQuery !== undefined ||
+        args.organizationText !== undefined ||
         args.includeMembers !== undefined ||
         args.includeCoverageTotals !== undefined) &&
       action !== "inventory"
@@ -11235,6 +11242,7 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
               .sharedGraph.snapshot;
           const scopedInventoryQuery = inventory &&
             (inventory.args.assetText !== undefined ||
+              inventory.args.assetQuery !== undefined ||
               inventory.args.organizationText !== undefined ||
               inventory.args.includeMembers === true ||
               inventory.args.includeCoverageTotals === true);

@@ -294,6 +294,11 @@ export function sentinelDefenseReadArgs(args: Record<string, unknown>) {
   };
 }
 
+import {
+  parseSentinelAssetQuery,
+  type SentinelAssetQuery,
+} from "./asset_properties.ts";
+
 export const SENTINEL_CASE_INVENTORY_READ = "sentinel_case_inventory";
 
 export function sentinelCheckpointInventoryArgs(args: Record<string, unknown>) {
@@ -304,6 +309,7 @@ export function sentinelCheckpointInventoryArgs(args: Record<string, unknown>) {
   const text = args.assetText === undefined
     ? undefined
     : parseSentinelInventoryText(args.assetText);
+  const assetQuery = parseSentinelAssetQuery(args.assetQuery);
   const organizationText = args.organizationText === undefined
     ? undefined
     : parseSentinelInventoryText(args.organizationText);
@@ -324,6 +330,8 @@ export function sentinelCheckpointInventoryArgs(args: Record<string, unknown>) {
       (args.includeMembers !== true || view !== "organizations" ||
         typeof args.organizationId !== "string" ||
         !args.organizationId.trim())) ||
+    (args.assetQuery !== undefined &&
+      (!assetQuery || view !== "assets" || args.assetIds !== undefined)) ||
     (args.assetText !== undefined &&
       (!text || view !== "assets" ||
         args.assetId !== undefined || args.assetIds !== undefined)) ||
@@ -343,6 +351,7 @@ export function sentinelCheckpointInventoryArgs(args: Record<string, unknown>) {
       key !== "view" && key !== "limit" && key !== "coverageGap" &&
       key !== "asOf" && key !== "assetIds" && key !== "assetText" &&
       key !== "organizationText" && key !== "includeMembers" &&
+      key !== "assetQuery" &&
       !selectors.some((selector) => selector === key)
     )
   ) return;
@@ -362,6 +371,7 @@ export function sentinelCheckpointInventoryArgs(args: Record<string, unknown>) {
     ...retained,
     ...(batch && { assetIds: batch }),
     ...(text !== undefined && { assetText: text }),
+    ...(assetQuery && { assetQuery }),
     ...(organizationText !== undefined && { organizationText }),
     ...(args.includeMembers === true && { includeMembers: true as const }),
     ...(limit !== undefined && { limit }),
@@ -735,6 +745,7 @@ type GoalReceiptReadArguments =
     assetId?: string;
     assetIds?: readonly string[];
     assetText?: string;
+    assetQuery?: SentinelAssetQuery;
     organizationText?: string;
     includeMembers?: true;
     organizationId?: string;

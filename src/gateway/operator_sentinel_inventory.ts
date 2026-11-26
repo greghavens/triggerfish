@@ -29,6 +29,8 @@ import {
 } from "../sentinel/inventory_queries.ts";
 import { readHistoricalAdaptiveSentinel } from "./sentinel_adaptive_runtime.ts";
 
+import { parseSentinelAssetQuery } from "../sentinel/asset_properties.ts";
+
 const textFilters = [
   "assetId",
   "organizationId",
@@ -41,6 +43,7 @@ const queryFields = new Set([
   "view",
   "assetIds",
   "assetText",
+  "assetQuery",
   "organizationText",
   "includeMembers",
   "scope",
@@ -64,6 +67,7 @@ function optionsFor(
   const text = args.assetText === undefined
     ? undefined
     : parseSentinelInventoryText(args.assetText);
+  const assetQuery = parseSentinelAssetQuery(args.assetQuery);
   const organizationText = args.organizationText === undefined
     ? undefined
     : parseSentinelInventoryText(args.organizationText);
@@ -81,6 +85,9 @@ function optionsFor(
       (args.includeMembers !== true || args.view !== "organizations" ||
         typeof args.organizationId !== "string" ||
         !args.organizationId.trim())) ||
+    (args.assetQuery !== undefined &&
+      (!assetQuery || (args.view !== undefined && args.view !== "assets") ||
+        args.assetIds !== undefined)) ||
     (args.assetText !== undefined &&
       (!text || (args.view !== undefined && args.view !== "assets") ||
         args.assetId !== undefined || args.assetIds !== undefined)) ||
@@ -92,6 +99,7 @@ function optionsFor(
     onlyAsset: args.assetId as string | undefined,
     ...(batch && { exactAssetIds: batch }),
     ...(text !== undefined && { assetText: text }),
+    ...(assetQuery && { assetQuery }),
     ...(organizationText !== undefined && { organizationText }),
     ...(args.includeMembers === true && { includeMembers: true }),
     organizationId: args.organizationId as string | undefined,

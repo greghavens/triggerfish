@@ -16,6 +16,12 @@ import {
 } from "./peer_coverage.ts";
 import { digestSentinelSnapshot } from "./shared_inventory.ts";
 
+import {
+  matchesSentinelAssetQuery,
+  parseSentinelAssetQuery,
+  type SentinelAssetQuery,
+} from "./asset_properties.ts";
+
 type Snapshot = ReturnType<ReturnType<typeof loadSentinelGraph>["snapshot"]>;
 type Asset = Extract<Snapshot["nodes"][number], { kind: "asset" }>;
 type Review = Pick<SentinelFindingReview, "id" | "disposition" | "at">;
@@ -33,6 +39,7 @@ export interface SentinelAssetInventoryOptions extends PageOptions {
   readonly allowedAssetIds?: readonly string[];
   readonly exactAssetIds?: readonly string[];
   readonly assetText?: string;
+  readonly assetQuery?: SentinelAssetQuery;
   readonly organizationId?: string;
   readonly assetType?: SentinelAssetType;
   readonly parentId?: string;
@@ -160,6 +167,7 @@ function filterAssets(
     onlyAsset,
     exactAssetIds,
     assetText,
+    assetQuery,
     organizationId,
     assetType,
     parentId,
@@ -197,6 +205,12 @@ function filterAssets(
   if (assetText !== undefined && (!text || batch)) {
     throw new Error("Invalid Sentinel inventory text selector");
   }
+  const query = assetQuery === undefined
+    ? undefined
+    : parseSentinelAssetQuery(assetQuery);
+  if (assetQuery !== undefined && (!query || batch)) {
+    throw new Error("Invalid Sentinel typed asset selector");
+  }
   const requested = batch && new Set(batch);
   const assets = snapshot.nodes.filter((node): node is Asset =>
     node.kind === "asset" &&
@@ -208,6 +222,7 @@ function filterAssets(
     (assetType === undefined || node.assetType === assetType) &&
     (parentId === undefined || node.parentId === parentId) &&
     (alias === undefined || node.aliases?.includes(alias) === true) &&
+    (query === undefined || matchesSentinelAssetQuery(node, query)) &&
     (text === undefined ||
       [node.label, ...(node.aliases ?? [])].some((value) =>
         value.normalize("NFC").toLowerCase().includes(text)
@@ -227,6 +242,7 @@ function filterAssets(
       ...(allowed ? [[...allowed].sort()] : []),
       ...(batch ? [{ exactAssetIds: batch }] : []),
       ...(text ? [{ assetText: text }] : []),
+      ...(query ? [{ assetQuery: query }] : []),
     ],
   };
 }

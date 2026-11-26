@@ -35,6 +35,8 @@ import {
   sentinelCheckpointInventoryArgs,
 } from "../sentinel/worker_goal_recovery.ts";
 
+import { parseSentinelAssetQuery } from "../sentinel/asset_properties.ts";
+
 type InventoryScope = Pick<
   SentinelAgentOptions,
   | "snapshotPath"
@@ -57,6 +59,11 @@ export const sentinelInventoryTool: ToolDefinition = {
       required: true,
     },
     assetId: { type: "string", description: "Exact asset ID" },
+    assetQuery: {
+      type: "object",
+      description:
+        "Typed Boolean assets filter. Use {and:[...]}, {or:[...]}, {not:...}, or {field,op,value}. Text fields service, technology, url, title, ip, domain and registrationId accept contains/eq/ne. Numeric port and status accept eq/ne/gt/gte/lt/lte. Omit exact assetIds.",
+    },
     assetText: {
       type: "string",
       description:
@@ -165,6 +172,7 @@ function queryOptions(
   const text = args.assetText === undefined
     ? undefined
     : parseSentinelInventoryText(args.assetText);
+  const assetQuery = parseSentinelAssetQuery(args.assetQuery);
   const organizationText = args.organizationText === undefined
     ? undefined
     : parseSentinelInventoryText(args.organizationText);
@@ -178,6 +186,7 @@ function queryOptions(
         "asOf",
         "assetIds",
         "assetText",
+        "assetQuery",
         "organizationText",
         "includeMembers",
         "includeCoverageTotals",
@@ -199,6 +208,8 @@ function queryOptions(
       (args.includeMembers !== true || args.view !== "organizations" ||
         typeof args.organizationId !== "string" ||
         !args.organizationId.trim())) ||
+    (args.assetQuery !== undefined &&
+      (!assetQuery || args.view !== "assets" || args.assetIds !== undefined)) ||
     (args.assetText !== undefined &&
       (!text || args.view !== "assets" ||
         args.assetId !== undefined || args.assetIds !== undefined)) ||
@@ -213,6 +224,7 @@ function queryOptions(
   return {
     onlyAsset: batch ? undefined : assignedAsset ?? args.assetId,
     ...(text !== undefined && { assetText: text }),
+    ...(assetQuery && { assetQuery }),
     ...(organizationText !== undefined && { organizationText }),
     ...(args.includeMembers === true && { includeMembers: true }),
     ...(batch && { exactAssetIds: batch }),

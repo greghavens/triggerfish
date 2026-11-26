@@ -237,6 +237,11 @@ export const sentinelFindingDispositions = [
 type Kind = typeof kinds[number];
 type Severity = typeof sentinelFindingSeverities[number];
 
+import {
+  parseSentinelAssetProperties,
+  type SentinelAssetProperties,
+} from "./asset_properties.ts";
+
 interface NodeFields {
   readonly id: string;
   readonly label: string;
@@ -254,6 +259,7 @@ export type GraphNode =
       readonly kind: "asset";
       readonly aliases?: readonly string[];
       readonly assetType?: SentinelAssetType;
+      readonly properties?: SentinelAssetProperties;
       readonly parentId?: string;
       readonly organization?: { readonly id: string; readonly label: string };
     }
@@ -431,6 +437,12 @@ function parseNode(value: unknown): GraphNode {
     if (parentId !== undefined && parentId.length > 4096) {
       throw new Error("Invalid Sentinel asset parent ID");
     }
+    const properties = raw.properties === undefined
+      ? undefined
+      : parseSentinelAssetProperties(raw.properties);
+    if (raw.properties !== undefined && !properties) {
+      throw new Error("Invalid Sentinel asset properties");
+    }
     const importedAliases = raw.aliases === undefined ? [] : raw.aliases;
     if (
       !Array.isArray(importedAliases) || importedAliases.length > 32 ||
@@ -452,6 +464,7 @@ function parseNode(value: unknown): GraphNode {
       ...(assetType !== undefined && { assetType }),
       ...(parentId !== undefined && { parentId }),
       ...(organization && { organization }),
+      ...(properties && { properties }),
     };
   }
   if (raw.executionSource !== undefined) {

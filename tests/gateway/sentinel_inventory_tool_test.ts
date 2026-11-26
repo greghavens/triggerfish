@@ -153,6 +153,7 @@ async function fixture(
           label: "Alpha application",
           assetType: "service",
           aliases: ["alpha.example.test"],
+          properties: { port: [443] },
           organization: { id: "blue", label: "Blue Operations" },
         },
         {
@@ -161,6 +162,7 @@ async function fixture(
           label: "Beta application",
           assetType: "service",
           aliases: ["beta.example.test"],
+          properties: { port: [8443] },
           organization: { id: "green", label: "Green Operations" },
         },
         {
@@ -433,6 +435,23 @@ Deno.test("Sentinel inventory enforces the real leased asset and stops flow on h
         lease,
         { workerBoundary: () => ({}) },
       );
+      const typed = await query(
+        main,
+        [
+          {
+            view: "assets",
+            assetQuery: { field: "port", op: "eq", value: 443 },
+          },
+          {
+            view: "assets",
+            assetQuery: { field: "port", op: "eq", value: 8443 },
+          },
+        ],
+        undefined,
+        lease,
+      );
+      assertEquals(JSON.parse(typed.resultFrames[0]).assets[0].id, "alpha");
+      assertEquals(JSON.parse(typed.resultFrames[1]).assets, []);
       assertEquals(
         JSON.parse(worker.resultFrames[0]).assets.map((
           { id }: { id: string },
