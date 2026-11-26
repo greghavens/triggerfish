@@ -1429,6 +1429,32 @@ Deno.test("Owner gateway resumes a team delivery checklist without repeating a c
       await archiveTool(baseDir, foreign, inspectDelivery),
       "unavailable",
     );
+    const pauseTeam = { ...inspectDelivery, action: "pause" };
+    const beforePause = approvals;
+    assertStringIncludes(
+      await archiveTool(baseDir, parent, {
+        ...pauseTeam,
+        id: [crypto.randomUUID(), member.sessionId, interruptedDelivery].join(
+          ":",
+        ),
+      }),
+      "unavailable",
+    );
+    assertStringIncludes(
+      await archiveTool(baseDir, foreign, pauseTeam),
+      "unavailable",
+    );
+    assertEquals(approvals, beforePause);
+    const pausedSource = JSON.parse(
+      await archiveTool(baseDir, parent, pauseTeam),
+    );
+    assertEquals(pausedSource.run.ref, sourceStatus.run.ref);
+    assertEquals(pausedSource.run.status, "paused");
+    assertEquals(
+      JSON.parse(await archiveTool(baseDir, parent, pauseTeam)),
+      pausedSource,
+    );
+    assertEquals(approvals, beforePause + 1);
     const checkpointRunId = await teamDeliveryExecutionId(
       parent.id,
       member.sessionId,
@@ -1470,7 +1496,7 @@ Deno.test("Owner gateway resumes a team delivery checklist without repeating a c
       }),
       "unavailable",
     );
-    assertEquals(approvals, 2);
+    assertEquals(approvals, beforePause + 2);
     const restored = JSON.parse(
       await archiveTool(cleanRoot, parent, restoreArgs),
     );
@@ -1479,7 +1505,7 @@ Deno.test("Owner gateway resumes a team delivery checklist without repeating a c
       JSON.parse(await archiveTool(cleanRoot, parent, restoreArgs)),
       restored,
     );
-    assertEquals(approvals, 3);
+    assertEquals(approvals, beforePause + 3);
     assert(
       archiveHooks.some(({ hook, input }) =>
         hook === "POST_TOOL_RESPONSE" && input.tool_name === "operator_runs"
@@ -1587,9 +1613,8 @@ Deno.test("Owner gateway resumes a team delivery checklist without repeating a c
         cleanRoot,
         actor,
         {
+          ...inspectDelivery,
           action: "resume",
-          kind: "delegated",
-          id: checkpointRunId,
           originalTask,
         },
         deny,
@@ -1697,7 +1722,7 @@ Deno.test("Owner gateway resumes a team delivery checklist without repeating a c
         "unavailable",
       );
       const completed = JSON.parse(await resumeWithModel());
-      assertEquals(completed.run.ref.id, checkpointRunId);
+      assertEquals(completed.run.ref, sourceStatus.run.ref);
       assertEquals(completed.run.status, "completed");
       const settled = JSON.parse(
         await archiveTool(cleanRoot, parent, inspectDelivery),

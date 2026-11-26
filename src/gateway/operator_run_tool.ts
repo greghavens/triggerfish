@@ -1376,6 +1376,13 @@ export const operatorRunTool: ToolDefinition = {
   },
 };
 
+export const sentinelScopedTelemetryReadActions = [
+  "incidents",
+  "incident_alerts",
+  "case_alert",
+  "defense_coverage",
+] as const;
+
 export const sentinelOperatorCaseReadActions = [
   "model_route",
   "graph_overview",
@@ -1386,10 +1393,7 @@ export const sentinelOperatorCaseReadActions = [
   "facts",
   "finding_receipts",
   "finding_receipt",
-  "incidents",
-  "incident_alerts",
-  "case_alert",
-  "defense_coverage",
+  ...sentinelScopedTelemetryReadActions,
   "list_digests",
   "expand_digest",
   "traces",
@@ -2676,10 +2680,30 @@ export function createOperatorRunToolExecutor(options: {
     ) {
       return unavailable;
     }
-    const backgroundRole =
-      args.kind === "delegated" || args.kind === "scheduled"
+    const controllingTeam = args.kind === "team_delivery" &&
+      (action === "pause" || action === "resume");
+    const teamControl = controllingTeam && typeof args.id === "string"
+      ? args.id.toLowerCase().split(":")
+      : [];
+    if (
+      controllingTeam && (!backgroundOwner || teamControl.length !== 3 ||
+        !teamControl.every((part) => digestPattern.test(part)))
+    ) return unavailable;
+    const [controlTeamId, controlMember, controlDelivery] = teamControl;
+    const teamControlRef = controllingTeam && backgroundOwner
+      ? {
+        kind: "delegated" as const,
+        id: await teamDeliveryExecutionId(
+          backgroundOwner as SessionId,
+          controlMember as SessionId,
+          controlDelivery,
+        ),
+      }
+      : undefined;
+    const backgroundRole = teamControlRef?.kind ??
+      (args.kind === "delegated" || args.kind === "scheduled"
         ? args.kind
-        : undefined;
+        : undefined);
     const inspectTeamDelivery = action === "inspect" &&
       args.kind === "team_delivery";
     if (
@@ -3846,7 +3870,8 @@ ${
           recovery.close();
         }
       }
-      const ref = reference(args.kind, args.id, args.revision) ??
+      const ref = teamControlRef ??
+        reference(args.kind, args.id, args.revision) ??
         (action === "inspect" || action === "link" || action === "cancel" ||
             action === "pause" || action === "resume" || action === "steer" ||
             action === "spawn"
@@ -11301,6 +11326,9 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
         }
         const pausing = action === "pause";
         const delegated = !pausing && backgroundRole === "delegated";
+        const publicRef = teamControlRef
+          ? { kind: "team_delivery", id: teamControl.join(":") }
+          : ref;
         const { executionId, originalTask } = args;
         if (
           Object.keys(args).some((key) =>
@@ -11308,7 +11336,8 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
               "action",
               "kind",
               "id",
-              ...(delegated ? ["executionId", "originalTask"] : []),
+              ...(delegated ? ["originalTask"] : []),
+              ...(delegated && !teamControlRef ? ["executionId"] : []),
             ].includes(key)
           ) ||
           (delegated && (typeof originalTask !== "string" ||
@@ -11327,15 +11356,11 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
           controller.inspect(ref).then((run) =>
             run
               ? safeProjection({
-                run: projectBackgroundRun(run),
+                run: { ...projectBackgroundRun(run), ref: publicRef },
                 ...(pauseRequested && { pauseRequested }),
               })
               : unavailable
           );
-        if (pausing && before.status === "paused") return await present();
-        if (before.status !== (pausing ? "running" : "paused")) {
-          return unavailable;
-        }
         const journal = openExecutionTraces(backgroundTracePath);
         try {
           const initial = journal.readRun(backgroundRole, ref.id, "INTERNAL");
@@ -11343,9 +11368,24 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
             initial?.status !== "running" || initial.operatorCancelled ||
             !canReadBackgroundTrace(initial)
           ) return unavailable;
+          const team = parseTeamDeliveryTraceSource(initial.scope.sourceId);
+          const exactAdmission = teamControlRef &&
+            teamAdmissionArchive(options.baseDir, initial.scope);
+          const reviewedAdmission = exactAdmission &&
+            await exactAdmission.read();
+          if (
+            teamControlRef && (!reviewedAdmission || !team ||
+              team.sender !== backgroundOwner ||
+              team.teamId !== controlTeamId ||
+              team.delivery !== controlDelivery ||
+              initial.scope.sessionId !== controlMember)
+          ) return unavailable;
+          if (pausing && before.status === "paused") return await present();
+          if (before.status !== (pausing ? "running" : "paused")) {
+            return unavailable;
+          }
           let resumeDelegated: (() => Promise<void>) | undefined;
           if (delegated && typeof originalTask === "string") {
-            const team = parseTeamDeliveryTraceSource(initial.scope.sourceId);
             if (team) {
               const resume = context?.resumeTeamDelivery;
               if (
@@ -11386,11 +11426,18 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
           if (
             !await options.confirm(
               `${pausing ? "Pause" : "Resume"} this exact background run?\n${
-                JSON.stringify(ref)
+                JSON.stringify(publicRef)
               }`,
             )
           ) return "Error: The operator declined the run action.";
-          if (!await authorize(args)) return unavailable;
+          if (
+            (exactAdmission &&
+              !isDeepStrictEqual(
+                await exactAdmission.read(),
+                reviewedAdmission,
+              )) ||
+            !await authorize(args)
+          ) return unavailable;
           const current = journal.readRun(backgroundRole, ref.id, "INTERNAL");
           if (
             current?.status !== "running" || current.operatorCancelled ||
