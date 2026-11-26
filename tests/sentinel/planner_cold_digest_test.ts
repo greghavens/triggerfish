@@ -4039,6 +4039,106 @@ Deno.test("Scoped incident discovery and assignment require every retained membe
       revision: state.revision,
       runId,
     };
+    const digestRef = {
+      kind: "sentinel" as const,
+      id: ref.id,
+      revision: ref.revision,
+    };
+    const saveIncident = {
+      ...digestRef,
+      action: "save_digest",
+      nodeKind: "observation",
+    };
+    const expandIncident = {
+      ...digestRef,
+      action: "expand_digest",
+      limit: 1,
+    };
+    const allowedIncidentRef = `observation:assessment:${allowedIncident}`;
+    const mixedIncidentRef = `observation:assessment:${mixedIncident}`;
+    let allowedDigestId = "";
+    let mixedDigestId = "";
+    let mixedCursor = "";
+    await withArchivedPlannerRead(directory, async (read) => {
+      allowedDigestId = JSON.parse(
+        await read({ ...saveIncident, query: allowedIncident }),
+      ).digest.id;
+      const savedMixed = JSON.parse(
+        await read({ ...saveIncident, query: mixedIncident }),
+      ).digest.id;
+      const original = JSON.parse(
+        await read({ ...expandIncident, digestId: savedMixed }),
+      ).page.members[0];
+      assertEquals(original.id, mixedIncidentRef);
+      const store = openSentinelEvidenceDigests(directory);
+      try {
+        const mixed = store.record({
+          caseId,
+          runId,
+          evidenceRevision: state.revision,
+        }, {
+          members: [{
+            id: "asset:approved",
+            kind: "asset",
+            label: "Approved asset",
+          }, original],
+        });
+        assert(mixed);
+        mixedDigestId = mixed.id;
+      } finally {
+        store.close();
+      }
+      const page =
+        JSON.parse(await read({ ...expandIncident, digestId: mixedDigestId }))
+          .page;
+      assertEquals(page.members.map(({ id }: { id: string }) => id), [
+        "asset:approved",
+      ]);
+      assert(typeof page.nextCursor === "string");
+      mixedCursor = page.nextCursor;
+    });
+    const checkDigestScope = (allowApproved: boolean) =>
+      withArchivedPlannerRead(directory, async (read) => {
+        const allow = await read({
+          ...expandIncident,
+          digestId: allowedDigestId,
+        });
+        if (allowApproved) {
+          assertEquals(
+            JSON.parse(allow).page.members[0].id,
+            allowedIncidentRef,
+          );
+          assertStringIncludes(
+            await read({ ...saveIncident, query: mixedIncident }),
+            "unavailable",
+          );
+        } else {
+          assertStringIncludes(allow, "unavailable");
+        }
+        const catalog = JSON.parse(
+          await read({ ...digestRef, action: "list_digests", limit: 10 }),
+        ).page;
+        assertEquals(
+          catalog.digests.map(({ id }: { id: string }) => id).includes(
+            allowedDigestId,
+          ),
+          allowApproved,
+        );
+        assert(
+          !catalog.digests.some(({ id }: { id: string }) =>
+            id === mixedDigestId
+          ),
+        );
+        for (const cursor of [undefined, mixedCursor]) {
+          const denied = await read({
+            ...expandIncident,
+            digestId: mixedDigestId,
+            cursor,
+          });
+          assertStringIncludes(denied, "unavailable");
+          assert(!denied.includes(mixedIncidentRef));
+        }
+      });
     const narrow = (expectedVersion: number, allowedAssetIds: string[]) => ({
       ...ref,
       action: "narrow_constraints",
@@ -4066,6 +4166,7 @@ Deno.test("Scoped incident discovery and assignment require every retained membe
         "unavailable",
       );
     });
+    await checkDigestScope(true);
     const incidentRead = {
       kind: "sentinel",
       id: caseId,
@@ -4215,6 +4316,8 @@ Deno.test("Scoped incident discovery and assignment require every retained membe
         evidenceIds.includes(availableAlertId)
       ),
     );
+    await archiveAndRestoreDigestFixture(directory, path, digestRef, runId);
+    await checkDigestScope(false);
   } finally {
     held.resolve();
     planner.stop();

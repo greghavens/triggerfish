@@ -46,12 +46,25 @@ const nodeKinds = new Set([
   "observation",
 ]);
 
+function scopedAssessmentDigestMembers(path: string, revision: number) {
+  let visible: Set<string> | undefined;
+  return (id: string) => {
+    visible ??= new Set(
+      readSentinelProvenance(path, revision, null)?.graph.snapshot().nodes.map(
+        ({ id }) => id,
+      ),
+    );
+    return visible.has(id);
+  };
+}
+
 /** Adaptive evidence in a digest stays subject to current run constraints. */
-export function allowSentinelDigestObservations(
+function allowSentinelDigestObservations(
   path: string,
   runId: string,
   revision: number,
   members: readonly { readonly id: string }[],
+  assessmentMemberVisible: (id: string) => boolean,
 ): boolean {
   const assignments = members.flatMap(({ id }) => {
     const match =
@@ -77,6 +90,14 @@ export function allowSentinelDigestObservations(
   });
   const constraints = readSentinelOperatingConstraints(path, runId)
     ?.constraints;
+  if (
+    constraints &&
+    members.some(({ id }) =>
+      (id.startsWith("observation:assessment:") ||
+        id.startsWith("operator:incident-review:")) &&
+      !assessmentMemberVisible(id)
+    )
+  ) return false;
   const inventory = constraints && members.flatMap(({ id }) => {
     const match = /^(asset|control|evidence|finding):(.+)$/.exec(id);
     return match ? [{ kind: match[1], id: match[2] }] : [];
@@ -167,6 +188,7 @@ export function allowsRetainedSentinelDigests(
       digest.scope.runId === runId && digest.scope.evidenceRevision === revision
     ).map((entry) => [entry.digest.id, entry]),
   );
+  const assessmentMemberVisible = scopedAssessmentDigestMembers(path, revision);
   let store: ReturnType<typeof openSentinelEvidenceDigests> | undefined;
   try {
     const scope = { caseId, runId, evidenceRevision: revision };
@@ -174,7 +196,13 @@ export function allowsRetainedSentinelDigests(
       const entry = archived.get(id) ??
         (store ??= openSentinelEvidenceDigests(baseDir)).read(scope, id);
       return !!entry &&
-        allowSentinelDigestObservations(path, runId, revision, entry.members);
+        allowSentinelDigestObservations(
+          path,
+          runId,
+          revision,
+          entry.members,
+          assessmentMemberVisible,
+        );
     });
   } finally {
     store?.close();
@@ -231,9 +259,19 @@ export async function executeOperatorEvidenceDigest(
         digest.scope.runId === runId &&
         digest.scope.evidenceRevision === revision
       );
+      const assessmentMemberVisible = scopedAssessmentDigestMembers(
+        path,
+        revision,
+      );
+      const allow = (members: readonly SentinelEvidenceDigestMember[]) =>
+        allowSentinelDigestObservations(
+          path,
+          runId,
+          revision,
+          members,
+          assessmentMemberVisible,
+        );
       if (list) {
-        const allow = (members: readonly SentinelEvidenceDigestMember[]) =>
-          allowSentinelDigestObservations(path, runId, revision, members);
         const visibleArchive = archived.filter(({ members }) => allow(members));
         const archivedIndex = visibleArchive.findIndex(({ digest }) =>
           digest.id === cursor
@@ -265,7 +303,7 @@ export async function executeOperatorEvidenceDigest(
         store.read(scope, digestId as string);
       if (
         !entry ||
-        !allowSentinelDigestObservations(path, runId, revision, entry.members)
+        !allow(entry.members)
       ) {
         return unavailable;
       }
@@ -274,7 +312,7 @@ export async function executeOperatorEvidenceDigest(
     }
     const select = () =>
       normalizeSentinelEvidenceDigestMembers(
-        readSentinelProvenance(path, revision)?.graph
+        readSentinelProvenance(path, revision, null)?.graph
           .searchNodes(query, nodeKind as string | undefined)
           .map((node) => ({
             id: node.id,
