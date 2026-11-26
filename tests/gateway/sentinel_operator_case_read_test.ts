@@ -1104,6 +1104,24 @@ Deno.test("Authenticated Sentinel chat reads exact approved cross-case graph fin
       "asset-a",
     ]);
     assert(typedPage.nextCursor);
+    await turn("Read an equivalent text query using the existing cursor", {
+      ...typedSearch,
+      assetQuery: {
+        dsl:
+          'service_name==HTTPS AND port=443 AND tech=PROXY AND url=/health AND title=="Health status" AND ip=192.0.2. AND domain=.example.test AND (status_code=200 OR status>=500)',
+      },
+      cursor: typedPage.nextCursor,
+    });
+    assertEquals(
+      JSON.parse(result).page.assets.map(({ id }: { id: string }) => id),
+      ["asset-b"],
+    );
+    await turn("Reject an unsupported field in a text query", {
+      ...typedSearch,
+      assetQuery: { dsl: "task_id=13 OR port=443" },
+    });
+    assert(result.startsWith("Error:"));
+
     await turn("Read the second typed asset page", {
       ...typedSearch,
       cursor: typedPage.nextCursor,

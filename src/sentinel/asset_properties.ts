@@ -127,6 +127,97 @@ export function parseSentinelAssetProperties(
   return Object.freeze(out);
 }
 
+const dslFields = new Map<string, TextField | NumericField>([
+  ...textFields.map((field) => [field.toLowerCase(), field] as const),
+  ["service_name", "service"],
+  ["page_title", "title"],
+  ["icp", "registrationId"],
+  ["tech", "technology"],
+  ["technologies", "technology"],
+  ["port", "port"],
+  ["status", "status"],
+  ["status_code", "status"],
+]);
+
+/** Compile bounded inventory expressions into the existing typed selector. */
+function parseAssetSearchText(text: string): unknown {
+  if (!text.trim() || text.length > 4096 || /[\p{Cc}\p{Cf}]/u.test(text)) {
+    return;
+  }
+  const parts = text.match(/"[^"]*"|!=|==|>=|<=|[()=<>]|[^\s"()=<>!]+|./gu);
+  if (!parts || parts.length > 128) return;
+  const tokens = parts.filter((part) => part.trim());
+  let cursor = 0;
+  const peek = () => tokens[cursor];
+
+  function group(operator: "AND" | "OR", next: () => unknown): unknown {
+    const first = next();
+    if (!first) return;
+    const children = [first];
+    while (peek()?.toUpperCase() === operator) {
+      cursor++;
+      const child = next();
+      if (!child) return;
+      children.push(child);
+    }
+    return children.length === 1
+      ? first
+      : { [operator.toLowerCase()]: children };
+  }
+
+  function expression(depth: number): unknown {
+    if (depth > 5) return;
+    return group("OR", () => group("AND", () => atom(depth)));
+  }
+
+  function atom(depth: number): unknown {
+    const name = tokens[cursor++];
+    if (!name) return;
+    if (name === "(") {
+      const nested = expression(depth + 1);
+      return tokens[cursor++] === ")" ? nested : undefined;
+    }
+    if (/^(?:AND|OR|[()=<>!"]|!=|==|>=|<=)$/i.test(name)) return;
+    const op = peek();
+    if (op && /^(?:!=|==|>=|<=|[=<>])$/.test(op)) {
+      cursor++;
+      const field = dslFields.get(name.toLowerCase());
+      const raw = tokens[cursor++];
+      if (!field || !raw || /^(?:AND|OR|[()=<>!"]|!=|==|>=|<=)$/i.test(raw)) {
+        return;
+      }
+      const value = raw.startsWith('"') ? raw.slice(1, -1) : raw;
+      if (field === "port" || field === "status") {
+        if (!/^\d+$/.test(value)) return;
+        const numericOps = new Map([
+          ["=", "eq"],
+          ["==", "eq"],
+          ["!=", "ne"],
+          [">", "gt"],
+          [">=", "gte"],
+          ["<", "lt"],
+          ["<=", "lte"],
+        ]);
+        return { field, op: numericOps.get(op), value: Number(value) };
+      }
+      if (op === "=" || op === "==") {
+        return { field, op: op === "=" ? "contains" : "eq", value };
+      }
+      if (op === "!=") {
+        if (field === "technology") return { field, op: "ne", value };
+        return { not: { field, op: "contains", value } };
+      }
+      return;
+    }
+    const value = name.startsWith('"') ? name.slice(1, -1) : name;
+    return {
+      or: textFields.map((field) => ({ field, op: "contains", value })),
+    };
+  }
+  const result = expression(0);
+  return cursor === tokens.length ? result : undefined;
+}
+
 /** Parse model-provided JSON without interpreting any part as code or SQL. */
 export function parseSentinelAssetQuery(
   input: unknown,
@@ -175,6 +266,11 @@ export function parseSentinelAssetQuery(
       ? undefined
       : { field: textField, op, value: text };
   }
+  const inputObject = object(input);
+  if (
+    inputObject && Object.keys(inputObject).length === 1 &&
+    typeof inputObject.dsl === "string"
+  ) return parse(parseAssetSearchText(inputObject.dsl), 0);
   return parse(input, 0);
 }
 
