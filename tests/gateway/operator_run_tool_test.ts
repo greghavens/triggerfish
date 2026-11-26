@@ -3595,6 +3595,15 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
         "unavailable",
       );
       assert(nextPeer.revision > peer.revision);
+      const discoverRechecks = {
+        ...receiptAction,
+        action: "finding_recheck_candidates",
+        revision: nextPeer.revision,
+      };
+      assertStringIncludes(
+        (await turn(discoverRechecks)).result,
+        "unavailable",
+      );
       const rechecks = openSentinelWorkerFindingStore(peerPath);
       try {
         const recheck = rechecks.recordRecheck({
@@ -3657,6 +3666,10 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
           })).result,
         );
         assertEquals(membershipWithTraffic.version, 2);
+        assertEquals(
+          JSON.parse((await turn(discoverRechecks)).result).findingId,
+          original.id,
+        );
         assertEquals(
           JSON.parse((await turn(readRecheck)).result).record,
           recheck,

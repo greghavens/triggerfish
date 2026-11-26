@@ -4580,6 +4580,16 @@ ${JSON.stringify({ run: ref, runId: exactRunId, turn: selected })}`,
         ) {
           return unavailable;
         }
+        const revision = ref.revision;
+        const scope = readSentinelFindingReceiptScope(path, revision);
+        if (scope?.runId !== finding.runId || !scope.allows(finding.targetId)) {
+          return unavailable;
+        }
+        const policyDigest = readSentinelOperatingConstraints(
+          path,
+          finding.runId,
+        )
+          ?.digest;
         const assetEvidence = new Set(snapshot.edges.flatMap(
           ({ relation, from, to }) =>
             relation === "observed_on" && to === finding.targetId ? [from] : [],
@@ -4590,13 +4600,16 @@ ${JSON.stringify({ run: ref, runId: exactRunId, turn: selected })}`,
           node.controlVerification?.observedAt &&
           node.controlVerification.observedAt > finding.observedAt &&
           !checked.has(node.id) &&
-          assetEvidence.has(node.id)
+          assetEvidence.has(node.id) && scope.allows(node.id)
         );
         const isCurrent = () => {
           const latest = readSentinelAssessment(path);
           return latest?.active === true &&
             latest.revision === state.revision &&
-            latest.plan.runId === state.plan.runId;
+            latest.plan.runId === state.plan.runId &&
+            context.authorizeSentinelCaseRead?.(ref.id, revision) !== false &&
+            readSentinelOperatingConstraints(path, finding.runId)?.digest ===
+              policyDigest;
         };
         const candidates = [];
         const end = Math.min(nodes.length, offset + 8);
@@ -4630,7 +4643,7 @@ ${JSON.stringify({ run: ref, runId: exactRunId, turn: selected })}`,
         }
         const current = await controller.inspect(ref);
         if (
-          readSentinelAssessment(path)?.revision !== state.revision ||
+          !isCurrent() ||
           current?.details?.runId !== state.plan.runId ||
           current.details.adaptiveRevision !== adaptiveRevision
         ) {
