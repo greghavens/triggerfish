@@ -548,31 +548,47 @@ async function verifyIntermediateWorkflowGateway(checkpointOnly: boolean) {
                     });
                   }
                   return Promise.resolve({
-                    content: JSON.stringify([{
-                      kind: "trace",
-                      depth: 1,
-                      nodeId: "delivery",
-                      committedObservationId: "workflow-observation:" +
-                        "0".repeat(64),
-                      requiredWorkflowOutcome: "failure",
-                    }, {
-                      kind: "trace",
-                      depth: 1,
-                      nodeId: "delivery",
-                      committedObservationId: id,
-                      requiredWorkflowOutcome: expectedGateOutcome,
-                    }, {
-                      kind: "trace",
-                      depth: 1,
-                      nodeId: "delivery",
-                      committedObservationId: id,
-                      dependsOn: [1],
-                    }, {
-                      kind: "impact",
-                      depth: 1,
-                      nodeId: "delivery",
-                      committedObservationId: id,
-                    }]),
+                    content: JSON.stringify({
+                      assignments: [{
+                        kind: "trace",
+                        depth: 1,
+                        nodeId: "delivery",
+                        committedObservationId: "workflow-observation:" +
+                          "0".repeat(64),
+                        requiredWorkflowOutcome: "failure",
+                      }, {
+                        kind: "trace",
+                        depth: 1,
+                        nodeId: "delivery",
+                        committedObservationId: id,
+                        requiredWorkflowOutcome: expectedGateOutcome,
+                      }, {
+                        kind: "trace",
+                        depth: 1,
+                        nodeId: "delivery",
+                        committedObservationId: id,
+                        dependsOn: [1],
+                      }, {
+                        kind: "impact",
+                        depth: 1,
+                        nodeId: "delivery",
+                        committedObservationId: id,
+                      }],
+                      prioritize: expectedGateOutcome === "failure"
+                        ? input.currentInvestigations.filter((
+                          entry: {
+                            kind: string;
+                            nodeId: string;
+                            status: string;
+                          },
+                        ) =>
+                          entry.kind === "impact" &&
+                          entry.nodeId === "delivery" &&
+                          entry.status === "queued"
+                        )
+                          .map((entry: { id: string }) => entry.id)
+                        : [],
+                    }),
                     usage,
                     toolCalls: [],
                   });
@@ -1124,6 +1140,7 @@ async function verifyIntermediateWorkflowGateway(checkpointOnly: boolean) {
     )!;
     assertEquals(updatedImpact.status, "queued");
     assertEquals(updatedImpact.attempts, 0);
+    assertEquals(updatedImpact.plannerPriority, 1);
     assertEquals(updatedImpact.prerequisites, heldImpact.prerequisites);
     assertEquals(updatedImpact.plannerRound?.committedObservation, {
       observationId: observation.id,
