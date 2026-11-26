@@ -143,7 +143,12 @@ function reviewedPurgeBatch(
   receipt: RunArchivePurgeReceipt,
 ): Record<string, unknown> | undefined {
   const batch = journal.readBatch(batchRequestId);
-  if (!batch?.eligible.includes(target.archiveId)) return;
+  if (
+    !batch?.eligible.includes(target.archiveId) ||
+    (batch.purgeDigests &&
+      batch.purgeDigests.find(({ archiveId }) => archiveId === target.archiveId)
+          ?.archiveDigest !== receipt.archiveDigest)
+  ) return;
   const group = JSON.parse(batch.binding);
   if (
     group.action !== "purge_archives" || group.requestId !== batchRequestId ||
@@ -169,6 +174,19 @@ export async function recoverSentinelArchivePurges(
   ) return;
   const journal = openRunArchiveActions(join(directory, "actions.db"));
   try {
+    for (const binding of journal.pendingReviewedPurgeBatchBindings()) {
+      try {
+        await executeOperatorArchivePurge(
+          baseDir,
+          JSON.parse(binding),
+          authorize,
+          () => Promise.resolve(false),
+          true,
+        );
+      } catch {
+        // A different verified group can still recover.
+      }
+    }
     for await (const entry of Deno.readDir(directory)) {
       if (!entry.isDirectory) continue;
       const staged = entry.name.startsWith(".purge-");
@@ -257,11 +275,12 @@ export async function executeOperatorArchivePurge(
   args: Record<string, unknown>,
   authorize: (args: Record<string, unknown>) => Promise<boolean>,
   confirm: (message: string) => Promise<boolean>,
+  recoveryOnly = false,
 ) {
   const { action, requestId: supplied, runTargets, ...rest } = args;
   const batch = action === "purge_archives";
   if (
-    (action !== "purge_archive" && !batch) ||
+    (action !== "purge_archive" && !batch) || (recoveryOnly && !batch) ||
     typeof supplied !== "string" || !uuid.test(supplied)
   ) return;
   const requestId = supplied.toLowerCase();
@@ -308,7 +327,7 @@ export async function executeOperatorArchivePurge(
             source.identity.runId === target.runId &&
             source.identity.revision === target.revision &&
             !!source.archiveDigest
-          ? source
+          ? { ...source, archiveDigest: source.archiveDigest }
           : undefined;
       };
       const item = (target: Target) => ({
@@ -323,7 +342,10 @@ export async function executeOperatorArchivePurge(
         await authorize(group) && (!batch || await authorize(item(target)));
 
       let reviewed = batch ? journal.readBatch(requestId) : undefined;
-      if (reviewed && reviewed.binding !== binding) return;
+      if (
+        (reviewed && reviewed.binding !== binding) ||
+        (recoveryOnly && !reviewed?.purgeDigests)
+      ) return;
       if (batch && !reviewed) {
         const eligible = [];
         const dependencies = new Map<string, readonly ArchiveDependency[]>();
@@ -356,8 +378,12 @@ export async function executeOperatorArchivePurge(
         ) return { declined: true as const };
         if (!await authorize(group)) return;
         const ids = ordered.map(({ archiveId }) => archiveId);
-        if (!journal.admitBatch(requestId, binding, ids)) return;
-        reviewed = { binding, eligible: ids };
+        const purgeDigests = ordered.map(({ archiveId, archiveDigest }) => ({
+          archiveId,
+          archiveDigest,
+        }));
+        if (!journal.admitBatch(requestId, binding, ids, purgeDigests)) return;
+        reviewed = { binding, eligible: ids, purgeDigests };
       }
 
       const outcomes: { target: Target; receipt?: RunArchivePurgeReceipt }[] =
@@ -386,7 +412,10 @@ export async function executeOperatorArchivePurge(
         const source = exactSource(target);
         const receipt = journal.readPurge(archiveId);
         if (
-          !source || (receipt && (receipt.requestId !== call.requestId ||
+          !source || (reviewed?.purgeDigests &&
+            reviewed.purgeDigests.find((entry) => entry.archiveId === archiveId)
+                ?.archiveDigest !== source.archiveDigest) ||
+          (receipt && (receipt.requestId !== call.requestId ||
             receipt.archiveDigest !== source.archiveDigest)) ||
           !await authorized(target)
         ) continue;

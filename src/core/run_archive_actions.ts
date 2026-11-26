@@ -233,6 +233,32 @@ function addPurgeAuthorization(db: DatabaseSync) {
   `);
 }
 
+function addPurgeBatchDigests(db: DatabaseSync) {
+  db.exec(`
+    ALTER TABLE run_archive_batches ADD COLUMN purgeDigests TEXT;
+    PRAGMA user_version = 5;
+  `);
+}
+
+interface ReviewedPurgeDigest {
+  readonly archiveId: string;
+  readonly archiveDigest: string;
+}
+
+function exactPurgeDigests(
+  eligible: readonly string[],
+  entries: readonly ReviewedPurgeDigest[],
+): boolean {
+  return entries.length > 0 && entries.length === eligible.length &&
+    entries.length <= 8 && new Set(eligible).size === eligible.length &&
+    entries.every((entry, index) =>
+      entry && typeof entry === "object" &&
+      entry.archiveId === eligible[index] && uuid.test(entry.archiveId) &&
+      typeof entry.archiveDigest === "string" &&
+      digestPattern.test(entry.archiveDigest)
+    );
+}
+
 export function openRunArchiveActions(path: string, now = Date.now) {
   const db = privateDatabase(path);
   try {
@@ -240,14 +266,15 @@ export function openRunArchiveActions(path: string, now = Date.now) {
     transaction(db, () => {
       const id = db.prepare("PRAGMA application_id").get()?.application_id;
       const version = db.prepare("PRAGMA user_version").get()?.user_version;
-      if (id === applicationId && version === 4) return;
+      if (id === applicationId && version === 5) return;
       if (
         id === applicationId &&
-        (version === 1 || version === 2 || version === 3)
+        (version === 1 || version === 2 || version === 3 || version === 4)
       ) {
         if (version === 1) createArchiveBatches(db);
         if (version < 3) createArchivePurges(db);
-        addPurgeAuthorization(db);
+        if (version < 4) addPurgeAuthorization(db);
+        addPurgeBatchDigests(db);
         return;
       }
       if (
@@ -282,6 +309,7 @@ export function openRunArchiveActions(path: string, now = Date.now) {
       createArchiveBatches(db);
       createArchivePurges(db);
       addPurgeAuthorization(db);
+      addPurgeBatchDigests(db);
     });
   } catch (error) {
     db.close();
@@ -385,26 +413,72 @@ export function openRunArchiveActions(path: string, now = Date.now) {
         : undefined;
     },
 
-    readBatch(requestId: string) {
+    readBatch(requestId: string): {
+      readonly binding: string;
+      readonly eligible: string[];
+      readonly purgeDigests?: readonly ReviewedPurgeDigest[];
+    } | undefined {
       if (!uuid.test(requestId)) return undefined;
       const row = db.prepare(
-        "SELECT binding, eligible FROM run_archive_batches WHERE requestId = ?",
+        "SELECT binding, eligible, purgeDigests FROM run_archive_batches WHERE requestId = ?",
       ).get(requestId);
-      return row && {
+      if (!row) return;
+      const eligible = JSON.parse(String(row.eligible)) as string[];
+      const purgeDigests = row.purgeDigests === null
+        ? undefined
+        : JSON.parse(String(row.purgeDigests)) as ReviewedPurgeDigest[];
+      if (
+        !Array.isArray(eligible) || (purgeDigests !== undefined &&
+          (!Array.isArray(purgeDigests) ||
+            !exactPurgeDigests(eligible, purgeDigests)))
+      ) {
+        throw new Error("Invalid retained batch purge approval.");
+      }
+      return {
         binding: String(row.binding),
-        eligible: JSON.parse(String(row.eligible)) as string[],
+        eligible,
+        ...(purgeDigests && { purgeDigests }),
       };
+    },
+
+    pendingReviewedPurgeBatchBindings() {
+      return db.prepare(`
+        SELECT binding FROM run_archive_batches AS batch
+        WHERE purgeDigests IS NOT NULL AND EXISTS (
+          SELECT 1
+          FROM json_each(CASE WHEN json_valid(batch.purgeDigests) THEN batch.purgeDigests ELSE '[]' END) AS member
+          WHERE member.type = 'object' AND NOT EXISTS (
+            SELECT 1 FROM run_archive_purges AS purge
+            WHERE purge.archiveId = json_extract(
+              CASE WHEN member.type = 'object' THEN member.value ELSE '{}' END, '$.archiveId'
+            )
+              AND purge.status = 'succeeded'
+          )
+        ) ORDER BY batch.createdAt, batch.rowid
+      `).all().map(({ binding }) => String(binding));
     },
 
     admitBatch(
       requestId: string,
       binding: string,
       eligible: readonly string[],
+      purgeDigests?: readonly ReviewedPurgeDigest[],
     ) {
-      if (!uuid.test(requestId)) return false;
-      return db.prepare(
-        "INSERT OR IGNORE INTO run_archive_batches VALUES (?, ?, ?, ?)",
-      ).run(requestId, binding, JSON.stringify(eligible), now()).changes === 1;
+      if (
+        !uuid.test(requestId) ||
+        (purgeDigests && !exactPurgeDigests(eligible, purgeDigests))
+      ) return false;
+      return db.prepare(`
+        INSERT OR IGNORE INTO run_archive_batches
+          (requestId, binding, eligible, createdAt, purgeDigests)
+        VALUES (?, ?, ?, ?, ?)
+      `).run(
+        requestId,
+        binding,
+        JSON.stringify(eligible),
+        now(),
+        purgeDigests ? JSON.stringify(purgeDigests) : null,
+      ).changes === 1;
     },
 
     admit(raw: RunArchiveActionInput): RunArchiveActionAdmission | undefined {

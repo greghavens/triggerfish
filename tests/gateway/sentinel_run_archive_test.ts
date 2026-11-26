@@ -6997,7 +6997,7 @@ Deno.test("Owner gateway reviews exact single and batch archive purge and resume
     const batchBeforeCrash = {
       action: "purge_archives",
       requestId: crypto.randomUUID(),
-      runTargets: [batchLive, batchUnadmitted],
+      runTargets: [batchLive, batchUnadmitted, current],
     };
     const single = {
       action: "purge_archive",
@@ -7134,15 +7134,31 @@ Deno.test("Owner gateway reviews exact single and batch archive purge and resume
           kind: "batch",
           batchRequestId: batchBeforeCrash.requestId,
         });
-        assertEquals(pending.readBatch(batchBeforeCrash.requestId)?.eligible, [
+        const retainedBatch = pending.readBatch(batchBeforeCrash.requestId);
+        assertEquals(retainedBatch?.eligible, [
           batchLive.archiveId,
           batchUnadmitted.archiveId,
         ]);
+        assertEquals(
+          retainedBatch?.purgeDigests,
+          [batchLive, batchUnadmitted].map(({ archiveId }) => {
+            const archiveDigest = pending.readArchived(archiveId, true)
+              ?.archiveDigest;
+            assert(archiveDigest);
+            return { archiveId, archiveDigest };
+          }),
+        );
         assertEquals(pending.readPurge(batchUnadmitted.archiveId), undefined);
       } finally {
         pending.close();
       }
     });
+    // This selected archive was ineligible when the group was approved.
+    // Making it non-current afterwards must not add it to the approval.
+    const nowNonCurrent = startSentinelAssessment(
+      resolveSentinelCasePath(baseDir, current.id),
+    );
+    assert(nowNonCurrent.plan.runId !== current.runId);
     const resume = {
       action: "purge_archive",
       ...recovering,
@@ -7198,6 +7214,11 @@ Deno.test("Owner gateway reviews exact single and batch archive purge and resume
             denied.readPurge(batchLive.archiveId)?.status,
             "pending",
           );
+          assertEquals(denied.readPurge(batchUnadmitted.archiveId), undefined);
+          assert(
+            (await Deno.lstat(join(directory, batchUnadmitted.archiveId)))
+              .isDirectory,
+          );
           assert(
             (await Deno.lstat(join(directory, batchLive.archiveId)))
               .isDirectory,
@@ -7243,6 +7264,11 @@ Deno.test("Owner gateway reviews exact single and batch archive purge and resume
           const batchMember = reopened.readPurge(batchLive.archiveId);
           assertEquals(batchMember?.status, "pending");
           batchMemberRequest = batchMember?.requestId;
+          assertEquals(
+            reopened.readPurge(batchUnadmitted.archiveId)?.status,
+            "succeeded",
+          );
+          assertEquals(reopened.readPurge(current.archiveId), undefined);
           assert(
             (await Deno.lstat(join(directory, batchLive.archiveId)))
               .isDirectory,
@@ -7285,14 +7311,21 @@ Deno.test("Owner gateway reviews exact single and batch archive purge and resume
           reopened.readPurge(batchLive.archiveId)?.status,
           "succeeded",
         );
-        assertEquals(reopened.readPurge(batchUnadmitted.archiveId), undefined);
+        assertEquals(
+          reopened.readPurge(batchUnadmitted.archiveId)?.status,
+          "succeeded",
+        );
+        assertEquals(reopened.readPurge(current.archiveId), undefined);
         await assertRejects(
           () => Deno.lstat(join(directory, batchLive.archiveId)),
           Deno.errors.NotFound,
         );
+        await assertRejects(
+          () => Deno.lstat(join(directory, batchUnadmitted.archiveId)),
+          Deno.errors.NotFound,
+        );
         assert(
-          (await Deno.lstat(join(directory, batchUnadmitted.archiveId)))
-            .isDirectory,
+          (await Deno.lstat(join(directory, current.archiveId))).isDirectory,
         );
       } finally {
         reopened.close();
@@ -7301,7 +7334,7 @@ Deno.test("Owner gateway reviews exact single and batch archive purge and resume
       const result = JSON.parse(await turn({ action: "archive_catalog" }));
       assertEquals(
         result.archives.map((item: { archiveId: string }) => item.archiveId),
-        [lateArchiveId, batchUnadmitted.archiveId, current.archiveId],
+        [lateArchiveId, current.archiveId],
       );
     });
   } finally {
