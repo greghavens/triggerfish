@@ -13,6 +13,7 @@ import { createGatewayServer } from "../../src/gateway/server/server.ts";
 import {
   advanceAdaptiveSentinel,
   createSentinelModelPlanner,
+  createSentinelWorkerPool,
   readAdaptiveSentinel,
 } from "../../src/gateway/sentinel_adaptive_runtime.ts";
 import { readSentinelSharedAssetDiscoveries } from "../../src/gateway/sentinel_asset_discoveries.ts";
@@ -789,6 +790,224 @@ Deno.test("Owner socket steers and stops one exact leased worker with a shared T
     releaseStoppedDecision.resolve();
     planner.stop();
     await until(() => !planner.hasInFlightWork());
+    await Deno.remove(baseDir, { recursive: true });
+  }
+});
+
+Deno.test("Owner gateway pauses and resumes one graph worker from its committed checkpoint", async () => {
+  const baseDir = await Deno.makeTempDir();
+  const path = resolveSentinelCasePath(baseDir);
+  const release = Promise.withResolvers<void>();
+  const releasePeer = Promise.withResolvers<void>();
+  let peerStarted = false;
+  const usage = { inputTokens: 1, outputTokens: 1 };
+  const sourceCalls = new Map<string, number>();
+  let heldStep = false;
+  let reused = false;
+  let peerCompleted = false;
+  const provider = (id: string) => {
+    const registry = createProviderRegistry();
+    const name = `hold-fixture-${id}`;
+    registry.register({
+      name,
+      supportsStreaming: false,
+      async complete(messages) {
+        const saved = messages.findLast(({ role }) => role === "tool");
+        if (!saved) {
+          sourceCalls.set(id, (sourceCalls.get(id) ?? 0) + 1);
+          return {
+            content: "",
+            usage,
+            toolCalls: [{
+              id: `read-${id}`,
+              type: "function",
+              function: { name: "sentinel_assigned_target", arguments: "{}" },
+            }],
+          };
+        }
+        assert(String(saved.content).includes(id));
+        if (id === "held-graph") {
+          if (!heldStep) {
+            heldStep = true;
+            await release.promise;
+          } else reused = true;
+        } else {
+          peerStarted = true;
+          await releasePeer.promise;
+          peerCompleted = true;
+        }
+        return {
+          content: JSON.stringify({
+            summary: "Reviewed the pinned local target.",
+          }),
+          usage,
+          toolCalls: [],
+        };
+      },
+    });
+    registry.setDefault(name);
+    return registry;
+  };
+  const heldProvider = provider("held-graph");
+  const peerProvider = provider("peer-graph");
+  const workerPool = createSentinelWorkerPool(2);
+  const hookRunner: HookRunner = {
+    evaluateHook() {
+      return Promise.resolve({
+        allowed: true,
+        action: "ALLOW",
+        ruleId: null,
+        duration: 0,
+      });
+    },
+  };
+  const adaptive = () => {
+    const state = readSentinelAssessment(path);
+    return state && readAdaptiveSentinel(path, state);
+  };
+  const planners: ReturnType<typeof createSentinelModelPlanner>[] = [];
+  const startPlanner = () => {
+    const planner = createSentinelModelPlanner(path, (state, taskId, token) => {
+      if (!taskId || !token) {
+        return {
+          execute(_content, send) {
+            send({
+              type: "response",
+              text: JSON.stringify([
+                { kind: "impact", nodeId: "held-graph" },
+                { kind: "impact", nodeId: "peer-graph" },
+              ]),
+              taint: "INTERNAL",
+            });
+            return Promise.resolve();
+          },
+          clear() {},
+        };
+      }
+      const target = adaptive()?.tasks.find(({ id }) => id === taskId)?.nodeId;
+      const registry = target === "held-graph" ? heldProvider : peerProvider;
+      return createSentinelSubagent({
+        snapshotPath: path,
+        assessmentRevision: state.revision,
+        assignedTaskId: taskId,
+        assignedTaskLeaseToken: token,
+        hookRunner,
+        providerRegistry: registry,
+        allowModelAccess: true,
+      });
+    }, () => workerPool(path));
+    planners.push(planner);
+    return planner;
+  };
+  try {
+    await Deno.mkdir(dirname(path), { recursive: true });
+    await Deno.writeTextFile(
+      path,
+      JSON.stringify({
+        version: 1,
+        nodes: ["held-graph", "peer-graph"].map((id) => ({
+          kind: "asset",
+          id,
+          label: id,
+        })),
+        edges: [],
+      }),
+    );
+    const initial = startSentinelAssessment(path, {
+      goal: "Review two graph assets.",
+    });
+    advanceAdaptiveSentinel(path, initial);
+    const first = startPlanner();
+    first.advance(initial);
+    await until(() =>
+      !!adaptive()?.tasks.find(({ nodeId, status }) =>
+        nodeId === "held-graph" && status === "completed"
+      )
+    );
+    first.advance(initial);
+    await until(() => heldStep);
+    const status = adaptive()!;
+    const held = status.tasks.find(({ nodeId }) => nodeId === "held-graph")!;
+    const pause = {
+      action: "pause_assignment",
+      kind: "sentinel",
+      id: "main",
+      revision: initial.revision,
+      runId: initial.plan.runId,
+      adaptiveRevision: status.revision,
+      taskId: held.id,
+      attempt: 1,
+      requestId: crypto.randomUUID(),
+    };
+    let pauseReceipt: unknown;
+    await withOwnerControl(baseDir, async (request, approvals) => {
+      assert((await request({ ...pause, attempt: 2 })).includes("unavailable"));
+      assertEquals(approvals.length, 0);
+      pauseReceipt = JSON.parse(await request(pause)).receipt;
+      assertEquals(approvals.length, 1);
+      assertEquals(
+        adaptive()?.modelReviewStates.find(({ taskId }) => taskId === held.id)
+          ?.status,
+        "paused",
+      );
+      first.advance(initial);
+      await until(() => peerStarted);
+      releasePeer.resolve();
+      await until(() => peerCompleted);
+      assertEquals(sourceCalls.get("held-graph"), 1);
+    });
+    first.stop();
+    release.resolve();
+    await until(() => !first.hasInFlightWork());
+    const resumed = startPlanner();
+    const resume = {
+      ...pause,
+      action: "resume_assignment",
+      requestId: crypto.randomUUID(),
+    };
+    let revoked = false;
+    await withOwnerControl(
+      baseDir,
+      async (request, approvals) => {
+        assert((await request(resume)).includes("unavailable"));
+        assertEquals(approvals.length, 1);
+        assertEquals(
+          adaptive()?.modelReviewStates.find(({ taskId }) => taskId === held.id)
+            ?.status,
+          "paused",
+        );
+      },
+      undefined,
+      () => !revoked,
+      {
+        onConfirm: () => {
+          revoked = true;
+        },
+      },
+    );
+    await withOwnerControl(baseDir, async (request, approvals) => {
+      assertEquals(JSON.parse(await request(pause)).receipt, pauseReceipt);
+      assertEquals(approvals.length, 0);
+      const receipt = JSON.parse(await request(resume)).receipt;
+      assertEquals(receipt.action, "resume_assignment");
+      assertEquals(JSON.parse(await request(resume)).receipt, receipt);
+      assertEquals(approvals.length, 1);
+    });
+    resumed.advance(initial);
+    await until(() => reused);
+    assertEquals(sourceCalls.get("held-graph"), 1);
+    await until(() =>
+      adaptive()?.modelReviewStates.some(({ taskId, status }) =>
+        taskId === held.id && status === "completed"
+      ) === true
+    );
+  } finally {
+    release.resolve();
+    releasePeer.resolve();
+    for (const planner of planners) planner.stop();
+    for (const planner of planners) {
+      await until(() => !planner.hasInFlightWork());
+    }
     await Deno.remove(baseDir, { recursive: true });
   }
 });

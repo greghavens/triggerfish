@@ -2542,6 +2542,42 @@ export function reviewSentinelStoppedGraphRetry(
   return result;
 }
 
+function workerHoldPolicyDigest(snapshotPath: string, state: State) {
+  return createHash("sha256").update(JSON.stringify(
+    operatingConstraints(snapshotPath, state) ?? null,
+  )).digest("hex");
+}
+
+/** Fence an individual graph-only worker without changing the enclosing assessment. */
+export function reviewSentinelWorkerHold(
+  snapshotPath: string,
+  runId: string,
+  adaptive: string,
+  scope: import("../sentinel/adaptive_store.ts").SentinelWorkerHold,
+  expected?: string,
+) {
+  return withSentinelAssessmentWriteLock(snapshotPath, (state) => {
+    if (
+      !state?.active || state.paused ||
+      state.revision !== scope.evidenceRevision ||
+      state.plan.runId !== runId
+    ) return;
+    const store = openSentinelAdaptiveStore(storePath(snapshotPath));
+    try {
+      if (revisionForStore(state, store) !== adaptive) return;
+      return store.reviewModelHold(
+        adaptive,
+        scope,
+        workerHoldPolicyDigest(snapshotPath, state),
+        decisionAllowsClaim(snapshotPath, state.revision),
+        expected,
+      );
+    } finally {
+      store.close();
+    }
+  });
+}
+
 export function requestSentinelWorkerControl(
   snapshotPath: string,
   revision: string,
@@ -5330,6 +5366,15 @@ export function createSentinelModelPlanner(
                 args,
               ),
           );
+          const resumedPolicy = checkpointStore.resumedModelHoldPolicy(
+            revision,
+            task.id,
+          );
+          if (
+            resumedPolicy !== undefined &&
+            (!resume ||
+              resumedPolicy !== workerHoldPolicyDigest(snapshotPath, latest))
+          ) return;
           await worker.execute(
             prompt,
             (event) => {

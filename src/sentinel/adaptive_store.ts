@@ -1004,6 +1004,14 @@ export interface AdaptiveFactSatisfaction {
   readonly checkedAt?: string;
 }
 
+export interface SentinelWorkerHold {
+  readonly action: "pause_assignment" | "resume_assignment";
+  readonly requestId: string;
+  readonly taskId: string;
+  readonly evidenceRevision: number;
+  readonly attempt: number;
+}
+
 export type SentinelWorkerControlReceipt = AssignmentControlReceipt;
 
 /** A committed intermediate workflow fact, independent of review completion. */
@@ -4298,6 +4306,13 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
       "model_mutation_pending";
   }
 
+  const lastWorkerHold = db.prepare(`
+    SELECT event, note, at FROM adaptive_events
+    WHERE revision = ? AND taskId = ?
+      AND event IN ('model_review_paused', 'model_review_resumed')
+    ORDER BY rowid DESC LIMIT 1
+  `);
+
   const nextModelReview = db.prepare(`
     SELECT task.*, COALESCE(review.attempts, 0) AS reviewAttempts
     FROM adaptive_tasks AS task
@@ -4324,6 +4339,10 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
 
       AND NOT EXISTS (SELECT 1 FROM adaptive_worker_controls AS control
         WHERE control.revision = task.revision AND control.taskId = task.id AND control.action = 'stop')
+      AND COALESCE((SELECT hold.event FROM adaptive_events AS hold
+        WHERE hold.revision = task.revision AND hold.taskId = task.id
+          AND hold.event IN ('model_review_paused', 'model_review_resumed')
+        ORDER BY hold.rowid DESC LIMIT 1), '') != 'model_review_paused'
       AND NOT EXISTS (SELECT 1 FROM adaptive_events AS activity
         WHERE activity.revision = task.revision AND activity.taskId = task.id
           AND activity.event = 'model_review_completed')
@@ -6636,6 +6655,131 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
           );
         }
         return result?.receipt;
+      });
+    },
+
+    resumedModelHoldPolicy(revision: string, id: string): string | undefined {
+      const hold = lastWorkerHold.get(revision, id);
+      return hold?.event === "model_review_resumed"
+        ? JSON.parse(String(hold.note)).policyDigest
+        : undefined;
+    },
+
+    reviewModelHold(
+      revision: string,
+      scope: SentinelWorkerHold,
+      policyDigest: string,
+      eligible: (task: AdaptiveTask) => boolean,
+      expected?: string,
+    ) {
+      return transaction(db, () => {
+        const { action, requestId, taskId: id, evidenceRevision, attempt } =
+          scope;
+        const kind = action === "pause_assignment"
+          ? "model_review_paused"
+          : "model_review_resumed";
+        const time = now();
+        const previous = db.prepare(`
+          SELECT revision, taskId, event, note, at FROM adaptive_events
+          WHERE event IN ('model_review_paused', 'model_review_resumed')
+            AND json_extract(CASE WHEN json_valid(note) THEN note END, '$.scope.requestId') = ?
+        `).get(requestId);
+        const task = lookup.get(id);
+        if (
+          activeRevision() !== revision || !task ||
+          task.revision !== revision ||
+          (task.kind !== "trace" && task.kind !== "impact") ||
+          !eligible(decodeTask(task)) || mutationPending(revision, id) ||
+          this.modelReviewControls(revision, id).stopped
+        ) return;
+        const receipt = (at: number) => ({
+          ...scope,
+          at: new Date(at).toISOString(),
+        });
+        if (previous) {
+          const prior = JSON.parse(String(previous.note));
+          if (
+            previous.revision === revision && previous.taskId === id &&
+            previous.event === kind && prior.policyDigest === policyDigest &&
+            JSON.stringify(prior.scope) === JSON.stringify(scope)
+          ) return { receipt: receipt(Number(previous.at)) };
+          return;
+        }
+        if (
+          db.prepare(
+            "SELECT 1 FROM adaptive_worker_controls WHERE requestId = ?",
+          ).get(requestId)
+        ) return;
+        const hold = lastWorkerHold.get(revision, id);
+        const paused = hold?.event === "model_review_paused";
+        const pause = action === "pause_assignment";
+        if (paused === pause || !checkpoints.hasTable()) return;
+        const checkpoint = db.prepare(`
+          SELECT checkpoint FROM adaptive_worker_checkpoints
+          WHERE revision = ? AND taskId = ? AND evidenceRevision = ? AND expiresAt > ? AND version = 1
+        `).get(revision, id, evidenceRevision, time);
+        if (typeof checkpoint?.checkpoint !== "string") return;
+        const savedCheckpoint = JSON.parse(
+          checkpoint.checkpoint,
+        ) as AgentTurnCheckpoint;
+        const calls = savedCheckpoint.history.flatMap(({ tool_calls }) =>
+          tool_calls ?? []
+        );
+        if (
+          !calls.length ||
+          calls.some((call) =>
+            (call as { function?: { name?: string } } | null)?.function
+              ?.name !==
+              "sentinel_assigned_target"
+          )
+        ) return;
+        const checkpointSha256 = createHash("sha256").update(
+          checkpoint.checkpoint,
+        ).digest("hex");
+        const review = db.prepare(
+          "SELECT token, attempts, availableAt, noteId FROM adaptive_model_reviews WHERE taskId = ?",
+        ).get(id);
+        if (!review || review.noteId !== null) return;
+        const current = pause && typeof review.token === "string"
+          ? this.activeModelReviewTask(revision, id, review.token)
+          : undefined;
+        if (pause) {
+          if (!current || review.attempts !== attempt) return;
+        } else {
+          const saved = JSON.parse(String(hold?.note));
+          if (
+            review.token !== null || Number(review.attempts) !== attempt - 1 ||
+            saved.scope.attempt !== attempt ||
+            saved.policyDigest !== policyDigest ||
+            saved.checkpointSha256 !== checkpointSha256
+          ) return;
+        }
+        const binding = createHash("sha256").update(JSON.stringify([
+          scope,
+          policyDigest,
+          checkpointSha256,
+          review.token,
+          Number(hold?.at ?? 0),
+        ])).digest("hex");
+        if (expected === undefined) return { preview: binding };
+        if (expected !== binding) return;
+        if (
+          pause && !assignmentLeases.release(
+            id,
+            String(review.token),
+            attempt - 1,
+            time,
+          )
+        ) return;
+        event.run(
+          revision,
+          id,
+          kind,
+          attempt,
+          time,
+          JSON.stringify({ scope, policyDigest, checkpointSha256 }),
+        );
+        return { receipt: receipt(time) };
       });
     },
 
@@ -8965,8 +9109,12 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
       `).all(revisionKey(revision)).map((row) => {
         const attempts = Number(row.attempts);
         const outcomeUncertain = mutationPending(revision, String(row.taskId));
+        const hold = lastWorkerHold.get(revision, String(row.taskId));
+        const paused = active && hold?.event === "model_review_paused";
         const status = typeof row.stoppedAt === "number"
           ? "stopped"
+          : paused
+          ? "paused"
           : row.noteId != null || row.recordedCompletion === 1
           ? "completed"
           : !active ||
@@ -8982,6 +9130,10 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
           taskId: String(row.taskId),
           attempts,
           status,
+          ...(paused && {
+            pausedAt: new Date(Number(hold.at)).toISOString(),
+            pausedAttempt: attempts + 1,
+          }),
           retryable: status === "exhausted" && row.operatorRetry === 0,
           ...(outcomeUncertain && { outcomeUncertain: true }),
           ...(typeof row.stoppedAt === "number" &&

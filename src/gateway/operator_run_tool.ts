@@ -293,6 +293,7 @@ import {
   reviewSentinelGraphRetries,
   reviewSentinelOperatorHintBatch,
   reviewSentinelStoppedGraphRetry,
+  reviewSentinelWorkerHold,
   sentinelHintAssetsInScope,
   submitSentinelAssignmentIntent,
   updateSentinelWorkerLimit,
@@ -443,6 +444,8 @@ export const operatorRunTool: ToolDefinition = {
         "review_finding",
         "decision_history",
         "steer",
+        "pause_assignment",
+        "resume_assignment",
         "stop",
         "hint",
         "profiles",
@@ -5581,6 +5584,75 @@ ${
         } finally {
           journal.close();
         }
+      }
+      if (action === "pause_assignment" || action === "resume_assignment") {
+        const { runId, adaptiveRevision, taskId, requestId, attempt } = args;
+        if (
+          ref.kind !== "sentinel" || ref.revision === undefined ||
+          !context?.authenticatedOwnerSessionId ||
+          !context.authorizeOwnerRunCall ||
+          !canFlowTo("INTERNAL", context.ceiling ?? "PUBLIC") ||
+          typeof runId !== "string" || !digestPattern.test(runId) ||
+          typeof requestId !== "string" || !digestPattern.test(requestId) ||
+          typeof adaptiveRevision !== "string" ||
+          !/^[a-f0-9]{64}$/.test(adaptiveRevision) ||
+          typeof taskId !== "string" ||
+          !/^adaptive:[a-f0-9]{64}$/.test(taskId) ||
+          typeof attempt !== "number" || !Number.isSafeInteger(attempt) ||
+          attempt < 1 ||
+          Object.keys(args).some((key) =>
+            ![
+              "action",
+              "kind",
+              "id",
+              "revision",
+              "runId",
+              "adaptiveRevision",
+              "taskId",
+              "requestId",
+              "attempt",
+            ].includes(key)
+          ) ||
+          !await context.authorizeOwnerRunCall(args)
+        ) return unavailable;
+        const exactRunId = runId.toLowerCase();
+        const path = resolveSentinelCasePath(options.baseDir, ref.id);
+        const scope = {
+          action,
+          requestId: requestId.toLowerCase(),
+          taskId,
+          evidenceRevision: ref.revision,
+          attempt,
+        } as const;
+        const review = reviewSentinelWorkerHold(
+          path,
+          exactRunId,
+          adaptiveRevision,
+          scope,
+        );
+        if (review?.receipt) {
+          return safeProjection({ run: ref, receipt: review.receipt });
+        }
+        if (!review?.preview) return unavailable;
+        if (
+          !await options.confirm(
+            `Approve ${
+              action === "pause_assignment" ? "pausing" : "resuming"
+            } this exact Sentinel assignment?
+${JSON.stringify({ run: ref, runId: exactRunId, adaptiveRevision, ...scope })}`,
+          )
+        ) return "Error: The operator declined the run action.";
+        if (!await context.authorizeOwnerRunCall(args)) return unavailable;
+        const committed = reviewSentinelWorkerHold(
+          path,
+          exactRunId,
+          adaptiveRevision,
+          scope,
+          review.preview,
+        );
+        return committed?.receipt
+          ? safeProjection({ run: ref, receipt: committed.receipt })
+          : unavailable;
       }
       if (action === "steer" || action === "stop") {
         const selectedCase = context?.authorizeSelectedSentinelCase;
