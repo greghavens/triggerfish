@@ -1,6 +1,10 @@
 /** Project a retained control-check verdict independently of analyst disposition. */
 import { dirname, join } from "@std/path";
-import { readSentinelDedicatedRecheckSettlements } from "./adaptive_store.ts";
+import { isDeepStrictEqual } from "node:util";
+import {
+  readAdaptiveRepositoryVisibility,
+  readSentinelDedicatedRecheckSettlements,
+} from "./adaptive_store.ts";
 import {
   readSentinelAssessmentRevision,
   readSentinelOperatingConstraintsForRevision,
@@ -8,7 +12,11 @@ import {
 } from "./assessment_store.ts";
 import { locateSentinelCase } from "./cases.ts";
 import { sentinelOperatingConstraintsAllow } from "./operating_constraints.ts";
-import { verifyWorkerFindingRecheck } from "./worker_finding_evidence.ts";
+import {
+  verifyWorkerFindingRecheck,
+  withRepositoryVisibilityVerification,
+} from "./worker_finding_evidence.ts";
+import { digestSentinelSnapshot } from "./shared_inventory.ts";
 import type {
   SentinelWorkerFindingRecheckRecord,
   SentinelWorkerFindingRecord,
@@ -19,6 +27,7 @@ export function createSentinelFindingRemediationReader(
   caseId: string,
   revision: number,
   runId: string | undefined,
+  exactNativeRead = false,
 ) {
   const unknown = { status: "unknown", asOfRevision: revision } as const;
   type Revision = ReturnType<typeof readSentinelAssessmentRevision>;
@@ -82,6 +91,9 @@ export function createSentinelFindingRemediationReader(
         b.recordedAt.localeCompare(a.recordedAt) || a.id.localeCompare(b.id)
       )[0];
     if (!latest) return { value: unknown };
+    if (latest.nativeRepositoryVisibility && !exactNativeRead) {
+      return { value: unknown };
+    }
     const selected = read(revision);
     const snapshot = selected?.result.sharedGraph.snapshot;
     const origin = read(latest.evidenceRevision)?.result.sharedGraph.snapshot;
@@ -123,8 +135,45 @@ export function createSentinelFindingRemediationReader(
     ) {
       return { value: unknown };
     }
+    const native = latest.nativeRepositoryVisibility;
+    const observation = native && readAdaptiveRepositoryVisibility(
+      join(dirname(path), "sentinel-adaptive.db"),
+      runId,
+      latest.evidenceRevision,
+      latest.taskId,
+      latest.targetId,
+      true,
+    );
+    if (
+      native &&
+      (!observation || !isDeepStrictEqual(observation.reference, native) ||
+        observation.receipt.observedAt !== latest.observedAt ||
+        (observation.receipt.visibility === "private" ? "pass" : "fail") !==
+          latest.outcome ||
+        latest.observedAt <= original.observedAt ||
+        Date.parse(latest.validUntil) - Date.parse(latest.observedAt) !==
+          Date.parse(original.validUntil) - Date.parse(original.observedAt))
+    ) {
+      return { value: unknown };
+    }
+    const projected = (graph: typeof origin) =>
+      native
+        ? withRepositoryVisibilityVerification(
+          graph,
+          latest.evidenceId,
+          latest.targetId,
+          latest.controlId,
+          {
+            outcome: latest.outcome,
+            observedAt: latest.observedAt,
+            validUntil: latest.validUntil,
+          },
+        )
+        : graph;
+    const selectedTime = selected.result.controlEvaluationAt ??
+      selected.updatedAt;
     const captured = verifyWorkerFindingRecheck(
-      origin,
+      projected(origin),
       {
         caseId,
         evidenceRevision: latest.evidenceRevision,
@@ -134,17 +183,21 @@ export function createSentinelFindingRemediationReader(
       exact,
     );
     const visible = verifyWorkerFindingRecheck(
-      snapshot,
+      projected(snapshot),
       {
         caseId,
         evidenceRevision: revision,
-        evaluatedAt: selected.result.controlEvaluationAt ?? selected.updatedAt,
+        evaluatedAt: native && latest.evaluatedAt > selectedTime
+          ? latest.evaluatedAt
+          : selectedTime,
       },
       claim,
       exact,
     );
     if (
-      captured?.snapshotDigest !== latest.snapshotDigest ||
+      !captured ||
+      (native ? digestSentinelSnapshot(origin) : captured.snapshotDigest) !==
+        latest.snapshotDigest ||
       captured.outcome !== latest.outcome ||
       captured.observedAt !== latest.observedAt ||
       captured.validUntil !== latest.validUntil ||
@@ -183,6 +236,7 @@ export function createSentinelFindingRemediationReader(
         validUntil: latest.validUntil,
       },
       sources,
+      nativeSource: native ? latest : undefined,
     };
   };
 }

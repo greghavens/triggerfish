@@ -5,6 +5,7 @@ import {
   workerNarrativeEvidenceCall,
 } from "./sentinel_worker_narratives.ts";
 import {
+  nativeRepositoryVisibilityEvidenceId,
   projectRepositoryVisibility,
   SENTINEL_LIVE_REPOSITORY_VISIBILITY,
   SENTINEL_SAVED_REPOSITORY_VISIBILITY,
@@ -81,7 +82,10 @@ import {
   executionTracePayloadCall,
   executionTracePayloadResponse,
 } from "../core/execution_traces.ts";
-import { readCaseExecutionEvidence } from "../sentinel/case_execution_evidence.ts";
+import {
+  executionEvidenceDigest,
+  readCaseExecutionEvidence,
+} from "../sentinel/case_execution_evidence.ts";
 import { redactCredentialText } from "../core/logger/redactor.ts";
 import {
   parseSavedFindingPage,
@@ -2333,6 +2337,8 @@ async function readLiveRepositoryVisibility(
     assetId,
   );
   const replay = resumeOnly || hasPreviousValue;
+  const reviewed = task.plannerRound?.findingFollowup
+    ?.nativeRepositoryVisibility;
   const result = await callback({
     caseId: location.caseId,
     assetId,
@@ -2360,16 +2366,19 @@ async function readLiveRepositoryVisibility(
         )
       ),
     authorize: (destination) =>
-      authorizeRepositoryVisibilityDestination(
-        options,
-        session,
-        destination,
-        location.caseId,
-        task.id,
-        evidenceRevision,
-        current,
-        replay,
-      ),
+      reviewed && (destination.repository !== reviewed.repository ||
+          destination.repositoryId !== reviewed.repositoryId)
+        ? Promise.resolve(false)
+        : authorizeRepositoryVisibilityDestination(
+          options,
+          session,
+          destination,
+          location.caseId,
+          task.id,
+          evidenceRevision,
+          current,
+          replay,
+        ),
   });
   return result && current()
     ? boundResult(projectRepositoryVisibility(result, task.id, assetId))
@@ -5205,6 +5214,7 @@ function createAgent(
   const assignedReview = readAssignedModelReview(options);
   const reporter = assignedReview?.kind === "report_finding";
   const findingFollowup = assignedReview?.plannerRound?.findingFollowup;
+  const nativeRepositoryRecheck = findingFollowup?.nativeRepositoryVisibility;
   const graphOnlyRetry = !!assignedReview?.plannerRound?.stoppedRetry;
   const toolDefs = graphOnlyRetry
     ? [assignedTargetTool]
@@ -5226,7 +5236,14 @@ function createAgent(
     )
     : findingFollowup
     ? availableTools.filter(({ name }) =>
-      name === assignedTargetTool.name || name === "sentinel_worker_findings"
+      name === assignedTargetTool.name || name === "sentinel_worker_findings" ||
+      (nativeRepositoryRecheck &&
+        [
+          SENTINEL_LIVE_REPOSITORY_VISIBILITY,
+          SENTINEL_ASSIGNED_EXECUTION_EVIDENCE,
+          SENTINEL_RECHECK_CONTEXT_TOOL,
+          "sentinel_record_finding_recheck",
+        ].includes(name))
     )
     : availableTools;
   const mutationTools = new Set([
@@ -5925,6 +5942,15 @@ function createAgent(
         ) {
           return { ...result, allowed: false, action: "BLOCK" };
         }
+        if (
+          name === "PRE_TOOL_CALL" && findingFollowup &&
+          nativeRepositoryRecheck &&
+          ((toolName === SENTINEL_ASSIGNED_EXECUTION_EVIDENCE &&
+            call?.args?.node !== findingFollowup.evidenceId) ||
+            ((toolName === SENTINEL_RECHECK_CONTEXT_TOOL ||
+              toolName === "sentinel_record_finding_recheck") &&
+              call?.args?.findingId !== findingFollowup.findingId))
+        ) return { ...result, allowed: false, action: "BLOCK" };
         if (
           name === "PRE_TOOL_CALL" && reporter &&
           toolName === sentinelFindingTrafficAttachTool.name &&
@@ -6629,6 +6655,78 @@ function createAgent(
             sentinelTrafficPolicyRevision(args.revision) ??
             readSentinelAssessment(options.snapshotPath)?.revision;
         }
+        let nativeReference: SentinelRepositoryVisibilityReference | undefined;
+        if (
+          name === "sentinel_record_finding_recheck" &&
+          nativeRepositoryRecheck && findingFollowup
+        ) {
+          const unavailable =
+            "Error: The exact repository visibility recheck is unavailable.";
+          const task = readAssignedModelReview(options);
+          const original = turn.executionReads.get(findingFollowup.evidenceId);
+          const state = readSentinelAssessment(options.snapshotPath);
+          if (
+            !task?.nodeId || !state?.plan.runId ||
+            args.findingId !== findingFollowup.findingId ||
+            args.evidenceId !== nativeRepositoryVisibilityEvidenceId(task.id) ||
+            original?.kind !== "github_repository_status" ||
+            original.repo.toLowerCase() !==
+              nativeRepositoryRecheck.repository ||
+            original.repositoryId !== nativeRepositoryRecheck.repositoryId ||
+            executionEvidenceDigest(original) !==
+              nativeRepositoryRecheck.originalSha256
+          ) {
+            return unavailable;
+          }
+          const current = () =>
+            !turn.signal.aborted &&
+            readAssignedModelReview(options)?.id === task.id;
+          const originalSource = options.sharedInventoryBaseDir &&
+            await readCaseExecutionEvidence(
+              options.sharedInventoryBaseDir,
+              options.snapshotPath,
+              state.revision,
+              findingFollowup.evidenceId,
+              task.nodeId,
+            );
+          if (
+            !originalSource ||
+            originalSource.resultSha256 !==
+              nativeRepositoryRecheck.originalSha256 ||
+            !isDeepStrictEqual(originalSource.payload, original) || !current()
+          ) return unavailable;
+          const originalCall = executionTracePayloadCall(original);
+          if (
+            !await authorizeSavedToolCalls(
+              [originalCall],
+              config,
+              session,
+              undefined,
+              turn.signal,
+            ) || !current() ||
+            !await options.authorizeExecutionTracePayload?.(
+              original,
+              originalSource.classification,
+            ) ||
+            !current() ||
+            (await enforcePostToolResponse(originalCall.name, config, session, {
+              resultText: executionTracePayloadResponse(original),
+              blocked: false,
+            })).blocked || !current()
+          ) return unavailable;
+          const exact = await reopenRepositoryVisibility(
+            options,
+            session,
+            state.plan.runId,
+            state.revision,
+            task.id,
+            task.nodeId,
+            turn.signal,
+            current,
+          );
+          if (!exact || !current()) return unavailable;
+          nativeReference = exact.reference;
+        }
         const result = executeSentinelWorkerFindingTool(
           options,
           name,
@@ -6640,6 +6738,7 @@ function createAgent(
             ? (target) => currentPlannerReceiptScope(turn, target)
             : undefined,
           turn.approvedTrafficReads,
+          nativeReference,
         );
         if (
           (name === SENTINEL_RECHECK_CONTEXT_TOOL ||

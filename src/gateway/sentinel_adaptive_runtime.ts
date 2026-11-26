@@ -20,8 +20,10 @@ import {
 } from "../sentinel/traffic_receipts.ts";
 import { notifyCommittedEvidence } from "../core/evidence_task_progression.ts";
 import {
+  nativeRepositoryVisibilityEvidenceId,
   SENTINEL_LIVE_REPOSITORY_VISIBILITY,
   SENTINEL_SAVED_REPOSITORY_VISIBILITY,
+  type SentinelRepositoryVisibilityRecheckBinding,
   type SentinelRepositoryVisibilityReference,
 } from "../sentinel/github_repository_visibility.ts";
 import { readAdaptiveRepositoryVisibility } from "../sentinel/adaptive_store.ts";
@@ -390,7 +392,13 @@ function committedRecheckProvenance(
     evidenceId: record.evidenceId,
     findingId: record.findingId,
     graphFindingId: record.graphFindingId,
-    outcome: record.outcome,
+    ...(record.nativeRepositoryVisibility === undefined &&
+      { outcome: record.outcome }),
+    ...(record.nativeRepositoryVisibility && {
+      nativeRepositoryVisibility: record.nativeRepositoryVisibility,
+      originalEvidenceId: tasks.find(({ id }) => id === record.taskId)
+        ?.plannerRound?.findingFollowup?.evidenceId,
+    }),
     receiptSha256: createHash("sha256").update(JSON.stringify(record)).digest(
       "hex",
     ),
@@ -522,6 +530,7 @@ function plannerFindingRechecks(snapshotPath: string, state: State) {
   return readSentinelWorkerFindingHistory(snapshotPath, state.revision)
     .flatMap((record) =>
       record.kind === "recheck" && record.caseId === caseId &&
+        !record.nativeRepositoryVisibility &&
         record.runId === runId && record.evidenceRevision === state.revision &&
         settledPlannerRecheck(settlements, record) &&
         sentinelOperatingConstraintsAllow(
@@ -1145,7 +1154,10 @@ function committedDedicatedRecheckResult(
   state: State,
   task: AdaptiveTask,
 ) {
-  const findingId = task.plannerRound?.recheckFindingId;
+  const followup = task.plannerRound?.findingFollowup;
+  const native = followup?.nativeRepositoryVisibility;
+  const findingId = task.plannerRound?.recheckFindingId ??
+    (native && followup?.findingId);
   if (!findingId) return;
   const caseId = locateSentinelCase(path)?.caseId;
   const runId = state.plan.runId;
@@ -1174,16 +1186,23 @@ function committedDedicatedRecheckResult(
       receipt.caseId === caseId && receipt.runId === runId &&
       receipt.taskId === task.id &&
       receipt.evidenceRevision === state.revision &&
-      receipt.evidenceId === task.nodeId &&
+      receipt.evidenceId === (native
+          ? nativeRepositoryVisibilityEvidenceId(task.id)
+          : task.nodeId) &&
       receipt.snapshotDigest === snapshotDigest &&
       receipt.targetId === original.targetId;
     return journal.listFindingRechecks(findingId, state.revision).find((
       receipt,
     ) =>
       receipt.controlId === original.controlId &&
-      receipt.graphFindingId === original.graphFindingId && matches(receipt)
+      receipt.graphFindingId === original.graphFindingId &&
+      (!native || !!receipt.nativeRepositoryVisibility) && matches(receipt)
     ) ||
-      journal.listInconclusiveRechecks(findingId, state.revision).find(matches);
+      (!native &&
+        journal.listInconclusiveRechecks(findingId, state.revision).find(
+          matches,
+        )) ||
+      undefined;
   } finally {
     journal.close();
   }
@@ -1303,16 +1322,23 @@ export function readSentinelFindingRecheckAttempts(
             mapping.revision,
           );
           for (const task of tasks) {
-            const source = task.plannerRound?.recheckFindingId;
+            const followup = task.plannerRound?.findingFollowup;
+            const native = !!followup?.nativeRepositoryVisibility;
+            const source = task.plannerRound?.recheckFindingId ??
+              (native ? followup.findingId : undefined);
             if (
-              task.kind !== "review_evidence" || !task.nodeId ||
+              task.kind !== (native ? "trace" : "review_evidence") ||
+              !task.nodeId ||
               !source || (findingId && source !== findingId) ||
               !allowsReview(task.nodeId)
             ) continue;
             const target = readOriginal(source);
             if (
               !target ||
-              executionFindingAsset(snapshot, task.nodeId) !== target.targetId
+              (native
+                  ? task.nodeId
+                  : executionFindingAsset(snapshot, task.nodeId)) !==
+                target.targetId
             ) continue;
             const review = reviews.get(task.id);
             const status = review?.status ??
@@ -1325,7 +1351,9 @@ export function readSentinelFindingRecheckAttempts(
               taskId: task.id,
               ...(!findingId && { findingId: source }),
               status,
-              evidenceId: task.nodeId,
+              evidenceId: native
+                ? nativeRepositoryVisibilityEvidenceId(task.id)!
+                : task.nodeId,
               attempts: review?.attempts ?? 0,
               ...(lastAttempt && { lastAttempt }),
               ...(lifecycle && {
@@ -1358,7 +1386,9 @@ export function readSentinelFindingRecheckAttempts(
         result.evidenceRevision !== revision ||
         result.targetId !== original.targetId ||
         result.controlId !== original.controlId ||
-        !allowsReview(result.evidenceId)
+        !(result.nativeRepositoryVisibility
+          ? allowsReview(result.targetId)
+          : allowsReview(result.evidenceId))
       ) continue;
       const linked = map.get(result.taskId);
       if (linked) {
@@ -1366,7 +1396,11 @@ export function readSentinelFindingRecheckAttempts(
           continue;
         }
         linked.resultReceiptId = result.id;
-        if (linked.status === "completed") linked.outcome = result.outcome;
+        if (
+          linked.status === "completed" && !result.nativeRepositoryVisibility
+        ) {
+          linked.outcome = result.outcome;
+        }
       } else {
         map.set(result.taskId, {
           taskId: result.taskId,
@@ -1374,7 +1408,8 @@ export function readSentinelFindingRecheckAttempts(
           evidenceId: result.evidenceId,
           attempts: null,
           resultReceiptId: result.id,
-          outcome: result.outcome,
+          ...(!result.nativeRepositoryVisibility &&
+            { outcome: result.outcome }),
         });
       }
     }
@@ -2741,6 +2776,7 @@ export function readSentinelFindingFollowup(
   nodeId: string,
   findingId: string,
   note: string,
+  nativeRepositoryVisibility?: SentinelRepositoryVisibilityRecheckBinding,
 ): import("../sentinel/adaptive_store.ts").AdaptiveFindingFollowup | undefined {
   const snapshot = state.result?.sharedGraph.snapshot;
   const caseId = locateSentinelCase(path)?.caseId;
@@ -2763,6 +2799,16 @@ export function readSentinelFindingFollowup(
       finding.evidenceRevision > state.revision ||
       !findingRecheckStillApplies(snapshot, finding)
     ) return;
+    if (nativeRepositoryVisibility) {
+      const source = snapshot.nodes.find(({ id }) => id === finding.evidenceId);
+      if (
+        source?.kind !== "evidence" ||
+        source.executionSource?.resultSha256 !==
+          nativeRepositoryVisibility.originalSha256 ||
+        !allowed({ kind: "review_evidence", nodeId: finding.evidenceId }) ||
+        !allowed({ kind: "review_finding", nodeId: finding.graphFindingId })
+      ) return;
+    }
     let sourceAnalystSha256: string | undefined;
     if ("analyst" in finding) {
       if (
@@ -2812,6 +2858,7 @@ export function readSentinelFindingFollowup(
       snapshotDigest: finding.snapshotDigest,
       reportVersion: report.version,
       note,
+      ...(nativeRepositoryVisibility && { nativeRepositoryVisibility }),
     };
   } finally {
     journal.close();
@@ -2891,6 +2938,7 @@ export function submitSentinelAssignmentIntent(
             input.nodeId,
             followup.findingId,
             followup.note,
+            followup.nativeRepositoryVisibility,
           ),
         ))
     ) return;
@@ -4204,6 +4252,7 @@ function decisionAllowsClaim(snapshotPath: string, revision: number) {
             task.nodeId,
             source.findingId,
             source.note,
+            source.nativeRepositoryVisibility,
           ),
         );
     })());
@@ -7353,6 +7402,26 @@ export function createSentinelModelPlanner(
             : undefined;
         }
         if (!await authorizeSources()) return;
+        if (task.plannerRound?.findingFollowup?.nativeRepositoryVisibility) {
+          const result = committedDedicatedRecheckResult(
+            snapshotPath,
+            state,
+            task,
+          );
+          const native = result && "nativeRepositoryVisibility" in result &&
+            result.nativeRepositoryVisibility;
+          if (
+            native && (!task.nodeId || !latest.plan.runId ||
+              !await worker.authorizeRepositoryVisibility?.(
+                latest.plan.runId,
+                latest.revision,
+                task.nodeId,
+                native,
+                signal,
+                currentSource,
+              ))
+          ) return;
+        }
         if (
           contextualSources.some(({ id, digest }) =>
             !steps.some((step) =>
@@ -7475,7 +7544,9 @@ export function createSentinelModelPlanner(
                 !signal.aborted
                 ? review
                 : undefined;
-            const dedicated = task.plannerRound?.recheckFindingId !== undefined;
+            const dedicated =
+              task.plannerRound?.recheckFindingId !== undefined ||
+              !!task.plannerRound?.findingFollowup?.nativeRepositoryVisibility;
             const recheck = eligibleReview && dedicated
               ? committedDedicatedRecheckResult(snapshotPath, state, task)
               : undefined;

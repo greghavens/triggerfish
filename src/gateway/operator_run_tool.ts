@@ -1163,6 +1163,11 @@ export const operatorRunTool: ToolDefinition = {
       description:
         "Exact worker finding for an approved review_evidence assignment on a retained verification receipt.",
     },
+    nativeRepositoryVisibilityRecheck: {
+      type: "boolean",
+      description:
+        "Approve a fresh configured repository visibility recheck of this exact repository-visibility finding.",
+    },
     passingRecheckForFindingId: {
       type: "string",
       description:
@@ -6682,6 +6687,7 @@ ${request}`)
           taskKind,
           node,
           recheckFindingId,
+          nativeRepositoryVisibilityRecheck,
           passingRecheckForFindingId,
           graphRelationship,
           prioritizeNext,
@@ -6704,6 +6710,7 @@ ${request}`)
               "taskKind",
               "node",
               "recheckFindingId",
+              "nativeRepositoryVisibilityRecheck",
               "passingRecheckForFindingId",
               "graphRelationship",
               "prioritizeNext",
@@ -6744,6 +6751,10 @@ ${request}`)
             !canFlowTo("INTERNAL", context?.ceiling ?? "INTERNAL"))
         ) return unavailable;
         const finding = parseReviewedFindingFollowup(receiptId, note, context);
+        if (
+          nativeRepositoryVisibilityRecheck !== undefined &&
+          (nativeRepositoryVisibilityRecheck !== true || !finding)
+        ) return unavailable;
         if (
           (receiptId !== undefined || note !== undefined && !hasRecheckNote) &&
           (!finding || taskKind !== "trace" || recheckFindingId !== undefined ||
@@ -6820,7 +6831,7 @@ ${request}`)
           : await reopen();
         if (recheckFindingId !== undefined && !original) return unavailable;
         const findingState = finding ? readSentinelAssessment(path) : undefined;
-        const findingFollowup = findingState?.revision === ref.revision &&
+        const baseFindingFollowup = findingState?.revision === ref.revision &&
             findingState.plan.runId === runId.toLowerCase() &&
             finding
           ? readSentinelFindingFollowup(
@@ -6831,7 +6842,44 @@ ${request}`)
             finding.note,
           )
           : undefined;
-        if (finding && !findingFollowup) return unavailable;
+        if (finding && !baseFindingFollowup) return unavailable;
+        const nativeSource = async () => {
+          if (
+            !baseFindingFollowup ||
+            nativeRepositoryVisibilityRecheck !== true ||
+            !context
+          ) return;
+          const saved = await readAuthorizedCaseEvidence(
+            ref.id,
+            path,
+            evidenceRevision,
+            baseFindingFollowup.evidenceId,
+            context,
+            () => {
+              const latest = readSentinelAssessment(path);
+              return latest?.active === true &&
+                latest.revision === evidenceRevision &&
+                latest.plan.runId === runId.toLowerCase();
+            },
+          );
+          if (
+            saved?.payload.kind !== "github_repository_status" ||
+            saved.payload.visibility === "private"
+          ) return;
+          return {
+            repository: saved.payload.repo.toLowerCase(),
+            repositoryId: saved.payload.repositoryId,
+            originalSha256: saved.resultSha256,
+          };
+        };
+        const nativeRepositoryVisibility = await nativeSource();
+        if (nativeRepositoryVisibilityRecheck && !nativeRepositoryVisibility) {
+          return unavailable;
+        }
+        const findingFollowup = baseFindingFollowup && {
+          ...baseFindingFollowup,
+          ...(nativeRepositoryVisibility && { nativeRepositoryVisibility }),
+        };
         const authorizeAnalyst = async () =>
           !findingFollowup?.sourceAnalystSha256 || (
             await authorize({
@@ -6919,6 +6967,11 @@ ${request}`)
         }
         if (
           !await authorize(args) || !await authorizeAnalyst() ||
+          (nativeRepositoryVisibility &&
+            !isDeepStrictEqual(
+              await nativeSource(),
+              nativeRepositoryVisibility,
+            )) ||
           context.authorizeSelectedSentinelCase?.() === false
         ) return unavailable;
         const receipt = submitSentinelAssignmentIntent(
@@ -11905,6 +11958,63 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
             allows(record) &&
             (record.findingId === undefined ||
               originalFinding(record.findingId)?.targetId === record.targetId);
+          const authorizeNativeRepositoryVerdict = async (
+            record: NonNullable<ReturnType<typeof journal.read>>,
+          ) => {
+            if (
+              record.kind !== "recheck" || !record.nativeRepositoryVisibility
+            ) return false;
+            const native = record.nativeRepositoryVisibility;
+            const original = originalFinding(record.findingId);
+            const current = () => {
+              const currentScope = readSentinelFindingReceiptScope(
+                path,
+                revision,
+              );
+              return currentScope?.runId === runId &&
+                currentScope.allowsRecord(record) && !!original &&
+                currentScope.allowsRecord(original) &&
+                isDeepStrictEqual(journal.read(record.id), record) &&
+                context?.authorizeSentinelCaseRead?.(ref.id, revision) !==
+                  false;
+            };
+            if (!original || !context || !current()) return false;
+            const oldEvidence = await readAuthorizedCaseEvidence(
+              ref.id,
+              path,
+              original.evidenceRevision,
+              original.evidenceId,
+              context,
+              current,
+            );
+            const fresh = await reopenOwnedSentinelRepositoryVisibility(
+              options.readRepositoryVisibility,
+              context,
+              {
+                caseId: ref.id,
+                path,
+                runId,
+                revision: record.evidenceRevision,
+                taskId: record.taskId,
+                assetId: record.targetId,
+                sourceStepIndex: native.sourceStepIndex,
+                resultSha256: native.resultSha256,
+              },
+              current,
+            );
+            if (
+              oldEvidence?.payload.kind !== "github_repository_status" ||
+              oldEvidence.payload.visibility === "private" ||
+              !fresh ||
+              fresh.repositoryId !== oldEvidence.payload.repositoryId ||
+              fresh.repository !== oldEvidence.payload.repo.toLowerCase() ||
+              fresh.observedAt !== record.observedAt ||
+              (fresh.visibility === "private" ? "pass" : "fail") !==
+                record.outcome ||
+              !current()
+            ) return false;
+            return true;
+          };
           if (listingReport) {
             if (
               !canFlowTo("INTERNAL", context?.ceiling ?? "INTERNAL") ||
@@ -11947,12 +12057,44 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
               ref.id,
               ref.revision,
               runId,
+              true,
             )(
               report.finding,
               journal.listFindingRechecks(report.finding.id, ref.revision),
             );
             let remediation = checked.value;
-            if (checked.sources?.length) {
+            if (checked.nativeSource) {
+              const approved = await authorizeNativeRepositoryVerdict(
+                checked.nativeSource,
+              );
+              const latest = journal.readFindingReport(
+                report.finding.id,
+                revision,
+              );
+              const rechecked = latest &&
+                createSentinelFindingRemediationReader(
+                  path,
+                  ref.id,
+                  revision,
+                  runId,
+                  true,
+                )(
+                  latest.finding,
+                  journal.listFindingRechecks(latest.finding.id, revision),
+                );
+              if (
+                !latest ||
+                (reportVersion === undefined &&
+                  latest.version !== report.version)
+              ) {
+                return unavailable;
+              }
+              if (
+                !approved || !isDeepStrictEqual(rechecked?.value, remediation)
+              ) {
+                remediation = { status: "unknown", asOfRevision: revision };
+              }
+            } else if (checked.sources?.length) {
               const revalidateScope = () => {
                 const current = readSentinelFindingReceiptScope(path, revision);
                 return current?.runId === runId &&
@@ -12067,7 +12209,8 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
                   recordedAt: record.recordedAt,
                   ...(record.kind === "recheck" && {
                     findingId: record.findingId,
-                    outcome: record.outcome,
+                    ...(!record.nativeRepositoryVisibility &&
+                      { outcome: record.outcome }),
                   }),
                 }),
               );
@@ -12092,6 +12235,10 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
               : unavailable;
           }
           const record = journal.read(receiptId as string);
+          if (
+            record?.kind === "recheck" && record.nativeRepositoryVisibility &&
+            !await authorizeNativeRepositoryVerdict(record)
+          ) return unavailable;
           return record && allowsReceipt(record) &&
               record.evidenceRevision === ref.revision
             ? safeProjection({ run: ref, record })

@@ -547,7 +547,10 @@ export function createTidepoolSentinelHandler(
           >();
           const results = readSentinelWorkerFindingHistory(path, revision)
             .filter((record) => {
-              if (record.caseId !== caseId) return false;
+              if (
+                record.caseId !== caseId ||
+                (record.kind === "recheck" && record.nativeRepositoryVisibility)
+              ) return false;
               const exactRevision = revision ?? record.evidenceRevision;
               if (!scopes.has(exactRevision)) {
                 scopes.set(

@@ -22,10 +22,12 @@ import { createAssignmentObservationJournal } from "../core/assignment_observati
 import {
   projectRepositoryVisibility,
   repositoryVisibilityReceipt,
+  repositoryVisibilityRecheckBinding,
   repositoryVisibilityReference,
   SENTINEL_LIVE_REPOSITORY_VISIBILITY,
   SENTINEL_SAVED_REPOSITORY_VISIBILITY,
   type SentinelRepositoryVisibilityReceipt,
+  type SentinelRepositoryVisibilityRecheckBinding,
   type SentinelRepositoryVisibilityReference,
 } from "./github_repository_visibility.ts";
 import {
@@ -1000,6 +1002,8 @@ export interface AdaptiveFindingFollowup {
   readonly snapshotDigest: string;
   readonly reportVersion: number;
   readonly note: string;
+  readonly nativeRepositoryVisibility?:
+    SentinelRepositoryVisibilityRecheckBinding;
 }
 
 export interface SentinelQueuedCancellation {
@@ -2667,6 +2671,10 @@ function normalizePlannerRound(round: AdaptivePlannerRound | undefined) {
       !Number.isSafeInteger(findingFollowup.reportVersion) ||
       findingFollowup.reportVersion < 1 ||
       !findingFollowup.evidenceId || findingFollowup.evidenceId.length > 256 ||
+      (findingFollowup.nativeRepositoryVisibility !== undefined &&
+        !repositoryVisibilityRecheckBinding(
+          findingFollowup.nativeRepositoryVisibility,
+        )) ||
       !findingFollowup.note?.trim() || findingFollowup.note.length > 1000 ||
       /[\p{Cc}\p{Cf}]/u.test(findingFollowup.note) ||
       redactCredentialText(findingFollowup.note) !== findingFollowup.note
@@ -2830,6 +2838,11 @@ function normalizePlannerRound(round: AdaptivePlannerRound | undefined) {
         snapshotDigest: findingFollowup.snapshotDigest,
         reportVersion: findingFollowup.reportVersion,
         note: findingFollowup.note,
+        ...(findingFollowup.nativeRepositoryVisibility && {
+          nativeRepositoryVisibility: repositoryVisibilityRecheckBinding(
+            findingFollowup.nativeRepositoryVisibility,
+          ),
+        }),
       },
     }),
     ...(passingRecheckId && { passingRecheckId }),
@@ -3163,8 +3176,12 @@ function readDedicatedRecheckSettlements(
   ) return new Map();
   return new Map(
     db.prepare(`
-      SELECT task.id, task.nodeId,
-        json_extract(task.plannerRound, '$.recheckFindingId') AS findingId,
+      SELECT task.id,
+        CASE WHEN json_extract(task.plannerRound, '$.findingFollowup.nativeRepositoryVisibility') IS NOT NULL
+          THEN 'repository-visibility:' || substr(task.id, 10)
+          ELSE task.nodeId END AS evidenceId,
+        COALESCE(json_extract(task.plannerRound, '$.recheckFindingId'),
+          json_extract(task.plannerRound, '$.findingFollowup.findingId')) AS findingId,
         (
           SELECT event FROM adaptive_events AS settlement
           WHERE settlement.revision = task.revision AND settlement.taskId = task.id
@@ -3176,14 +3193,16 @@ function readDedicatedRecheckSettlements(
       FROM adaptive_tasks AS task
       JOIN adaptive_evidence_revisions AS evidence ON evidence.revision = task.revision
       WHERE evidence.goalId = ? AND evidence.evidenceNumber = ?
-        AND task.kind = 'review_evidence'
-        AND json_extract(task.plannerRound, '$.recheckFindingId') IS NOT NULL
+        AND ((task.kind = 'review_evidence' AND
+          json_extract(task.plannerRound, '$.recheckFindingId') IS NOT NULL)
+          OR (task.kind = 'trace' AND
+          json_extract(task.plannerRound, '$.findingFollowup.nativeRepositoryVisibility') IS NOT NULL))
     `).all(runId, evidenceRevision).map((row) =>
       [
         String(row.id),
         {
           findingId: String(row.findingId),
-          evidenceId: String(row.nodeId),
+          evidenceId: String(row.evidenceId),
           completed: row.settlement === "model_review_completed",
         },
       ] as const

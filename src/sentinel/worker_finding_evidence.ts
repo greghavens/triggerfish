@@ -32,6 +32,30 @@ type Node = Snapshot["nodes"][number];
 type Evidence = Extract<Node, { kind: "evidence" }>;
 type Verification = NonNullable<Evidence["controlVerification"]>;
 
+/** Construct the exact derived verification without changing the case snapshot. */
+export function withRepositoryVisibilityVerification(
+  snapshot: Snapshot,
+  evidenceId: string,
+  assetId: string,
+  controlId: string,
+  controlVerification: Verification,
+): Snapshot {
+  return {
+    ...snapshot,
+    nodes: [...snapshot.nodes, {
+      id: evidenceId,
+      kind: "evidence",
+      label: "Approved native repository visibility check",
+      controlVerification,
+    }],
+    edges: [...snapshot.edges, {
+      from: evidenceId,
+      to: assetId,
+      relation: "observed_on",
+    }, { from: evidenceId, to: controlId, relation: "verifies" }],
+  };
+}
+
 /** Resolve only a uniquely linked asset for an imported verification receipt. */
 export function executionFindingAsset(
   snapshot: Snapshot,

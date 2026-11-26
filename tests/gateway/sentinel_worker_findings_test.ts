@@ -22,6 +22,8 @@ import {
 import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";
 import { createSentinelLiveWorkflowReader } from "../../src/gateway/sentinel_live_workflow.ts";
+import { createSentinelRepositoryVisibilityReader } from "../../src/gateway/sentinel_repository_visibility.ts";
+import { SENTINEL_LIVE_REPOSITORY_VISIBILITY } from "../../src/sentinel/github_repository_visibility.ts";
 import {
   branchExecutionEvidenceId,
   executionEvidenceDigest,
@@ -484,6 +486,12 @@ async function withFindingAssignmentGateway(
   readLiveWorkflow?: ReturnType<typeof nativeWorkflowReader>,
   echoToolResult = false,
   fixtureSnapshotPath?: string,
+  authorizeExecutionTracePayload?: Parameters<
+    typeof createOperatorRunToolExecutor
+  >[0]["authorizeExecutionTracePayload"],
+  readRepositoryVisibility?: ReturnType<
+    typeof createSentinelRepositoryVisibilityReader
+  >,
 ) {
   const registry = createProviderRegistry();
   let input: Record<string, unknown> = {};
@@ -518,6 +526,17 @@ async function withFindingAssignmentGateway(
     }),
     providerRegistry: registry,
     enableStreaming: false,
+    ...(authorizeExecutionTracePayload && {
+      tools: [{
+        name: "github_repos",
+        description: "Reauthorize the retained repository metadata fixture.",
+        parameters: {},
+      }],
+      toolExecutor: () =>
+        Promise.reject(
+          new Error("Saved evidence must not request fresh metadata."),
+        ),
+    }),
     sentinelSnapshotPath: fixtureSnapshotPath,
     sentinelSharedInventoryBaseDir: fixtureSnapshotPath ? baseDir : undefined,
     resolveSentinelChatCase: fixtureSnapshotPath
@@ -529,6 +548,8 @@ async function withFindingAssignmentGateway(
       confirm,
       workflows,
       readLiveWorkflow,
+      authorizeExecutionTracePayload,
+      readRepositoryVisibility,
     }),
     hookRunner: {
       evaluateHook(hook, { input }) {
@@ -8128,6 +8149,428 @@ Deno.test("Reviewed cross-case worker review reaches a scoped planner and reopen
     await Deno.remove(baseDir, { recursive: true });
   }
 });
+
+for (
+  const scenario of [
+    { visibility: "private", repositoryId: 42, outcome: "pass" },
+    { visibility: "internal", repositoryId: 42, outcome: "fail" },
+    {
+      visibility: "private",
+      repositoryId: 43,
+      outcome: undefined,
+      denied: "repository ID",
+    },
+    {
+      visibility: "private",
+      repositoryId: 42,
+      outcome: undefined,
+      denied: "older observation",
+    },
+    {
+      visibility: "private",
+      repositoryId: 42,
+      outcome: undefined,
+      denied: "revoked original",
+    },
+  ] as const
+) {
+  Deno.test(`Native repository visibility remediation checks ${scenario.outcome ?? scenario.denied}`, async () => {
+    const baseDir = await Deno.makeTempDir();
+    const caseId = "native-repository-remediation";
+    const path = resolveSentinelCasePath(baseDir, caseId);
+    let coordinator: ReturnType<typeof createSentinelModelPlanner> | undefined;
+    const placeholder = `execution-evidence:${"a".repeat(64)}`;
+    const repo = "owner/repo";
+    const original = {
+      kind: "github_repository_status" as const,
+      repo,
+      repositoryId: 42,
+      visibility: "public" as const,
+    };
+    const source = {
+      role: "delegated" as const,
+      runId: "original-repository-review",
+      ordinal: 1,
+      receiptId: `execution-trace:${"b".repeat(64)}`,
+      resultSha256: executionEvidenceDigest(original),
+    };
+    const observedAt = new Date(Date.now() - 60_000).toISOString();
+    const validUntil = new Date(Date.now() + 900_000).toISOString();
+    try {
+      await Deno.mkdir(dirname(path), { recursive: true, mode: 0o700 });
+      const snapshot = JSON.stringify({
+        version: 1,
+        nodes: [
+          { id: "app", kind: "asset", label: "Assigned application" },
+          {
+            id: "gap",
+            kind: "finding",
+            label: "Repository exposure",
+            severity: "low",
+          },
+          {
+            id: "control",
+            kind: "control",
+            label: "Private repository default",
+          },
+          {
+            id: placeholder,
+            kind: "evidence",
+            label: "Original repository status",
+            executionSource: source,
+            controlVerification: { outcome: "fail", observedAt, validUntil },
+          },
+        ],
+        edges: [
+          { from: "gap", to: "app", relation: "affects" },
+          { from: "control", to: "gap", relation: "mitigates" },
+          { from: placeholder, to: "control", relation: "verifies" },
+          { from: placeholder, to: "app", relation: "observed_on" },
+        ],
+      });
+      await Deno.writeTextFile(path, snapshot);
+      await Deno.writeTextFile(
+        join(dirname(path), sentinelExecutionEvidenceFile),
+        JSON.stringify([{
+          ...source,
+          recordedAt: observedAt,
+          classification: "INTERNAL",
+          payload: original,
+        }]),
+        { mode: 0o600 },
+      );
+      const started = startSentinelAssessment(path);
+      const runId = started.plan.runId;
+      assert(runId);
+      const originalId = repositoryVisibilityEvidenceId(
+        runId,
+        "app",
+        "control",
+        source,
+        original.repositoryId,
+        validUntil,
+      );
+      await Deno.writeTextFile(
+        path,
+        snapshot.replaceAll(placeholder, originalId),
+      );
+      const state = refreshSentinelAssessment(path);
+      assert(state);
+      const initial = await workerTurn(
+        path,
+        assignedLease(path, state, "review_evidence", originalId),
+        [
+          [tool("sentinel_assigned_execution_evidence", { node: originalId })],
+          [tool(report, {
+            graphFindingId: "gap",
+            controlId: "control",
+            evidenceId: originalId,
+            requestId: crypto.randomUUID(),
+            title: "Repository visibility control failure",
+            summary: "The original retained result confirms public visibility.",
+          })],
+        ],
+        undefined,
+        baseDir,
+      );
+      assertEquals(
+        JSON.parse(initial.results[0][0]).evidence.payload,
+        original,
+      );
+      const finding = JSON.parse(initial.results[1][0]).record;
+      assert(finding);
+      const ref = {
+        kind: "sentinel",
+        id: caseId,
+        revision: state.revision,
+        runId,
+      };
+      let selectedTask: string | undefined;
+      await withFindingAssignmentGateway(
+        baseDir,
+        () => Promise.resolve(true),
+        async (turn) => {
+          const saved = JSON.parse(
+            await turn({
+              ...ref,
+              action: "assign",
+              adaptiveRevision: adaptiveRevision(state),
+              taskKind: "trace",
+              nativeRepositoryVisibilityRecheck: true,
+              node: "app",
+              receiptId: finding.id,
+              note: "Recheck the exact repository visibility control.",
+              requestId: crypto.randomUUID(),
+            }),
+          );
+          selectedTask = saved.receipt.taskId;
+          assertEquals(saved.receipt.findingFollowup.findingId, finding.id);
+        },
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        false,
+        undefined,
+        (payload) =>
+          Promise.resolve(
+            payload.kind === original.kind &&
+              payload.repo === original.repo &&
+              payload.repositoryId === original.repositoryId,
+          ),
+      );
+      assert(selectedTask);
+      const virtualId = `repository-visibility:${
+        selectedTask.slice("adaptive:".length)
+      }`;
+      const credentialRef = crypto.randomUUID();
+      let fetches = 0;
+      let secretLookups = 0;
+      let availableCredential = true;
+      let originalAllowed = true;
+      let blockedOriginal = 0;
+      let result: string | undefined;
+      let live: string | undefined;
+      const reader = createSentinelRepositoryVisibilityReader({
+        scopes: [{
+          case: caseId,
+          asset: "app",
+          owner: "owner",
+          repo: "repo",
+          repository_id: scenario.repositoryId,
+        }],
+        // The fixture explicitly approves this exact private repository for
+        // INTERNAL visibility metadata; no unrelated repository shares the grant.
+        classificationOverrides: { [repo]: "INTERNAL" },
+        resolveCredential: () => {
+          secretLookups++;
+          return Promise.resolve(
+            availableCredential
+              ? {
+                token: "synthetic-local-metadata-token",
+                ref: credentialRef,
+              }
+              : undefined,
+          );
+        },
+        ssrfChecker: () => Promise.resolve({ ok: true, value: "192.0.2.1" }),
+        ...("denied" in scenario && scenario.denied === "older observation" && {
+          now: () => new Date(Date.parse(observedAt) - 1_000),
+        }),
+        readVisibility(request) {
+          assertEquals(request.repositoryId, scenario.repositoryId);
+          fetches++;
+          return Promise.resolve(scenario.visibility);
+        },
+      });
+      const model = createProviderRegistry();
+      const usage = { inputTokens: 1, outputTokens: 1 };
+      const requestId = crypto.randomUUID();
+      model.register({
+        name: "native-repository-remediation-worker",
+        supportsStreaming: false,
+        complete(messages) {
+          const returns = messages.filter(({ role }) => role === "tool");
+          const call = (name: string, args: Record<string, unknown> = {}) =>
+            Promise.resolve({
+              content: "",
+              toolCalls: [{
+                type: "function" as const,
+                id: crypto.randomUUID(),
+                function: { name, arguments: JSON.stringify(args) },
+              }],
+              usage,
+            });
+          if (returns.length === 0) {
+            return call("sentinel_assigned_execution_evidence", {
+              node: originalId,
+            });
+          }
+          if (returns.length === 1) {
+            assertEquals(
+              JSON.parse(String(returns[0].content)).evidence.payload,
+              original,
+            );
+            return call(SENTINEL_LIVE_REPOSITORY_VISIBILITY);
+          }
+          if (returns.length === 2) {
+            live = String(returns[1].content);
+            if (scenario.repositoryId === original.repositoryId) {
+              assertEquals(
+                JSON.parse(live).repositoryId,
+                scenario.repositoryId,
+              );
+            } else {
+              assert(!live.startsWith("{"));
+            }
+            if (
+              "denied" in scenario && scenario.denied === "revoked original"
+            ) {
+              originalAllowed = false;
+            }
+            return call(recheck, {
+              findingId: finding.id,
+              evidenceId: virtualId,
+              summary:
+                "Rechecked the exact repository against the original private visibility control.",
+              requestId,
+            });
+          }
+          result = String(returns[2].content);
+          return Promise.resolve({
+            content:
+              '{"summary":"Finished the narrowly scoped repository recheck.","followUps":[]}',
+            toolCalls: [],
+            usage,
+          });
+        },
+      });
+      model.setDefault("native-repository-remediation-worker");
+      coordinator = createSentinelModelPlanner(
+        path,
+        (current, taskId, token) => {
+          if (taskId !== selectedTask) {
+            return { execute: () => Promise.resolve(), clear() {} };
+          }
+          return createSentinelSubagent({
+            snapshotPath: path,
+            sharedInventoryBaseDir: baseDir,
+            assessmentRevision: current.revision,
+            assignedTaskId: taskId,
+            assignedTaskLeaseToken: token,
+            providerRegistry: model,
+            readRepositoryVisibility: reader,
+            authorizeExecutionTracePayload: (receipt) =>
+              Promise.resolve(receipt.repositoryId === original.repositoryId),
+            allowModelAccess: true,
+            hookRunner: {
+              evaluateHook(hook, { input }) {
+                const call = input.tool_call as { name?: string } | undefined;
+                const denied = !originalAllowed && hook === "PRE_TOOL_CALL" &&
+                  (input.tool_name === "github_repos" ||
+                    call?.name === "github_repos");
+                if (denied) blockedOriginal++;
+                return Promise.resolve({
+                  allowed: !denied,
+                  action: denied ? "BLOCK" : "ALLOW",
+                  ruleId: null,
+                  duration: 0,
+                });
+              },
+            },
+          });
+        },
+        () => () => {},
+      );
+      const deniedWrite = () =>
+        readAdaptiveSentinel(path, state, "revision")?.modelReviewStates.find(
+          ({ taskId }) => taskId === selectedTask,
+        )?.progressSteps?.some(({ tool, outcome }) =>
+          tool === recheck && outcome === "error"
+        );
+      await waitForCondition(
+        () =>
+          !coordinator?.hasInFlightWork() &&
+          (scenario.outcome ? result !== undefined : deniedWrite() === true),
+        () => coordinator?.advance(state),
+      );
+      assertEquals(
+        fetches,
+        scenario.repositoryId === original.repositoryId ? 1 : 0,
+      );
+      assertEquals(readSentinelAssessment(path)?.revision, state.revision);
+      const saved = readSentinelWorkerFindingReport(path, state.revision);
+      assertEquals(
+        saved?.findings.find(({ id }) => id === finding.id),
+        finding,
+      );
+      const measured = saved?.rechecks.filter(({ findingId }) =>
+        findingId === finding.id
+      );
+      if (!scenario.outcome) {
+        if (scenario.denied === "repository ID") {
+          assertEquals(secretLookups, 0);
+          assertStringIncludes(live!, "unavailable");
+        }
+        if (scenario.denied === "revoked original") assert(blockedOriginal > 0);
+        assert(deniedWrite());
+        assertEquals(measured, []);
+        return;
+      }
+      const receipt = JSON.parse(result!).record;
+      assertEquals(receipt.outcome, scenario.outcome);
+      assertEquals(receipt.findingId, finding.id);
+      assertEquals(receipt.taskId, selectedTask);
+      assertEquals(receipt.evidenceId, virtualId);
+      assertEquals(receipt.evidenceRevision, state.revision);
+      assert(live);
+      assertEquals(receipt.nativeRepositoryVisibility, {
+        taskId: selectedTask,
+        sourceStepIndex: 1,
+        resultSha256: createHash("sha256").update(live).digest("hex"),
+      });
+      assertEquals(measured, [receipt]);
+      assert(!JSON.stringify(receipt).includes(credentialRef));
+      await withFindingAssignmentGateway(
+        baseDir,
+        () =>
+          Promise.reject(
+            new Error("Saved report reads must not require approval."),
+          ),
+        async (turn) => {
+          const readRef = {
+            kind: "sentinel",
+            id: caseId,
+            revision: state.revision,
+          };
+          const verdict = {
+            ...readRef,
+            action: "finding_receipt",
+            receiptId: receipt.id,
+          };
+          const reportRequest = {
+            ...readRef,
+            action: "finding_report",
+            receiptId: finding.id,
+          };
+          assertEquals(JSON.parse(await turn(verdict)).record, receipt);
+          const current = JSON.parse(await turn(reportRequest));
+          assertEquals(current.report.remediation.status, scenario.outcome);
+          assertEquals(current.report.sourceReceiptId, finding.id);
+          availableCredential = false;
+          assertStringIncludes(await turn(verdict), "unavailable");
+          const revoked = JSON.parse(await turn(reportRequest));
+          assertEquals(revoked.report.remediation.status, "unknown");
+          assertEquals(revoked.report.sourceReceiptId, finding.id);
+          assertEquals(
+            JSON.parse(await turn({ ...verdict, receiptId: finding.id }))
+              .record,
+            finding,
+          );
+          assert(!JSON.stringify(revoked).includes(receipt.id));
+        },
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        false,
+        undefined,
+        (payload) =>
+          Promise.resolve(
+            payload.kind === original.kind &&
+              payload.repo === original.repo &&
+              payload.repositoryId === original.repositoryId,
+          ),
+        reader,
+      );
+      assertEquals(fetches, 1);
+    } finally {
+      coordinator?.stop();
+      await waitForCondition(() => !coordinator?.hasInFlightWork(), () => {});
+      await Deno.remove(baseDir, { recursive: true });
+    }
+  });
+}
 
 async function verifyReceiptFamily(
   family:

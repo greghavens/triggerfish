@@ -1,4 +1,10 @@
 import {
+  nativeRepositoryVisibilityEvidenceId,
+  repositoryVisibilityReference,
+  type SentinelRepositoryVisibilityReference,
+} from "./github_repository_visibility.ts";
+
+import {
   decodeInconclusiveRecheck,
   inconclusiveRecheckId,
   normalizeInconclusiveRecheck,
@@ -187,6 +193,7 @@ export interface SentinelWorkerFindingRecheckInput
   readonly findingId: string;
   readonly outcome: typeof sentinelWorkerRecheckOutcomes[number];
   readonly summary: string;
+  readonly nativeRepositoryVisibility?: SentinelRepositoryVisibilityReference;
 }
 
 type Receipt = {
@@ -429,10 +436,19 @@ type AssignedFindingInput = SentinelWorkerFindingInput & { kind: "finding" };
 type AnalystFindingInput = SentinelAnalystFindingInput & { kind: "finding" };
 
 function normalizeRecheck(raw: SentinelWorkerFindingRecheckInput) {
+  const nativeRepositoryVisibility =
+    raw.nativeRepositoryVisibility === undefined
+      ? undefined
+      : repositoryVisibilityReference(raw.nativeRepositoryVisibility);
   if (
     !bounded(raw.summary, 4096) ||
     typeof raw.findingId !== "string" || !findingPattern.test(raw.findingId) ||
-    !sentinelWorkerRecheckOutcomes.includes(raw.outcome)
+    !sentinelWorkerRecheckOutcomes.includes(raw.outcome) ||
+    (raw.nativeRepositoryVisibility !== undefined &&
+      (!nativeRepositoryVisibility ||
+        redactCredentialText(raw.summary) !== raw.summary ||
+        nativeRepositoryVisibility.taskId !== raw.taskId ||
+        nativeRepositoryVisibilityEvidenceId(raw.taskId) !== raw.evidenceId))
   ) {
     throw new Error("Invalid Sentinel worker remediation recheck");
   }
@@ -441,6 +457,7 @@ function normalizeRecheck(raw: SentinelWorkerFindingRecheckInput) {
     findingId: raw.findingId,
     outcome: raw.outcome,
     summary: raw.summary,
+    ...(nativeRepositoryVisibility && { nativeRepositoryVisibility }),
     kind: "recheck" as const,
   };
 }

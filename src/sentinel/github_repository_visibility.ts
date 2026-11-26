@@ -4,6 +4,38 @@ export const SENTINEL_LIVE_REPOSITORY_VISIBILITY =
 export const SENTINEL_SAVED_REPOSITORY_VISIBILITY =
   "sentinel_saved_repository_visibility";
 
+export function nativeRepositoryVisibilityEvidenceId(taskId: string) {
+  return /^adaptive:[a-f0-9]{64}$/.test(taskId)
+    ? "repository-visibility:" + taskId.slice("adaptive:".length)
+    : undefined;
+}
+
+export interface SentinelRepositoryVisibilityRecheckBinding {
+  readonly repository: string;
+  readonly repositoryId: number;
+  readonly originalSha256: string;
+}
+
+export function repositoryVisibilityRecheckBinding(
+  value: unknown,
+): SentinelRepositoryVisibilityRecheckBinding | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return;
+  const { repository, repositoryId, originalSha256 } = value as Record<
+    string,
+    unknown
+  >;
+  if (
+    Object.keys(value).length !== 3 || typeof repository !== "string" ||
+    !/^[a-z0-9](?:[a-z0-9-]{0,37}[a-z0-9])?\/[a-z0-9_.-]{1,100}$/.test(
+      repository,
+    ) ||
+    typeof repositoryId !== "number" || !Number.isSafeInteger(repositoryId) ||
+    repositoryId < 1 ||
+    typeof originalSha256 !== "string" || !/^[a-f0-9]{64}$/.test(originalSha256)
+  ) return;
+  return { repository, repositoryId, originalSha256 };
+}
+
 export interface SentinelRepositoryVisibilityReference {
   readonly taskId: string;
   readonly sourceStepIndex: number;

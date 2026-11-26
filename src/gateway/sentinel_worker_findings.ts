@@ -1,4 +1,10 @@
 import {
+  nativeRepositoryVisibilityEvidenceId,
+  type SentinelRepositoryVisibilityReference,
+} from "../sentinel/github_repository_visibility.ts";
+import { verifySentinelNativeRepositoryRecheck } from "./sentinel_native_repository_recheck.ts";
+
+import {
   initialSentinelFindingTrafficEvidenceVersion,
   openSentinelFindingTrafficLinks,
   type SentinelFindingTrafficLinkInput,
@@ -181,7 +187,8 @@ export function readScopedSentinelWorkerFindingReport(
   return {
     findings,
     rechecks: report.rechecks.filter((item) =>
-      visible.has(item.findingId) && allows(item) &&
+      !item.nativeRepositoryVisibility && visible.has(item.findingId) &&
+      allows(item) &&
       scope.allows(item.evidenceId)
     ),
     amendments: report.amendments.filter((item) =>
@@ -537,6 +544,7 @@ export function executeSentinelWorkerFindingTool(
   >,
   allowReadTarget?: (target: string) => boolean,
   trafficReads?: ReadonlyMap<string, { stepIndex: number; sha256: string }>,
+  nativeRepositoryVisibility?: SentinelRepositoryVisibilityReference,
 ): string {
   const tool = findTool(name);
   if (
@@ -592,6 +600,7 @@ export function executeSentinelWorkerFindingTool(
               : undefined);
           const eligible = (record: ReturnType<typeof store.read>): boolean =>
             !!record && record.caseId === caseId &&
+            !(record.kind === "recheck" && record.nativeRepositoryVisibility) &&
             record.runId === policy.runId && policy.allowsRecord(record) &&
             (!allowReadTarget || allowReadTarget(record.targetId)) &&
             record.evidenceRevision <= selectedRevision &&
@@ -751,6 +760,12 @@ export function executeSentinelWorkerFindingTool(
               _classification: "INTERNAL",
               finding,
               originalOutcome: "fail",
+              ...(task?.plannerRound?.findingFollowup
+                ?.nativeRepositoryVisibility &&
+                task.plannerRound.findingFollowup.findingId === finding.id && {
+                nativeRepositoryVisibilityEvidenceId:
+                  nativeRepositoryVisibilityEvidenceId(task.id),
+              }),
               ...(selectedFinding === finding.id &&
                 task?.plannerRound?.recheckNote &&
                 { recheckNote: task.plannerRound.recheckNote }),
@@ -788,7 +803,8 @@ export function executeSentinelWorkerFindingTool(
               rechecks: store.listFindingRechecks(finding.id, state.revision)
                 .filter((item) =>
                   item.caseId === caseId && item.runId === finding.runId &&
-                  item.targetId === finding.targetId
+                  item.targetId === finding.targetId &&
+                  !item.nativeRepositoryVisibility
                 ).slice(0, 5),
             };
           },
@@ -895,7 +911,9 @@ export function executeSentinelWorkerFindingTool(
 
     if (
       typeof evidenceId !== "string" ||
-      !(readEvidence.has(evidenceId) || executionReads?.has(evidenceId)) ||
+      !(readEvidence.has(evidenceId) || executionReads?.has(evidenceId) ||
+        (name === "sentinel_record_finding_recheck" &&
+          nativeRepositoryVisibility)) ||
       typeof requestId !== "string" ||
       !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(requestId) ||
       typeof args.summary !== "string"
@@ -945,22 +963,32 @@ export function executeSentinelWorkerFindingTool(
             evidenceId,
             executionReads?.get(evidenceId),
           );
-          if (boundary === false) return;
-          const outcome = verifyWorkerFindingRecheck(
-            snapshot,
-            {
-              caseId,
-              evidenceRevision: state.revision,
-              evaluatedAt: state.result!.controlEvaluationAt ?? state.updatedAt,
-            },
-            {
-              assetId: asset,
-              findingId: graphId,
-              controlId: control,
+          if (boundary === false && !nativeRepositoryVisibility) return;
+          const outcome = nativeRepositoryVisibility
+            ? previous && task && verifySentinelNativeRepositoryRecheck(
+              scope.snapshotPath,
+              state,
+              task,
+              previous,
               evidenceId,
-            },
-            boundary,
-          );
+              nativeRepositoryVisibility,
+            )
+            : verifyWorkerFindingRecheck(
+              snapshot,
+              {
+                caseId,
+                evidenceRevision: state.revision,
+                evaluatedAt: state.result!.controlEvaluationAt ??
+                  state.updatedAt,
+              },
+              {
+                assetId: asset,
+                findingId: graphId,
+                controlId: control,
+                evidenceId,
+              },
+              boundary === false ? undefined : boundary,
+            );
           const evidence = snapshot.nodes.find(({ id }) => id === evidenceId);
           if (
             !outcome || initial && outcome.outcome !== "fail" ||
@@ -1139,8 +1167,12 @@ export function executeSentinelWorkerFindingTool(
               ...receipt,
               findingId: previous.id,
               outcome: outcome.outcome,
+              ...(nativeRepositoryVisibility && { nativeRepositoryVisibility }),
             }, (recheck) => {
-              if (task?.plannerRound?.recheckFindingId) return;
+              if (
+                task?.plannerRound?.recheckFindingId ||
+                nativeRepositoryVisibility
+              ) return;
               notify(recheck);
               if (recheck.outcome === "pass") notify({ id: recheck.findingId });
             });

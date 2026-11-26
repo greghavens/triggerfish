@@ -1,4 +1,9 @@
 import {
+  nativeRepositoryVisibilityEvidenceId,
+  repositoryVisibilityReference,
+} from "./github_repository_visibility.ts";
+
+import {
   isWorkerNarrativeId,
   readWorkerNarrativeReceipt,
   SENTINEL_WORKER_NARRATIVE_READ,
@@ -161,9 +166,13 @@ type RemediationRecheckProvenance =
     | "evidenceId"
     | "findingId"
     | "graphFindingId"
-    | "outcome"
+    | "nativeRepositoryVisibility"
   >
-  & { readonly receiptSha256: string };
+  & {
+    readonly receiptSha256: string;
+    readonly originalEvidenceId?: string;
+    readonly outcome?: SentinelWorkerFindingRecheckRecord["outcome"];
+  };
 
 export interface WorkerNarrativeProvenance {
   readonly id: string;
@@ -1368,7 +1377,21 @@ function addAdaptive(
   );
   for (const receipt of rechecks.values()) {
     const assignment = assignments.get(receipt.taskId);
-    const evidence = imported.get(receipt.evidenceId)?.ref;
+    const followup = assignment?.plannerRound?.findingFollowup;
+    const native = repositoryVisibilityReference(
+      receipt.nativeRepositoryVisibility,
+    );
+    const originalEvidence = receipt.originalEvidenceId &&
+      imported.get(receipt.originalEvidenceId)?.ref;
+    const repositoryEvidence = native && native.taskId === receipt.taskId &&
+      followup?.nativeRepositoryVisibility &&
+      followup.findingId === receipt.findingId &&
+      followup.evidenceId === receipt.originalEvidenceId &&
+      nativeRepositoryVisibilityEvidenceId(receipt.taskId) ===
+        receipt.evidenceId &&
+      originalEvidence && derivedRef("observation", origin, receipt.evidenceId);
+    const evidence = repositoryEvidence ||
+      imported.get(receipt.evidenceId)?.ref;
     const originalFinding = imported.get(receipt.graphFindingId)?.ref;
     if (
       !/^worker-recheck:[a-f0-9]{64}$/.test(receipt.id) ||
@@ -1379,6 +1402,21 @@ function addAdaptive(
         assignment.nodeId !== receipt.evidenceId)
     ) continue;
     const id = derivedRef("observation", origin, receipt.id);
+    if (repositoryEvidence && originalEvidence) {
+      index.addNode({
+        id: repositoryEvidence,
+        sourceId: receipt.evidenceId,
+        label: "Approved repository visibility evidence",
+        kind: "observation",
+        origin,
+      });
+      index.addEdge(
+        derivedRef("task", origin, receipt.taskId),
+        repositoryEvidence,
+        "produces",
+      );
+      index.addEdge(repositoryEvidence, originalEvidence, "references");
+    }
     index.addNode({
       id,
       sourceId: receipt.id,
