@@ -1803,9 +1803,40 @@ Deno.test("gateway reopens a cold remediation receipt separately from its origin
         ),
       );
       assertEquals(adaptive.modelReviewNotes(revision), []);
-      for (let index = 0; index < 8; index++) {
+      const recentReason = "fixture newer recheck review";
+      const recentTasks = adaptive.sync(
+        revision,
+        Array.from({ length: 8 }, (_, index) => ({
+          kind: "trace" as const,
+          nodeId: affected,
+          depth: index + 3,
+          reason: recentReason,
+        })),
+        revision,
+      ).filter(({ reason }) => reason === recentReason);
+      assertEquals(recentTasks.length, 8);
+      for (const [index, task] of recentTasks.entries()) {
+        const excluded = new Set(
+          adaptive.list(revision).filter(({ id }) => id !== task.id).map((
+            { id },
+          ) => id),
+        );
+        const queued = adaptive.claim(revision, 60, excluded);
+        assert(queued);
+        assert(adaptive.complete({
+          taskId: task.id,
+          leaseToken: queued.leaseToken,
+          observation: {},
+        }));
+        const recentLease = adaptive.claimModelReview(
+          revision,
+          recentReason,
+          ({ id }) => id === task.id,
+        );
+        assert(recentLease);
         findings.recordRecheck({
           ...receiptScope,
+          taskId: recentLease.task.id,
           findingId: originalId,
           evidenceId: "passing-check",
           observedAt: passing,
@@ -1813,6 +1844,12 @@ Deno.test("gateway reopens a cold remediation receipt separately from its origin
           summary: `Recent retained remediation ${index}.`,
           requestId: crypto.randomUUID(),
         });
+        assert(adaptive.finishModelReview(
+          revision,
+          recentLease.task.id,
+          recentLease.token,
+          "interrupted",
+        ));
       }
     } finally {
       findings.close();
