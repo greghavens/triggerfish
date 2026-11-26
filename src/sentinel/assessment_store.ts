@@ -4230,3 +4230,110 @@ export function readSentinelDecision(
 ) {
   return readSentinelDecisions(path, kind, [id])[0];
 }
+
+export interface SentinelRunDisplay {
+  readonly version: number;
+  readonly title?: string;
+  readonly pinnedAt?: string;
+}
+
+export interface SentinelRunDisplayChange {
+  readonly runId: string;
+  readonly revision: number;
+  readonly requestId: string;
+  readonly expectedVersion: number;
+  readonly title?: string;
+  readonly pinned?: boolean;
+}
+
+function readRunDisplay(db: DatabaseSync, runId: string): SentinelRunDisplay {
+  const table = db.prepare(
+    "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'assessment_run_display'",
+  ).get();
+  if (!table) return { version: 0 };
+  const row = db.prepare(
+    "SELECT display FROM assessment_run_display WHERE runId = ? ORDER BY version DESC LIMIT 1",
+  ).get(runId);
+  return row ? JSON.parse(String(row.display)) : { version: 0 };
+}
+
+export function readSentinelRunDisplay(path: string, runId: string) {
+  const db = openStore(path, false);
+  if (!db) return { version: 0 };
+  try {
+    return readRunDisplay(db, runId);
+  } finally {
+    db.close();
+  }
+}
+
+/** Check or persist a list-only change bound to the current assessment. */
+export function changeSentinelRunDisplay(
+  path: string,
+  change: SentinelRunDisplayChange,
+  commit: boolean,
+):
+  | {
+    previous: SentinelRunDisplay;
+    display: SentinelRunDisplay;
+    saved: boolean;
+  }
+  | undefined {
+  const db = openStore(path, false);
+  if (!db) return;
+  try {
+    return transact(db, () => {
+      const row = getRow(db);
+      if (
+        row?.revision !== change.revision ||
+        (JSON.parse(row.plan) as AssessmentPlan).runId !== change.runId
+      ) return;
+      const expected = JSON.stringify(change);
+      const table = db.prepare(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'assessment_run_display'",
+      ).get();
+      if (table) {
+        const existing = db.prepare(
+          "SELECT change, previous, display FROM assessment_run_display WHERE requestId = ?",
+        ).get(change.requestId);
+        if (existing) {
+          return existing.change === expected
+            ? {
+              saved: true,
+              previous: JSON.parse(String(existing.previous)),
+              display: JSON.parse(String(existing.display)),
+            }
+            : undefined;
+        }
+      }
+      const previous = readRunDisplay(db, change.runId);
+      if (previous.version !== change.expectedVersion) return;
+      const title = change.title ?? previous.title;
+      const pinnedAt = change.pinned === false
+        ? undefined
+        : previous.pinnedAt ??
+          (change.pinned ? new Date().toISOString() : undefined);
+      const display = { version: previous.version + 1, title, pinnedAt };
+      if (commit) {
+        db.exec(`CREATE TABLE IF NOT EXISTS assessment_run_display (
+          runId TEXT NOT NULL, version INTEGER NOT NULL, requestId TEXT NOT NULL UNIQUE,
+          change TEXT NOT NULL, previous TEXT NOT NULL, display TEXT NOT NULL,
+          PRIMARY KEY (runId, version)
+        )`);
+        db.prepare(
+          "INSERT INTO assessment_run_display VALUES (?, ?, ?, ?, ?, ?)",
+        ).run(
+          change.runId,
+          display.version,
+          change.requestId,
+          expected,
+          JSON.stringify(previous),
+          JSON.stringify(display),
+        );
+      }
+      return { previous, display, saved: commit };
+    });
+  } finally {
+    db.close();
+  }
+}

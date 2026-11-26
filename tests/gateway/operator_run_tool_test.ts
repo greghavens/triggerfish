@@ -731,6 +731,72 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
       sentinelRevision = started.ref.revision;
       assert(sentinelRevision);
       const exact = { ...sentinel, revision: sentinelRevision };
+      const displayRequest = {
+        action: "set_display",
+        ...exact,
+        runId: started.details.runId,
+        requestId: crypto.randomUUID(),
+        expectedVersion: 0,
+        title: "Priority control review",
+        pinned: true,
+      };
+      const displayApprovals = confirmations.length;
+      denied = "PRE_TOOL_CALL";
+      await turn(displayRequest);
+      assertEquals(confirmations.length, displayApprovals);
+      denied = undefined;
+      const display = JSON.parse((await turn(displayRequest)).result);
+      assertEquals(display.display.title, displayRequest.title);
+      assertEquals(display.display.version, 1);
+      assert(typeof display.display.pinnedAt === "string");
+      assertEquals(confirmations.length, displayApprovals + 1);
+      assertStringIncludes(
+        (await turn({ ...displayRequest, requestId: crypto.randomUUID() }))
+          .result,
+        "unavailable",
+      );
+      assertStringIncludes(
+        (await turn({ ...displayRequest, title: "Changed retry" })).result,
+        "unavailable",
+      );
+      await withGateway(async (reconnected) => {
+        const list = { action: "list", kind: "sentinel" };
+        const first = JSON.parse((await reconnected(list)).result).runs[0];
+        assertEquals(first.ref, started.ref);
+        assertEquals(first.label, displayRequest.title);
+        assertEquals(first.details.pinnedAt, display.display.pinnedAt);
+        denied = "POST_TOOL_RESPONSE";
+        assertEquals(
+          (await reconnected(list)).result,
+          "Tool response withheld by policy.",
+        );
+        denied = "PRE_OUTPUT";
+        assertEquals((await reconnected(list)).response, undefined);
+        denied = undefined;
+        assertEquals(
+          JSON.parse((await reconnected(displayRequest)).result),
+          display,
+        );
+        assertEquals(confirmations.length, displayApprovals + 1);
+        assertEquals(
+          JSON.parse(
+            (await reconnected({ action: "inspect", ...exact })).result,
+          )
+            .run.label,
+          started.label,
+        );
+        const unpinned = JSON.parse(
+          (await reconnected({
+            ...displayRequest,
+            requestId: crypto.randomUUID(),
+            expectedVersion: 1,
+            title: undefined,
+            pinned: false,
+          })).result,
+        ).display;
+        assertEquals(unpinned.title, displayRequest.title);
+        assertEquals(unpinned.pinnedAt, undefined);
+      });
       const tracesAction = {
         action: "execution_traces",
         traceRole: "delegated",

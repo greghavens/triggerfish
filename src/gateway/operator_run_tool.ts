@@ -155,6 +155,7 @@ import {
 import type { ToolDefinition } from "../core/types/tool.ts";
 import {
   applySentinelFormalGoals,
+  changeSentinelRunDisplay,
   MAX_SENTINEL_RUN_TIMEOUT_SECONDS,
   readSentinelAssessment,
   readSentinelAssessmentAlerts,
@@ -326,6 +327,7 @@ export const operatorRunTool: ToolDefinition = {
       enum: [
         "list",
         "inspect",
+        "set_display",
         "start",
         "spawn",
         "link",
@@ -522,7 +524,16 @@ export const operatorRunTool: ToolDefinition = {
       type: "string",
       description: "Exact finding attachment-set digest from finding_traffic",
     },
-    title: { type: "string", description: "New finding report title" },
+    title: {
+      type: "string",
+      description:
+        "New finding report title or Sentinel run list display title",
+    },
+    pinned: {
+      type: "boolean",
+      description:
+        "Whether to pin this exact Sentinel run in the owner run list",
+    },
     summary: { type: "string", description: "New finding report summary" },
     reportVersion: {
       type: "integer",
@@ -2653,6 +2664,72 @@ export function createOperatorRunToolExecutor(options: {
             action === "spawn"
           ? backgroundReference(args.kind, args.id, args.revision)
           : undefined);
+      if (action === "set_display") {
+        const { title, pinned, runId, expectedVersion, requestId } = args;
+        if (
+          !context?.authenticatedOwnerSessionId ||
+          !canFlowTo("INTERNAL", context.ceiling ?? "PUBLIC") ||
+          !canFlowTo(context.inputClassification ?? "PUBLIC", "INTERNAL") ||
+          ref?.kind !== "sentinel" || ref.revision === undefined ||
+          typeof runId !== "string" || !digestPattern.test(runId) ||
+          typeof requestId !== "string" || !digestPattern.test(requestId) ||
+          typeof expectedVersion !== "number" ||
+          !Number.isSafeInteger(expectedVersion) || expectedVersion < 0 ||
+          (title === undefined && pinned === undefined) ||
+          (pinned !== undefined && typeof pinned !== "boolean") ||
+          (title !== undefined &&
+            (typeof title !== "string" || !title.trim() ||
+              title.trim().length > 256 ||
+              Array.from(title.trim()).length > 200 ||
+              /[\p{Cc}\p{Cf}]/u.test(title) ||
+              redactCredentialText(title) !== title)) ||
+          Object.keys(args).some((key) =>
+            ![
+              "action",
+              "kind",
+              "id",
+              "revision",
+              "runId",
+              "expectedVersion",
+              "requestId",
+              "title",
+              "pinned",
+            ].includes(key)
+          ) || !await controller.inspect(ref)
+        ) return unavailable;
+        const path = resolveSentinelCasePath(options.baseDir, ref.id);
+        const change = {
+          runId: runId.toLowerCase(),
+          revision: ref.revision,
+          expectedVersion,
+          requestId: requestId.toLowerCase(),
+          ...(typeof title === "string" && { title: title.trim() }),
+          ...(typeof pinned === "boolean" && { pinned }),
+        };
+        const preview = changeSentinelRunDisplay(path, change, false);
+        if (!preview) return unavailable;
+        if (
+          !preview.saved && !await options.confirm(
+            `Change how this exact run appears in the list?\n${
+              JSON.stringify({
+                run: ref,
+                ...change,
+                previous: preview.previous,
+              })
+            }`,
+          )
+        ) return "Error: The operator declined the run action.";
+        const committed = preview.saved
+          ? preview
+          : changeSentinelRunDisplay(path, change, true);
+        return committed
+          ? safeProjection({
+            run: ref,
+            runId: change.runId,
+            display: committed.display,
+          })
+          : unavailable;
+      }
       if (
         action === "archive" || action === "restore" ||
         action === "archive_history"

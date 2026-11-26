@@ -39,6 +39,7 @@ import {
   readSentinelModelProfileForRevision,
   readSentinelOperatingConstraintVersion,
   readSentinelPlannerHeartbeatForRevision,
+  readSentinelRunDisplay,
   readSentinelRunIdForRevision,
   readSentinelRunTimeoutForRevision,
   resumeSentinelAssessment,
@@ -165,7 +166,21 @@ export function createOperatorSentinelRuns(
         reference: `${ref.id}:${publicRef.revision}`,
       }],
     };
-    if (!full) return summary;
+    if (!full) {
+      const runId = readSentinelRunIdForRevision(path, publicRef.revision);
+      if (!runId) return summary;
+      const display = readSentinelRunDisplay(path, runId);
+      if (!display.version) return summary;
+      return {
+        ...summary,
+        label: display.title ?? summary.label,
+        details: {
+          displayVersion: display.version,
+          pinned: display.pinnedAt !== undefined,
+          ...(display.pinnedAt && { pinnedAt: display.pinnedAt }),
+        },
+      };
+    }
     const current = readSentinelAssessment(path);
     if (!current) return undefined;
     const state = current.revision === publicRef.revision
@@ -281,7 +296,11 @@ export function createOperatorSentinelRuns(
       ids().flatMap((id) => {
         const summary = inspect({ kind: "sentinel", id }, false);
         return summary ? [summary] : [];
-      }),
+      }).sort((left, right) =>
+        String(right.details?.pinnedAt ?? "").localeCompare(
+          String(left.details?.pinnedAt ?? ""),
+        )
+      ),
     inspect,
     cancelExact(ref, runId) {
       const path = pathFor(ref);
