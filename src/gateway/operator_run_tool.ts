@@ -672,6 +672,7 @@ export const operatorRunTool: ToolDefinition = {
       description: "Exact link ID from a finding_traffic page",
     },
     payloadPart: sentinelTrafficBlobTool.parameters.payloadPart,
+    byteLength: sentinelTrafficBlobTool.parameters.byteLength,
     family: sentinelTrafficSearchTool.parameters.family,
     origin: sentinelTrafficSearchTool.parameters.origin,
     hostname: sentinelTrafficSearchTool.parameters.hostname,
@@ -9976,12 +9977,14 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
           limit,
           offset,
           payloadPart,
+          byteLength,
           includeWithdrawn,
         } = args;
         if (
           ref.kind !== "sentinel" || ref.revision === undefined ||
           !canFlowTo("INTERNAL", context?.ceiling ?? "INTERNAL") ||
           (payloadPart !== undefined && trafficLinkId === undefined) ||
+          (byteLength !== undefined && payloadPart === undefined) ||
           (includeWithdrawn !== undefined &&
             (includeWithdrawn !== true || !trafficLinkId ||
               payloadPart !== undefined ||
@@ -10006,6 +10009,7 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
               "recheckId",
               "trafficLinkId",
               "payloadPart",
+              "byteLength",
               "includeWithdrawn",
               "limit",
               "offset",
@@ -10038,7 +10042,12 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
           }
           const payload = payloadPart === undefined
             ? undefined
-            : projectSentinelTrafficBlob(receipt, payloadPart, offset);
+            : projectSentinelTrafficBlob(
+              receipt,
+              payloadPart,
+              offset,
+              byteLength,
+            );
           if (typeof payload === "string") return payload;
           const annotations = readSentinelTrafficLinkAnnotations(
             snapshotPath,

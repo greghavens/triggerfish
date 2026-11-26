@@ -435,6 +435,8 @@ const hookRunner: HookRunner = {
       if (
         (directTraffic ? page.text : page.payload?.text) !==
           "retained-payload-tail" ||
+        (directTraffic ? page.offsetUnit : page.payload?.offsetUnit) !==
+          "bytes" ||
         (directTraffic ? page.nextOffset : page.payload.nextOffset) !== null ||
         (directTraffic
           ? page.evidenceId !== traffic.historicalEvidenceId
@@ -1311,6 +1313,7 @@ registry.register({
                     digest: traffic.historicalDigest,
                     payloadPart: "response",
                     offset: 512,
+                    byteLength: 32,
                   }),
                 },
               }]
@@ -1328,6 +1331,7 @@ registry.register({
                       trafficLinkId: traffic.historicalLinkId,
                       payloadPart: "response",
                       payloadOffset: 512,
+                      byteLength: 32,
                     }),
                   }),
                 },

@@ -701,6 +701,7 @@ type GoalReceiptReadArguments =
     evidenceId?: string;
     digest?: string;
     payloadPart?: string;
+    byteLength?: number;
     sourceCase?: string;
     asset?: string;
     includeFindings?: boolean;

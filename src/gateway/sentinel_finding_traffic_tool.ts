@@ -42,6 +42,7 @@ import {
   sentinelLinkedTrafficPayloadArgs,
   sentinelTrafficAttachBatchArgs,
   sentinelTrafficLinksArgs,
+  sentinelTrafficPayloadByteLengthParameter,
   sentinelTrafficPayloadOffsetParameter,
   sentinelTrafficPayloadPartParameter,
 } from "../sentinel/traffic_recovery.ts";
@@ -160,6 +161,7 @@ export const sentinelFindingTrafficListTool: ToolDefinition = {
       description: "Exact retained payload part.",
     },
     payloadOffset: sentinelTrafficPayloadOffsetParameter,
+    byteLength: sentinelTrafficPayloadByteLengthParameter,
     limit: { type: "integer", description: "Page size from 1 to 10" },
     offset: {
       type: "integer",
@@ -248,8 +250,14 @@ export function reopenSentinelLinkedTrafficPayload(
 ): string {
   const selector = sentinelLinkedTrafficPayloadArgs(args);
   if (selector?.revision !== revision) return unavailable;
-  const { findingId, recheckId, trafficLinkId, payloadPart, payloadOffset } =
-    selector;
+  const {
+    findingId,
+    recheckId,
+    trafficLinkId,
+    payloadPart,
+    payloadOffset,
+    byteLength,
+  } = selector;
   const [link] = listSentinelFindingTrafficLinks(snapshotPath, {
     id: trafficLinkId,
     evidenceRevision: revision,
@@ -270,6 +278,7 @@ export function reopenSentinelLinkedTrafficPayload(
     receipt,
     payloadPart,
     payloadOffset,
+    byteLength,
   );
   if (typeof payload === "string") return payload;
   const result = JSON.stringify({
@@ -292,7 +301,7 @@ function listForScope(
 ) {
   if (
     args.trafficLinkId !== undefined || args.payloadPart !== undefined ||
-    args.payloadOffset !== undefined
+    args.payloadOffset !== undefined || args.byteLength !== undefined
   ) {
     return reopenSentinelLinkedTrafficPayload(
       scope.snapshotPath,

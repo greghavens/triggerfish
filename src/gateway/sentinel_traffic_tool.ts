@@ -1,6 +1,8 @@
 import {
+  isSentinelTrafficPayloadByteLength,
   SENTINEL_TRAFFIC_BLOB,
   sentinelTrafficBlobArgs,
+  sentinelTrafficPayloadByteLengthParameter,
   sentinelTrafficPayloadOffsetParameter,
   sentinelTrafficPayloadPartParameter,
 } from "../sentinel/traffic_recovery.ts";
@@ -106,6 +108,7 @@ export const sentinelTrafficBlobTool: ToolDefinition = {
     ...sentinelTrafficGetTool.parameters,
     payloadPart: sentinelTrafficPayloadPartParameter,
     offset: sentinelTrafficPayloadOffsetParameter,
+    byteLength: sentinelTrafficPayloadByteLengthParameter,
   },
 };
 
@@ -192,8 +195,11 @@ export function projectSentinelTrafficBlob(
   receipt: SentinelTrafficReceipt,
   payloadPart: unknown,
   offset: unknown = 0,
+  byteLength?: unknown,
 ) {
   if (
+    (byteLength !== undefined &&
+      !isSentinelTrafficPayloadByteLength(byteLength)) ||
     typeof offset !== "number" || !Number.isSafeInteger(offset) || offset < 0 ||
     (payloadPart !== "request" && payloadPart !== "response" &&
       payloadPart !== "headers")
@@ -205,10 +211,11 @@ export function projectSentinelTrafficBlob(
     if (offset > bytes.length) {
       return "Error: Traffic payload offset is unavailable.";
     }
-    const end = Math.min(bytes.length, offset + 512);
+    const end = Math.min(bytes.length, offset + (byteLength ?? 512));
     return {
       responsePayload: binaryPayloadMetadata(bytes),
       offset,
+      ...(byteLength !== undefined && { offsetUnit: "bytes" }),
       base64: bytes.subarray(offset, end).toString("base64"),
       nextOffset: end < bytes.length ? end : null,
     };
@@ -221,18 +228,40 @@ export function projectSentinelTrafficBlob(
   if (text === undefined) {
     return `Error: Reviewed ${payloadPart} content is unavailable for this exact receipt.`;
   }
+  const descriptor = trafficPayloadMetadata(text);
+  const metadata = payloadPart === "request"
+    ? { requestPayload: descriptor }
+    : payloadPart === "headers"
+    ? { headersPayload: descriptor }
+    : { responsePayload: descriptor };
+  if (byteLength !== undefined) {
+    const bytes = Buffer.from(text, "utf8");
+    const continuation = (index: number) => (bytes[index] & 0xc0) === 0x80;
+    if (
+      offset > bytes.length || (offset < bytes.length && continuation(offset))
+    ) {
+      return "Error: Traffic payload byte offset must be at a UTF-8 character boundary.";
+    }
+    let end = Math.min(bytes.length, offset + byteLength);
+    while (end < bytes.length && end > offset && continuation(end)) end--;
+    if (end === offset && offset < bytes.length) {
+      return "Error: The byte range is too short for the next UTF-8 character.";
+    }
+    return {
+      ...metadata,
+      offset,
+      offsetUnit: "bytes",
+      text: bytes.subarray(offset, end).toString("utf8"),
+      nextOffset: end < bytes.length ? end : null,
+    };
+  }
   const body = Array.from(text);
   if (offset > body.length) {
     return "Error: Traffic payload offset is unavailable.";
   }
   const end = Math.min(body.length, offset + 512);
-  const descriptor = trafficPayloadMetadata(text);
   return {
-    ...(payloadPart === "request"
-      ? { requestPayload: descriptor }
-      : payloadPart === "headers"
-      ? { headersPayload: descriptor }
-      : { responsePayload: descriptor }),
+    ...metadata,
     offset,
     text: body.slice(offset, end).join(""),
     nextOffset: end < body.length ? end : null,
@@ -329,13 +358,18 @@ export function reopenProjectedSentinelTrafficBlob(
   assetId?: string,
 ) {
   if (args.revision !== revision) return;
-  const { evidenceId, digest, payloadPart, offset } = args;
+  const { evidenceId, digest, payloadPart, offset, byteLength } = args;
   const receipt = readSentinelTrafficReceipt(path, revision, {
     evidenceId,
     digest,
   }, assetId);
   if (!receipt) return;
-  const page = projectSentinelTrafficBlob(receipt, payloadPart, offset);
+  const page = projectSentinelTrafficBlob(
+    receipt,
+    payloadPart,
+    offset,
+    byteLength,
+  );
   if (typeof page === "string") return;
   const output = JSON.stringify({
     caseId,

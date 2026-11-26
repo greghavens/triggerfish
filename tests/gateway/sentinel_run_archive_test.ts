@@ -1443,6 +1443,8 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
       evidenceId: binary.evidenceId,
       digest: binary.digest,
     };
+    const byteRange = { ...trafficBlob, byteLength: 512 };
+    let savedLinkedRange: unknown;
     let originalBinary: unknown;
     const headerBlob = { ...trafficBlob, payloadPart: "headers" };
     let originalHeaders: unknown;
@@ -1573,6 +1575,30 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
         ).digest("hex"),
       });
       originalPayload = firstPayload;
+      const prefix = JSON.parse(await turn(byteRange));
+      assertEquals(prefix.offsetUnit, "bytes");
+      assertEquals(prefix.text, "x".repeat(511));
+      assertEquals(prefix.nextOffset, 511);
+      const rune = JSON.parse(
+        await turn({ ...byteRange, offset: prefix.nextOffset, byteLength: 4 }),
+      );
+      assertEquals(rune.text, "🙂");
+      assertEquals(rune.nextOffset, 515);
+      assert(
+        !(await turn({ ...byteRange, offset: 512, byteLength: 4 })).includes(
+          "🙂",
+        ),
+      );
+      assert(!(await turn({ ...byteRange, byteLength: 1025 })).includes("🙂"));
+      const binaryRange = JSON.parse(
+        await turn({ ...binaryBlob, offset: 13, byteLength: 31 }),
+      );
+      assertEquals(binaryRange.offsetUnit, "bytes");
+      assertEquals(binaryRange.nextOffset, 44);
+      assertEquals(
+        Buffer.from(binaryRange.base64, "base64"),
+        binaryBody.subarray(13, 44),
+      );
       const binaryFirst = JSON.parse(await turn(binaryBlob));
       assertEquals(binaryFirst.nextOffset, 512);
       const binaryLast = JSON.parse(
@@ -1792,6 +1818,14 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
         reviewedBody,
       );
       preArchiveLinkedPayload = linkedPage;
+      const linkedRange = JSON.parse(
+        await turn({ ...findingPayload(), offset: 511, byteLength: 4 }),
+      );
+      assertEquals(linkedRange.link.id, trafficLinkId);
+      assertEquals(linkedRange.payload.text, "🙂");
+      assertEquals(linkedRange.payload.offsetUnit, "bytes");
+      assertEquals(linkedRange.payload.nextOffset, 515);
+      savedLinkedRange = linkedRange;
       assertStringIncludes(
         await turn({
           ...findingPayload(),
@@ -2768,6 +2802,12 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
       assertEquals(
         JSON.parse(await turn(findingPayload())),
         preArchiveLinkedPayload,
+      );
+      assertEquals(
+        JSON.parse(
+          await turn({ ...findingPayload(), offset: 511, byteLength: 4 }),
+        ),
+        savedLinkedRange,
       );
       const restoredReport = JSON.parse(
         await turn({

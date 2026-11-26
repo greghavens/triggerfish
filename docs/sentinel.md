@@ -380,6 +380,11 @@ finding's current assignment completes, exhausts retries, or is stopped.
 Existing request IDs
 still reopen their original admission receipt.
 
+For retained payload reads, set `byteLength` (1–1024) to page by UTF-8
+byte position or binary byte position. Use returned `nextOffset` with
+`byteLength` on the next call. Text pages end at a character boundary.
+Without `byteLength`, text offsets continue to use Unicode code points.
+
 A leased worker can include `trafficEvidenceId` and `trafficDigest` in
 `sentinel_report_finding` after opening that exact retained traffic receipt
 for its assigned asset. The finding becomes visible once its traffic link

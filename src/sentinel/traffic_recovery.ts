@@ -179,6 +179,19 @@ export const sentinelTrafficPayloadOffsetParameter = {
     "Unicode code-point offset for text or byte offset for binary. Use nextOffset to continue.",
 } as const;
 
+export const sentinelTrafficPayloadByteLengthParameter = {
+  type: "integer",
+  description:
+    "Optional byte range length (1–1024). With byteLength set, offset and nextOffset are UTF-8 byte positions.",
+} as const;
+
+export function isSentinelTrafficPayloadByteLength(
+  value: unknown,
+): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) &&
+    value >= 1 && value <= 1024;
+}
+
 export function sentinelLinkedTrafficPayloadArgs(value: unknown) {
   const args = record(value);
   if (
@@ -190,6 +203,7 @@ export function sentinelLinkedTrafficPayloadArgs(value: unknown) {
         "recheckId",
         "payloadPart",
         "payloadOffset",
+        "byteLength",
       ]
         .includes(key)
     )
@@ -201,6 +215,7 @@ export function sentinelLinkedTrafficPayloadArgs(value: unknown) {
     trafficLinkId,
     payloadPart,
     payloadOffset,
+    byteLength,
   } = args;
   if (
     typeof revision !== "number" || !Number.isSafeInteger(revision) ||
@@ -212,6 +227,8 @@ export function sentinelLinkedTrafficPayloadArgs(value: unknown) {
     !/^finding-traffic-link:[a-f0-9]{64}$/.test(trafficLinkId) ||
     (payloadPart !== "request" && payloadPart !== "response" &&
       payloadPart !== "headers") ||
+    (byteLength !== undefined &&
+      !isSentinelTrafficPayloadByteLength(byteLength)) ||
     (payloadOffset !== undefined &&
       (typeof payloadOffset !== "number" ||
         !Number.isSafeInteger(payloadOffset) ||
@@ -224,6 +241,7 @@ export function sentinelLinkedTrafficPayloadArgs(value: unknown) {
     trafficLinkId,
     payloadPart,
     ...(payloadOffset !== undefined && { payloadOffset }),
+    ...(byteLength !== undefined && { byteLength }),
   };
 }
 
@@ -274,20 +292,40 @@ export function sentinelTrafficBlobArgs(value: unknown) {
   if (
     !args ||
     Object.keys(args).some((key) =>
-      !["revision", "evidenceId", "digest", "offset", "payloadPart"].includes(
+      ![
+        "revision",
+        "evidenceId",
+        "digest",
+        "offset",
+        "payloadPart",
+        "byteLength",
+      ].includes(
         key,
       )
     )
   ) return;
-  const { revision, evidenceId, digest, offset = 0, payloadPart = "response" } =
-    args;
+  const {
+    revision,
+    evidenceId,
+    digest,
+    offset = 0,
+    payloadPart = "response",
+    byteLength,
+  } = args;
   const read = sentinelTrafficReadArgs({ revision, evidenceId, digest });
   if (
+    (byteLength !== undefined &&
+      !isSentinelTrafficPayloadByteLength(byteLength)) ||
     !read || typeof offset !== "number" || !Number.isSafeInteger(offset) ||
     offset < 0 || (payloadPart !== "request" && payloadPart !== "response" &&
       payloadPart !== "headers")
   ) return;
-  return { ...read, offset, payloadPart };
+  return {
+    ...read,
+    offset,
+    payloadPart,
+    ...(byteLength !== undefined && { byteLength }),
+  };
 }
 
 export function sentinelTrafficAttachArgs(value: unknown) {

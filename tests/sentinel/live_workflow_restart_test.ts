@@ -2979,6 +2979,7 @@ for (
               historicalTrafficId,
             );
             assertEquals(step?.goalReceiptRead?.args.offset, 512);
+            assertEquals(step?.goalReceiptRead?.args.byteLength, 32);
             for (const suffix of ["traffic_payload_pre", "traffic_payload"]) {
               assertEquals(
                 hooks.filter((line) => line.endsWith(`:${suffix}`)),
