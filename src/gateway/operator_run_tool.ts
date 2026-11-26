@@ -90,9 +90,11 @@ import {
   resolveSentinelIncidentAlerts,
 } from "../sentinel/incident_correlation.ts";
 import {
+  readSavedSentinelIncidentAssetScopes,
   readSavedSentinelIncidentCandidate,
   readSavedSentinelIncidentCandidates,
 } from "../sentinel/incident_archive.ts";
+import { sentinelTelemetryAssetResolver } from "../sentinel/defense_coverage.ts";
 import { redactCredentialText } from "../core/logger/redactor.ts";
 import { sentinelIncidentCandidates } from "../sentinel/adaptive_planner.ts";
 import { readSentinelPlannerInventoryResult } from "../sentinel/inventory_queries.ts";
@@ -1384,6 +1386,10 @@ export const sentinelOperatorCaseReadActions = [
   "facts",
   "finding_receipts",
   "finding_receipt",
+  "incidents",
+  "incident_alerts",
+  "case_alert",
+  "defense_coverage",
   "list_digests",
   "expand_digest",
   "traces",
@@ -1422,6 +1428,10 @@ export const sentinelOperatorCaseReadParameters = [
   "cursor",
   "factId",
   "receiptId",
+  "incidentId",
+  "alertId",
+  "upstreamCheck",
+  "behavior",
   "digestId",
   "taskId",
   "stepIndices",
@@ -6804,15 +6814,36 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
             byId.set(candidate.id, candidate);
           }
         }
-        const candidates = [...byId.values()].sort(
-          compareSentinelIncidentPriority,
-        ).filter((
-          candidate,
-        ) =>
-          assetId === undefined || candidate.asset === assetId ||
-          (Array.isArray(candidate.relatedAssetIds) &&
-            candidate.relatedAssetIds.includes(assetId))
-        );
+        const snapshot = saved.result.sharedGraph.snapshot;
+        const runId = authorizeCaseRead &&
+          readSentinelRunIdForRevision(path, ref.revision);
+        if (authorizeCaseRead && (!runId || !snapshot)) return unavailable;
+        const controls = runId
+          ? readSentinelOperatingConstraints(path, runId)?.constraints
+          : undefined;
+        const incidentScopes = authorizeCaseRead
+          ? readSavedSentinelIncidentAssetScopes(path, ref.revision)
+          : undefined;
+        const candidates = [...byId.values()].filter((candidate) => {
+          if (authorizeCaseRead) {
+            const assets = typeof candidate.id === "string"
+              ? incidentScopes?.get(candidate.id)
+              : undefined;
+            if (
+              !assets?.length ||
+              !assets.every((nodeId) =>
+                sentinelOperatingConstraintsAllow(
+                  controls,
+                  { kind: "review_evidence", nodeId },
+                  snapshot,
+                )
+              )
+            ) return false;
+          }
+          return assetId === undefined || candidate.asset === assetId ||
+            (Array.isArray(candidate.relatedAssetIds) &&
+              candidate.relatedAssetIds.includes(assetId));
+        }).sort(compareSentinelIncidentPriority);
         const reviews = readSentinelIncidentReviews(path, ref.revision);
         const incidents = candidates.slice(offset, offset + limit).map(
           (
@@ -6860,12 +6891,21 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
           ) ||
           !await controller.inspect(ref)
         ) return unavailable;
-        const alerts = readSentinelAssessmentAlerts(
-          resolveSentinelCasePath(options.baseDir, ref.id),
-          ref.revision,
-        );
+        const path = resolveSentinelCasePath(options.baseDir, ref.id);
+        const alerts = readSentinelAssessmentAlerts(path, ref.revision);
         const alert = alerts &&
           resolveSentinelIncidentAlerts(alerts, [alertId])[0];
+        if (authorizeCaseRead && alert) {
+          const runId = readSentinelRunIdForRevision(path, ref.revision);
+          const snapshot = readSentinelAssessmentRevision(path, ref.revision)
+            ?.result.sharedGraph.snapshot;
+          if (
+            !runId || !snapshot || !sentinelTelemetryAssetResolver(
+              snapshot,
+              readSentinelOperatingConstraints(path, runId)?.constraints,
+            )(alert)
+          ) return unavailable;
+        }
         return alert
           ? safeProjection({ run: ref, alertId, alert })
           : unavailable;
@@ -6888,11 +6928,20 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
           assessmentRevision: ref.revision,
         };
         const result = action === "defense_coverage"
-          ? await readDefenseCoverage({
-            ...scope,
-            webContainmentConfigured: options.webContainmentConfigured,
-          }, query)
-          : queryIncidentAlerts(scope, query, true);
+          ? await readDefenseCoverage(
+            {
+              ...scope,
+              webContainmentConfigured: options.webContainmentConfigured,
+            },
+            query,
+            authorizeCaseRead ? {} : undefined,
+          )
+          : queryIncidentAlerts(
+            scope,
+            query,
+            true,
+            authorizeCaseRead ? {} : undefined,
+          );
         return result.startsWith("Error:")
           ? result
           : safeProjection({ run: ref, evidence: JSON.parse(result) });

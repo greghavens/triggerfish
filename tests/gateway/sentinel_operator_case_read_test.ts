@@ -19,12 +19,31 @@ import {
 } from "../../src/sentinel/assessment_store.ts";
 import { resolveSentinelCaseMembership } from "../../src/sentinel/case_membership.ts";
 import { resolveSentinelCasePath } from "../../src/sentinel/cases.ts";
+import { sentinelAlertsPath } from "../../src/sentinel/paths.ts";
+import { sentinelAlertReference } from "../../src/sentinel/telemetry.ts";
 
 Deno.test("Authenticated Sentinel chat reads exact approved cross-case graph findings and inventory through root policy", async () => {
   const baseDir = await Deno.makeTempDir();
   const secretLabel = "Exact authorized cross-case finding";
   const hiddenLabel = "Unregistered case finding";
   const inventoryLabel = "Approved asset in exact peer inventory";
+  const visibleAlert = {
+    asset: "asset-a",
+    type: "integrity_change" as const,
+    severity: "high" as const,
+    subject: "Authorized detection fixture",
+    observedAt: "2026-01-01T00:00:00.000Z",
+    evidenceIds: ["visible-defensive-event"],
+    triggeringAction: "cloudtrail.amazonaws.com:StopLogging",
+  };
+  const restrictedAlert = {
+    ...visibleAlert,
+    asset: "asset-c",
+    subject: "Outside selected inventory scope",
+    evidenceIds: ["restricted-defensive-event"],
+  };
+  const visibleAlertId = sentinelAlertReference(visibleAlert);
+  const restrictedAlertId = sentinelAlertReference(restrictedAlert);
   async function setupCase(
     id: string,
     label: string,
@@ -69,6 +88,20 @@ Deno.test("Authenticated Sentinel chat reads exact approved cross-case graph fin
       }),
       { mode: 0o600 },
     );
+    if (id === "approved") {
+      await Deno.writeTextFile(
+        sentinelAlertsPath(path),
+        JSON.stringify(
+          [visibleAlert, restrictedAlert].flatMap((alert) => [alert, {
+            ...alert,
+            type: "network_security_alert",
+            triggeringAction: undefined,
+            evidenceIds: [`${alert.asset}-network-event`],
+          }]),
+        ),
+        { mode: 0o600 },
+      );
+    }
     const state = startSentinelAssessment(path, { inventoryCoverageEnabled });
     return { path, revision: state.revision, state };
   }
@@ -214,6 +247,10 @@ Deno.test("Authenticated Sentinel chat reads exact approved cross-case graph fin
             "facts",
             "finding_receipts",
             "finding_receipt",
+            "incidents",
+            "incident_alerts",
+            "case_alert",
+            "defense_coverage",
             "list_digests",
             "expand_digest",
             "traces",
@@ -284,7 +321,13 @@ Deno.test("Authenticated Sentinel chat reads exact approved cross-case graph fin
           const blocked = hook === reject &&
             (selectsTool || hook === "PRE_OUTPUT" &&
                 typeof input.content === "string" &&
-                [secretLabel, inventoryLabel, restrictionNote, additionNote]
+                [
+                  secretLabel,
+                  inventoryLabel,
+                  restrictionNote,
+                  additionNote,
+                  visibleAlert.subject,
+                ]
                   .some((label) => String(input.content).includes(label)));
           return Promise.resolve({
             allowed: !blocked,
@@ -387,6 +430,77 @@ Deno.test("Authenticated Sentinel chat reads exact approved cross-case graph fin
       action: "graph_overview",
     });
     assertEquals(JSON.parse(result).overview.revision, approved.revision);
+
+    const coverageCheck = {
+      ...exact,
+      action: "defense_coverage",
+      upstreamCheck: "cloudtrail_logging_stopped",
+    };
+    await turn("Read checked telemetry in the authorized case", coverageCheck);
+    assertEquals(
+      JSON.parse(result).evidence.matches.map(
+        ({ alertId }: { alertId: string }) => alertId,
+      ),
+      [visibleAlertId],
+    );
+    assertEquals(JSON.parse(result).evidence.matchCount, 1);
+    await turn("Discover incidents in the authorized case", {
+      ...exact,
+      action: "incidents",
+    });
+    const catalog = JSON.parse(result);
+    assertEquals(catalog.total, 1);
+    assertEquals(catalog.incidents[0].asset, visibleAlert.asset);
+    await turn("Open scoped incident members", {
+      ...exact,
+      action: "incident_alerts",
+      incidentId: catalog.incidents[0].id,
+    });
+    assertEquals(JSON.parse(result).evidence.total, 2);
+    assertStringIncludes(result, visibleAlert.subject);
+    assert(!result.includes(restrictedAlert.subject));
+    const exactAlert = {
+      ...exact,
+      action: "case_alert",
+      alertId: visibleAlertId,
+    };
+    await turn("Open the exact authorized retained alert", exactAlert);
+    assertEquals(JSON.parse(result).alertId, visibleAlertId);
+    assertStringIncludes(result, visibleAlert.subject);
+    assert(
+      hooks.includes("PRE_TOOL_CALL") && hooks.includes("POST_TOOL_RESPONSE") &&
+        hooks.includes("PRE_OUTPUT"),
+    );
+    for (
+      const denied of [
+        { ...exactAlert, alertId: restrictedAlertId },
+        { ...exactAlert, id: "unregistered" },
+        { ...exactAlert, revision: exact.revision + 100 },
+      ]
+    ) {
+      await turn("Reject a non-authorized retained alert request", denied);
+      assertStringIncludes(result, "unavailable");
+      assert(
+        !result.includes(visibleAlert.subject) &&
+          !result.includes(restrictedAlert.subject),
+      );
+    }
+    const beforeTelemetryPolicy = dispatched;
+    reject = "PRE_TOOL_CALL";
+    await turn("Deny exact telemetry before dispatch", exactAlert);
+    assertEquals(dispatched, beforeTelemetryPolicy);
+    assert(!result.includes(visibleAlert.subject));
+    reject = "POST_TOOL_RESPONSE";
+    await turn("Deny exact telemetry response after dispatch", exactAlert);
+    assertEquals(dispatched, beforeTelemetryPolicy + 1);
+    assert(!result.includes(visibleAlert.subject));
+    reject = "PRE_OUTPUT";
+    const withheldTelemetry = await turn("Deny telemetry output", exactAlert);
+    assertStringIncludes(result, visibleAlert.subject);
+    assert(
+      withheldTelemetry.every((frame) => !frame.includes(visibleAlert.subject)),
+    );
+    reject = undefined;
 
     const inventory = {
       ...exact,
