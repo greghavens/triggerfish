@@ -16,6 +16,7 @@ import {
   isWorkerNarrativeId,
   SENTINEL_WORKER_NARRATIVE_COMMIT,
   SENTINEL_WORKER_NARRATIVE_READ,
+  workerNarrativeArguments,
 } from "../sentinel/worker_narratives.ts";
 import { readLinkedSentinelWorkerReview } from "./sentinel_linked_worker_reviews.ts";
 import type { SentinelPeerWorkerReviewReference } from "../sentinel/linked_case_sources.ts";
@@ -6524,30 +6525,14 @@ export function createSentinelModelPlanner(
           selection,
         );
         if (!record || record.targetId !== targetId) return;
-        const {
-          evidenceId,
-          summary,
-          confidence,
-          trafficDigest,
-          upstreamCheck,
-        } = record.receipt;
-        const args = committedBeforeProgress
-          ? sentinelGoalReceiptReadArguments(tool, {
-            summary,
-            confidence,
-            evidenceId,
-            ...(trafficDigest && { trafficDigest }),
-            ...(upstreamCheck && { upstreamCheck }),
-          })
-          : requested;
+        const canonical = workerNarrativeArguments(record.receipt);
+        const args = committedBeforeProgress ? canonical : requested;
         if (
           !args || (selecting
             ? record.taskId === taskId
-            : summary !== args.summary || confidence !== args.confidence ||
-              evidenceId !== args.evidenceId ||
-              trafficDigest !== args.trafficDigest ||
-              upstreamCheck !== args.upstreamCheck ||
-              (committedBeforeProgress && evidenceId !== requestId)) ||
+            : !isDeepStrictEqual(canonical, args) ||
+              (committedBeforeProgress &&
+                canonical.evidenceId !== requestId)) ||
           !currentWorkerNarrative(
             snapshotPath,
             runId,

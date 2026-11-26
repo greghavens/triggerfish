@@ -43,6 +43,7 @@ import {
   SENTINEL_WORKER_NARRATIVE_COMMIT,
   SENTINEL_WORKER_NARRATIVE_READ,
   type SentinelWorkerNarrativeReceipt,
+  workerNarrativeArguments,
 } from "./worker_narratives.ts";
 import {
   type AssignmentControlReceipt,
@@ -3328,26 +3329,11 @@ export function readAdaptiveWorkerNarrative(
       stepIndex === select.stepIndex
     );
     return (occupied ? [occupied] : records).find(({ stepIndex, receipt }) => {
-      const {
-        summary,
-        confidence,
-        evidenceId,
-        sourceSha256,
-        trafficDigest,
-        upstreamCheck,
-      } = receipt;
       return stepIndex <= select.stepIndex &&
-        sourceSha256 === select.sourceSha256 &&
-        createHash("sha256").update(
-            JSON.stringify({
-              summary,
-              confidence,
-              evidenceId,
-              ...(trafficDigest && { trafficDigest }),
-              ...(upstreamCheck && { upstreamCheck }),
-            }),
-          )
-            .digest("hex") === select.argsDigest;
+        receipt.sourceSha256 === select.sourceSha256 &&
+        createHash("sha256").update(JSON.stringify(
+            workerNarrativeArguments(receipt),
+          )).digest("hex") === select.argsDigest;
     });
   } finally {
     db.close();

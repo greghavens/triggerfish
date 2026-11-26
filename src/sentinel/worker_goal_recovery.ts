@@ -4,9 +4,11 @@ import {
 } from "./github_repository_visibility.ts";
 import {
   isWorkerNarrativeId,
-  readWorkerNarrativeReceipt,
+  readWorkerNarrativeSubmission,
   SENTINEL_WORKER_NARRATIVE_COMMIT,
   SENTINEL_WORKER_NARRATIVE_READ,
+  type SentinelWorkerNarrativeReceipt,
+  workerNarrativeArguments,
 } from "./worker_narratives.ts";
 import {
   SENTINEL_TRAFFIC_BLOB,
@@ -728,6 +730,9 @@ type GoalReceiptReadArguments =
     trafficDigest?: string;
     summary?: string;
     confidence?: "observed" | "inferred";
+    conclusion?: SentinelWorkerNarrativeReceipt["conclusion"];
+    detail?: string;
+    facts?: SentinelWorkerNarrativeReceipt["facts"];
     digest?: string;
     payloadPart?: string;
     byteLength?: number;
@@ -896,23 +901,8 @@ export function sentinelGoalReceiptReadArguments(
       : undefined;
   }
   if (tool === SENTINEL_WORKER_NARRATIVE_COMMIT) {
-    if (Object.hasOwn(args, "sourceSha256")) return;
-    const receipt = readWorkerNarrativeReceipt({
-      ...args,
-      sourceSha256: "0".repeat(64),
-    });
-    if (receipt) {
-      const { summary, confidence, evidenceId, trafficDigest, upstreamCheck } =
-        receipt;
-      return {
-        summary,
-        confidence,
-        evidenceId,
-        ...(trafficDigest && { trafficDigest }),
-        ...(upstreamCheck && { upstreamCheck }),
-      };
-    }
-    return;
+    const receipt = readWorkerNarrativeSubmission(args, "0".repeat(64));
+    return receipt && workerNarrativeArguments(receipt);
   }
   if (tool === SENTINEL_SHARED_WORKER_REVIEW) {
     const { sourceCase, taskId, asset } = args;

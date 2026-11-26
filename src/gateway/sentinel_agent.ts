@@ -32,7 +32,7 @@ import {
 import { readAdaptiveRepositoryVisibility } from "../sentinel/adaptive_store.ts";
 import {
   isWorkerNarrativeId,
-  readWorkerNarrativeReceipt,
+  readWorkerNarrativeSubmission,
   SENTINEL_WORKER_NARRATIVE_COMMIT,
   SENTINEL_WORKER_NARRATIVE_READ,
 } from "../sentinel/worker_narratives.ts";
@@ -1166,17 +1166,40 @@ const workerNarrativeRead: ToolDefinition = {
 const workerNarrativeCommit: ToolDefinition = {
   name: SENTINEL_WORKER_NARRATIVE_COMMIT,
   description:
-    "Commit one bounded, citable observation from local evidence you read on this assignment. Your confidence label does not verify the claim.",
+    "Record a positive or negative conclusion or a batch of distinct conclusions supported by one exact evidence read from this assignment. Confidence describes the strength of the observation.",
   parameters: {
+    conclusion: {
+      type: "string",
+      enum: ["positive", "negative"],
+      description: "Polarity of a single evidence-backed conclusion.",
+    },
+    detail: {
+      type: "string",
+      description: "Optional details of one conclusion, up to 300 characters.",
+    },
+    facts: {
+      type: "array",
+      description:
+        "Alternative to summary, confidence, conclusion and detail. Up to eight distinct conclusions supported by the same exact evidence.",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["summary", "confidence", "conclusion"],
+        properties: {
+          summary: { type: "string", maxLength: 300 },
+          confidence: { type: "string", enum: ["observed", "inferred"] },
+          conclusion: { type: "string", enum: ["positive", "negative"] },
+          detail: { type: "string", maxLength: 300 },
+        },
+      },
+    },
     summary: {
       type: "string",
       description: "Plain summary of up to 600 characters",
-      required: true,
     },
     confidence: {
       type: "string",
       description: "Observed or inferred",
-      required: true,
     },
     evidenceId: {
       type: "string",
@@ -9947,10 +9970,7 @@ function createAgent(
             source.stepIndex >= turn.narrativeBatchStart) ||
           Object.hasOwn(args, "sourceSha256")
         ) return unavailable;
-        const receipt = readWorkerNarrativeReceipt({
-          ...args,
-          sourceSha256: source.sha256,
-        });
+        const receipt = readWorkerNarrativeSubmission(args, source.sha256);
         if (!receipt) return unavailable;
         if (
           (origin.traffic &&
@@ -10092,7 +10112,14 @@ function createAgent(
             }
             if (
               allowed === false ||
-              (term && !receipt.summary.toLowerCase().includes(term))
+              (term &&
+                ![
+                  receipt.summary,
+                  receipt.detail,
+                  ...(receipt.facts ?? []).flatMap((
+                    { summary, detail },
+                  ) => [summary, detail]),
+                ].some((text) => text?.toLowerCase().includes(term)))
             ) {
               continue;
             }
@@ -10808,13 +10835,13 @@ function createAgent(
                       (selecting
                         ? (record.taskId === task.id || record.id !== args.id)
                         : (record.taskId !== task.id ||
-                          record.receipt.summary !== args.summary ||
-                          record.receipt.confidence !== args.confidence ||
-                          record.receipt.evidenceId !== args.evidenceId ||
-                          record.receipt.trafficDigest !==
-                            args.trafficDigest ||
-                          record.receipt.upstreamCheck !==
-                            args.upstreamCheck)) ||
+                          !isDeepStrictEqual(
+                            record.receipt,
+                            readWorkerNarrativeSubmission(
+                              call.args,
+                              record.receipt.sourceSha256,
+                            ),
+                          ))) ||
                       saved !==
                         boundResult({
                           _classification: "INTERNAL",
