@@ -166,6 +166,7 @@ import {
 } from "../sentinel/operating_constraints.ts";
 import {
   buildSentinelProvenance,
+  projectSentinelProvenance,
   verifiedSharedAssetDiscovery,
 } from "../sentinel/provenance.ts";
 import type { GoalObservation } from "../core/goal_completion.ts";
@@ -1954,16 +1955,61 @@ export function readSentinelProvenance(
       ),
     };
   }
-  return {
-    revision: state.revision,
-    graph: buildSentinelProvenance(
-      state.result,
-      visible,
-      undefined,
-      readSentinelIncidentReviews(snapshotPath, state.revision),
-      readSentinelFindingReviews(snapshotPath, state.revision),
-    ),
+  const graph = buildSentinelProvenance(
+    state.result,
+    visible,
+    undefined,
+    readSentinelIncidentReviews(snapshotPath, state.revision),
+    readSentinelFindingReviews(snapshotPath, state.revision),
+  );
+  const runId = scopedAssignment !== undefined &&
+    (readSentinelRunIdForRevision(snapshotPath, revision) ?? adaptive?.goal.id);
+  const constraints = runId
+    ? readSentinelOperatingConstraints(snapshotPath, runId)?.constraints
+    : undefined;
+  if (
+    constraints?.allowedAssetIds === undefined &&
+    !constraints?.deniedKinds.includes("review_evidence")
+  ) {
+    return { revision: state.revision, graph };
+  }
+  const snapshot = state.result.sharedGraph.snapshot;
+  if (!snapshot) return;
+  const inventory = new Set(
+    snapshot.nodes.filter(({ id }) =>
+      sentinelOperatingConstraintsAllow(constraints, {
+        kind: "review_evidence",
+        nodeId: id,
+      }, snapshot)
+    ).map(({ id }) => id),
+  );
+  const resolveAlert = sentinelTelemetryAssetResolver(snapshot, constraints);
+  let incidents: ReturnType<typeof readSavedSentinelIncidentAssetScopes>;
+  const allowsIncident = (id: string) => {
+    incidents ??=
+      readSavedSentinelIncidentAssetScopes(snapshotPath, revision) ??
+        new Map<string, readonly string[]>();
+    const assets = incidents.get(id);
+    return !!assets?.length && assets.every((asset) => inventory.has(asset));
   };
+  const projection = projectSentinelProvenance(
+    graph,
+    (node) => {
+      if (node.origin === "imported") return inventory.has(node.sourceId);
+      if (node.alert) return resolveAlert(node.alert) !== undefined;
+      if (node.incident) return allowsIncident(node.sourceId);
+      if (node.incidentReview) {
+        return allowsIncident(node.incidentReview.incidentId);
+      }
+      if (node.origin === "assessment" && node.requiredInput) {
+        return ["graph_snapshot", "alert_feed"].includes(node.requiredInput) ||
+          inventory.has(node.requiredInput);
+      }
+      return true;
+    },
+    (reference) => inventory.has(reference),
+  );
+  return { revision: state.revision, graph: projection };
 }
 
 /** Status, observations and immutable planning provenance for the UI. */

@@ -4208,3 +4208,186 @@ Deno.test("Leased execution evidence review sees telemetry only for its uniquely
     await Deno.remove(directory, { recursive: true });
   }
 });
+
+Deno.test("Scoped planner provenance hides forbidden graph records and retained paths", async () => {
+  const directory = await Deno.makeTempDir();
+  const caseId = "scoped-base-provenance";
+  const path = resolveSentinelCasePath(directory, caseId);
+  const graphNodes = [
+    { id: "approved", kind: "asset", label: "Approved asset" },
+    { id: "alternate", kind: "asset", label: "Allowed alternate asset" },
+    { id: "restricted", kind: "asset", label: "Out-of-scope bridge" },
+  ];
+  const checks = [
+    {
+      tool: "sentinel_provenance_search",
+      args: { origin: "imported", query: "Allowed alternate", limit: 2 },
+    },
+    {
+      tool: "sentinel_provenance_search",
+      args: { origin: "imported", limit: 5 },
+    },
+    { tool: "sentinel_provenance_node", args: { node: "asset:approved" } },
+    {
+      tool: "sentinel_path",
+      args: {
+        graph: "provenance",
+        from: "asset:approved",
+        to: "asset:alternate",
+      },
+    },
+    { tool: "sentinel_graph_overview", args: {} },
+  ];
+  let phase = 0;
+  let clock = Date.now();
+  const responses: string[][] = [[], []];
+  const providers = createProviderRegistry();
+  providers.register({
+    name: "scoped-base-provenance",
+    supportsStreaming: false,
+    complete(messages) {
+      const reads = messages.filter(({ role }) => role === "tool");
+      if (!reads.length) {
+        return Promise.resolve({
+          ...completion(""),
+          toolCalls: checks.map(({ tool, args }, index) => ({
+            id: `scoped-provenance-${index}`,
+            type: "function" as const,
+            function: { name: tool, arguments: JSON.stringify(args) },
+          })),
+        });
+      }
+      responses[phase] = reads.slice(0, checks.length).map(({ content }) =>
+        String(content)
+      );
+      return Promise.resolve(completion("[]"));
+    },
+  });
+  providers.setDefault("scoped-base-provenance");
+  const planner = createSentinelModelPlanner(
+    path,
+    (state, task) =>
+      task
+        ? { execute: () => Promise.resolve(), clear() {} }
+        : createSentinelSubagent({
+          snapshotPath: path,
+          assessmentRevision: state.revision,
+          plannerExecutionEvidenceRunId: state.plan.runId,
+          providerRegistry: providers,
+          hookRunner: allowHooks,
+          allowModelAccess: true,
+        }),
+    undefined,
+    () => clock,
+  );
+  const settle = async () => {
+    const deadline = Date.now() + 4000;
+    while (planner.hasInFlightWork() && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    assert(!planner.hasInFlightWork());
+    assertEquals(responses[phase].length, checks.length);
+  };
+  try {
+    await Deno.mkdir(dirname(path), { recursive: true, mode: 0o700 });
+    await Deno.writeTextFile(
+      path,
+      JSON.stringify({
+        version: 1,
+        nodes: graphNodes,
+        edges: [
+          { from: "approved", to: "restricted", relation: "depends_on" },
+          { from: "restricted", to: "alternate", relation: "depends_on" },
+        ],
+      }),
+      { mode: 0o600 },
+    );
+    const state = startSentinelAssessment(path);
+    const runId = state.plan.runId;
+    assert(runId);
+    const ref = {
+      kind: "sentinel" as const,
+      id: caseId,
+      revision: state.revision,
+    };
+    planner.advance(state);
+    await settle();
+    assertEquals(JSON.parse(responses[0][1]).totalNodes, 3);
+    assertStringIncludes(responses[0][2], "asset:restricted");
+    assertStringIncludes(responses[0][3], "Out-of-scope bridge");
+    assertEquals(JSON.parse(responses[0][4]).nodesByKind.asset, 3);
+    const saved = readAdaptiveSentinel(path, state)?.modelPlannerHistory.find(
+      ({ reads }) =>
+        reads?.some(({ tool }) => tool === "sentinel_provenance_search"),
+    );
+    assert(saved);
+    const retained = {
+      ...ref,
+      action: "planner_reads",
+      plannerIdentity: saved.identity,
+      attempt: saved.attempt,
+      ordinal: 1,
+      includeResult: true,
+    };
+    let allowedRead = "";
+    await withArchivedPlannerRead(directory, async (read) => {
+      allowedRead = await read(retained);
+      assertEquals(JSON.parse(allowedRead).result, JSON.parse(responses[0][0]));
+      assertEquals(
+        JSON.parse(await read({ ...retained, ordinal: 4 })).result,
+        JSON.parse(responses[0][3]),
+      );
+      const narrowed = JSON.parse(
+        await read({
+          ...ref,
+          action: "narrow_constraints",
+          runId,
+          expectedVersion: 0,
+          requestId: crypto.randomUUID(),
+          deniedKinds: [],
+          allowedAssetIds: ["approved", "alternate"],
+        }),
+      );
+      assertEquals(narrowed.record.constraints.allowedAssetIds, [
+        "alternate",
+        "approved",
+      ]);
+    });
+    phase = 1;
+    clock += 61_000;
+    planner.advance(readSentinelAssessment(path)!);
+    await settle();
+    assertEquals(responses[1][0], responses[0][0]);
+    assertEquals(JSON.parse(responses[1][1]).totalNodes, 2);
+    assertEquals(JSON.parse(responses[1][2]).totalConnections, 0);
+    assertEquals(JSON.parse(responses[1][3]).path, null);
+    assertEquals(JSON.parse(responses[1][4]).nodesByKind.asset, 2);
+    assert(
+      responses[1].every((text) =>
+        !text.includes("asset:restricted") &&
+        !text.includes("Out-of-scope bridge")
+      ),
+    );
+    for (const restored of [false, true]) {
+      if (restored) {
+        await archiveAndRestoreDigestFixture(directory, path, ref, runId);
+      }
+      await withArchivedPlannerRead(directory, async (read) => {
+        assertEquals(await read(retained), allowedRead);
+        for (const ordinal of [2, 3, 4, 5]) {
+          assertStringIncludes(
+            await read({ ...retained, ordinal }),
+            "unavailable",
+          );
+        }
+        const forensic = JSON.parse(
+          await read({ ...ref, action: "node", node: "asset:restricted" }),
+        );
+        assertEquals(forensic.page.node.label, "Out-of-scope bridge");
+      });
+    }
+  } finally {
+    planner.stop();
+    await Deno.remove(directory, { recursive: true });
+  }
+});

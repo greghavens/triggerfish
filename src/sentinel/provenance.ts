@@ -1910,6 +1910,10 @@ export function buildSentinelProvenance(
     });
     index.addEdge(id, candidate, "references");
   }
+  return sentinelProvenanceGraphView(index);
+}
+
+function sentinelProvenanceGraphView(index: Index) {
   return {
     snapshot: index.snapshot,
     overview: index.overview,
@@ -1920,4 +1924,31 @@ export function buildSentinelProvenance(
     searchNodes: index.searchNodes,
     searchReviewSteps: index.searchReviewSteps,
   };
+}
+
+/** Project an induced graph without changing the retained source records. */
+export function projectSentinelProvenance(
+  graph: ReturnType<typeof buildSentinelProvenance>,
+  allow: (node: ProvenanceNode) => boolean,
+  allowUnresolved: (reference: string) => boolean,
+) {
+  const projected = indexProvenance();
+  const saved = graph.snapshot();
+  for (const node of saved.nodes) {
+    if (allow(node)) projected.addNode(node);
+  }
+  for (const { from, to, relation } of saved.edges) {
+    if (projected.hasNode(from) && projected.hasNode(to)) {
+      projected.addEdge(from, to, relation);
+    }
+  }
+  for (const unresolved of saved.unresolvedReferences) {
+    if (
+      projected.hasNode(unresolved.node) &&
+      allowUnresolved(unresolved.reference)
+    ) {
+      projected.addUnresolved(unresolved);
+    }
+  }
+  return sentinelProvenanceGraphView(projected);
 }

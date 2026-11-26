@@ -3452,18 +3452,22 @@ export function allowsRetainedSentinelProvenancePage(
     const node = visible.inspect(args.node);
     if (!node) return false;
     const current = new Set(visible.snapshot().nodes.map(({ id }) => id));
-    const allows = (id: unknown) =>
-      typeof id === "string" &&
-      (!/^(?:task|observation):adaptive:/.test(id) || current.has(id));
+    const unresolved = new Set(
+      node.connections.flatMap((item) =>
+        item.kind === "unresolved" ? [JSON.stringify(item)] : []
+      ),
+    );
     if (
       !page.connections.every((
         item: { kind: string; from?: string; to?: string; reference?: string },
       ) =>
         item.kind === "edge"
-          ? allows(item.from) && allows(item.to)
-          : !item.reference ||
-            !/^adaptive:[a-f0-9]{64}$/.test(item.reference) ||
-            allows(`task:adaptive:${item.reference}`)
+          ? typeof item.from === "string" && current.has(item.from) &&
+            typeof item.to === "string" && current.has(item.to)
+          : unresolved.has(JSON.stringify(item)) &&
+            (!item.reference ||
+              !/^adaptive:[a-f0-9]{64}$/.test(item.reference) ||
+              current.has(`task:adaptive:${item.reference}`))
       )
     ) return false;
     if (page.totalConnections <= node.connections.length) return true;
@@ -4472,7 +4476,7 @@ function createAgent(
         ) return { ...result, allowed: false, action: "BLOCK" };
         if (
           result.allowed && name === "POST_TOOL_RESPONSE" &&
-          (toolName === SENTINEL_DEFENSE_READ ||
+          (provenanceRead || toolName === SENTINEL_DEFENSE_READ ||
             toolName === SENTINEL_INCIDENT_ALERTS_READ) &&
           options.assignedTaskId
         ) {
