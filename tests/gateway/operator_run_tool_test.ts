@@ -4190,6 +4190,134 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
         });
       }, reopenedWorkflows);
 
+      const priorityCase = "selected-assignment-priority";
+      const priorityPath = resolveSentinelCasePath(baseDir, priorityCase);
+      await Deno.mkdir(dirname(priorityPath), { recursive: true });
+      await Deno.writeTextFile(priorityPath, JSON.stringify(childGraph));
+      const priorityState = startSentinelAssessment(priorityPath, {
+        goal: "Review local graph.",
+      });
+      const priorityRevision = adaptiveRevision(priorityState);
+      const priorityRef = {
+        kind: "sentinel",
+        id: priorityCase,
+        revision: priorityState.revision,
+      };
+      const ordinary = {
+        kind: "trace" as const,
+        nodeId: "child-asset",
+        depth: 2,
+      };
+      const ordinaryId = sentinelAdaptiveTaskId(priorityRevision, ordinary);
+      const blockedPriority = {
+        kind: "trace" as const,
+        nodeId: "other-child-asset",
+        depth: 2,
+        prerequisites: [ordinaryId],
+      };
+      const blockedPriorityId = sentinelAdaptiveTaskId(
+        priorityRevision,
+        blockedPriority,
+      );
+      const priorityStorePath = join(
+        dirname(priorityPath),
+        "sentinel-adaptive.db",
+      );
+      const priorityStore = openSentinelAdaptiveStore(priorityStorePath);
+      try {
+        priorityStore.sync(
+          priorityRevision,
+          [ordinary, blockedPriority],
+          undefined,
+          {
+            number: priorityState.revision,
+            goal: {
+              id: priorityState.plan.runId!,
+              label: priorityState.plan.goal!,
+            },
+          },
+        );
+      } finally {
+        priorityStore.close();
+      }
+      assertEquals(
+        JSON.parse((await turn({ action: "pause", ...priorityRef })).result).run
+          .status,
+        "paused",
+      );
+      const priorityRequest = {
+        action: "assign",
+        ...priorityRef,
+        runId: priorityState.plan.runId,
+        adaptiveRevision: priorityRevision,
+        requestId: crypto.randomUUID(),
+        taskKind: "impact",
+        node: "other-child-asset",
+        prioritizeNext: true,
+      };
+      const beforePriorityApproval = confirmations.length;
+      denied = "PRE_TOOL_CALL";
+      await turn(priorityRequest);
+      denied = undefined;
+      assertEquals(confirmations.length, beforePriorityApproval);
+      approved = false;
+      assertStringIncludes(
+        (await turn(priorityRequest)).result,
+        "operator declined",
+      );
+      approved = true;
+      const preferred =
+        JSON.parse((await turn(priorityRequest)).result).receipt;
+      assertEquals(preferred.prioritizeNext, true);
+      assertEquals(
+        JSON.parse(confirmations.at(-1)!.split("\n").at(-1)!).prioritizeNext,
+        true,
+      );
+      const heldPriority = JSON.parse(
+        (await turn({
+          ...priorityRequest,
+          taskKind: "trace",
+          requestId: crypto.randomUUID(),
+        })).result,
+      ).receipt;
+      assertEquals(heldPriority.taskId, blockedPriorityId);
+      const originalPriorityApproval = confirmations.length;
+      await withGateway(async (priorityTurn) => {
+        assertEquals(
+          JSON.parse((await priorityTurn(priorityRequest)).result).receipt,
+          preferred,
+        );
+        assertStringIncludes(
+          (await priorityTurn({
+            ...priorityRequest,
+            prioritizeNext: undefined,
+          })).result,
+          "unavailable",
+        );
+        assertEquals(confirmations.length, originalPriorityApproval);
+        assertEquals(
+          JSON.parse(
+            (await priorityTurn({ action: "resume", ...priorityRef })).result,
+          ).run.status,
+          "running",
+        );
+      }, restarted);
+      const completedPriority = openSentinelAdaptiveStore(priorityStorePath);
+      try {
+        assertEquals(
+          completedPriority.history(priorityRevision).filter(({ event }) =>
+            event === "claimed"
+          ).reverse().map(({ taskId }) => taskId),
+          [
+            preferred.taskId,
+            ordinaryId,
+            blockedPriorityId,
+          ],
+        );
+      } finally {
+        completedPriority.close();
+      }
+
       const batchCase = "reviewed-batch-case";
       const batchPath = resolveSentinelCasePath(baseDir, batchCase);
       await Deno.mkdir(dirname(batchPath), { recursive: true });

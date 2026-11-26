@@ -1,3 +1,4 @@
+import { readSentinelTrafficReceipt, type SentinelHintTrafficReference } from "../sentinel/traffic_receipts.ts";
 import { notifyCommittedEvidence } from "../core/evidence_task_progression.ts";
 import { readLinkedFindingProof } from "./sentinel_linked_findings.ts";
 import { reopenSentinelAssignedInventory } from "./sentinel_inventory_tool.ts";
@@ -1256,11 +1257,14 @@ export function recordOperatorSentinelRunHint(
   note: string,
   operatorScope = "owner",
   assetIds?: readonly string[],
+  trafficReference?: SentinelHintTrafficReference,
 ) {
   const saved = withSentinelAssessmentWriteLock(snapshotPath, (state) => {
     if (
       !state?.active || state.revision !== revision ||
-      (assetIds && !sentinelHintAssetsInScope(snapshotPath, state, assetIds))
+      (assetIds && !sentinelHintAssetsInScope(snapshotPath, state, assetIds)) ||
+      (trafficReference && (assetIds?.length !== 1 ||
+        !readSentinelTrafficReceipt(snapshotPath, revision, trafficReference, assetIds[0])))
     ) return;
     const runId = state.plan.runId ?? "sentinel-assessment";
     const store = openSentinelAdaptiveStore(storePath(snapshotPath));
@@ -1272,6 +1276,7 @@ export function recordOperatorSentinelRunHint(
         operatorScope,
         runId,
         assetIds,
+        trafficReference,
       );
       return receipt && { receipt, runId };
     } finally {
@@ -1297,6 +1302,7 @@ export function readSentinelOperatorAssetHint(
   requestId: string,
   text: string,
   assetIds: readonly string[],
+  trafficReference?: SentinelHintTrafficReference,
 ) {
   const store = openSentinelAdaptiveStore(storePath(path));
   try {
@@ -1307,6 +1313,7 @@ export function readSentinelOperatorAssetHint(
       "owner",
       state.plan.runId ?? "sentinel-assessment",
       assetIds,
+      trafficReference,
     );
   } finally {
     store.close();
@@ -1696,6 +1703,7 @@ export function submitSentinelAssignmentIntent(
     readonly adaptiveRevision: string;
     readonly kind: string;
     readonly nodeId: string;
+    readonly prioritizeNext?: true;
     readonly recheckFindingId?: string;
     readonly passingRecheckForFindingId?: string;
     readonly graphRelationship?: SentinelGraphFactRequirement;
@@ -1735,7 +1743,8 @@ export function submitSentinelAssignmentIntent(
               input.graphRelationship,
             ) &&
             prior.recheckFindingId === input.recheckFindingId &&
-            prior.passingRecheckForFindingId === passing
+            prior.passingRecheckForFindingId === passing &&
+            prior.prioritizeNext === input.prioritizeNext
           ? { state, receipt: prior, replay: true }
           : undefined;
       }
@@ -1792,6 +1801,7 @@ export function submitSentinelAssignmentIntent(
         adaptiveRevision: revision,
         task,
         reason: OPERATOR_ASSIGNMENT_REASON,
+        prioritize: input.prioritizeNext,
         takeOverQueued: !!queued &&
           !decisionAllowsClaim(snapshotPath, state.revision)(queued),
       });
@@ -5437,9 +5447,11 @@ export function createSentinelModelPlanner(
         const observedCriteria = new Set(
           goalCompletion?.observations.map(({ criterionId }) => criterionId),
         );
-        const assetHints = hints.flatMap(({ id, text, assetIds }) =>
-          assetIds && sentinelHintAssetsInScope(snapshotPath, state, assetIds)
-            ? [{ id, text, assetIds }]
+        const assetHints = hints.flatMap(({ id, revision, text, assetIds, trafficReference }) =>
+          assetIds && sentinelHintAssetsInScope(snapshotPath, state, assetIds) &&
+            (!trafficReference || (revision === state.revision && assetIds.length === 1 &&
+              readSentinelTrafficReceipt(snapshotPath, revision, trafficReference, assetIds[0])))
+            ? [{ id, text, assetIds, ...(trafficReference && { trafficReference }) }]
             : []
         );
         const inputs = {

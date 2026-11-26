@@ -818,6 +818,11 @@ export const operatorRunTool: ToolDefinition = {
       ],
       description: "Filter the Sentinel task queue by durable execution status",
     },
+    prioritizeNext: {
+      type: "boolean",
+      description:
+        "Explicitly place a local trace or impact assignment ahead of ordinary eligible queued work.",
+    },
     taskKind: {
       type: "string",
       description: "Supported defensive investigation kind for an exact node",
@@ -4492,6 +4497,7 @@ ${
           recheckFindingId,
           passingRecheckForFindingId,
           graphRelationship,
+          prioritizeNext,
         } = args;
         if (
           ref.kind !== "sentinel" || ref.revision === undefined ||
@@ -4509,6 +4515,7 @@ ${
               "recheckFindingId",
               "passingRecheckForFindingId",
               "graphRelationship",
+              "prioritizeNext",
             ].includes(key)
           ) ||
           typeof runId !== "string" || !digestPattern.test(runId) ||
@@ -4516,6 +4523,13 @@ ${
           !/^[a-f0-9]{64}$/.test(adaptiveRevision) ||
           typeof requestId !== "string" || !digestPattern.test(requestId) ||
           typeof taskKind !== "string" || !/^[a-z_]{1,64}$/.test(taskKind) ||
+          (prioritizeNext !== undefined &&
+            typeof prioritizeNext !== "boolean") ||
+          (prioritizeNext === true &&
+            ((taskKind !== "trace" && taskKind !== "impact") ||
+              recheckFindingId !== undefined ||
+              passingRecheckForFindingId !== undefined ||
+              graphRelationship !== undefined)) ||
           typeof node !== "string" || !node.trim() || node.length > 4096 ||
           node.includes("\0")
         ) return unavailable;
@@ -4595,6 +4609,7 @@ ${
           adaptiveRevision,
           kind: taskKind,
           nodeId: node,
+          ...(prioritizeNext === true && { prioritizeNext: true as const }),
           ...(relationship && { graphRelationship: relationship }),
           ...(typeof recheckFindingId === "string" && { recheckFindingId }),
           ...(typeof passingRecheckForFindingId === "string" &&
