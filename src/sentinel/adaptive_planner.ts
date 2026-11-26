@@ -1200,7 +1200,8 @@ export function validateSentinelPlanSuggestions(
       ...new Set([
         ...dependencies.map((dependency) => accepted.get(dependency)!),
         ...(graphFact ? [graphFact.taskId] : []),
-        ...(sourceEvidence?.map(({ taskId }) => taskId) ?? []),
+        ...(sourceEvidence?.flatMap(({ taskId }) => taskId ? [taskId] : []) ??
+          []),
         ...(committed ? [committed.sourceTaskId] : []),
         ...(typeof source === "string" ? [source] : []),
         ...(workerSources?.map(({ taskId }) => taskId) ?? []),

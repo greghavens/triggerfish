@@ -2957,7 +2957,10 @@ function readRetainedReviewedAssignmentSources(
     ? readSentinelAssessmentRevision(path, latestRevision)?.result.sharedGraph
       .snapshot
     : undefined;
-  const allows = (kind: "trace" | "review_evidence", nodeId: string) =>
+  const allows = (
+    kind: "trace" | "review_evidence" | "review_finding",
+    nodeId: string,
+  ) =>
     sentinelOperatingConstraintsAllow(saved, { kind, nodeId }, snapshot) &&
     sentinelOperatingConstraintsAllow(
       latest?.constraints,
@@ -2995,17 +2998,22 @@ function readRetainedReviewedAssignmentSources(
         const evidence = finding &&
           snapshot.nodes.find(({ id }) => id === finding.evidenceId);
         if (
-          !report || !finding?.taskId || finding.caseId !== caseId ||
+          !report || !finding || finding.caseId !== caseId ||
           finding.runId !== runId ||
           finding.evidenceRevision !== revision ||
           finding.targetId !== target ||
           !findingRecheckStillApplies(snapshot, finding) ||
           evidence?.kind !== "evidence" ||
-          !allowNode(evidence.id)
+          !allowNode(evidence.id) ||
+          !allows("review_finding", finding.graphFindingId) ||
+          ("analyst" in finding &&
+            (evidence.executionSource || evidence.nativeWorkflowSource))
         ) return;
         result.push({
           id,
-          taskId: finding.taskId,
+          ...("analyst" in finding
+            ? { analyst: finding.analyst }
+            : { taskId: finding.taskId }),
           evidenceRevision: finding.evidenceRevision,
           ...(evidence.executionSource || evidence.nativeWorkflowSource
             ? { executionEvidenceId: evidence.id }

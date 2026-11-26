@@ -23,7 +23,11 @@ import { readSentinelGraphFactPageReference } from "./worker_graph_facts.ts";
 import { redactCredentialText } from "../core/logger/redactor.ts";
 import { parseSharedAssetLinkPage } from "./shared_asset_link_page.ts";
 import { latestAssignedControlCheck } from "./assigned_relationship_facts.ts";
-import type { loadSentinelGraph } from "./graph.ts";
+import {
+  type loadSentinelGraph,
+  readSentinelFindingAnalyst,
+  type SentinelFindingAnalyst,
+} from "./graph.ts";
 import {
   MAX_SHARED_ASSET_MAPPING_SOURCES,
   type SharedAssetMappingSource,
@@ -966,14 +970,18 @@ export interface AdaptiveRecheckBaseline {
 }
 
 /** A retained fact or finding frozen by reviewed assignment admission. */
-export interface AdaptiveReviewedAssignmentSource {
-  readonly id: string;
-  readonly taskId: string;
-  readonly evidenceRevision: number;
-  readonly digest: string;
-  readonly sourceStepIndex?: number;
-  readonly executionEvidenceId?: string;
-}
+export type AdaptiveReviewedAssignmentSource =
+  & {
+    readonly id: string;
+    readonly evidenceRevision: number;
+    readonly digest: string;
+    readonly sourceStepIndex?: number;
+    readonly executionEvidenceId?: string;
+  }
+  & (
+    | { readonly taskId: string; readonly analyst?: never }
+    | { readonly analyst: SentinelFindingAnalyst; readonly taskId?: never }
+  );
 
 export interface AdaptivePlannerRound {
   readonly cancelledTaskRequestId?: string;
@@ -2486,6 +2494,7 @@ function normalizePlannerRound(round: AdaptivePlannerRound | undefined) {
           ![
             "id",
             "taskId",
+            "analyst",
             "evidenceRevision",
             "digest",
             "sourceStepIndex",
@@ -2502,7 +2511,16 @@ function normalizePlannerRound(round: AdaptivePlannerRound | undefined) {
           (!entry.id.startsWith("worker-finding:") ||
             !/^(?:execution-evidence|native-workflow-evidence):[a-f0-9]{64}$/
               .test(entry.executionEvidenceId))) ||
-        !/^adaptive:[a-f0-9]{64}$/.test(entry.taskId) ||
+        (entry.analyst === undefined
+          ? typeof entry.taskId !== "string" ||
+            !/^adaptive:[a-f0-9]{64}$/.test(entry.taskId)
+          : entry.taskId !== undefined ||
+            entry.executionEvidenceId !== undefined ||
+            !entry.id.startsWith("worker-finding:") ||
+            !isDeepStrictEqual(
+              readSentinelFindingAnalyst(entry.analyst),
+              entry.analyst,
+            )) ||
         !Number.isSafeInteger(entry.evidenceRevision) ||
         entry.evidenceRevision < 1 ||
         !/^[a-f0-9]{64}$/.test(entry.digest) ||

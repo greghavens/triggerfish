@@ -1198,7 +1198,7 @@ Deno.test("Reviewed analyst finding uses exact local failing evidence and surviv
   }
 });
 
-Deno.test("Reviewed mixed-source assignment retains exact graph and finding lineage across gateway restore", async () => {
+async function verifyReviewedMixedSourceAssignment(analyst: boolean) {
   const baseDir = await Deno.makeTempDir();
   const caseId = "mixed-source-review";
   const path = resolveSentinelCasePath(baseDir, caseId);
@@ -1244,8 +1244,11 @@ Deno.test("Reviewed mixed-source assignment retains exact graph and finding line
     const state = startSentinelAssessment(path);
     const runId = state.plan.runId;
     assert(runId);
+    const ref = { kind: "sentinel", id: caseId, revision: state.revision };
     const graphWorker = assignedLease(path, state, "review_evidence");
-    const findingWorker = assignedLease(path, state, "impact");
+    const findingWorker = analyst
+      ? undefined
+      : assignedLease(path, state, "impact");
     const graphResult = await workerTurn(path, graphWorker, [
       [tool(assigned)],
       [tool("sentinel_publish_graph_fact", {
@@ -1255,25 +1258,55 @@ Deno.test("Reviewed mixed-source assignment retains exact graph and finding line
     ]);
     const parsedFact = JSON.parse(graphResult.results[1][0]);
     assert(parsedFact.id);
-    const findingResult = await workerTurn(path, findingWorker, [
-      [tool(assigned)],
-      [tool(report, {
-        graphFindingId: "gap",
-        controlId: "control",
-        evidenceId: "check",
-        title: "Retained failed control check",
-        summary: "The verified local check failed.",
-        requestId: crypto.randomUUID(),
-      })],
-    ]);
-    const { record: finding } = JSON.parse(findingResult.results[1][0]);
+    const findingInput = {
+      controlId: "control",
+      evidenceId: "check",
+      title: "Retained failed control check",
+      summary: "The verified local check failed.",
+      requestId: crypto.randomUUID(),
+    };
+    let finding: SentinelWorkerFindingRecord;
+    if (findingWorker) {
+      const findingResult = await workerTurn(path, findingWorker, [
+        [tool(assigned)],
+        [tool(report, { ...findingInput, graphFindingId: "gap" })],
+      ]);
+      finding = JSON.parse(findingResult.results[1][0]).record;
+    } else {
+      await withFindingAssignmentGateway(
+        baseDir,
+        () => Promise.resolve(true),
+        async (turn) => {
+          const response = JSON.parse(
+            await turn({
+              ...ref,
+              ...findingInput,
+              action: "record_analyst_finding",
+              runId,
+              findingId: "gap",
+              targetId: "app",
+            }),
+          );
+          const receipt: SentinelWorkerFindingRecord = response.receipt;
+          assert(receipt && "analyst" in receipt);
+          assertEquals(receipt.analyst, { operatorScope: "owner" });
+          assertEquals(receipt.taskId, undefined);
+          finding = receipt;
+        },
+      );
+    }
+    assert(finding!);
     assert(finding.id);
     const revision = adaptiveRevision(state);
     const store = openSentinelAdaptiveStore(
       join(dirname(path), "sentinel-adaptive.db"),
     );
     try {
-      for (const lease of [graphWorker, findingWorker]) {
+      for (
+        const lease of findingWorker
+          ? [graphWorker, findingWorker]
+          : [graphWorker]
+      ) {
         assert(store.finishModelReview(
           revision,
           lease.assignedTaskId,
@@ -1284,7 +1317,6 @@ Deno.test("Reviewed mixed-source assignment retains exact graph and finding line
     } finally {
       store.close();
     }
-    const ref = { kind: "sentinel", id: caseId, revision: state.revision };
     const batch = {
       ...ref,
       action: "assign_batch",
@@ -1301,12 +1333,14 @@ Deno.test("Reviewed mixed-source assignment retains exact graph and finding line
     let reviews = 0;
     let revoke = false;
     let allowed = true;
+    let denyAnalystSource = false;
     let reviewed: {
       receipts: {
         taskId: string;
         sourceEvidence: {
           id: string;
-          taskId: string;
+          taskId?: string;
+          analyst?: unknown;
           evidenceRevision: number;
           digest: string;
           sourceStepIndex?: number;
@@ -1344,6 +1378,13 @@ Deno.test("Reviewed mixed-source assignment retains exact graph and finding line
       }
       assertEquals(reviews, beforeReview);
       const before = readAdaptiveSentinel(path, state)?.tasks;
+      if (analyst) {
+        denyAnalystSource = true;
+        assertStringIncludes(await turn(batch), "unavailable");
+        denyAnalystSource = false;
+        assertEquals(reviews, beforeReview);
+        assertEquals(readAdaptiveSentinel(path, state)?.tasks, before);
+      }
       revoke = true;
       assertStringIncludes(await turn(batch), "unavailable");
       assertEquals(reviews, beforeReview + 1);
@@ -1355,8 +1396,9 @@ Deno.test("Reviewed mixed-source assignment retains exact graph and finding line
       assertEquals(sources.map(({ id }) => id), [parsedFact.id, finding.id]);
       assertEquals(sources.map(({ taskId }) => taskId), [
         graphWorker.assignedTaskId,
-        findingWorker.assignedTaskId,
+        findingWorker?.assignedTaskId,
       ]);
+      if (analyst) assertEquals(sources[1].analyst, { operatorScope: "owner" });
       assertEquals(sources.map(({ evidenceRevision }) => evidenceRevision), [
         state.revision,
         state.revision,
@@ -1364,10 +1406,14 @@ Deno.test("Reviewed mixed-source assignment retains exact graph and finding line
       assertEquals(sources[0].digest, parsedFact.resultSha256);
       assertEquals(sources[0].sourceStepIndex, parsedFact.sourceStepIndex);
       assert(/^[a-f0-9]{64}$/.test(sources[1].digest));
-    }, (hook, input) =>
-      allowed || hook !== "PRE_TOOL_CALL" ||
-      (input.tool_call as { args?: { action?: string } } | undefined)
-          ?.args?.action !== "assign_batch");
+    }, (hook, input) => {
+      const action =
+        (input.tool_call as { args?: { action?: string } } | undefined)
+          ?.args?.action;
+      return hook !== "PRE_TOOL_CALL" ||
+        (allowed || action !== "assign_batch") &&
+          (!denyAnalystSource || action !== "finding_receipt");
+    });
     assert(reviewed!);
     await withFindingAssignmentGateway(baseDir, confirm, async (turn) => {
       const beforeReplay = reviews;
@@ -1516,6 +1562,7 @@ Deno.test("Reviewed mixed-source assignment retains exact graph and finding line
     }
     const node = `task:adaptive:${receipt.taskId}`;
     const exactNode = { ...ref, action: "node", node };
+    const scopedAssets = analyst ? ["app", "other"] : ["app"];
     await withFindingAssignmentGateway(baseDir, confirm, async (turn) => {
       assertStringIncludes(await turn(exactNode), parsedFact.id);
       assertEquals(
@@ -1526,11 +1573,11 @@ Deno.test("Reviewed mixed-source assignment retains exact graph and finding line
             runId,
             requestId: crypto.randomUUID(),
             expectedVersion: 0,
-            allowedAssetIds: ["app"],
-            deniedKinds: [],
+            allowedAssetIds: scopedAssets,
+            deniedKinds: analyst ? ["review_finding"] : [],
           }),
         ).record.constraints.allowedAssetIds,
-        ["app"],
+        scopedAssets,
       );
       assertStringIncludes(await turn(batch), "unavailable");
       const scopedNode = await turn(exactNode);
@@ -1543,7 +1590,13 @@ Deno.test("Reviewed mixed-source assignment retains exact graph and finding line
     planner?.stop();
     await Deno.remove(baseDir, { recursive: true });
   }
-});
+}
+
+Deno.test("Reviewed mixed-source assignment retains exact graph and finding lineage across gateway restore", () =>
+  verifyReviewedMixedSourceAssignment(false));
+
+Deno.test("Reviewed mixed-source assignment preserves analyst actor and scoped evidence through gateway restore", () =>
+  verifyReviewedMixedSourceAssignment(true));
 
 Deno.test("Leased Sentinel workers report, recheck, and amend findings visible in authenticated Tidepool", async () => {
   const baseDir = await Deno.makeTempDir();
