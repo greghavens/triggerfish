@@ -327,6 +327,7 @@ export interface SentinelAgentOptions {
       directTelemetry?: SentinelDirectTelemetryRead,
     ) => Promise<string>;
   };
+  readonly allowUnleasedInteractiveTelemetry?: boolean;
   readonly plannerExecutionEvidenceRunId?: string;
   readonly authorizeExecutionTracePayload?: (
     payload: ExecutionTraceApprovedPayload,
@@ -3928,6 +3929,14 @@ function createAgent(
     canDelegate && options.snapshotOverride === undefined
       ? options.operatorRunReader
       : undefined;
+  const directTelemetryReader = operatorRunReader ??
+    (!canDelegate && options.allowUnleasedInteractiveTelemetry &&
+        options.snapshotOverride === undefined &&
+        options.assessmentRevision === undefined &&
+        options.assignedTaskId === undefined &&
+        options.assignedTaskLeaseToken === undefined
+      ? options.operatorRunReader
+      : undefined);
   const availableTools = canDelegate
     ? [
       ...tools,
@@ -4307,7 +4316,7 @@ function createAgent(
             toolName === SENTINEL_INCIDENT_ALERTS_READ ||
             toolName === SENTINEL_DEFENSE_READ || traffic || plannerTodo ||
             digestRead || plannerControl);
-        const selectedDirectTelemetry = !!operatorRunReader &&
+        const selectedDirectTelemetry = !!directTelemetryReader &&
           (toolName === SENTINEL_DEFENSE_READ ||
             toolName === SENTINEL_INCIDENT_ALERTS_READ);
         const pendingTelemetry = active?.pendingTelemetryFence;
@@ -4375,7 +4384,7 @@ function createAgent(
         );
         if (
           result.allowed && name === "PRE_CONTEXT_INJECTION" && turn &&
-          operatorRunReader
+          directTelemetryReader
         ) {
           const retained = retainedTelemetry;
           if (retained) {
@@ -4588,14 +4597,21 @@ function createAgent(
       if (++turn.reads > MAX_READS_PER_TURN) {
         return "Error: This turn reached the Sentinel graph read limit.";
       }
-      if (
-        operatorRunReader && (operatorRunReader.definition.name === name ||
-          name === SENTINEL_DEFENSE_READ ||
-          name === SENTINEL_INCIDENT_ALERTS_READ)
-      ) {
-        const direct = name !== operatorRunReader.definition.name
+      const direct =
+        name === SENTINEL_DEFENSE_READ || name === SENTINEL_INCIDENT_ALERTS_READ
           ? { name, args }
           : undefined;
+      const selectedReader = direct
+        ? directTelemetryReader
+        : operatorRunReader?.definition.name === name
+        ? operatorRunReader
+        : undefined;
+      if (
+        direct && options.allowUnleasedInteractiveTelemetry && !selectedReader
+      ) {
+        return "Error: The selected Sentinel telemetry authority is unavailable.";
+      }
+      if (selectedReader) {
         let request = args;
         if (direct) {
           const query = name === SENTINEL_DEFENSE_READ
@@ -4619,7 +4635,7 @@ function createAgent(
           };
         }
         turn.pendingTelemetryFence = undefined;
-        const result = await operatorRunReader.execute(
+        const result = await selectedReader.execute(
           request,
           turn.signal,
           (fence) => {

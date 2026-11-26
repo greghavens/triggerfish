@@ -191,6 +191,7 @@ Deno.test("Authenticated Sentinel chat reads exact approved cross-case graph fin
   let result = "";
   let verifyWorkerBinding = false;
   let localInventory = false;
+  let unleasedTelemetry = false;
   let localTelemetry:
     | "sentinel_defense"
     | "sentinel_incident_alerts"
@@ -251,7 +252,13 @@ Deno.test("Authenticated Sentinel chat reads exact approved cross-case graph fin
           toolCalls: [],
         });
       }
-      if (next && !localInventory) {
+      if (unleasedTelemetry) {
+        assertEquals(definition, undefined);
+        for (const name of ["sentinel_defense", "sentinel_incident_alerts"]) {
+          assert(definitions?.some((tool) => tool.function?.name === name));
+        }
+      }
+      if (next && !localInventory && !unleasedTelemetry) {
         assert(definition);
         assertEquals(
           definition.function?.parameters?.properties?.action?.enum,
@@ -858,8 +865,68 @@ Deno.test("Authenticated Sentinel chat reads exact approved cross-case graph fin
     assertStringIncludes(result, "unavailable");
     assertEquals(constraintConfirmations, []);
     await turn("/sentinel case approved");
-    localTelemetry = "sentinel_defense";
     const localCheck = { upstreamCheck: coverageCheck.upstreamCheck };
+    unleasedTelemetry = true;
+    localTelemetry = "sentinel_defense";
+    const intake = sentinelAlertsPath(approved.path);
+    const previousIntake = await Deno.readTextFile(intake);
+    await Deno.writeTextFile(intake, "[]");
+    try {
+      await turn(
+        "/sentinel-agent Read the committed defensive check.",
+        localCheck,
+      );
+    } finally {
+      await Deno.writeTextFile(intake, previousIntake);
+    }
+    assertEquals(
+      JSON.parse(result).matches.map(({ alertId }: { alertId: string }) =>
+        alertId
+      ),
+      [visibleAlertId],
+    );
+    assert(
+      hooks.includes("PRE_TOOL_CALL") && hooks.includes("POST_TOOL_RESPONSE") &&
+        hooks.includes("PRE_OUTPUT"),
+    );
+    await turn("/sentinel-agent Try an exact excluded alert.", {
+      ...localCheck,
+      alertId: restrictedAlertId,
+    });
+    assertStringIncludes(result, "did not match");
+    localTelemetry = "sentinel_incident_alerts";
+    await turn("/sentinel-agent Read scoped incident members.", {
+      incidentId: catalog.incidents[0].id,
+    });
+    assertEquals(JSON.parse(result).total, 2);
+    await turn("/sentinel-agent Try an unavailable incident revision.", {
+      incidentId: catalog.incidents[0].id,
+      revision: approved.revision + 1,
+    });
+    assertStringIncludes(result, "unavailable");
+    localTelemetry = undefined;
+    const beforeUnleasedControl = dispatched;
+    await turn("/sentinel-agent Try to use the owner case reader.", exactAlert);
+    assertEquals(dispatched, beforeUnleasedControl);
+    assert(!result.includes(visibleAlert.subject));
+
+    localTelemetry = "sentinel_defense";
+    revokeTelemetry = "POST_TOOL_RESPONSE";
+    const workerRevoked = await turn(
+      "/sentinel-agent Check an alert as authority is revoked.",
+      {
+        ...localCheck,
+        alertId: visibleAlertId,
+      },
+    );
+    assertEquals(telemetryRevocations, 1);
+    assert(!result.includes(visibleAlert.subject));
+    assert(
+      workerRevoked.every((frame) => !frame.includes(visibleAlert.subject)),
+    );
+    constraintsAllowed = true;
+    telemetryRevocations = 0;
+    unleasedTelemetry = false;
     const alertsPath = sentinelAlertsPath(approved.path);
     const uncommittedAlerts = await Deno.readTextFile(alertsPath);
     await Deno.writeTextFile(alertsPath, "[]");

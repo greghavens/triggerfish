@@ -1312,8 +1312,8 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
             worker ? "worker" : "interactive",
           ),
           hookRunner: config.hookRunner,
-          ...(!worker &&
-            { operatorRunReader: operatorRunReaderForCase(caseSnapshotPath) }),
+          operatorRunReader: operatorRunReaderForCase(caseSnapshotPath),
+          allowUnleasedInteractiveTelemetry: worker,
           outputLanguage: config.sentinelOutputLanguage,
           readOutputLanguage: () =>
             readSentinelModelSettings(caseSnapshotPath)?.outputLanguage,
