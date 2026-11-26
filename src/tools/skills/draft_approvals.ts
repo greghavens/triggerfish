@@ -5,7 +5,7 @@
 import { DatabaseSync } from "node:sqlite";
 
 const APPLICATION_ID = 0x534b4150;
-const VERSION = 2;
+const VERSION = 3;
 const SCHEMA = `
   CREATE TABLE IF NOT EXISTS approvals (
     workspace TEXT NOT NULL,
@@ -31,6 +31,18 @@ const CREATIONS_SCHEMA = `
   ) STRICT
 `;
 
+const WITHDRAWALS_SCHEMA = `
+  CREATE TABLE IF NOT EXISTS withdrawals (
+    workspace TEXT NOT NULL,
+    skillName TEXT NOT NULL,
+    digest TEXT NOT NULL,
+    receiptId TEXT NOT NULL,
+    ownerSessionId TEXT NOT NULL,
+    withdrawnAt TEXT NOT NULL,
+    PRIMARY KEY (workspace, skillName, digest)
+  ) STRICT
+`;
+
 export interface SkillCreationReceipt {
   readonly skillName: string;
   readonly proposalDigest: string;
@@ -40,12 +52,22 @@ export interface SkillCreationReceipt {
   readonly stagedAt: string;
 }
 
+export interface SkillWithdrawalReceipt {
+  readonly skillName: string;
+  readonly digest: string;
+  readonly approvalReceiptId: string;
+  readonly receiptId: string;
+  readonly ownerSessionId: string;
+  readonly withdrawnAt: string;
+}
+
 export interface SkillDraftReceipt {
   readonly skillName: string;
   readonly digest: string;
   readonly receiptId: string;
   readonly ownerSessionId: string;
   readonly approvedAt: string;
+  readonly withdrawal?: SkillWithdrawalReceipt;
 }
 
 export interface SkillDraftApprovals {
@@ -59,6 +81,13 @@ export interface SkillDraftApprovals {
     digest: string,
     ownerSessionId: string,
   ): SkillDraftReceipt;
+  withdraw(
+    workspace: string,
+    skillName: string,
+    digest: string,
+    approvalReceiptId: string,
+    ownerSessionId: string,
+  ): SkillWithdrawalReceipt | undefined;
   creation(
     workspace: string,
     skillName: string,
@@ -93,10 +122,14 @@ function openRegistry(path: string, readOnly: boolean): DatabaseSync {
     if (application_id === APPLICATION_ID && user_version === VERSION) {
       return db;
     }
-    if (application_id === APPLICATION_ID && user_version === 1) {
+    if (
+      application_id === APPLICATION_ID &&
+      (user_version === 1 || user_version === 2)
+    ) {
       if (!readOnly) {
         db.exec(`BEGIN IMMEDIATE;
         ${CREATIONS_SCHEMA};
+        ${WITHDRAWALS_SCHEMA};
         PRAGMA user_version = ${VERSION};
         COMMIT;`);
       }
@@ -109,6 +142,7 @@ function openRegistry(path: string, readOnly: boolean): DatabaseSync {
     db.exec(`BEGIN IMMEDIATE;
       ${SCHEMA};
       ${CREATIONS_SCHEMA};
+      ${WITHDRAWALS_SCHEMA};
       PRAGMA application_id = ${APPLICATION_ID};
       PRAGMA user_version = ${VERSION};
       COMMIT;`);
@@ -120,17 +154,25 @@ function openRegistry(path: string, readOnly: boolean): DatabaseSync {
 }
 
 function receiptFromRow(
-  { skillName, digest, receiptId, ownerSessionId, approvedAt }: Record<
-    string,
-    unknown
-  >,
+  row: Record<string, unknown>,
 ): SkillDraftReceipt {
+  const { skillName, digest, receiptId, ownerSessionId, approvedAt } = row;
   return {
     skillName: String(skillName),
     digest: String(digest),
     receiptId: String(receiptId),
     ownerSessionId: String(ownerSessionId),
     approvedAt: String(approvedAt),
+    ...(typeof row.withdrawalId === "string" && {
+      withdrawal: {
+        skillName: String(skillName),
+        digest: String(digest),
+        approvalReceiptId: String(receiptId),
+        receiptId: row.withdrawalId,
+        ownerSessionId: String(row.withdrawingOwner),
+        withdrawnAt: String(row.withdrawnAt),
+      },
+    }),
   };
 }
 
@@ -148,12 +190,26 @@ function openWritableRegistry(path: string): DatabaseSync {
   return openRegistry(path, false);
 }
 
+function approvalRows(db: DatabaseSync, where: string) {
+  if (db.prepare("PRAGMA user_version").get()?.user_version === VERSION) {
+    return db.prepare(`
+      SELECT approvals.*, withdrawals.receiptId AS withdrawalId,
+        withdrawals.ownerSessionId AS withdrawingOwner, withdrawals.withdrawnAt
+      FROM approvals LEFT JOIN withdrawals USING (workspace, skillName, digest)
+      WHERE ${where}
+    `);
+  }
+  return db.prepare(`SELECT * FROM approvals WHERE ${where}`);
+}
+
+const exactApproval = "workspace = ? AND skillName = ? AND digest = ?";
+
 function readCreation(
   db: DatabaseSync,
   workspace: string,
   skillName: string,
 ): SkillCreationReceipt | undefined {
-  if (db.prepare("PRAGMA user_version").get()?.user_version !== VERSION) return;
+  if (Number(db.prepare("PRAGMA user_version").get()?.user_version) < 2) return;
   const row = db.prepare(`SELECT * FROM creations
     WHERE workspace = ? AND skillName = ?`).get(workspace, skillName);
   if (!row) return;
@@ -175,7 +231,9 @@ export function createSkillDraftApprovals(path: string): SkillDraftApprovals {
       if (!hasRegistry(path)) return out;
       const db = openRegistry(path, true);
       try {
-        if (db.prepare("PRAGMA user_version").get()?.user_version === VERSION) {
+        if (
+          Number(db.prepare("PRAGMA user_version").get()?.user_version) >= 2
+        ) {
           for (
             const row of db.prepare(
               "SELECT skillName FROM creations WHERE workspace = ?",
@@ -185,9 +243,7 @@ export function createSkillDraftApprovals(path: string): SkillDraftApprovals {
           }
         }
         for (
-          const row of db.prepare(
-            "SELECT * FROM approvals WHERE workspace = ?",
-          ).all(workspace)
+          const row of approvalRows(db, "workspace = ?").all(workspace)
         ) {
           const receipt = receiptFromRow(row);
           const versions = out.get(receipt.skillName) ?? new Map();
@@ -212,13 +268,38 @@ export function createSkillDraftApprovals(path: string): SkillDraftApprovals {
           new Date().toISOString(),
         );
         return receiptFromRow(
-          db.prepare(`SELECT * FROM approvals
-          WHERE workspace = ? AND skillName = ? AND digest = ?`).get(
-            workspace,
-            skillName,
-            digest,
-          )!,
+          approvalRows(db, exactApproval).get(workspace, skillName, digest)!,
         );
+      } finally {
+        db.close();
+      }
+    },
+    withdraw(workspace, skillName, digest, approvalReceiptId, ownerSessionId) {
+      if (!hasRegistry(path)) return;
+      const db = openWritableRegistry(path);
+      try {
+        db.prepare(`
+          INSERT INTO withdrawals
+          SELECT workspace, skillName, digest, ?, ?, ?
+          FROM approvals WHERE ${exactApproval} AND receiptId = ?
+          ON CONFLICT(workspace, skillName, digest) DO NOTHING
+        `).run(
+          crypto.randomUUID(),
+          ownerSessionId,
+          new Date().toISOString(),
+          workspace,
+          skillName,
+          digest,
+          approvalReceiptId,
+        );
+        const row = approvalRows(db, exactApproval).get(
+          workspace,
+          skillName,
+          digest,
+        );
+        if (row?.receiptId === approvalReceiptId) {
+          return receiptFromRow(row).withdrawal;
+        }
       } finally {
         db.close();
       }

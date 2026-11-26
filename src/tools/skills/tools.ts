@@ -130,6 +130,22 @@ export function buildSkillAdministrationToolDefinitions(): readonly ToolDefiniti
       },
     },
   }, {
+    name: "withdraw_skill",
+    description:
+      "Request owner confirmation to withdraw the active approval for one exact workspace-authored skill digest. The draft and approval history are retained.",
+    parameters: {
+      skill_name: {
+        type: "string",
+        description: "Exact workspace-authored skill name",
+        required: true,
+      },
+      digest: {
+        type: "string",
+        description: "Exact active digest returned by inspect_skill_draft",
+        required: true,
+      },
+    },
+  }, {
     name: "inspect_skill_revision",
     description:
       "Preview one exact approved workspace skill revision. The proposed Markdown body comes from SKILL.revision.md beside the approved SKILL.md. The preview preserves the skill's frontmatter and does not activate the proposed text.",
@@ -255,7 +271,7 @@ async function executeListSkills(
 
 async function executeDraftAction(
   ctx: SkillToolContext,
-  name: "inspect_skill_draft" | "approve_skill",
+  name: "inspect_skill_draft" | "approve_skill" | "withdraw_skill",
   input: Record<string, unknown>,
   dispatch?: ToolExecutionContext,
 ): Promise<string> {
@@ -288,6 +304,39 @@ async function executeDraftAction(
   if (!applicable()) {
     return "Error: Draft administration is outside the active owner scope.";
   }
+  const approval = draft.approvals?.get(draft.skill.contentHash);
+  if (name === "withdraw_skill") {
+    if (!approval || typeof digest !== "string") {
+      return "Error: The selected skill approval is unavailable.";
+    }
+    const project = (withdrawal: NonNullable<typeof approval.withdrawal>) =>
+      JSON.stringify({ withdrawal, _classification: currentTaint() });
+    if (approval.withdrawal) return project(approval.withdrawal);
+    if (
+      !ctx.getConfirmPrompt || !ctx.skillLoader.withdrawDraft ||
+      !dispatch?.reauthorizeOwnerApproval || !dispatch.ownerSessionId
+    ) return "Error: The confirmation channel is unavailable.";
+    const confirmed = await ctx.getConfirmPrompt()(
+      `Withdraw workspace skill '${skillName}' with SHA-256 ${digest}?`,
+    );
+    if (!confirmed) return "The owner declined the skill withdrawal.";
+    if (!applicable() || !await dispatch.reauthorizeOwnerApproval()) {
+      return "Error: Owner authorization changed before skill withdrawal.";
+    }
+    const withdrawal = await ctx.skillLoader.withdrawDraft(
+      skillName,
+      digest,
+      approval.receiptId,
+      dispatch.ownerSessionId,
+      applicable,
+    );
+    return withdrawal
+      ? project(withdrawal)
+      : "Error: The skill or its approval changed before withdrawal.";
+  }
+  if (!inspection && approval?.withdrawal) {
+    return "Error: This exact skill draft approval was withdrawn.";
+  }
   const scan = await ctx.skillScanner.scan(draft.content);
   if (!applicable()) {
     return "Error: Draft administration is outside the active owner scope.";
@@ -306,6 +355,7 @@ async function executeDraftAction(
           ),
         }),
       approval: draft.skill.draftApproval ?? null,
+      ...(approval?.withdrawal && { withdrawal: approval.withdrawal }),
       approval_history: [...draft.approvals?.values() ?? []]
         .sort((a, b) => b.approvedAt.localeCompare(a.approvedAt))
         .slice(0, 20),
@@ -569,7 +619,10 @@ export function createSkillToolExecutor(
     if (name === "inspect_skill_revision" || name === "stage_skill_revision") {
       return await executeRevisionAction(ctx, name, input, context);
     }
-    if (name === "inspect_skill_draft" || name === "approve_skill") {
+    if (
+      name === "inspect_skill_draft" || name === "approve_skill" ||
+      name === "withdraw_skill"
+    ) {
       return await executeDraftAction(ctx, name, input, context);
     }
     if (name === "list_skills") {
@@ -678,6 +731,14 @@ export function createSkillToolExecutor(
           scanResult.warnings.join("; ")
         }`;
       }
+    }
+
+    if (skill.draftApproval) {
+      const current = await ctx.skillLoader.inspectDraft?.(skill.name);
+      if (
+        current?.skill.draftApproval?.receiptId !==
+          skill.draftApproval.receiptId
+      ) return "Error: The skill approval changed during activation.";
     }
 
     // 4. Track the active skill for tool filtering and domain enforcement

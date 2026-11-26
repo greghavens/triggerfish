@@ -366,6 +366,7 @@ export async function dispatchApprovedToolCall(
       (call.args.action === "evidence" || call.args.action === "status" ||
         (!call.args.action && !call.args.criterion))) ||
     call.name === "inspect_skill_draft" || call.name === "approve_skill" ||
+    call.name === "withdraw_skill" ||
     call.name === "inspect_skill_creation" || call.name === "create_skill" ||
     call.name === "inspect_skill_revision" ||
     call.name === "stage_skill_revision" ||
@@ -568,7 +569,8 @@ export async function dispatchSecurityEnforcedToolCall(
           commit();
         }),
       signal,
-      (call.name === "approve_skill" || call.name === "stage_skill_revision" ||
+      (call.name === "approve_skill" || call.name === "withdraw_skill" ||
+          call.name === "stage_skill_revision" ||
           call.name === "create_skill" ||
           (approval && chatGoalMutation(call.name, call.args) === "confirm"))
         ? {

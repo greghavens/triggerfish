@@ -24,6 +24,7 @@ import type {
   SkillCreationReceipt,
   SkillDraftApprovals,
   SkillDraftReceipt,
+  SkillWithdrawalReceipt,
 } from "./draft_approvals.ts";
 import {
   buildPendingSkillMarkdown,
@@ -130,6 +131,13 @@ export interface SkillLoader {
     revisionDigest: string,
     isCurrentOwner: () => boolean,
   ) => Promise<SkillDraftRevision | undefined>;
+  readonly withdrawDraft?: (
+    name: string,
+    digest: string,
+    approvalReceiptId: string,
+    ownerSessionId: string,
+    isCurrentOwner: () => boolean,
+  ) => Promise<SkillWithdrawalReceipt | undefined>;
   readonly approveDraft?: (
     name: string,
     digest: string,
@@ -388,7 +396,9 @@ async function readExactDraft(
   const approvals = registry.list(workspace).get(name);
   const draftApproval = approvals?.get(digest);
   return {
-    skill: draftApproval ? { ...skill, draftApproval } : skill,
+    skill: draftApproval && !draftApproval.withdrawal
+      ? { ...skill, draftApproval }
+      : skill,
     content,
     approvals,
   };
@@ -435,9 +445,10 @@ function replaceDraftIfCurrent(
   const current = () => {
     if (!isCurrentOwner()) return false;
     const approvals = registry.list(workspace).get(revision.skill.name);
-    return approvals?.get(revision.skill.contentHash)?.receiptId ===
-        revision.sourceApproval.receiptId &&
-      !approvals.has(revision.digest) &&
+    const active = approvals?.get(revision.skill.contentHash);
+    return active?.receiptId === revision.sourceApproval.receiptId &&
+      !active.withdrawal &&
+      !approvals?.has(revision.digest) &&
       readWorkspaceSkillText(workspace, path, "SKILL.md") ===
         revision.sourceContent &&
       readWorkspaceSkillText(workspace, path, "SKILL.revision.md") ===
@@ -507,7 +518,8 @@ async function scanSkillDirectory(
       if (frontmatter.status === "PENDING_APPROVAL" || receipts) {
         draftApproval = receipts?.get(contentHash);
         if (
-          !draftApproval || entry.name !== sanitizedName ||
+          !draftApproval || draftApproval.withdrawal ||
+          entry.name !== sanitizedName ||
           frontmatter.name !== sanitizedName ||
           frontmatter.status !== "PENDING_APPROVAL" ||
           !(await Deno.lstat(join(skillDir, "SKILL.md"))).isFile ||
@@ -622,6 +634,30 @@ export function createSkillLoader(options: SkillLoaderOptions): SkillLoader {
           ? revision
           : undefined;
       },
+      async withdrawDraft(
+        name: string,
+        digest: string,
+        approvalReceiptId: string,
+        ownerSessionId: string,
+        isCurrentOwner: () => boolean,
+      ) {
+        const workspace = approvals.workspace;
+        const draft = await readExactDraft(workspace, name, approvals.registry);
+        if (
+          !draft || draft.skill.contentHash !== digest ||
+          draft.approvals?.get(digest)?.receiptId !== approvalReceiptId ||
+          !isCurrentOwner() ||
+          readWorkspaceSkillText(workspace, draft.skill.path, "SKILL.md") !==
+            draft.content
+        ) return;
+        return approvals.registry.withdraw(
+          workspace,
+          name,
+          digest,
+          approvalReceiptId,
+          ownerSessionId,
+        );
+      },
       async approveDraft(
         name: string,
         digest: string,
@@ -633,15 +669,17 @@ export function createSkillLoader(options: SkillLoaderOptions): SkillLoader {
           name,
           approvals.registry,
         );
-        if (!draft || draft.skill.contentHash !== digest || !isCurrentOwner()) {
-          return undefined;
-        }
-        return approvals.registry.record(
+        if (
+          !draft || draft.skill.contentHash !== digest ||
+          draft.approvals?.get(digest)?.withdrawal || !isCurrentOwner()
+        ) return;
+        const approval = approvals.registry.record(
           approvals.workspace,
           name,
           digest,
           ownerSessionId,
         );
+        return approval.withdrawal ? undefined : approval;
       },
     }),
     async discover(): Promise<readonly Skill[]> {

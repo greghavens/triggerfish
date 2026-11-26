@@ -678,3 +678,142 @@ Deno.test("Owner creates one reviewed workspace skill without carrying proposal 
     await Deno.remove(dir, { recursive: true });
   }
 });
+
+Deno.test("Owner withdrawal retires only the approved workspace skill digest and preserves its receipt", async () => {
+  const dir = await Deno.makeTempDir();
+  try {
+    const skillName = "withdrawal-fixture";
+    const authored = await createSkillAuthor({
+      skillsDir: join(dir, "workspaces", "main", "skills"),
+      userCeiling: "INTERNAL",
+    }).create({
+      name: skillName,
+      description: "Controlled retirement fixture",
+      classificationCeiling: "INTERNAL",
+      content: "Review trusted service status.",
+    });
+    assert(authored.ok);
+    const file = join(authored.value.path, "SKILL.md");
+    const original = await Deno.readTextFile(file);
+    const selector = { skill_name: skillName };
+    const read = { ...selector, type: "USER_PROVIDED" };
+    assert(
+      !resolveToolsForProfile("subagent").some(({ name }) =>
+        name === "withdraw_skill"
+      ),
+    );
+    let blocked: HookType | undefined;
+    let reviews = 0;
+    let outcome: "allow" | "revoke" | "mutate" = "allow";
+    const confirm = async (prompt: string) => {
+      reviews++;
+      if (prompt.startsWith("Withdraw ")) {
+        if (outcome === "revoke") blocked = "PRE_TOOL_CALL";
+        if (outcome === "mutate") {
+          await Deno.writeTextFile(
+            file,
+            original + "\nReplaced during review.",
+          );
+        }
+      }
+      return true;
+    };
+    let digest = "";
+    let approval: Record<string, unknown>;
+    let withdrawal: Record<string, unknown>;
+    await withGateway(dir, confirm, () => blocked, async (turn, sessionId) => {
+      digest = JSON.parse((await turn("inspect_skill_draft", selector)).result)
+        .digest;
+      const exact = { ...selector, digest };
+      approval =
+        JSON.parse((await turn("approve_skill", exact)).result).approval;
+      assertEquals(
+        JSON.parse((await turn("read_skill", read)).result).found,
+        true,
+      );
+      assertEquals(reviews, 1);
+      const mismatch = await turn("withdraw_skill", {
+        ...exact,
+        digest: "0".repeat(64),
+      });
+      assertStringIncludes(mismatch.result, "unavailable");
+      assertEquals(reviews, 1);
+      blocked = "PRE_TOOL_CALL";
+      await turn("withdraw_skill", exact);
+      assertEquals(reviews, 1);
+      blocked = undefined;
+      outcome = "revoke";
+      assertStringIncludes(
+        (await turn("withdraw_skill", exact)).result,
+        "authorization changed",
+      );
+      blocked = undefined;
+      assertEquals(
+        JSON.parse((await turn("read_skill", read)).result).found,
+        true,
+      );
+      outcome = "mutate";
+      assertStringIncludes(
+        (await turn("withdraw_skill", exact)).result,
+        "changed before withdrawal",
+      );
+      await Deno.writeTextFile(file, original);
+      assertEquals(
+        JSON.parse((await turn("read_skill", read)).result).found,
+        true,
+      );
+      outcome = "allow";
+      blocked = "PRE_OUTPUT";
+      const allowed = await turn("withdraw_skill", exact);
+      assertEquals(allowed.output, false);
+      withdrawal = JSON.parse(allowed.result).withdrawal;
+      blocked = undefined;
+      assertEquals(withdrawal.ownerSessionId, sessionId);
+      assertEquals(withdrawal.approvalReceiptId, approval.receiptId);
+      assertEquals(withdrawal.digest, digest);
+      assertEquals(await Deno.readTextFile(file), original);
+      assertEquals(
+        JSON.parse((await turn("read_skill", read)).result).found,
+        false,
+      );
+    });
+    await withGateway(dir, confirm, () => blocked, async (turn) => {
+      const prior = reviews;
+      const exact = { ...selector, digest };
+      assertEquals(
+        JSON.parse((await turn("withdraw_skill", exact)).result).withdrawal,
+        withdrawal,
+      );
+      blocked = "POST_TOOL_RESPONSE";
+      assertEquals(
+        (await turn("withdraw_skill", exact)).result,
+        "Tool response withheld by policy.",
+      );
+      blocked = undefined;
+      const audit = JSON.parse(
+        (await turn("inspect_skill_draft", selector)).result,
+      );
+      assertEquals(audit.approval, null);
+      assertEquals(audit.withdrawal, withdrawal);
+      assertEquals(audit.approval_history, [{ ...approval, withdrawal }]);
+      assertStringIncludes(
+        (await turn("approve_skill", exact)).result,
+        "approval was withdrawn",
+      );
+      assertEquals(
+        JSON.parse(
+          (await turn("list_skills", { type: "USER_PROVIDED" })).result,
+        )
+          .skills,
+        [],
+      );
+      assertEquals(
+        JSON.parse((await turn("read_skill", read)).result).found,
+        false,
+      );
+      assertEquals(reviews, prior);
+    });
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
