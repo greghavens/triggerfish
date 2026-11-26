@@ -2,7 +2,8 @@
 import {
   encodeSentinelFindingZip,
   SENTINEL_FINDING_ZIP_END_BYTES,
-  sentinelFindingZipEntryBytes,
+  type SentinelFindingZipRecord,
+  sentinelFindingZipRecordBytes,
 } from "../../../../src/sentinel/finding_export_zip.ts";
 
 export type FindingDownloadFormat =
@@ -83,6 +84,7 @@ export function createFindingDownload(
     : "";
   const footer = format === "findings-json" ? "]}\n" : "";
   const pieces: string[] = header ? [header] : [];
+  const zipRecords: SentinelFindingZipRecord[] = [];
   let markdownHeader: string | undefined;
   let bytes = format === "md-zip"
     ? SENTINEL_FINDING_ZIP_END_BYTES
@@ -157,20 +159,27 @@ export function createFindingDownload(
     if (page.nextCursor !== expected) return reject();
 
     if (format === "md-zip") {
-      if (message.encoding !== "markdown-entries") return reject();
+      if (message.encoding !== "finding-zip-entries-v2") return reject();
       try {
         const entries = JSON.parse(content);
-        if (
-          !Array.isArray(entries) || entries.length !== end - offset ||
-          entries.some((entry) => typeof entry !== "string" || !entry)
-        ) return reject();
+        if (!Array.isArray(entries) || entries.length !== end - offset) {
+          return reject();
+        }
         for (const [index, entry] of entries.entries()) {
-          bytes += sentinelFindingZipEntryBytes(
-            offset + index,
-            encoder.encode(entry).byteLength,
-          );
+          if (
+            !entry || typeof entry.markdown !== "string" || !entry.markdown ||
+            !Array.isArray(entry.manifests) ||
+            entry.manifests.some((manifest: unknown) =>
+              typeof manifest !== "string" || !manifest
+            )
+          ) return reject();
+          const record: SentinelFindingZipRecord = {
+            markdown: entry.markdown,
+            manifests: entry.manifests,
+          };
+          bytes += sentinelFindingZipRecordBytes(offset + index, record);
           if (bytes > maxBytes) return reject();
-          pieces.push(entry);
+          zipRecords.push(record);
         }
       } catch {
         return reject();
@@ -236,7 +245,7 @@ export function createFindingDownload(
       return next();
     }
     if (format === "md-zip") {
-      const zip = encodeSentinelFindingZip(pieces, maxBytes);
+      const zip = encodeSentinelFindingZip(zipRecords, maxBytes);
       if (!zip) return reject();
       finished = true;
       return { content: [zip] };

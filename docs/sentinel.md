@@ -332,6 +332,10 @@ download aborts if the report selection changes before all pages arrive.
 The `md-zip` response provides a base64 ZIP with one Markdown file per finding,
 a suggested `filename`, and `contentType: application/zip`. Each file retains the
 same reviewed report and exact evidence references as the Markdown export.
+Under `evidence/`, the ZIP also includes a JSON manifest for each retained
+attachment. It identifies the exact traffic receipt, current report version
+and original attachment version, and records any withdrawal or amendment.
+Traffic entries contain link metadata and exclude network payloads.
 
 In authenticated owner chat, add `receiptId` and reviewed `note` to an
 `operator_runs assign` trace for a saved worker finding on the selected

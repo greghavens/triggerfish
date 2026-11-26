@@ -1451,7 +1451,7 @@ export function createTidepoolSentinelHandler(
               format,
               content,
               ...(page?.findingPage && { findingPage: page.findingPage }),
-              ...(zipEntries && { encoding: "markdown-entries" }),
+              ...(zipEntries && { encoding: "finding-zip-entries-v2" }),
               ...(format === "md-zip" && !zipEntries && {
                 encoding: "base64",
                 contentType: "application/zip",

@@ -783,7 +783,41 @@ function renderFindingExport(
         "",
       ].join("\n");
     if (format === "md-zip") {
-      const entries = records.map((record) => renderMarkdown([record]));
+      const entries = records.map((record) => ({
+        markdown: renderMarkdown([record]),
+        manifests: record.trafficLinks.map((link) =>
+          JSON.stringify(
+            {
+              version: 1,
+              caseId,
+              runId,
+              reportRevision: assessment.revision,
+              findingId: record.id,
+              linkId: link.id,
+              assetId: link.assetId,
+              evidenceRevision: link.evidenceRevision,
+              reportVersion: record.kind === "worker"
+                ? record.reportVersion
+                : undefined,
+              attachmentReportVersion: link.reportVersion,
+              recheckId: link.recheckId,
+              trafficId: link.trafficId,
+              trafficSource: link.trafficSource,
+              trafficDigest: link.trafficDigest,
+              authority: link.authority,
+              recordedAt: link.recordedAt,
+              sourceStep: link.sourceStep,
+              sourceHint: link.sourceHint,
+              evidenceRole: link.evidenceRole,
+              evidenceNote: link.evidenceNote,
+              withdrawn: link.withdrawn === true,
+              annotations: link.annotations,
+            },
+            null,
+            2,
+          ) + "\n"
+        ),
+      }));
       if (!zipEntries) {
         const zip = encodeSentinelFindingZip(
           entries,

@@ -5122,6 +5122,119 @@ async function testScopedReporterRestart(
       assertEquals(exportedLink.annotations[0].id, annotationId);
       assertEquals(exportedLink.annotations[0].evidenceRole, "verification");
       assertEquals(exportedLink.annotations[0].requestId, undefined);
+      const exportZip = createFindingDownload(
+        "main",
+        state.revision,
+        "md-zip",
+        {
+          findingIds: pagedCase.findingIds,
+        },
+      );
+      const direct = await request("export", {
+        caseId: "main",
+        ...exportZip.initial,
+      });
+      const zip = Buffer.from(String(direct.content), "base64");
+      const directoryEnd = zip.length - 22;
+      assertEquals(zip.readUInt32LE(directoryEnd), 0x06054b50);
+      assertEquals(zip.readUInt16LE(directoryEnd + 10), 4);
+      let entry = zip.readUInt32LE(directoryEnd + 16);
+      const manifests = new Map<string, Record<string, unknown>>();
+      const names = [];
+      for (let index = 0; index < 4; index++) {
+        const nameSize = zip.readUInt16LE(entry + 28);
+        const name = zip.toString("utf8", entry + 46, entry + 46 + nameSize);
+        names.push(name);
+        if (name.endsWith("/manifest.json")) {
+          const local = zip.readUInt32LE(entry + 42);
+          const start = local + 30 + nameSize;
+          const manifest = JSON.parse(
+            zip.toString("utf8", start, start + zip.readUInt32LE(entry + 24)),
+          );
+          manifests.set(manifest.linkId, manifest);
+        }
+        entry += 46 + nameSize;
+      }
+      assertEquals(names, [
+        "finding-01.md",
+        "evidence/finding-01/link-1/manifest.json",
+        "evidence/finding-01/link-2/manifest.json",
+        "finding-02.md",
+      ]);
+      const historical = manifests.get(links[0].id);
+      assertEquals(historical, {
+        version: 1,
+        caseId: "main",
+        runId: state.plan.runId,
+        reportRevision: state.revision,
+        findingId: finding.id,
+        linkId: links[0].id,
+        assetId: links[0].assetId,
+        evidenceRevision: state.revision,
+        reportVersion: saved.reports[0].version,
+        attachmentReportVersion: 1,
+        trafficId: traffic.evidenceId,
+        trafficSource: links[0].trafficSource,
+        trafficDigest: traffic.digest,
+        authority: links[0].authority,
+        recordedAt: links[0].recordedAt,
+        evidenceRole: attachment.evidenceRole,
+        evidenceNote: attachment.evidenceNote,
+        withdrawn: true,
+        annotations: exportedLink.annotations,
+      });
+      assertEquals(
+        [...manifests.values()].filter(({ withdrawn }) => withdrawn === false)
+          .length,
+        1,
+      );
+      assert(!zip.toString().includes("Reviewed response."));
+      assert(!zip.toString().includes(links[0].requestId));
+      const legacyPage = await request("export", {
+        caseId: "main",
+        ...exportZip.initial,
+        findingPageSize: 1,
+      });
+      assertEquals(legacyPage.encoding, "base64");
+      const legacyZip = Buffer.from(String(legacyPage.content), "base64");
+      assertEquals(legacyZip.readUInt16LE(legacyZip.length - 12), 3);
+      assertStringIncludes(
+        legacyZip.toString(),
+        JSON.stringify(historical, null, 2),
+      );
+      let assembled = exportZip.accept({
+        type: "error",
+        code: "finding_export_byte_limit",
+        caseId: "main",
+        revision: state.revision,
+        format: "md-zip",
+      });
+      for (const _pageSize of [16, 8, 4, 2]) {
+        assert("request" in assembled);
+        assertEquals(assembled.request.findingPageSize, _pageSize);
+        assembled = exportZip.accept({
+          type: "error",
+          code: "finding_export_byte_limit",
+          caseId: "main",
+          revision: state.revision,
+          format: "md-zip",
+        });
+      }
+      for (let index = 0; index < 2; index++) {
+        assert("request" in assembled);
+        assertEquals(assembled.request.findingPageSize, 1);
+        const page = await request("export", {
+          caseId: "main",
+          ...assembled.request,
+        });
+        assertEquals(page.encoding, "finding-zip-entries-v2");
+        assembled = exportZip.accept(page);
+      }
+      assert("content" in assembled);
+      assertEquals(
+        Buffer.from(await new Blob([...assembled.content]).arrayBuffer()),
+        zip,
+      );
       const finalPage = await request("export", pagedCase);
       const archivedCursor =
         (finalPage.findingPage as { nextCursor: string }).nextCursor;
@@ -5131,6 +5244,12 @@ async function testScopedReporterRestart(
         goal: "Investigate another saved run",
       });
       assert(next.revision > state.revision);
+      const archivedZip = await request("export", {
+        caseId: "main",
+        ...exportZip.initial,
+      });
+      assertEquals(archivedZip.revision, state.revision);
+      assertEquals(archivedZip.content, direct.content);
       const archivedPage = await request("export", {
         ...pagedCase,
         findingCursor: archivedCursor,

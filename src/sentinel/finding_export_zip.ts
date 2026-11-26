@@ -1,4 +1,4 @@
-/** Build a bounded, deterministic ZIP with one inert Markdown entry per finding. */
+/** Build a bounded, deterministic ZIP containing inert finding reports and attachment manifests. */
 const LOCAL_HEADER = 30;
 const CENTRAL_HEADER = 46;
 export const SENTINEL_FINDING_ZIP_END_BYTES = 22;
@@ -17,24 +17,50 @@ function crc32(bytes: Uint8Array): number {
   return (crc ^ 0xffffffff) >>> 0;
 }
 
-function filename(index: number): string {
-  return `finding-${String(index + 1).padStart(2, "0")}.md`;
+export interface SentinelFindingZipRecord {
+  readonly markdown: string;
+  readonly manifests: readonly string[];
 }
 
-export function sentinelFindingZipEntryBytes(index: number, bodyBytes: number) {
-  return LOCAL_HEADER + CENTRAL_HEADER + 2 * filename(index).length + bodyBytes;
+function findingName(index: number): string {
+  return `finding-${String(index + 1).padStart(2, "0")}`;
+}
+
+function recordEntries(record: SentinelFindingZipRecord, index: number) {
+  const name = findingName(index);
+  return [
+    { name: `${name}.md`, body: record.markdown },
+    ...record.manifests.map((body, link) => ({
+      name: `evidence/${name}/link-${link + 1}/manifest.json`,
+      body,
+    })),
+  ];
+}
+
+export function sentinelFindingZipRecordBytes(
+  index: number,
+  record: SentinelFindingZipRecord,
+) {
+  return recordEntries(record, index).reduce(
+    (bytes, entry) =>
+      bytes + LOCAL_HEADER + CENTRAL_HEADER + 2 * entry.name.length +
+      encoder.encode(entry.body).byteLength,
+    0,
+  );
 }
 
 export function encodeSentinelFindingZip(
-  markdown: readonly string[],
+  records: readonly SentinelFindingZipRecord[],
   maxBytes: number,
   offset = 0,
 ): ArrayBuffer | undefined {
-  if (markdown.length > 0xffff) return;
-  const entries = markdown.map((content, index) => ({
-    name: encoder.encode(filename(offset + index)),
-    body: encoder.encode(content),
-  }));
+  const entries = records.flatMap((record, index) =>
+    recordEntries(record, offset + index).map(({ name, body }) => ({
+      name: encoder.encode(name),
+      body: encoder.encode(body),
+    }))
+  );
+  if (entries.length > 0xffff) return;
   let localSize = 0;
   let centralSize = 0;
   for (const { name, body } of entries) {
