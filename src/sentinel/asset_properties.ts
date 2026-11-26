@@ -10,6 +10,14 @@ const textFields = [
   "ip",
   "domain",
   "registrationId",
+  "rootDomain",
+  "appName",
+  "bundleId",
+  "category",
+  "appRegistrationId",
+  "method",
+  "serviceType",
+  "recordType",
 ] as const;
 type TextField = typeof textFields[number];
 type NumericField = "port" | "status";
@@ -24,7 +32,7 @@ export type SentinelAssetQuery =
   | { readonly not: SentinelAssetQuery }
   | {
     readonly field: TextField;
-    readonly op: "contains" | "eq" | "ne";
+    readonly op: "contains" | "not_contains" | "eq" | "ne";
     readonly value: string;
   }
   | {
@@ -82,13 +90,21 @@ function textProperty(field: TextField, value: unknown) {
   if (!text) return;
   switch (field) {
     case "domain":
+    case "rootDomain":
       return canonicalAssetDomain(text);
     case "ip":
       return canonicalAssetIp(text);
     case "url":
       return canonicalAssetUrl(text);
     case "title":
+    case "appName":
+    case "bundleId":
       return text;
+    case "method":
+    case "recordType":
+      return /^[a-z][a-z0-9_-]{0,31}$/i.test(text)
+        ? text.toUpperCase()
+        : undefined;
     default:
       return text.toLowerCase();
   }
@@ -137,6 +153,12 @@ const dslFields = new Map<string, TextField | NumericField>([
   ["port", "port"],
   ["status", "status"],
   ["status_code", "status"],
+  ["root_domain", "rootDomain"],
+  ["app_name", "appName"],
+  ["bundle_id", "bundleId"],
+  ["app_icp", "appRegistrationId"],
+  ["service_type", "serviceType"],
+  ["record_type", "recordType"],
 ]);
 
 /** Compile bounded inventory expressions into the existing typed selector. */
@@ -204,8 +226,8 @@ function parseAssetSearchText(text: string): unknown {
         return { field, op: op === "=" ? "contains" : "eq", value };
       }
       if (op === "!=") {
-        if (field === "technology") return { field, op: "ne", value };
-        return { not: { field, op: "contains", value } };
+        if (field === "technology") return { not: { field, op: "eq", value } };
+        return { field, op: "not_contains", value };
       }
       return;
     }
@@ -228,7 +250,7 @@ export function parseSentinelAssetQuery(
     depth: number,
   ): SentinelAssetQuery | undefined {
     const item = object(value);
-    if (!item || ++count > 32 || depth > 5) return;
+    if (!item || ++count > 64 || depth > 5) return;
     const keys = Object.keys(item);
     if (keys.length === 1) {
       if (keys[0] === "not") {
@@ -239,7 +261,7 @@ export function parseSentinelAssetQuery(
       if (key !== "and" && key !== "or") return;
       const entries = item[key];
       if (
-        !Array.isArray(entries) || entries.length < 2 || entries.length > 12
+        !Array.isArray(entries) || entries.length < 2 || entries.length > 16
       ) return;
       const children = entries.map((entry) => parse(entry, depth + 1));
       if (children.some((child) => child === undefined)) return;
@@ -258,8 +280,11 @@ export function parseSentinelAssetQuery(
       return;
     }
     const textField = textFields.find((name) => name === field);
-    if (!textField || (op !== "contains" && op !== "eq" && op !== "ne")) return;
-    const text = op === "contains"
+    if (
+      !textField ||
+      (op !== "contains" && op !== "not_contains" && op !== "eq" && op !== "ne")
+    ) return;
+    const text = op === "contains" || op === "not_contains"
       ? assetText(operand)?.toLowerCase()
       : textProperty(textField, operand);
     return text === undefined
@@ -372,5 +397,6 @@ export function matchesSentinelAssetQuery(
   if (expr.op === "ne") {
     return values.length > 0 && !values.includes(value);
   }
-  return values.some((entry) => entry.toLowerCase().includes(value));
+  const matches = values.some((entry) => entry.toLowerCase().includes(value));
+  return expr.op === "not_contains" ? values.length > 0 && !matches : matches;
 }

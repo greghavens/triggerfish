@@ -79,6 +79,11 @@ Deno.test("Authenticated Sentinel chat reads exact approved cross-case graph fin
               title: ["Health status"],
               ip: [`192.0.2.${name.charCodeAt(0)}`],
               domain: [`${name}.example.test`],
+              ...(name === "a" && {
+                rootDomain: ["example.test"],
+                method: ["GET"],
+                serviceType: ["HTTP"],
+              }),
             },
             aliases: [
               `${name}.example`,
@@ -1121,6 +1126,32 @@ Deno.test("Authenticated Sentinel chat reads exact approved cross-case graph fin
       assetQuery: { dsl: "task_id=13 OR port=443" },
     });
     assert(result.startsWith("Error:"));
+    await turn("Read exact retained protocol and root domain fields", {
+      ...inventory,
+      assetQuery: {
+        dsl: "root_domain==example.test AND method==GET AND service_type=http",
+      },
+    });
+    assertEquals(
+      JSON.parse(result).page.assets.map(({ id }: { id: string }) => id),
+      ["asset-a"],
+    );
+    for (
+      const [dsl, expected] of [
+        ["method!=POST", ["asset-a"]],
+        ["method!=GET", []],
+        ["example.test", ["asset-a", "asset-b"]],
+      ] as const
+    ) {
+      await turn("Use typed matching for present values only", {
+        ...inventory,
+        assetQuery: { dsl },
+      });
+      assertEquals(
+        JSON.parse(result).page.assets.map(({ id }: { id: string }) => id),
+        expected,
+      );
+    }
 
     await turn("Read the second typed asset page", {
       ...typedSearch,
