@@ -3141,6 +3141,44 @@ function hasAdaptiveObservationSchema(db: DatabaseSync): boolean {
       WHERE type = 'table' AND name = 'adaptive_evidence_revisions'`).get();
 }
 
+/** Read recipient identity during reconciliation without starting a writer. */
+export function readSentinelEvidenceTaskRecipients(
+  path: string,
+  revision: number,
+  runId: string,
+) {
+  let db: DatabaseSync;
+  try {
+    db = openPrivateDatabase(path, true);
+  } catch (error) {
+    if (error instanceof Deno.errors.NotFound) return;
+    throw error;
+  }
+  try {
+    db.exec("PRAGMA busy_timeout = 250");
+    if (!hasAdaptiveObservationSchema(db)) return;
+    const rows = db.prepare(`
+      SELECT task.id, task.kind, task.nodeId FROM (
+        SELECT revision, goalId FROM adaptive_evidence_revisions
+        WHERE evidenceNumber = ? ORDER BY rowid DESC LIMIT 1
+      ) AS mapping LEFT JOIN adaptive_tasks AS task ON task.revision = mapping.revision
+      WHERE mapping.goalId = ? ORDER BY task.rowid
+    `).all(revision, runId);
+    if (!rows.length) return;
+    return rows.flatMap(({ id, kind, nodeId }) =>
+      typeof id === "string" && typeof kind === "string"
+        ? [{
+          id,
+          kind,
+          nodeId: typeof nodeId === "string" ? nodeId : undefined,
+        }]
+        : []
+    );
+  } finally {
+    db.close();
+  }
+}
+
 /** Read committed results from the exact archived evidence revision without opening a writer. */
 export function querySentinelWorkerObservations(
   path: string,
