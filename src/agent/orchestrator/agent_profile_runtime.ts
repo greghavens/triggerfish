@@ -24,7 +24,7 @@ export function withAgentProfileRuntime(
       name === "list_unavailable_skill_requests"
     ) return false;
     return (name !== "read_skill" && name !== "inspect_skill_document" &&
-      name !== "list_skill_usage") ||
+      name !== "list_skill_usage" && name !== "list_skill_visibility") ||
       !args ||
       (typeof args.skill_name === "string" &&
         settings.skills.includes(args.skill_name));

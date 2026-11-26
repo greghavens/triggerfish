@@ -36,6 +36,7 @@ import { createLogger } from "../../core/logger/logger.ts";
 import { fenceExternalMetadata } from "../../core/security/prompt_fencing.ts";
 import { redactCredentialText } from "../../core/logger/redactor.ts";
 import type { ConversationRecord } from "../../core/conversation/conversation_types.ts";
+import type { AgentProfileRevision } from "../../core/agent_profiles.ts";
 
 const log = createLogger("skill-tools");
 
@@ -68,6 +69,7 @@ export interface SkillToolContext {
   readonly skillScanner?: SkillScanner;
   readonly getConfirmPrompt?: () => (prompt: string) => Promise<boolean>;
   readonly loadOwnerSkillHistory?: () => Promise<readonly ConversationRecord[]>;
+  readonly listReviewedAgentProfiles?: () => readonly AgentProfileRevision[];
 }
 
 function buildReadSkillDef(): ToolDefinition {
@@ -138,6 +140,13 @@ export function buildSkillAdministrationToolDefinitions(): readonly ToolDefiniti
       "Count authorized requests for skills that were unavailable when requested in the current owner conversation.",
     parameters: {
       limit: { type: "integer", description: "Maximum groups, from 1 to 50" },
+    },
+  }, {
+    name: "list_skill_visibility",
+    description:
+      "List reviewed agent profile grants for one named skill. Inherited profiles remain subject to their run's tool bindings.",
+    parameters: {
+      skill_name: buildReadSkillDef().parameters.skill_name,
     },
   }, {
     name: "inspect_skill_document",
@@ -389,6 +398,42 @@ async function executeUnavailableSkillRequests(
     b.calls - a.calls || left.localeCompare(right)
   ).slice(0, limit).map(([, group]) => group);
   return JSON.stringify({ unavailable, _classification: taint });
+}
+
+function executeSkillVisibility(
+  ctx: SkillToolContext,
+  input: Record<string, unknown>,
+  dispatch?: ToolExecutionContext,
+): string {
+  const owner = dispatch?.isCurrentInteractiveOwner;
+  const { skill_name } = input;
+  if (
+    !owner?.() || !ctx.listReviewedAgentProfiles || !ctx.getSessionTaint ||
+    !canFlowTo("INTERNAL", ctx.getSessionTaint()) ||
+    !validSkillSelector(skill_name) ||
+    Object.keys(input).some((key) => key !== "skill_name")
+  ) {
+    return "Error: Skill visibility requires an authorized owner skill selector.";
+  }
+  const bindings = ctx.listReviewedAgentProfiles().flatMap((profile) => {
+    const { id, version, definition } = profile;
+    if (
+      !definition ||
+      (definition.tools && !definition.tools.includes("read_skill")) ||
+      (definition.skills && !definition.skills.includes(skill_name))
+    ) return [];
+    return [{
+      profile_id: id,
+      profile_version: version,
+      grant: definition.skills ? "explicit" : "inherited",
+    }];
+  });
+  if (!owner()) return "Error: The owner session is no longer active.";
+  return JSON.stringify({
+    skill_name,
+    profiles: bindings,
+    _classification: "INTERNAL",
+  });
 }
 
 async function executeListSkills(
@@ -816,6 +861,9 @@ export function createSkillToolExecutor(
     }
     if (name === "list_unavailable_skill_requests") {
       return await executeUnavailableSkillRequests(ctx, input, context);
+    }
+    if (name === "list_skill_visibility") {
+      return executeSkillVisibility(ctx, input, context);
     }
     const inspecting = name === "inspect_skill_document";
     if (name !== "read_skill" && !inspecting) return null;

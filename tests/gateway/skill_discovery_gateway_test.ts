@@ -1,6 +1,7 @@
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { join } from "@std/path";
 import { createProviderRegistry } from "../../src/agent/llm.ts";
+import { openAgentProfiles } from "../../src/core/agent_profiles.ts";
 import { createMessageStore } from "../../src/core/conversation/conversation_store.ts";
 import type { HookType } from "../../src/core/policy/rules.ts";
 import { createMemoryStorage } from "../../src/core/storage/memory.ts";
@@ -57,10 +58,13 @@ Deno.test("Owner gateway discovers live skill grants and blocks pending draft ac
   assert(tools.some(({ name }) => name === "inspect_skill_document"));
   assert(tools.some(({ name }) => name === "list_skill_usage"));
   assert(tools.some(({ name }) => name === "list_unavailable_skill_requests"));
+  assert(tools.some(({ name }) => name === "list_skill_visibility"));
   assert(
     !filterToolsForRole(tools, false).some(({ name }) =>
       name === "list_skills" || name === "inspect_skill_document" ||
-      name === "list_skill_usage" || name === "list_unavailable_skill_requests"
+      name === "list_skill_usage" ||
+      name === "list_unavailable_skill_requests" ||
+      name === "list_skill_visibility"
     ),
   );
   assert(
@@ -125,6 +129,7 @@ Deno.test("Owner gateway discovers live skill grants and blocks pending draft ac
   const storage = createMemoryStorage();
   const messageStore = createMessageStore(storage);
   let historyLoads = 0;
+  let visibilityReads = 0;
   const execute = createSkillToolExecutor({
     skillLoader: {
       async discover() {
@@ -149,6 +154,10 @@ Deno.test("Owner gateway discovers live skill grants and blocks pending draft ac
     loadOwnerSkillHistory: () => {
       historyLoads++;
       return createMessageStore(storage).loadSession(session.id);
+    },
+    listReviewedAgentProfiles: () => {
+      visibilityReads++;
+      return openAgentProfiles(dir).list();
     },
   });
 
@@ -422,6 +431,69 @@ Deno.test("Owner gateway discovers live skill grants and blocks pending draft ac
     assertEquals(report.unavailable[0].type, unavailable.type);
     assertEquals(report.unavailable[0].calls, 2);
     assertEquals(report._classification, "INTERNAL");
+
+    const profile = {
+      name: "Fixture profile",
+      description: "Fixture profile grants",
+      role: "assistant",
+      prompt: "Use reviewed skills.",
+      tools: ["read_skill"],
+    };
+    const updateProfile = (
+      id: string,
+      version: number,
+      definition: typeof profile & { skills?: readonly string[] },
+    ) => {
+      assert(
+        openAgentProfiles(dir).commit({
+          id,
+          expectedVersion: version,
+          requestId: crypto.randomUUID(),
+          definition,
+        }, session.id),
+      );
+    };
+    updateProfile("explicit-fixture", 0, { ...profile, skills: ["shared"] });
+    updateProfile("inherited-fixture", 0, profile);
+    updateProfile("blocked-fixture", 0, {
+      ...profile,
+      tools: [],
+      skills: ["shared"],
+    });
+    deny = "PRE_TOOL_CALL";
+    await turn("list_skill_visibility", { skill_name: "shared" });
+    assertEquals(visibilityReads, 0);
+    deny = "POST_TOOL_RESPONSE";
+    assertEquals(
+      (await turn("list_skill_visibility", { skill_name: "shared" })).result,
+      "Tool response withheld by policy.",
+    );
+    deny = "PRE_OUTPUT";
+    assert(
+      !(await turn("list_skill_visibility", { skill_name: "shared" })).messages
+        .includes("response"),
+    );
+    deny = undefined;
+    const readVisibility = async () =>
+      JSON.parse(
+        (await turn("list_skill_visibility", { skill_name: "shared" })).result,
+      );
+    assertEquals((await readVisibility()).profiles, [
+      { profile_id: "explicit-fixture", profile_version: 1, grant: "explicit" },
+      {
+        profile_id: "inherited-fixture",
+        profile_version: 1,
+        grant: "inherited",
+      },
+    ]);
+    updateProfile("explicit-fixture", 1, { ...profile, skills: [] });
+    assertEquals((await readVisibility()).profiles, [
+      {
+        profile_id: "inherited-fixture",
+        profile_version: 1,
+        grant: "inherited",
+      },
+    ]);
   } finally {
     if (socket.readyState < WebSocket.CLOSING) {
       const closed = Promise.withResolvers<void>();

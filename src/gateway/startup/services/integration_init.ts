@@ -9,6 +9,7 @@
 
 import { join } from "@std/path";
 import type { ClassificationLevel } from "../../../core/types/classification.ts";
+import { openAgentProfiles } from "../../../core/agent_profiles.ts";
 import { updateTaint } from "../../../core/types/session.ts";
 import type { TriggerFishConfig } from "../../../core/config.ts";
 import { createProviderRegistry } from "../../../agent/llm.ts";
@@ -161,6 +162,7 @@ export function buildAgentToolExecutors(
   triggerStore: ReturnType<typeof createTriggerStore>,
   skillLoader: Awaited<ReturnType<typeof discoverSkills>>["loader"],
   messageStore: CoreInfraResult["messageStore"],
+  baseDir: string,
 ): {
   claudeExecutor: ReturnType<typeof createClaudeToolExecutor>;
   mainKeychain: ReturnType<typeof createKeychain>;
@@ -191,6 +193,7 @@ export function buildAgentToolExecutors(
       skillScanner: createSkillScanner(),
       getConfirmPrompt: () => state.activeConfirmPrompt,
       loadOwnerSkillHistory: () => messageStore.loadSession(state.session.id),
+      listReviewedAgentProfiles: () => openAgentProfiles(baseDir).list(),
     }),
     skillContextTracker,
   };
@@ -212,6 +215,7 @@ export async function buildSkillAndAgentExecutors(
     coreInfra.triggerStore,
     skillLoader,
     coreInfra.messageStore,
+    bootstrap.baseDir,
   );
   return {
     skillLoader,
