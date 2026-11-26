@@ -46,6 +46,7 @@ const queryFields = new Set([
   "scope",
   "limit",
   "coverageGap",
+  "includeCoverageTotals",
   "asOf",
   ...textFilters,
 ]);
@@ -124,6 +125,8 @@ export function readOperatorSentinelInventory(
   );
   if (
     (args.coverageGap !== undefined && (view !== "coverage" || !coverageGap)) ||
+    (args.includeCoverageTotals !== undefined &&
+      (args.includeCoverageTotals !== true || view !== "coverage")) ||
     !validSentinelCoverageTime(coverageGap, args.asOf)
   ) {
     return undefined;
@@ -223,6 +226,8 @@ export function readOperatorSentinelInventory(
         {
           ...options,
           evidenceRevision: revision,
+          ...(args.includeCoverageTotals === true &&
+            { includeCoverageTotals: true }),
           coverageGap,
           asOf: args.asOf as string | undefined,
           reviewedAssetIds: reviewed.flatMap(({ nodeId }) =>

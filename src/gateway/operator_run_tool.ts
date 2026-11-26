@@ -1099,6 +1099,11 @@ export const operatorRunTool: ToolDefinition = {
       type: "string",
       description: "Search text for graph records or worker history",
     },
+    includeCoverageTotals: {
+      type: "boolean",
+      description:
+        "Include exact in-scope counts by asset type for inventory coverage.",
+    },
     includeFrontier: {
       type: "boolean",
       description:
@@ -1267,6 +1272,7 @@ export const sentinelOperatorCaseReadParameters = [
   "node",
   "includeFindingTraffic",
   "includeFrontier",
+  "includeCoverageTotals",
   "trafficOffset",
   "query",
   "offset",
@@ -2442,7 +2448,9 @@ export function createOperatorRunToolExecutor(options: {
     const action = args.action;
     if (
       (args.assetText !== undefined || args.organizationText !== undefined ||
-        args.includeMembers !== undefined) && action !== "inventory"
+        args.includeMembers !== undefined ||
+        args.includeCoverageTotals !== undefined) &&
+      action !== "inventory"
     ) {
       return unavailable;
     }

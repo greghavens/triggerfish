@@ -38,11 +38,18 @@ Deno.test("Authenticated Sentinel chat reads exact approved cross-case graph fin
         version: 1,
         nodes: [
           { kind: "finding", id: "finding", label, severity: "low" },
+          ...(id === "approved"
+            ? [{
+              kind: "evidence",
+              id: "coverage-evidence",
+              label: "Saved coverage evidence",
+            }]
+            : []),
           ...["a", "b", "c"].map((name) => ({
             kind: "asset",
             id: `asset-${name}`,
             label: name === "a" ? inventoryLabel : `Asset ${name}`,
-            assetType: "service",
+            assetType: name === "c" ? "application" : "service",
             aliases: [
               `${name}.example`,
               ...(id === "unregistered" ? ["hidden-only.example"] : []),
@@ -52,7 +59,13 @@ Deno.test("Authenticated Sentinel chat reads exact approved cross-case graph fin
               : { id: "ops", label: "Operations" },
           })),
         ],
-        edges: [],
+        edges: id === "approved"
+          ? [{
+            from: "coverage-evidence",
+            to: "asset-a",
+            relation: "observed_on",
+          }]
+          : [],
       }),
       { mode: 0o600 },
     );
@@ -519,6 +532,7 @@ Deno.test("Authenticated Sentinel chat reads exact approved cross-case graph fin
       ...inventory,
       view: "coverage",
       coverageGap: "unreviewed",
+      includeCoverageTotals: true,
       limit: 1,
     };
     await turn("Find missing review coverage", coverage);
@@ -536,6 +550,35 @@ Deno.test("Authenticated Sentinel chat reads exact approved cross-case graph fin
     const second = JSON.parse(result).page;
     assertEquals(second.assets[0].asset.id, "asset-b");
     assertEquals(second.nextCursor, null);
+    assertEquals(first.coverageTotals, {
+      assets: 2,
+      reviewed: 0,
+      withEvidence: 1,
+      matchedAssets: 2,
+      byAssetType: [{
+        assetType: "service",
+        assets: 2,
+        reviewed: 0,
+        withEvidence: 1,
+      }],
+    });
+    assertEquals(second.coverageTotals, first.coverageTotals);
+    await turn("Count assets missing evidence without losing the denominator", {
+      ...coverage,
+      coverageGap: "missing_evidence",
+    });
+    const missing = JSON.parse(result).page;
+    assertEquals(missing.coverageTotals, {
+      ...first.coverageTotals,
+      matchedAssets: 1,
+    });
+    assertEquals(missing.assets[0].asset.id, "asset-b");
+    await turn("Reject coverage totals on an asset listing", {
+      ...inventory,
+      includeCoverageTotals: true,
+    });
+    assertStringIncludes(result, "unavailable");
+
     await turn("Try a membership cursor against case-wide coverage", {
       ...coverage,
       scope: "case",
@@ -574,15 +617,15 @@ Deno.test("Authenticated Sentinel chat reads exact approved cross-case graph fin
     assertEquals(dispatched, beforeMutation);
 
     reject = "PRE_TOOL_CALL";
-    await turn("Pre-call denial", inventory);
+    await turn("Pre-call denial", coverage);
     assert(!result.includes(inventoryLabel));
     assertEquals(dispatched, beforeMutation);
     reject = "POST_TOOL_RESPONSE";
-    await turn("Response classification denial", inventory);
+    await turn("Response classification denial", coverage);
     assert(!result.includes(inventoryLabel));
     assertEquals(dispatched, beforeMutation + 1);
     reject = "PRE_OUTPUT";
-    const blocked = await turn("Output denial", inventory);
+    const blocked = await turn("Output denial", coverage);
     assertStringIncludes(result, inventoryLabel);
     assert(blocked.every((frame) => !frame.includes(inventoryLabel)));
 
@@ -927,6 +970,20 @@ Deno.test("Authenticated Sentinel chat reads exact approved cross-case graph fin
     );
     assertEquals(JSON.parse(result).page.assets[0].id, "asset-c");
     assertEquals(JSON.parse(result).page.membership.version, 4);
+    await turn(
+      "Count the newly approved type in the same membership view",
+      coverage,
+    );
+    assertEquals(JSON.parse(result).page.coverageTotals, {
+      assets: 3,
+      reviewed: 0,
+      withEvidence: 1,
+      matchedAssets: 3,
+      byAssetType: [
+        { assetType: "application", assets: 1, reviewed: 0, withEvidence: 0 },
+        { assetType: "service", assets: 2, reviewed: 0, withEvidence: 1 },
+      ],
+    });
     await turn("Reject a coverage cursor from before the reviewed addition", {
       ...coverage,
       cursor: first.nextCursor,

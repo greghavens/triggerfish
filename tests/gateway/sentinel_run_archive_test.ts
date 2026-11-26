@@ -5117,12 +5117,24 @@ async function verifyPlannerArchive(
             revision: run.revision,
             view: "coverage",
             assetId: "app",
+            includeCoverageTotals: true,
           }),
         );
         assertEquals(
           current.page.assets[0].findings[0].review.disposition,
           "confirmed",
         );
+        const restoredAsset = current.page.assets[0];
+        const counts = {
+          assets: 1,
+          reviewed: Number(restoredAsset.reviewed),
+          withEvidence: Number(restoredAsset.evidence.length > 0),
+        };
+        assertEquals(current.page.coverageTotals, {
+          ...counts,
+          matchedAssets: 1,
+          byAssetType: [{ assetType: null, ...counts }],
+        });
         const metadata = JSON.parse(
           await turn({
             action: "planner_reads",

@@ -162,7 +162,11 @@ Deno.test("operator inventory binds exact historical graph, organization and rev
         "Current revision only.",
       ),
     );
-    const oldCoverage = view({ view: "coverage", assetId: "asset-a" });
+    const oldCoverage = view({
+      view: "coverage",
+      includeCoverageTotals: true,
+      assetId: "asset-a",
+    });
     const newCoverage = readOperatorSentinelInventory(base, {
       ...scoped,
       revision: current.revision,
@@ -172,6 +176,18 @@ Deno.test("operator inventory binds exact historical graph, organization and rev
         newCoverage?.view === "coverage" && "assets" in newCoverage,
     );
     assertEquals(oldCoverage.assets[0].asset.label, "Original asset");
+    assertEquals(oldCoverage.coverageTotals, {
+      assets: 1,
+      reviewed: 0,
+      withEvidence: 1,
+      matchedAssets: 1,
+      byAssetType: [{
+        assetType: null,
+        assets: 1,
+        reviewed: 0,
+        withEvidence: 1,
+      }],
+    });
     assertEquals(
       oldCoverage.assets[0].findings[0].review?.disposition,
       "confirmed",

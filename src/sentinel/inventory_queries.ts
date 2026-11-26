@@ -49,6 +49,7 @@ export type SentinelAssetCoverageGap = typeof sentinelAssetCoverageGaps[number];
 
 export interface SentinelAssetReviewCoverageOptions
   extends SentinelAssetInventoryOptions {
+  readonly includeCoverageTotals?: true;
   readonly evidenceRevision: number;
   readonly coverageGap?: SentinelAssetCoverageGap;
   readonly asOf?: string;
@@ -324,6 +325,7 @@ export function querySentinelAssetReviewCoverage(
     evidenceRevision,
     coverageGap,
     asOf,
+    includeCoverageTotals,
     reviewedAssetIds = [],
     peerCoverage,
     evidenceReviewTasks = [],
@@ -392,22 +394,61 @@ export function querySentinelAssetReviewCoverage(
       }
     }
   }
+  const hasEvidence = (id: string) =>
+    peerCoverage?.selector.asset === id ||
+    !!assetEvidence.get(id)?.length ||
+    (assetFindings.get(id) ?? []).some((finding) =>
+      !!findingEvidence.get(finding)?.length
+    );
   const matches = coverageGap === undefined
     ? assets
     : assets.filter(({ id }) => {
       if (asOf !== undefined) return !currentlyVerified.has(id);
       const unreviewed = !reviewed.has(id);
-      const missingEvidence = peerCoverage?.selector.asset !== id &&
-        !assetEvidence.get(id)?.length &&
-        !(assetFindings.get(id) ?? []).some((finding) =>
-          findingEvidence.get(finding)?.length
-        );
+      const missingEvidence = !hasEvidence(id);
       return coverageGap === "unreviewed"
         ? unreviewed
         : coverageGap === "missing_evidence"
         ? missingEvidence
         : unreviewed || missingEvidence;
     });
+  const coverageTotals = includeCoverageTotals && (() => {
+    const empty = () => ({
+      assets: 0,
+      reviewed: 0,
+      withEvidence: 0,
+      ...(asOf !== undefined && { withCurrentVerification: 0 }),
+    });
+    type Counts = ReturnType<typeof empty>;
+    const total = empty();
+    const countsByType = new Map<SentinelAssetType | null, Counts>();
+    for (const { id, assetType = null } of assets) {
+      let counts = countsByType.get(assetType);
+      if (!counts) {
+        counts = empty();
+        countsByType.set(assetType, counts);
+      }
+      const isReviewed = Number(reviewed.has(id));
+      const evidenced = Number(hasEvidence(id));
+      const verified = Number(currentlyVerified.has(id));
+      for (const group of [total, counts]) {
+        group.assets++;
+        group.reviewed += isReviewed;
+        group.withEvidence += evidenced;
+        if (group.withCurrentVerification !== undefined) {
+          group.withCurrentVerification += verified;
+        }
+      }
+    }
+    return {
+      ...total,
+      matchedAssets: matches.length,
+      byAssetType: Array.from(
+        countsByType,
+        ([assetType, counts]) => ({ assetType, ...counts }),
+      ).sort((a, b) => compareIds(a.assetType ?? "", b.assetType ?? "")),
+    };
+  })();
   const { results, nextCursor } = page(
     matches,
     (asset) => asset.id,
@@ -464,6 +505,7 @@ export function querySentinelAssetReviewCoverage(
     evidenceRevision,
     nextCursor,
     assets: visible,
+    ...(coverageTotals && { coverageTotals }),
     ...(peerCoverage && { peerCoverage }),
   };
 }
