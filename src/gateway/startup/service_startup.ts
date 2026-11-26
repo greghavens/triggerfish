@@ -29,6 +29,7 @@ import {
 import { sentinelSnapshotPath } from "../../sentinel/paths.ts";
 import { createKeychain } from "../../core/secrets/keychain/keychain.ts";
 import { configuredSentinelWorkflowReader } from "./factory/sentinel_workflow_source.ts";
+import { configuredSentinelRepositoryVisibilityReader } from "./factory/sentinel_repository_visibility_source.ts";
 import { createOperatorRunToolExecutor } from "../operator_run_tool.ts";
 import { createOperatorWorkflowRuns } from "../operator_workflow_runs.ts";
 import {
@@ -506,6 +507,12 @@ export async function startServicesAndChannels(
     bootstrap.baseDir,
     createKeychain,
   );
+  const repositoryVisibilityReader =
+    configuredSentinelRepositoryVisibilityReader(
+      bootstrap.config,
+      bootstrap.baseDir,
+      createKeychain,
+    );
   const authorizeSentinelExecutionEvidence =
     buildExecutionTracePayloadAuthorizer(
       bootstrap.config,
@@ -580,6 +587,7 @@ export async function startServicesAndChannels(
               : Promise.resolve([])
           : undefined,
         readRetainedWorkflow: liveWorkflowReader,
+        readRepositoryVisibility: repositoryVisibilityReader,
         futureWorkflowScopes: bootstrap.config.sentinel?.github_workflow_reads,
         readLiveWorkflowStatus:
           liveWorkflowReader && assignedTaskId && assignedTaskLeaseToken

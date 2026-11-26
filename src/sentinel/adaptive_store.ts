@@ -20,6 +20,15 @@ import type { TodoItem, TodoList } from "../tools/todo_defs.ts";
 import { createEvidenceTaskSettler } from "../core/evidence_task_progression.ts";
 import { createAssignmentObservationJournal } from "../core/assignment_observations.ts";
 import {
+  projectRepositoryVisibility,
+  repositoryVisibilityReceipt,
+  repositoryVisibilityReference,
+  SENTINEL_LIVE_REPOSITORY_VISIBILITY,
+  SENTINEL_SAVED_REPOSITORY_VISIBILITY,
+  type SentinelRepositoryVisibilityReceipt,
+  type SentinelRepositoryVisibilityReference,
+} from "./github_repository_visibility.ts";
+import {
   isWorkerNarrativeId,
   readWorkerNarrativeReceipt,
   SENTINEL_WORKER_NARRATIVE_COMMIT,
@@ -434,6 +443,9 @@ function normalizeWorkerCheckpoint(
         if (!input) return;
         const reference = name === SENTINEL_TRAFFIC_BLOB
           ? "sentinel-traffic-blob"
+          : name === SENTINEL_LIVE_REPOSITORY_VISIBILITY ||
+              name === SENTINEL_SAVED_REPOSITORY_VISIBILITY
+          ? "sentinel-repository-visibility"
           : name === SENTINEL_CASE_INVENTORY_READ && input.view !== "coverage"
           ? "sentinel-case-inventory"
           : name === SENTINEL_SHARED_WORKER_REVIEW
@@ -1041,6 +1053,7 @@ export interface AdaptivePlannerRound {
   readonly findingFollowup?: AdaptiveFindingFollowup;
   readonly peerWorkerReview?: SentinelPeerWorkerReviewReference;
   readonly workerNarrativeId?: string;
+  readonly repositoryVisibility?: SentinelRepositoryVisibilityReference;
   readonly passingRecheckId?: string;
   readonly passingRecheckForFindingId?: string;
   readonly recheckFindingId?: string;
@@ -1582,6 +1595,7 @@ type RelationshipTaskIdentity = Pick<
   | "sourceEvidence"
   | "peerWorkerReview"
   | "workerNarrativeId"
+  | "repositoryVisibility"
   | "graphFactOnly"
   | "graphFactId"
   | "graphRelationship"
@@ -2294,6 +2308,9 @@ export function sentinelAdaptiveTaskId(
       ...(receipt.workerNarrativeId
         ? [["worker_narrative", receipt.workerNarrativeId]]
         : []),
+      ...(receipt.repositoryVisibility
+        ? [["repository_visibility", receipt.repositoryVisibility]]
+        : []),
       ...(receipt.peerWorkerReview
         ? [["peer_worker_review", receipt.peerWorkerReview]]
         : []),
@@ -2491,6 +2508,7 @@ function normalizePlannerRound(round: AdaptivePlannerRound | undefined) {
     findingFollowup,
     peerWorkerReview,
     workerNarrativeId,
+    repositoryVisibility,
     sourceEvidence,
     assignmentQuestion,
     cancelledTaskRequestId,
@@ -2606,6 +2624,14 @@ function normalizePlannerRound(round: AdaptivePlannerRound | undefined) {
       )
     )
   ) throw new Error("Invalid Sentinel reviewed assignment sources");
+  if (
+    repositoryVisibility !== undefined &&
+    (!repositoryVisibilityReference(repositoryVisibility) ||
+      !/^[a-f0-9]{64}(?::|$)/.test(identity) ||
+      Object.keys(round).some((key) =>
+        !["identity", "attempt", "repositoryVisibility"].includes(key)
+      ))
+  ) throw new Error("Invalid Sentinel repository visibility citation");
   if (
     workerNarrativeId !== undefined && (
       !isWorkerNarrativeId(workerNarrativeId) ||
@@ -2783,6 +2809,12 @@ function normalizePlannerRound(round: AdaptivePlannerRound | undefined) {
     ...(peerWorkerReview &&
       { peerWorkerReview: parseSentinelPeerWorkerReview(peerWorkerReview) }),
     ...(workerNarrativeId && { workerNarrativeId }),
+    ...(repositoryVisibility &&
+      {
+        repositoryVisibility: repositoryVisibilityReference(
+          repositoryVisibility,
+        ),
+      }),
     ...(assignmentQuestion && { assignmentQuestion }),
     ...(findingFollowup && {
       findingFollowup: {
@@ -2887,6 +2919,15 @@ function normalizeTask(revision: string, request: AdaptiveTaskRequest) {
     plannerRound?.sourceEvidence &&
     (identity.kind !== "trace" || identity.depth !== 1)
   ) throw new Error("Reviewed assignment evidence requires a one-hop trace");
+  if (
+    plannerRound?.repositoryVisibility &&
+    (identity.kind !== "trace" || identity.depth !== 1 ||
+      request.prerequisites?.length)
+  ) {
+    throw new Error(
+      "Repository visibility requires an independent local trace",
+    );
+  }
   if (
     plannerRound?.workerNarrativeId &&
     (identity.kind !== "trace" || identity.depth !== 1 ||
@@ -3272,6 +3313,60 @@ export function readAdaptiveWorkerNarrative(
   }
 }
 
+/** Select an exact typed result, then reauthorize its source before use. */
+export function readAdaptiveRepositoryVisibility(
+  path: string,
+  runId: string,
+  evidenceRevision: number,
+  taskId: string,
+  assetId: string,
+  committedOnly = false,
+) {
+  const db = openPrivateDatabase(path, true);
+  try {
+    if (
+      !db.prepare(
+        "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'adaptive_repository_visibility_results'",
+      ).get()
+    ) return;
+    const row = db.prepare(`SELECT result.receipt, result.sourceStepIndex
+      FROM adaptive_repository_visibility_results AS result
+      JOIN adaptive_tasks AS task ON task.id = result.taskId AND task.revision = result.revision
+      JOIN adaptive_evidence_revisions AS mapping ON mapping.revision = result.revision
+      WHERE mapping.goalId = ? AND mapping.evidenceNumber = ?
+      AND result.evidenceRevision = ? AND task.id = ? AND task.nodeId = ?
+      AND (? = 0 OR result.sourceStepIndex IS NOT NULL)`)
+      .get(
+        runId,
+        evidenceRevision,
+        evidenceRevision,
+        taskId,
+        assetId,
+        Number(committedOnly),
+      );
+    if (typeof row?.receipt !== "string") return;
+    const receipt = repositoryVisibilityReceipt(JSON.parse(row.receipt));
+    if (!receipt || receipt.evidenceRevision !== evidenceRevision) return;
+    const projection = projectRepositoryVisibility(receipt, taskId, assetId);
+    return {
+      receipt,
+      projection,
+      ...(typeof row.sourceStepIndex === "number" &&
+        {
+          reference: repositoryVisibilityReference({
+            taskId,
+            sourceStepIndex: row.sourceStepIndex,
+            resultSha256: createHash("sha256").update(
+              JSON.stringify(projection),
+            ).digest("hex"),
+          }),
+        }),
+    };
+  } finally {
+    db.close();
+  }
+}
+
 export function readAdaptivePeerWorkerReview(
   path: string,
   id: string,
@@ -3514,6 +3609,7 @@ export function readSentinelCompletedGoalTask(
     );
     const task = row && decodeTask(row);
     return task?.plannerRound?.workerNarrativeId ||
+        task?.plannerRound?.repositoryVisibility ||
         task?.plannerRound?.sourceEvidence?.some(({ contextOnly }) =>
           contextOnly
         )
@@ -8484,6 +8580,162 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
           promptSha256,
           { ...normalized, ...authority },
         );
+      });
+    },
+
+    /** Stage the first canonical result before making it visible to a worker. */
+    readLeasedRepositoryVisibility(
+      revision: string,
+      id: string,
+      token: string,
+      evidenceRevision: number,
+    ): SentinelRepositoryVisibilityReceipt | undefined {
+      if (
+        !db.prepare(
+          "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'adaptive_repository_visibility_results'",
+        ).get()
+      ) return;
+      return transaction(db, () => {
+        const authority = workerCheckpointAuthority(
+          revision,
+          id,
+          token,
+          evidenceRevision,
+        );
+        if (!authority) return;
+        const row = db.prepare(
+          `SELECT receipt FROM adaptive_repository_visibility_results
+          WHERE revision = ? AND taskId = ? AND evidenceRevision = ? AND controlClaimSha256 IS ?`,
+        )
+          .get(
+            revision,
+            id,
+            evidenceRevision,
+            authority.controlClaimSha256 ?? null,
+          );
+        return typeof row?.receipt === "string"
+          ? repositoryVisibilityReceipt(JSON.parse(row.receipt))
+          : undefined;
+      });
+    },
+
+    listCommittedRepositoryVisibility(
+      revision: string,
+      evidenceRevision: number,
+    ) {
+      if (
+        !db.prepare(
+          "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'adaptive_repository_visibility_results'",
+        ).get()
+      ) return [];
+      return db.prepare(`SELECT task.id AS taskId, task.nodeId AS assetId
+        FROM adaptive_repository_visibility_results AS receipt
+        JOIN adaptive_tasks AS task ON task.id = receipt.taskId AND task.revision = receipt.revision
+        WHERE receipt.revision = ? AND receipt.evidenceRevision = ?
+        AND receipt.sourceStepIndex IS NOT NULL AND task.nodeId IS NOT NULL
+        ORDER BY receipt.rowid DESC LIMIT ?`).all(
+        revision,
+        evidenceRevision,
+        MAX_ADAPTIVE_TASKS,
+      ).flatMap(({ taskId, assetId }) =>
+        typeof taskId === "string" && typeof assetId === "string"
+          ? [{ taskId, assetId }]
+          : []
+      );
+    },
+
+    recordLeasedRepositoryVisibility(
+      revision: string,
+      id: string,
+      token: string,
+      evidenceRevision: number,
+      value: SentinelRepositoryVisibilityReceipt,
+    ): SentinelRepositoryVisibilityReceipt | undefined {
+      const receipt = repositoryVisibilityReceipt(value);
+      if (receipt?.evidenceRevision !== evidenceRevision) return;
+      return transaction(db, () => {
+        const authority = workerCheckpointAuthority(
+          revision,
+          id,
+          token,
+          evidenceRevision,
+        );
+        if (!authority) return;
+        db.exec(
+          `CREATE TABLE IF NOT EXISTS adaptive_repository_visibility_results (
+          revision TEXT NOT NULL,
+          taskId TEXT NOT NULL REFERENCES adaptive_tasks(id),
+          evidenceRevision INTEGER NOT NULL,
+          receipt TEXT NOT NULL,
+          controlClaimSha256 TEXT,
+          sourceStepIndex INTEGER,
+          PRIMARY KEY(revision, taskId, evidenceRevision)
+        )`,
+        );
+        const row = db.prepare(
+          `INSERT INTO adaptive_repository_visibility_results
+          (revision, taskId, evidenceRevision, receipt, controlClaimSha256)
+          VALUES (?, ?, ?, ?, ?)
+          ON CONFLICT(revision, taskId, evidenceRevision) DO NOTHING
+          RETURNING receipt`,
+        ).get(
+          revision,
+          id,
+          evidenceRevision,
+          JSON.stringify(receipt),
+          authority.controlClaimSha256 ?? null,
+        );
+        return typeof row?.receipt === "string"
+          ? repositoryVisibilityReceipt(JSON.parse(row.receipt))
+          : undefined;
+      });
+    },
+
+    confirmLeasedRepositoryVisibility(
+      revision: string,
+      id: string,
+      token: string,
+      evidenceRevision: number,
+      sourceStepIndex: number,
+      result: string,
+    ) {
+      if (
+        !Number.isSafeInteger(sourceStepIndex) || sourceStepIndex < 0 ||
+        sourceStepIndex >= 16
+      ) return;
+      return transaction(db, () => {
+        const authority = workerCheckpointAuthority(
+          revision,
+          id,
+          token,
+          evidenceRevision,
+        );
+        const task = lookup.get(id);
+        if (!authority || typeof task?.nodeId !== "string") return;
+        const row = db.prepare(
+          `SELECT receipt FROM adaptive_repository_visibility_results
+          WHERE revision = ? AND taskId = ? AND evidenceRevision = ?
+            AND controlClaimSha256 IS ? AND sourceStepIndex IS NULL`,
+        ).get(
+          revision,
+          id,
+          evidenceRevision,
+          authority.controlClaimSha256 ?? null,
+        );
+        if (typeof row?.receipt !== "string") return;
+        const receipt = repositoryVisibilityReceipt(JSON.parse(row.receipt));
+        if (
+          !receipt ||
+          JSON.stringify(
+              projectRepositoryVisibility(receipt, id, task.nodeId),
+            ) !== result
+        ) return;
+        db.prepare(
+          `UPDATE adaptive_repository_visibility_results SET sourceStepIndex = ?
+          WHERE revision = ? AND taskId = ? AND evidenceRevision = ?`,
+        )
+          .run(sourceStepIndex, revision, id, evidenceRevision);
+        return true;
       });
     },
 

@@ -64,11 +64,18 @@ export function isSentinelGitHubWorkflowTarget(
     return false;
   }
   const { owner, repo, workflowId } = value as Record<string, unknown>;
+  return isSentinelGitHubRepositoryTarget(owner, repo) &&
+    positiveId(workflowId);
+}
+
+export function isSentinelGitHubRepositoryTarget(
+  owner: unknown,
+  repo: unknown,
+) {
   return typeof owner === "string" &&
     /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/.test(owner) &&
     typeof repo === "string" && /^[A-Za-z0-9_.-]{1,100}$/.test(repo) &&
-    repo !== "." && repo !== ".." &&
-    positiveId(workflowId);
+    repo !== "." && repo !== "..";
 }
 
 export function sentinelGitHubWorkflowMetadataUrl(
@@ -204,7 +211,7 @@ export function readSentinelGitHubWorkflowRuns(
   target: SentinelGitHubWorkflowTarget,
   options: SentinelGitHubWorkflowOptions,
 ): Promise<readonly SentinelGitHubWorkflowRun[]> {
-  return readGitHubWorkflowJson(
+  return readSentinelGitHubJson(
     sentinelGitHubWorkflowRunsUrl(target),
     options,
     (body) => normalize(body, target),
@@ -216,14 +223,47 @@ export function verifySentinelGitHubWorkflowAccess(
   target: SentinelGitHubWorkflowTarget,
   options: SentinelGitHubWorkflowOptions,
 ): Promise<boolean> {
-  return readGitHubWorkflowJson(
+  return readSentinelGitHubJson(
     sentinelGitHubWorkflowMetadataUrl(target),
     options,
     (body) => record(body).id === target.workflowId,
   );
 }
 
-async function readGitHubWorkflowJson<T>(
+export function sentinelGitHubRepositoryUrl(owner: string, repo: string) {
+  if (!isSentinelGitHubRepositoryTarget(owner, repo)) {
+    throw new Error("Invalid configured GitHub repository.");
+  }
+  return `https://api.github.com/repos/${owner}/${repo}`;
+}
+
+export function readSentinelGitHubRepositoryVisibility(
+  target: { owner: string; repo: string; repositoryId: number },
+  options: SentinelGitHubWorkflowOptions,
+) {
+  return readSentinelGitHubJson(
+    sentinelGitHubRepositoryUrl(target.owner, target.repo),
+    options,
+    (body) => {
+      const { id, full_name, visibility } = record(body);
+      if (
+        !positiveId(target.repositoryId) || id !== target.repositoryId ||
+        typeof full_name !== "string" ||
+        full_name.toLowerCase() !==
+          `${target.owner}/${target.repo}`.toLowerCase() ||
+        (visibility !== "public" && visibility !== "internal" &&
+          visibility !== "private")
+      ) {
+        throw new Error(
+          "GitHub repository identity or visibility is unavailable.",
+        );
+      }
+      return visibility;
+    },
+  );
+}
+
+async function readSentinelGitHubJson<T>(
   url: string,
   options: SentinelGitHubWorkflowOptions,
   project: (body: unknown) => T,
@@ -240,7 +280,7 @@ async function readGitHubWorkflowJson<T>(
   );
   const fetchPage = options.request ?? safeFetchWithRedirects;
   const failed = new Error(
-    "GitHub Actions evidence could not be read within policy.",
+    "GitHub evidence could not be read within policy.",
   );
   if (signal.aborted) throw failed;
   let onAbort!: () => void;

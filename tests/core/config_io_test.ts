@@ -38,6 +38,43 @@ async function setupTempConfig(): Promise<{
   };
 }
 
+Deno.test("Sentinel repository visibility configuration requires unique exact asset grants", () => {
+  const models = { primary: { provider: "openai", model: "gpt-4.1" } };
+  const grant = {
+    case: "repository-review",
+    asset: "application",
+    owner: "fixture-org",
+    repo: "fixture-repository",
+    repository_id: 17,
+  };
+  const check = (github_repository_visibility_reads: unknown) =>
+    enforceConfig({ models, sentinel: { github_repository_visibility_reads } });
+
+  assertEquals(
+    check([grant, { ...grant, asset: "another-application" }]).ok,
+    true,
+  );
+  for (
+    const invalid of [
+      [grant, { ...grant, repository_id: 18 }],
+      [{ ...grant, repository_id: 0 }],
+      [{ ...grant, repository_id: "17" }],
+      [{ ...grant, repo: ".." }],
+      [{ ...grant, url: "https://example.invalid/" }],
+      [{ ...grant, repository_id: undefined, workflow_id: 17 }],
+    ]
+  ) {
+    const result = check(invalid);
+    assertEquals(result.ok, false);
+    if (!result.ok) {
+      assertEquals(
+        result.error.includes("github_repository_visibility_reads"),
+        true,
+      );
+    }
+  }
+});
+
 // --- readConfigYaml ---
 
 Deno.test("readConfigYaml: reads valid YAML", async () => {

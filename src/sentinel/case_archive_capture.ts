@@ -158,6 +158,7 @@ const adaptiveTables = new Set([
   "adaptive_worker_settings",
   "adaptive_workflow_observations",
   "adaptive_worker_narratives",
+  "adaptive_repository_visibility_results",
 ]);
 
 interface EvidenceStoreSchema {

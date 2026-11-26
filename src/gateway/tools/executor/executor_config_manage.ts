@@ -33,6 +33,7 @@ const operatorSentinelGrants = new Set([
   "team_observation_reads",
   "delegated_observation_reads",
   "github_workflow_reads",
+  "github_repository_visibility_reads",
 ]);
 
 /** Protect user-only execution grants and reject prototype traversal in tool inputs. */

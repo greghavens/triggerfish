@@ -163,12 +163,24 @@ export function enforceConfig(
   }
   const workflowReads = sentinel?.github_workflow_reads;
   if (
-    workflowReads !== undefined && !validSentinelWorkflowReads(workflowReads)
+    workflowReads !== undefined &&
+    !validSentinelGitHubReads(workflowReads, "workflow_id")
   ) {
     return {
       ok: false,
       error:
         "sentinel.github_workflow_reads must contain unique case and asset mappings to exact GitHub repository workflows",
+    };
+  }
+  const visibilityReads = sentinel?.github_repository_visibility_reads;
+  if (
+    visibilityReads !== undefined &&
+    !validSentinelGitHubReads(visibilityReads, "repository_id")
+  ) {
+    return {
+      ok: false,
+      error:
+        "sentinel.github_repository_visibility_reads must contain unique case and asset mappings to exact GitHub repository IDs",
     };
   }
 
@@ -240,14 +252,17 @@ export function enforceConfig(
   return { ok: true, value: undefined };
 }
 
-function validSentinelWorkflowReads(value: unknown): boolean {
+function validSentinelGitHubReads(
+  value: unknown,
+  idField: "workflow_id" | "repository_id",
+): boolean {
   if (!Array.isArray(value) || value.length > 64) return false;
   const scopes = new Set<string>();
   for (const record of value) {
     if (!record || typeof record !== "object" || Array.isArray(record)) {
       return false;
     }
-    const { case: caseId, asset, owner, repo, workflow_id } = record;
+    const { case: caseId, asset, owner, repo, [idField]: id } = record;
     if (
       Object.keys(record).length !== 5 ||
       typeof caseId !== "string" ||
@@ -258,7 +273,7 @@ function validSentinelWorkflowReads(value: unknown): boolean {
       !/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/.test(owner) ||
       typeof repo !== "string" || !/^[A-Za-z0-9_.-]{1,100}$/.test(repo) ||
       repo === "." || repo === ".." ||
-      !Number.isSafeInteger(workflow_id) || workflow_id < 1
+      !Number.isSafeInteger(id) || id < 1
     ) return false;
     const scope = JSON.stringify([caseId, asset]);
     if (scopes.has(scope)) return false;

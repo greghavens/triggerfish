@@ -5,6 +5,17 @@ import {
   workerNarrativeEvidenceCall,
 } from "./sentinel_worker_narratives.ts";
 import {
+  projectRepositoryVisibility,
+  SENTINEL_LIVE_REPOSITORY_VISIBILITY,
+  SENTINEL_SAVED_REPOSITORY_VISIBILITY,
+  type SentinelRepositoryVisibilityReference,
+} from "../sentinel/github_repository_visibility.ts";
+import type {
+  createSentinelRepositoryVisibilityReader,
+  SentinelRepositoryVisibilityDestination,
+} from "./sentinel_repository_visibility.ts";
+import { readAdaptiveRepositoryVisibility } from "../sentinel/adaptive_store.ts";
+import {
   isWorkerNarrativeId,
   readWorkerNarrativeReceipt,
   SENTINEL_WORKER_NARRATIVE_COMMIT,
@@ -392,6 +403,9 @@ export interface SentinelAgentOptions {
   readonly readRetainedWorkflow?: ReturnType<
     typeof createSentinelLiveWorkflowReader
   >;
+  readonly readRepositoryVisibility?: ReturnType<
+    typeof createSentinelRepositoryVisibilityReader
+  >;
   readonly readLiveWorkflowStatus?: (request: {
     readonly task: AdaptiveTask;
     readonly evidenceRevision: number;
@@ -495,6 +509,14 @@ type ReviewedFindingSource =
   import("../sentinel/adaptive_store.ts").AdaptiveReviewedAssignmentSource;
 
 export interface SentinelAgent {
+  readonly authorizeRepositoryVisibility?: (
+    runId: string,
+    evidenceRevision: number,
+    assetId: string,
+    reference: SentinelRepositoryVisibilityReference,
+    signal: AbortSignal,
+    current: () => boolean,
+  ) => Promise<boolean>;
   readonly authorizeWorkerNarrative?: (
     runId: string,
     revision: number,
@@ -1142,6 +1164,31 @@ const liveWorkflowStatusTool: ToolDefinition = {
   description:
     "Read recent GitHub Actions workflow status for this leased assignment using its operator-configured read profile.",
   parameters: {},
+};
+
+const liveRepositoryVisibilityTool: ToolDefinition = {
+  name: SENTINEL_LIVE_REPOSITORY_VISIBILITY,
+  description:
+    "Read visibility of the exact operator-configured GitHub repository for this leased asset.",
+  parameters: {},
+};
+
+const savedRepositoryVisibilityTool: ToolDefinition = {
+  name: SENTINEL_SAVED_REPOSITORY_VISIBILITY,
+  description:
+    "Open a committed GitHub repository visibility result from one scoped source assignment.",
+  parameters: {
+    taskId: {
+      type: "string",
+      description: "Exact committed source assignment ID",
+      required: true,
+    },
+    asset: {
+      type: "string",
+      description: "Exact current scoped asset",
+      required: true,
+    },
+  },
 };
 
 const savedWorkflowReceiptTool: ToolDefinition = {
@@ -2195,6 +2242,227 @@ async function readLiveWorkflowStatus(
   } catch {
     return "Error: Live workflow status is unavailable for this assignment.";
   }
+}
+
+async function authorizeRepositoryVisibilityDestination(
+  options: SentinelAgentOptions,
+  session: SessionState,
+  destination: SentinelRepositoryVisibilityDestination,
+  caseId: string,
+  taskId: string,
+  evidenceRevision: number,
+  current: () => boolean,
+  replay: boolean,
+) {
+  if (!current() || destination.caseId !== caseId) return false;
+  const metadata = {
+    tool_name: SENTINEL_LIVE_REPOSITORY_VISIBILITY,
+    operation_type: "read",
+    resource_classification: "INTERNAL",
+    is_outbound_request: true,
+    is_owner: true,
+    url: destination.url,
+    sentinel_case_id: caseId,
+    sentinel_evidence_revision: evidenceRevision,
+    sentinel_task_id: taskId,
+    repository: destination.repository,
+    repository_id: destination.repositoryId,
+    replay,
+  };
+  const decision = await options.hookRunner.evaluateHook("PRE_TOOL_CALL", {
+    session,
+    input: {
+      ...metadata,
+      tool_call: {
+        name: SENTINEL_LIVE_REPOSITORY_VISIBILITY,
+        args: { url: destination.url },
+      },
+    },
+    auditInput: metadata,
+  });
+  return decision.allowed && current();
+}
+
+async function readLiveRepositoryVisibility(
+  options: SentinelAgentOptions,
+  turn: ActiveTurn,
+  args: Record<string, unknown>,
+  session: SessionState,
+  resumeOnly = false,
+) {
+  const unavailable =
+    "Error: Live repository visibility is unavailable for this assignment.";
+  const callback = options.readRepositoryVisibility;
+  const task = readAssignedModelReview(options);
+  const evidenceRevision = options.assessmentRevision;
+  const token = options.assignedTaskLeaseToken;
+  const location = locateSentinelCase(options.snapshotPath);
+  if (
+    Object.keys(args).length || !callback || !task?.nodeId ||
+    !location || evidenceRevision === undefined || !token
+  ) return unavailable;
+  const assetId = task.nodeId;
+  const path = join(dirname(options.snapshotPath), "sentinel-adaptive.db");
+  const runId = readSentinelRunIdForRevision(
+    options.snapshotPath,
+    evidenceRevision,
+  );
+  if (!runId) return unavailable;
+  const graph = await turn.readGraph();
+  const snapshot = graph.snapshot();
+  const current = () =>
+    !turn.signal.aborted &&
+    readAssignedModelReview(options)?.id === task.id &&
+    sentinelOperatingConstraintsAllow(
+      readSentinelOperatingConstraints(options.snapshotPath, runId)
+        ?.constraints,
+      { kind: "review_evidence", nodeId: assetId },
+      snapshot,
+    );
+  if (!current() || graph.trace(assetId, 0).nodes[0]?.kind !== "asset") {
+    return unavailable;
+  }
+  const withStore = <T>(
+    use: (store: ReturnType<typeof openSentinelAdaptiveStore>) => T,
+  ) => {
+    const store = openSentinelAdaptiveStore(path);
+    try {
+      return use(store);
+    } finally {
+      store.close();
+    }
+  };
+  const hasPreviousValue = !!readAdaptiveRepositoryVisibility(
+    path,
+    runId,
+    evidenceRevision,
+    task.id,
+    assetId,
+  );
+  const replay = resumeOnly || hasPreviousValue;
+  const result = await callback({
+    caseId: location.caseId,
+    assetId,
+    evidenceRevision,
+    signal: turn.signal,
+    isCurrent: current,
+    resumeOnly: replay,
+    loadSaved: () =>
+      withStore((store) =>
+        store.readLeasedRepositoryVisibility(
+          task.revision,
+          task.id,
+          token,
+          evidenceRevision,
+        )
+      ),
+    saveResult: (receipt) =>
+      withStore((store) =>
+        store.recordLeasedRepositoryVisibility(
+          task.revision,
+          task.id,
+          token,
+          evidenceRevision,
+          receipt,
+        )
+      ),
+    authorize: (destination) =>
+      authorizeRepositoryVisibilityDestination(
+        options,
+        session,
+        destination,
+        location.caseId,
+        task.id,
+        evidenceRevision,
+        current,
+        replay,
+      ),
+  });
+  return result && current()
+    ? boundResult(projectRepositoryVisibility(result, task.id, assetId))
+    : unavailable;
+}
+
+async function reopenRepositoryVisibility(
+  options: SentinelAgentOptions,
+  session: SessionState,
+  runId: string,
+  evidenceRevision: number,
+  taskId: string,
+  assetId: string,
+  signal: AbortSignal,
+  authorized: () => boolean,
+) {
+  const current = () => {
+    if (signal.aborted || !authorized()) return false;
+    const state = readSentinelAssessment(options.snapshotPath);
+    const snapshot = state?.result?.sharedGraph.snapshot;
+    return !!state?.active && !state.paused && !!snapshot &&
+      state.plan.runId === runId && state.revision === evidenceRevision &&
+      sentinelOperatingConstraintsAllow(
+        readSentinelOperatingConstraints(options.snapshotPath, runId)
+          ?.constraints,
+        { kind: "review_evidence", nodeId: assetId },
+        snapshot,
+      );
+  };
+  const location = locateSentinelCase(options.snapshotPath);
+  const callback = options.readRepositoryVisibility;
+  if (!location || !callback || !current() || signal.aborted) return;
+  const lookup = () =>
+    readAdaptiveRepositoryVisibility(
+      join(dirname(options.snapshotPath), "sentinel-adaptive.db"),
+      runId,
+      evidenceRevision,
+      taskId,
+      assetId,
+      true,
+    );
+  const stored = lookup();
+  if (!stored?.reference) return;
+  const result = await callback({
+    caseId: location.caseId,
+    assetId,
+    evidenceRevision,
+    signal,
+    isCurrent: () => current() && isDeepStrictEqual(stored, lookup()),
+    resumeOnly: true,
+    loadSaved: () => stored.receipt,
+    saveResult: () => undefined,
+    authorize: (destination) =>
+      authorizeRepositoryVisibilityDestination(
+        options,
+        session,
+        destination,
+        location.caseId,
+        taskId,
+        evidenceRevision,
+        current,
+        true,
+      ),
+  });
+  if (
+    !isDeepStrictEqual(result, stored.receipt) ||
+    signal.aborted || !current() || !isDeepStrictEqual(stored, lookup())
+  ) return;
+  const metadata = {
+    tool_name: SENTINEL_LIVE_REPOSITORY_VISIBILITY,
+    operation_type: "read",
+    resource_classification: "INTERNAL",
+    sentinel_case_id: location.caseId,
+    sentinel_evidence_revision: evidenceRevision,
+    sentinel_task_id: taskId,
+  };
+  const post = await options.hookRunner.evaluateHook("POST_TOOL_RESPONSE", {
+    session,
+    input: { ...metadata, tool_response: JSON.stringify(stored.projection) },
+    auditInput: metadata,
+  });
+  if (
+    !post.allowed || signal.aborted || !current() ||
+    !isDeepStrictEqual(stored, lookup())
+  ) return;
+  return { ...stored.projection, reference: stored.reference };
 }
 
 export function readSentinelPrerequisiteWorkflowReceipt(
@@ -4882,12 +5150,24 @@ function createAgent(
       ...(options.readLiveWorkflowStatus
         ? [liveWorkflowStatusTool, publishWorkflowObservationTool]
         : []),
+      ...(options.readRepositoryVisibility
+        ? [
+          liveRepositoryVisibilityTool,
+          ...(readAssignedModelReview(options)?.plannerRound
+              ?.repositoryVisibility
+            ? [savedRepositoryVisibilityTool]
+            : []),
+        ]
+        : []),
     ]
     : canReadPlannerCase
     ? [
       ...tools,
       ...plannerTodoTools,
       workerNarrativeRead,
+      ...(options.readRepositoryVisibility
+        ? [savedRepositoryVisibilityTool]
+        : []),
       ...(linkedFindingSources(options)?.some(({ workerReviews }) =>
           workerReviews?.length
         )
@@ -6512,6 +6792,56 @@ function createAgent(
       if (name === liveWorkflowStatusTool.name) {
         return await readLiveWorkflowStatus(options, turn, args, session);
       }
+      if (name === SENTINEL_LIVE_REPOSITORY_VISIBILITY) {
+        return await readLiveRepositoryVisibility(options, turn, args, session);
+      }
+      if (name === SENTINEL_SAVED_REPOSITORY_VISIBILITY) {
+        const { asset, taskId } = args;
+        const evidenceRevision = options.assessmentRevision;
+        const runId = options.plannerExecutionEvidenceRunId ??
+          (evidenceRevision &&
+            readSentinelRunIdForRevision(
+              options.snapshotPath,
+              evidenceRevision,
+            ));
+        const unavailable =
+          "Error: The saved repository visibility is unavailable.";
+        if (
+          Object.keys(args).length !== 2 ||
+          typeof asset !== "string" || typeof taskId !== "string" ||
+          !/^adaptive:[a-f0-9]{64}$/.test(taskId) || !evidenceRevision || !runId
+        ) {
+          return unavailable;
+        }
+        const worker = readAssignedModelReview(options);
+        const current = () =>
+          !turn.signal.aborted &&
+          (canReadPlannerCase
+            ? currentPlannerReceiptScope(turn, asset)
+            : worker?.nodeId === asset &&
+              readAssignedModelReview(options)?.id === worker.id &&
+              worker.plannerRound?.repositoryVisibility?.taskId === taskId);
+        const result = await reopenRepositoryVisibility(
+          options,
+          session,
+          runId,
+          evidenceRevision,
+          taskId,
+          asset,
+          turn.signal,
+          current,
+        );
+        if (
+          !result || (worker &&
+            !isDeepStrictEqual(
+              worker.plannerRound?.repositoryVisibility,
+              result.reference,
+            ))
+        ) {
+          return unavailable;
+        }
+        return boundResult(result);
+      }
       if (name === savedWorkflowReceiptTool.name) {
         return await readSavedWorkflowReceipt(options, turn, args, session);
       }
@@ -7285,6 +7615,47 @@ function createAgent(
       if (turn?.requiresLiveAssignment && !assignedReview) return;
       const failed = result.startsWith("Error:");
       if (
+        !failed && turn && assignedReview &&
+        name === SENTINEL_LIVE_REPOSITORY_VISIBILITY &&
+        options.assessmentRevision && options.assignedTaskLeaseToken
+      ) {
+        const published = withSentinelAssessmentWriteLock(
+          options.snapshotPath,
+          (state) => {
+            if (
+              !state?.active || state.paused ||
+              state.revision !== options.assessmentRevision
+            ) return;
+            const store = openSentinelAdaptiveStore(
+              join(dirname(options.snapshotPath), "sentinel-adaptive.db"),
+            );
+            try {
+              return store.confirmLeasedRepositoryVisibility(
+                  assignedReview.revision,
+                  assignedReview.id,
+                  options.assignedTaskLeaseToken!,
+                  options.assessmentRevision!,
+                  turn.traceStepCount,
+                  result,
+                )
+                ? state.plan.runId
+                : undefined;
+            } finally {
+              store.close();
+            }
+          },
+        );
+        const location = locateSentinelCase(options.snapshotPath);
+        if (published && location) {
+          notifyCommittedEvidence({
+            case: location.caseId,
+            run_id: published,
+            revision: options.assessmentRevision,
+            observation_id: `repository-visibility:${assignedReview.id}`,
+          });
+        }
+      }
+      if (
         turn && !failed && name === SENTINEL_ASSIGNED_EXECUTION_EVIDENCE &&
         typeof args.node === "string"
       ) rememberExecutionCheck(turn.executionReads, args.node, result);
@@ -7675,6 +8046,17 @@ function createAgent(
             ? redactCredentialText(result) === result &&
               JSON.parse(result).evidenceId === goalArgs.node &&
               JSON.parse(result).evidenceRevision === options.assessmentRevision
+            : name === SENTINEL_LIVE_REPOSITORY_VISIBILITY
+            ? !!assignedReview &&
+              JSON.parse(result).taskId === assignedReview.id &&
+              JSON.parse(result).targetId === assignedReview.nodeId &&
+              JSON.parse(result).evidenceRevision === options.assessmentRevision
+            : name === SENTINEL_SAVED_REPOSITORY_VISIBILITY
+            ? !!assignedReview?.plannerRound?.repositoryVisibility &&
+              isDeepStrictEqual(
+                assignedReview.plannerRound.repositoryVisibility,
+                JSON.parse(result).reference,
+              )
             : name === SENTINEL_WORKER_NARRATIVE_COMMIT
             ? isWorkerNarrativeId(JSON.parse(result).id) &&
               JSON.parse(result).taskId === assignedReview?.id
@@ -8111,6 +8493,8 @@ function createAgent(
         });
         if (
           (assigned || recheckContext || trafficLinks ||
+            (canReadPlannerCase && !failed &&
+              name === SENTINEL_SAVED_REPOSITORY_VISIBILITY) ||
             (goalReceiptRead &&
               isSentinelRetainedReadReceipt(name, goalReceiptRead.args))) &&
           turn.traceStepCount <= 16
@@ -8760,6 +9144,28 @@ function createAgent(
       { authorizeLinkedFinding, authorizeLinkedWorkerReview }),
     ...((canReadPlannerCase || options.assignedTaskId) &&
       { authorizeWorkerNarrative }),
+    ...(options.readRepositoryVisibility && {
+      async authorizeRepositoryVisibility(
+        runId,
+        revision,
+        assetId,
+        reference,
+        signal,
+        current,
+      ) {
+        const saved = await reopenRepositoryVisibility(
+          options,
+          session,
+          runId,
+          revision,
+          reference.taskId,
+          assetId,
+          signal,
+          current,
+        );
+        return !!saved && isDeepStrictEqual(saved.reference, reference);
+      },
+    }),
     ...((options.assignedTaskId || canReadPlannerCase) &&
       { authorizeReviewedFindingSource }),
     ...(canRequestWorkerControl && { canRequestWorkerControl }),
@@ -9081,6 +9487,49 @@ function createAgent(
                     state.revision !== revision ||
                     !readAssignedModelReview(options)
                   ) return false;
+                  if (
+                    call.name === SENTINEL_LIVE_REPOSITORY_VISIBILITY
+                  ) {
+                    const reopened = await readLiveRepositoryVisibility(
+                      options,
+                      turn,
+                      call.args,
+                      session,
+                      true,
+                    );
+                    if (!reopened.startsWith("{") || saved !== reopened) {
+                      return false;
+                    }
+                    const classified = await enforcePostToolResponse(
+                      call.name,
+                      config,
+                      session,
+                      { resultText: reopened, blocked: false },
+                    );
+                    if (
+                      classified.blocked || signal.aborted ||
+                      !readAssignedModelReview(options)
+                    ) return false;
+                    continue;
+                  }
+                  if (call.name === SENTINEL_SAVED_REPOSITORY_VISIBILITY) {
+                    const reopened = await config.toolExecutor!(
+                      call.name,
+                      call.args,
+                    );
+                    const classified = await enforcePostToolResponse(
+                      call.name,
+                      config,
+                      session,
+                      { resultText: reopened, blocked: false },
+                    );
+                    if (
+                      saved !== reopened || classified.blocked ||
+                      signal.aborted ||
+                      !readAssignedModelReview(options)
+                    ) return false;
+                    continue;
+                  }
                   if (
                     call.name === SENTINEL_WORKER_NARRATIVE_READ ||
                     call.name === SENTINEL_WORKER_NARRATIVE_COMMIT

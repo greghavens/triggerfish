@@ -1,4 +1,8 @@
 import {
+  SENTINEL_LIVE_REPOSITORY_VISIBILITY,
+  SENTINEL_SAVED_REPOSITORY_VISIBILITY,
+} from "./github_repository_visibility.ts";
+import {
   isWorkerNarrativeId,
   readWorkerNarrativeReceipt,
   SENTINEL_WORKER_NARRATIVE_COMMIT,
@@ -572,7 +576,9 @@ export function isSentinelGoalReceiptRead(tool: unknown) {
 }
 
 export function isRepeatableSentinelReceiptRead(tool: unknown) {
-  return tool === SENTINEL_WORKER_NARRATIVE_READ ||
+  return tool === SENTINEL_LIVE_REPOSITORY_VISIBILITY ||
+    tool === SENTINEL_SAVED_REPOSITORY_VISIBILITY ||
+    tool === SENTINEL_WORKER_NARRATIVE_READ ||
     tool === SENTINEL_WORKER_NARRATIVE_COMMIT ||
     tool === SENTINEL_SHARED_WORKER_REVIEW ||
     tool === SENTINEL_TRAFFIC_BLOB ||
@@ -856,6 +862,18 @@ export function sentinelGoalReceiptReadArguments(
 ): GoalReceiptReadArguments | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) return;
   const args = value as Record<string, unknown>;
+  if (tool === SENTINEL_LIVE_REPOSITORY_VISIBILITY) {
+    return Object.keys(args).length === 0 ? {} : undefined;
+  }
+  if (tool === SENTINEL_SAVED_REPOSITORY_VISIBILITY) {
+    const { taskId, asset } = args;
+    return Object.keys(args).length === 2 &&
+        typeof taskId === "string" && /^adaptive:[a-f0-9]{64}$/.test(taskId) &&
+        typeof asset === "string" && asset.length > 0 && asset.length <= 256 &&
+        redactCredentialText(asset) === asset
+      ? { taskId, asset }
+      : undefined;
+  }
   if (tool === SENTINEL_WORKER_NARRATIVE_READ) {
     return Object.keys(args).length === 1 && isWorkerNarrativeId(args.id)
       ? { id: args.id }

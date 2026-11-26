@@ -308,6 +308,13 @@ export interface TriggerFishConfig {
       readonly repo: string;
       readonly workflow_id: number;
     }[];
+    readonly github_repository_visibility_reads?: readonly {
+      readonly case: string;
+      readonly asset: string;
+      readonly owner: string;
+      readonly repo: string;
+      readonly repository_id: number;
+    }[];
   };
   readonly web?: {
     readonly search?: {
