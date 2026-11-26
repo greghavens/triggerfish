@@ -2284,6 +2284,44 @@ async function verifyOperatorNativeRecheck(options: {
   assertEquals(writes, 1);
 
   const path = resolveSentinelCasePath(options.baseDir, caseId);
+  const readLifecycle = async () => {
+    let lifecycle: {
+      queuedAt: string;
+      attempt?: number;
+      startedAt?: string;
+      finishedAt?: string;
+      note: string;
+    } | undefined;
+    await withFindingAssignmentGateway(
+      options.baseDir,
+      () => Promise.resolve(false),
+      async (turn) => {
+        const page = JSON.parse(
+          await turn({
+            action: "finding_recheck_attempts",
+            kind: "sentinel",
+            id: caseId,
+            revision: options.state.revision,
+            receiptId: options.findingId,
+            includeLifecycle: true,
+            limit: 3,
+          }),
+        ).page;
+        lifecycle = page.entries.find(({ taskId }: { taskId: string }) =>
+          taskId === assigned.taskId
+        )?.lifecycle;
+      },
+    );
+    assert(lifecycle);
+    return lifecycle;
+  };
+  const queuedLifecycle = await readLifecycle();
+  assertEquals(queuedLifecycle, {
+    queuedAt: queuedLifecycle.queuedAt,
+    note: recheckNote,
+  });
+  assert(Number.isFinite(Date.parse(queuedLifecycle.queuedAt)));
+  let startedAt: string | undefined;
   await withFindingAssignmentGateway(
     options.baseDir,
     () => Promise.resolve(false),
@@ -2332,6 +2370,15 @@ async function verifyOperatorNativeRecheck(options: {
         }
         assert(taskId && leaseToken);
         workerRuns++;
+        const activeLifecycle = await readLifecycle();
+        startedAt = activeLifecycle.startedAt;
+        assert(startedAt);
+        assert(Date.parse(startedAt) >= Date.parse(queuedLifecycle.queuedAt));
+        assertEquals(activeLifecycle, {
+          ...queuedLifecycle,
+          attempt: 1,
+          startedAt,
+        });
         if (alternateQueue) {
           assertStringIncludes(await run(alternateQueue), "unavailable");
         }
@@ -2533,6 +2580,16 @@ async function verifyOperatorNativeRecheck(options: {
     planner.stop();
   }
 
+  const finishedLifecycle = await readLifecycle();
+  assert(startedAt && finishedLifecycle.finishedAt);
+  assert(Date.parse(finishedLifecycle.finishedAt) >= Date.parse(startedAt));
+  assertEquals(finishedLifecycle, {
+    ...queuedLifecycle,
+    attempt: 1,
+    startedAt,
+    finishedAt: finishedLifecycle.finishedAt,
+  });
+
   if (alternateQueue) {
     const admitted = JSON.parse(await run(alternateQueue)).receipt;
     assertEquals(admitted.nodeId, options.alternate?.nodeId);
@@ -2578,6 +2635,7 @@ async function verifyOperatorNativeRecheck(options: {
     },
   );
   assertEquals(readSentinelAssessment(path)?.paused, true);
+  assertEquals(await readLifecycle(), finishedLifecycle);
   await run("Review the exact archived remediation status.");
   assertEquals(
     JSON.parse(modelResult ?? "").report.remediation.recheckId,

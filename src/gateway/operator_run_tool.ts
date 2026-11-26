@@ -567,6 +567,11 @@ export const operatorRunTool: ToolDefinition = {
       type: "integer",
       description: "Exact Sentinel evidence revision",
     },
+    includeLifecycle: {
+      type: "boolean",
+      description:
+        "Include exact retained assignment timing and reviewed guidance in finding_recheck_attempts.",
+    },
     activeOnly: {
       type: "boolean",
       description:
@@ -3886,7 +3891,13 @@ ${
         });
       }
       if (action === "finding_recheck_attempts") {
-        const { receiptId, activeOnly = false, limit = 5, cursor } = args;
+        const {
+          receiptId,
+          activeOnly = false,
+          includeLifecycle = false,
+          limit = 5,
+          cursor,
+        } = args;
         if (
           ref.kind !== "sentinel" || ref.revision === undefined ||
           (receiptId === undefined
@@ -3894,6 +3905,11 @@ ${
             : typeof receiptId !== "string" ||
               !/^worker-finding:[a-f0-9]{64}$/.test(receiptId)) ||
           typeof activeOnly !== "boolean" ||
+          typeof includeLifecycle !== "boolean" ||
+          (includeLifecycle && (!context?.authenticatedOwnerSessionId ||
+            !canFlowTo("INTERNAL", context.ceiling ?? "PUBLIC") ||
+            context.authorizeSentinelCaseRead?.(ref.id, ref.revision) ===
+              false)) ||
           typeof limit !== "number" || !Number.isSafeInteger(limit) ||
           limit < 1 || limit > 10 ||
           (cursor !== undefined &&
@@ -3907,6 +3923,7 @@ ${
               "revision",
               "receiptId",
               "activeOnly",
+              "includeLifecycle",
               "limit",
               "cursor",
             ].includes(key)
@@ -3920,6 +3937,7 @@ ${
             revision: ref.revision,
             findingId: receiptId as string | undefined,
             activeOnly,
+            ...(includeLifecycle && { includeLifecycle: true }),
           },
           limit,
           cursor as string | undefined,

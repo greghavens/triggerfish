@@ -9417,6 +9417,42 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
       return { blocked, sources, totalSources: held.length };
     },
 
+    /** Read timing only for the last exact claim, without borrowing a prior settlement. */
+    modelReviewLifecycle(revision: string, id: string) {
+      const key = revisionKey(revision);
+      const target = taskId(id);
+      const queued = db.prepare(`
+        SELECT at FROM adaptive_events WHERE revision = ? AND taskId = ? AND event = 'queued'
+        ORDER BY rowid LIMIT 1
+      `).get(key, target);
+      if (!queued || typeof queued.at !== "number") return;
+      const claim = db.prepare(`
+        SELECT rowid AS eventOrder, attempt, at FROM adaptive_events
+        WHERE revision = ? AND taskId = ? AND event = 'model_review_claimed'
+        ORDER BY rowid DESC LIMIT 1
+      `).get(key, target);
+      const queuedAt = new Date(queued.at).toISOString();
+      if (
+        typeof claim?.attempt !== "number" || typeof claim.at !== "number" ||
+        typeof claim.eventOrder !== "number"
+      ) return { queuedAt };
+      const terminal = db.prepare(`
+        SELECT at FROM adaptive_events WHERE revision = ? AND taskId = ?
+          AND attempt = ? AND rowid > ?
+          AND event IN ('model_review_completed', 'model_review_failed',
+            'model_review_interrupted', 'model_review_lease_expired',
+            'model_review_stopped', 'model_review_paused')
+        ORDER BY rowid DESC LIMIT 1
+      `).get(key, target, claim.attempt, claim.eventOrder);
+      return {
+        queuedAt,
+        attempt: claim.attempt,
+        startedAt: new Date(claim.at).toISOString(),
+        ...(typeof terminal?.at === "number" &&
+          { finishedAt: new Date(terminal.at).toISOString() }),
+      };
+    },
+
     /** Read the last recorded settlement separately from a retry or active lease. */
     lastModelReviewSettlements(revision: string) {
       const rows = db.prepare(`

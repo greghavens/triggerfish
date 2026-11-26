@@ -361,6 +361,9 @@ The page reports worker state and its last recorded settlement separately
 from the verdict. A failed or interrupted attempt
 does not establish a verdict. If the page becomes stale, start again
 without its cursor.
+Set `includeLifecycle: true` to see queued time, start and finish times
+for the latest exact claim, and reviewed guidance. A running retry omits
+the finish time even when a previous attempt has a saved settlement.
 
 An exact leased recheck can record a separate inconclusive rationale when
 it cannot establish a verified result. The attempt exposes the

@@ -1076,6 +1076,7 @@ export function readSentinelFindingRecheckAttempts(
     revision: number;
     findingId?: string;
     activeOnly: boolean;
+    includeLifecycle?: boolean;
   },
   limit: number,
   cursor?: string,
@@ -1136,6 +1137,13 @@ export function readSentinelFindingRecheckAttempts(
         at: string;
         reason?: "missing_recheck_result";
       };
+      lifecycle?:
+        & ReturnType<
+          ReturnType<typeof openSentinelAdaptiveStore>["modelReviewLifecycle"]
+        >
+        & {
+          note?: string;
+        };
       outcomeUncertain?: true;
       resultReceiptId?: string;
       inconclusiveReceiptId?: string;
@@ -1177,6 +1185,9 @@ export function readSentinelFindingRecheckAttempts(
             const status = review?.status ??
               (task.status === "completed" ? "queued" : task.status);
             const lastAttempt = settlements.get(task.id);
+            const lifecycle = scope.includeLifecycle
+              ? adaptive.modelReviewLifecycle(mapping.revision, task.id)
+              : undefined;
             map.set(task.id, {
               taskId: task.id,
               ...(!findingId && { findingId: source }),
@@ -1184,6 +1195,13 @@ export function readSentinelFindingRecheckAttempts(
               evidenceId: task.nodeId,
               attempts: review?.attempts ?? 0,
               ...(lastAttempt && { lastAttempt }),
+              ...(lifecycle && {
+                lifecycle: {
+                  ...lifecycle,
+                  ...(task.plannerRound?.recheckNote &&
+                    { note: task.plannerRound.recheckNote }),
+                },
+              }),
               ...(review?.outcomeUncertain &&
                 { outcomeUncertain: true as const }),
             });
