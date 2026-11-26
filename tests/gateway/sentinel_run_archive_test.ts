@@ -201,12 +201,12 @@ async function withGateway(
     allowsHook: (hook: string, input: Record<string, unknown>) => boolean;
     onFrame: (frame: string) => void;
   },
-  denyStartupPurge?: string,
+  denyStartupPurge?: string | readonly string[],
 ) {
   const approvals: string[] = [];
   const policy = {
     denyArchive: false,
-    denyPurgeMember: denyStartupPurge,
+    denyPurgeMember: undefined as string | undefined,
     denyReportAmendment: false,
     denyDispositionReview: false,
     afterConfirmation: undefined as (() => void) | undefined,
@@ -289,6 +289,11 @@ async function withGateway(
         !(policy.denyPurgeMember && hook === "PRE_TOOL_CALL" &&
           call?.args?.action === "purge_archive" &&
           call.args.id === policy.denyPurgeMember) &&
+        !(hook === "PRE_TOOL_CALL" && call?.args?.action === "purge_archive" &&
+          typeof call.args.id === "string" &&
+          (typeof denyStartupPurge === "string"
+            ? denyStartupPurge === call.args.id
+            : denyStartupPurge?.includes(call.args.id))) &&
         !(policy.denyReportAmendment && hook === "PRE_TOOL_CALL" &&
           call?.args?.action === "amend_finding_report") &&
         !(policy.denyDispositionReview && hook === "PRE_TOOL_CALL" &&
@@ -6741,6 +6746,8 @@ Deno.test("Owner gateway reviews exact single and batch archive purge and resume
       "purge-recover",
       "purge-current",
       "purge-unmoved",
+      "purge-approved-live",
+      "purge-batch-live",
     ]
       .map(
         (id) => ({ kind: "sentinel", id, archiveId: crypto.randomUUID() }),
@@ -6779,7 +6786,8 @@ Deno.test("Owner gateway reviews exact single and batch archive purge and resume
         assertEquals(archived.receipt.status, "succeeded");
       }
     });
-    const [one, two, recovering, current, unmoved] = targets;
+    const [one, two, recovering, current, unmoved, approvedLive, batchLive] =
+      targets;
     let child: typeof two | undefined;
     let unarchivedChild: typeof two | undefined;
     await withGateway(baseDir, async (turn) => {
@@ -6852,12 +6860,24 @@ Deno.test("Owner gateway reviews exact single and batch archive purge and resume
     assert(unarchivedChild);
     const { archiveId: lateArchiveId, ...lateChild } = unarchivedChild;
     const childTarget = child;
-    for (const target of [one, two, recovering, unmoved]) {
+    for (
+      const target of [one, two, recovering, unmoved, approvedLive, batchLive]
+    ) {
       const state = startSentinelAssessment(
         resolveSentinelCasePath(baseDir, target.id),
       );
       assert(state.plan.runId !== target.runId);
     }
+    const approvedBeforeCrash = {
+      action: "purge_archive",
+      ...approvedLive,
+      requestId: crypto.randomUUID(),
+    };
+    const batchBeforeCrash = {
+      action: "purge_archives",
+      requestId: crypto.randomUUID(),
+      runTargets: [batchLive],
+    };
     const single = {
       action: "purge_archive",
       ...one,
@@ -6951,6 +6971,46 @@ Deno.test("Owner gateway reviews exact single and batch archive purge and resume
         () => Deno.lstat(join(directory, lateArchiveId)),
         Deno.errors.NotFound,
       );
+      // Interrupt the filesystem transition after the genuine gateway approval
+      // has durably admitted the exact request.
+      const rename = Deno.renameSync;
+      Deno.renameSync = (from, to) => {
+        if (
+          [approvedLive, batchLive].some(({ archiveId }) =>
+            String(from) === join(directory, archiveId) &&
+            String(to) === join(directory, `.purge-${archiveId}`)
+          )
+        ) {
+          throw new Error("Synthetic interruption before quarantine");
+        }
+        rename(from, to);
+      };
+      try {
+        assert(!(await turn(approvedBeforeCrash)).includes("succeeded"));
+        assertEquals(
+          JSON.parse(await turn(batchBeforeCrash)).outcomes[0].receipt,
+          undefined,
+        );
+      } finally {
+        Deno.renameSync = rename;
+      }
+      const pending = openRunArchiveActions(join(directory, "actions.db"));
+      try {
+        assertEquals(
+          pending.readPurge(approvedLive.archiveId)?.status,
+          "pending",
+        );
+        assertEquals(pending.readPurgeAuthorization(approvedLive.archiveId), {
+          kind: "standalone",
+        });
+        assertEquals(pending.readPurge(batchLive.archiveId)?.status, "pending");
+        assertEquals(pending.readPurgeAuthorization(batchLive.archiveId), {
+          kind: "batch",
+          batchRequestId: batchBeforeCrash.requestId,
+        });
+      } finally {
+        pending.close();
+      }
     });
     const resume = {
       action: "purge_archive",
@@ -6999,18 +7059,27 @@ Deno.test("Owner gateway reviews exact single and batch archive purge and resume
             denied.readPurge(recovering.archiveId)?.status,
             "pending",
           );
+          assertEquals(
+            denied.readPurge(approvedLive.archiveId)?.status,
+            "pending",
+          );
+          assert(
+            (await Deno.lstat(join(directory, approvedLive.archiveId)))
+              .isDirectory,
+          );
         } finally {
           denied.close();
         }
       },
       undefined,
-      recovering.id,
+      [recovering.id, approvedLive.id],
     );
     await withGateway(baseDir, async (turn, approvals) => {
       await assertRejects(
         () => Deno.lstat(join(directory, `.purge-${recovering.archiveId}`)),
         Deno.errors.NotFound,
       );
+      let batchMemberRequest: string | undefined;
       const reopened = openRunArchiveActions(join(directory, "actions.db"));
       try {
         assertEquals(
@@ -7018,6 +7087,20 @@ Deno.test("Owner gateway reviews exact single and batch archive purge and resume
           "succeeded",
         );
         assertEquals(reopened.readPurge(unmoved.archiveId)?.status, "pending");
+        assertEquals(
+          reopened.readPurge(approvedLive.archiveId)?.status,
+          "succeeded",
+        );
+        await assertRejects(
+          () => Deno.lstat(join(directory, approvedLive.archiveId)),
+          Deno.errors.NotFound,
+        );
+        const batchMember = reopened.readPurge(batchLive.archiveId);
+        assertEquals(batchMember?.status, "pending");
+        batchMemberRequest = batchMember?.requestId;
+        assert(
+          (await Deno.lstat(join(directory, batchLive.archiveId))).isDirectory,
+        );
         assert(
           (await Deno.lstat(join(directory, unmoved.archiveId))).isDirectory,
         );
@@ -7025,7 +7108,26 @@ Deno.test("Owner gateway reviews exact single and batch archive purge and resume
       } finally {
         reopened.close();
       }
+      assert(batchMemberRequest);
+      assert(
+        !(await turn({
+          action: "purge_archive",
+          ...batchLive,
+          requestId: batchMemberRequest,
+        })).includes("succeeded"),
+      );
+      assert(
+        (await Deno.lstat(join(directory, batchLive.archiveId))).isDirectory,
+      );
       assertEquals(JSON.parse(await turn(resume)).receipt.status, "succeeded");
+      assertEquals(
+        JSON.parse(await turn(approvedBeforeCrash)).receipt.status,
+        "succeeded",
+      );
+      assertEquals(
+        JSON.parse(await turn(batchBeforeCrash)).outcomes[0].receipt.status,
+        "succeeded",
+      );
       assertEquals(approvals.length, 0);
       const result = JSON.parse(await turn({ action: "archive_catalog" }));
       assertEquals(

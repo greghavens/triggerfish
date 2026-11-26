@@ -136,8 +136,28 @@ async function hasRetainedDependent(
   }
 }
 
-/** Reconcile packages already removed from their public archive path. */
-export async function recoverSentinelArchiveQuarantines(
+function reviewedPurgeBatch(
+  journal: ReturnType<typeof openRunArchiveActions>,
+  batchRequestId: string,
+  target: Target,
+  receipt: RunArchivePurgeReceipt,
+): Record<string, unknown> | undefined {
+  const batch = journal.readBatch(batchRequestId);
+  if (!batch?.eligible.includes(target.archiveId)) return;
+  const group = JSON.parse(batch.binding);
+  if (
+    group.action !== "purge_archives" || group.requestId !== batchRequestId ||
+    !Array.isArray(group.runTargets) || group.runTargets.length > 8 ||
+    memberRequest(batchRequestId, target) !== receipt.requestId ||
+    !group.runTargets.some((raw: unknown) =>
+      JSON.stringify(parseTarget(raw)) === JSON.stringify(target)
+    )
+  ) return;
+  return group;
+}
+
+/** Reconcile prior purges with durable authority and current policy. */
+export async function recoverSentinelArchivePurges(
   baseDir: string,
   authorize: (args: Record<string, unknown>) => Promise<boolean>,
 ) {
@@ -150,17 +170,23 @@ export async function recoverSentinelArchiveQuarantines(
   const journal = openRunArchiveActions(join(directory, "actions.db"));
   try {
     for await (const entry of Deno.readDir(directory)) {
-      if (!entry.isDirectory || !entry.name.startsWith(".purge-")) continue;
-      const archiveId = entry.name.slice(".purge-".length);
-      if (
-        !uuid.test(archiveId) ||
-        entry.name !== `.purge-${archiveId.toLowerCase()}`
-      ) continue;
+      if (!entry.isDirectory) continue;
+      const staged = entry.name.startsWith(".purge-");
+      const archiveId = staged
+        ? entry.name.slice(".purge-".length)
+        : entry.name;
+      if (!uuid.test(archiveId) || archiveId !== archiveId.toLowerCase()) {
+        continue;
+      }
+      if (!journal.readPurge(archiveId)) continue;
       try {
         using packageLock = lockRunArchiveAction(directory, archiveId);
         using catalogLock = packageLock &&
           lockSentinelArchiveCatalog(directory);
-        if (!catalogLock || exists(join(directory, archiveId))) continue;
+        if (!catalogLock) continue;
+        const path = join(directory, archiveId);
+        const quarantine = join(directory, `.purge-${archiveId}`);
+        if (exists(staged ? path : quarantine)) continue;
         const receipt = journal.readPurge(archiveId);
         if (!receipt) continue;
         const target = parseTarget({ ...receipt.identity, archiveId });
@@ -168,36 +194,49 @@ export async function recoverSentinelArchiveQuarantines(
         if (!target || archived?.archiveDigest !== receipt.archiveDigest) {
           continue;
         }
-        const quarantine = join(directory, entry.name);
         if (receipt.status === "succeeded") {
-          removeQuarantine(quarantine);
+          if (staged) removeQuarantine(quarantine);
           continue;
         }
+        const approval = journal.readPurgeAuthorization(archiveId);
+        if (!staged && approval?.kind !== "standalone") continue;
+        const group = approval?.kind === "batch"
+          ? reviewedPurgeBatch(
+            journal,
+            approval.batchRequestId,
+            target,
+            receipt,
+          )
+          : undefined;
+        if (approval?.kind === "batch" && !group) continue;
         const action = {
           action: "purge_archive",
           ...target,
           requestId: receipt.requestId,
         };
+        const reauthorize = async () =>
+          (!group || await authorize(group)) && await authorize(action);
         if (
-          !await authorize(action) ||
+          !await reauthorize() ||
           await hasRetainedDependent(journal, directory, target)
         ) continue;
         const completed = await withVerifiedRunArchive(
-          quarantine,
+          staged ? quarantine : path,
           directory,
           verifySentinelArchive,
           async ({ manifest }) => {
             if (
               !archiveMatches(manifest, target, receipt.archiveDigest) ||
-              !await authorize(action)
+              !await reauthorize()
             ) return;
             return withSentinelAssessmentWriteLock(
               resolveSentinelCasePath(baseDir, target.id),
               (state) => {
                 if (
                   state?.plan.runId === target.runId ||
-                  exists(join(directory, archiveId))
+                  exists(staged ? path : quarantine)
                 ) return;
+                if (!staged) Deno.renameSync(path, quarantine);
                 return journal.completePurge(receipt);
               },
             );
@@ -394,7 +433,13 @@ export async function executeOperatorArchivePurge(
                 resolveSentinelCasePath(baseDir, target.id),
                 (state) => {
                   if (state?.plan.runId === target.runId) return;
-                  const admitted = journal.admitPurge(call.requestId, source);
+                  const admitted = journal.admitPurge(
+                    call.requestId,
+                    source,
+                    batch
+                      ? { kind: "batch", batchRequestId: requestId }
+                      : { kind: "standalone" },
+                  );
                   if (!admitted) return;
                   if (!hasStaged) {
                     if (exists(staged)) return;

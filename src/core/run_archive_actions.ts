@@ -27,6 +27,10 @@ export interface RunArchivePurgeReceipt {
   readonly status: "pending" | "succeeded";
 }
 
+export type RunArchivePurgeAuthorization =
+  | { readonly kind: "standalone" }
+  | { readonly kind: "batch"; readonly batchRequestId: string };
+
 export type RunArchiveActionAdmission =
   | {
     readonly admitted: true;
@@ -221,7 +225,14 @@ function createArchivePurges(db: DatabaseSync) {
   `);
 }
 
-/** One request claims one action. An interrupted action remains pending without automatic replay. */
+/** Durable admission and results for exact reviewed archive actions. */
+function addPurgeAuthorization(db: DatabaseSync) {
+  db.exec(`
+    ALTER TABLE run_archive_purges ADD COLUMN authorization TEXT;
+    PRAGMA user_version = 4;
+  `);
+}
+
 export function openRunArchiveActions(path: string, now = Date.now) {
   const db = privateDatabase(path);
   try {
@@ -229,10 +240,14 @@ export function openRunArchiveActions(path: string, now = Date.now) {
     transaction(db, () => {
       const id = db.prepare("PRAGMA application_id").get()?.application_id;
       const version = db.prepare("PRAGMA user_version").get()?.user_version;
-      if (id === applicationId && version === 3) return;
-      if (id === applicationId && (version === 1 || version === 2)) {
+      if (id === applicationId && version === 4) return;
+      if (
+        id === applicationId &&
+        (version === 1 || version === 2 || version === 3)
+      ) {
         if (version === 1) createArchiveBatches(db);
-        createArchivePurges(db);
+        if (version < 3) createArchivePurges(db);
+        addPurgeAuthorization(db);
         return;
       }
       if (
@@ -266,6 +281,7 @@ export function openRunArchiveActions(path: string, now = Date.now) {
       `);
       createArchiveBatches(db);
       createArchivePurges(db);
+      addPurgeAuthorization(db);
     });
   } catch (error) {
     db.close();
@@ -296,8 +312,31 @@ export function openRunArchiveActions(path: string, now = Date.now) {
   return {
     readPurge: purgeReceipt,
 
+    readPurgeAuthorization(
+      archiveId: string,
+    ): RunArchivePurgeAuthorization | undefined {
+      const raw = purge.get(archiveId)?.authorization;
+      if (raw === null || raw === undefined) return;
+      if (raw === "standalone") return { kind: "standalone" };
+      if (typeof raw === "string" && uuid.test(raw)) {
+        return { kind: "batch", batchRequestId: raw };
+      }
+      throw new Error("Invalid retained purge authorization.");
+    },
+
     /** Requires the caller to hold the package lock and current scope. */
-    admitPurge(requestId: string, archive: RunArchiveActionRecord) {
+    admitPurge(
+      requestId: string,
+      archive: RunArchiveActionRecord,
+      authorization?: RunArchivePurgeAuthorization,
+    ) {
+      if (
+        authorization?.kind === "batch" &&
+        !uuid.test(authorization.batchRequestId)
+      ) return;
+      const binding = authorization?.kind === "batch"
+        ? authorization.batchRequestId
+        : authorization?.kind ?? null;
       if (
         !uuid.test(requestId) || !uuid.test(archive.archiveId) ||
         !archive.archiveDigest || !digestPattern.test(archive.archiveDigest)
@@ -311,8 +350,10 @@ export function openRunArchiveActions(path: string, now = Date.now) {
         ) return;
         const prior = purgeReceipt(archive.archiveId);
         if (prior) {
+          const saved = purge.get(archive.archiveId)?.authorization;
           return prior.requestId === requestId &&
-              prior.archiveDigest === archive.archiveDigest
+              prior.archiveDigest === archive.archiveDigest &&
+              (saved === null || saved === binding)
             ? prior
             : undefined;
         }
@@ -326,8 +367,10 @@ export function openRunArchiveActions(path: string, now = Date.now) {
             "SELECT 1 FROM run_archive_actions WHERE archiveId = ? AND action = 'restore' AND status = 'pending'",
           ).get(archive.archiveId)
         ) return;
-        db.prepare("INSERT INTO run_archive_purges VALUES (?, ?, ?, 'pending')")
-          .run(archive.archiveId, requestId, archive.archiveDigest!);
+        db.prepare(`
+          INSERT INTO run_archive_purges (archiveId, requestId, archiveDigest, status, authorization)
+          VALUES (?, ?, ?, 'pending', ?)
+        `).run(archive.archiveId, requestId, archive.archiveDigest!, binding);
         return purgeReceipt(archive.archiveId);
       });
     },

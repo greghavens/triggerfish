@@ -1,4 +1,4 @@
-import { recoverSentinelArchiveQuarantines } from "./operator_run_archive_purge.ts";
+import { recoverSentinelArchivePurges } from "./operator_run_archive_purge.ts";
 import { reviewedRuleActions } from "./operator_reviewed_rules.ts";
 import {
   type NamedConversationAgentProfile,
@@ -1386,14 +1386,14 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
     config.customToolsBaseDir;
   const session: ChatSession = {
     ...(archiveRecoveryBaseDir && {
-      async recoverRunArchiveQuarantines() {
+      async recoverRunArchivePurges() {
         const { authorizeOwnerRunCall } = savedToolAuthorization(
           config.session,
           () => config.session.taint,
           () => true,
         );
         if (authorizeOwnerRunCall) {
-          await recoverSentinelArchiveQuarantines(
+          await recoverSentinelArchivePurges(
             archiveRecoveryBaseDir,
             authorizeOwnerRunCall,
           );

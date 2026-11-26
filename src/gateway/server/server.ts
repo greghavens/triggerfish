@@ -197,7 +197,7 @@ export function createGatewayServer(
 
     async start(): Promise<import("./server_types.ts").GatewayAddr> {
       try {
-        await chatSession?.recoverRunArchiveQuarantines?.();
+        await chatSession?.recoverRunArchivePurges?.();
       } catch {
         log.warn("Run archive quarantine reconciliation could not complete");
       }
