@@ -36,7 +36,12 @@ import { openSentinelWorkerFindingStore } from "../../src/sentinel/worker_findin
 import { openOperatorRunLinkStore } from "../../src/core/operator_runs.ts";
 import { AgentRecoveryStore } from "../../src/core/agent_recovery_store.ts";
 import { computeContentHash } from "../../src/core/session/lineage_serde.ts";
-import { assert, assertEquals, assertStringIncludes } from "@std/assert";
+import {
+  assert,
+  assertEquals,
+  assertRejects,
+  assertStringIncludes,
+} from "@std/assert";
 import { dirname, join } from "@std/path";
 import {
   openExecutionTraces,
@@ -74,6 +79,7 @@ import { renderSentinelProvenanceJson } from "../../src/sentinel/assessment_expo
 import {
   readSentinelAssessment,
   readSentinelAssessmentRevision,
+  readSentinelEmptyCreationDigest,
   readSentinelOperatingConstraints,
   refreshSentinelAssessment,
   SENTINEL_ASSESSMENT_TIMED_OUT,
@@ -3343,6 +3349,121 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
           "unavailable",
         );
       }, reopenedWorkflows);
+
+      const emptyCase = "linked-empty-case";
+      const emptyPath = resolveSentinelCasePath(baseDir, emptyCase);
+      const emptySpawn = {
+        ...spawn,
+        targetKind: "sentinel",
+        targetId: emptyCase,
+        initialGraph: "empty",
+        childGoal: "Review evidence once it is published.",
+        requestId: crypto.randomUUID(),
+      };
+      const beforeEmptyApproval = confirmations.length;
+      assertStringIncludes(
+        (await turn({ ...emptySpawn, initialGraph: undefined })).result,
+        "unavailable",
+      );
+      assertStringIncludes(
+        (await turn({ ...spawn, initialGraph: "empty" })).result,
+        "unavailable",
+      );
+      assertStringIncludes(
+        (await turn({
+          ...emptySpawn,
+          initialGraph: {
+            version: 1,
+            nodes: [{ id: "unexpected" }],
+            edges: [],
+          },
+        })).result,
+        "unavailable",
+      );
+      assertEquals(confirmations.length, beforeEmptyApproval);
+      approved = false;
+      assertStringIncludes(
+        (await turn(emptySpawn)).result,
+        "operator declined",
+      );
+      assertEquals(readSentinelAssessment(emptyPath), undefined);
+      await assertRejects(
+        () => Deno.lstat(dirname(emptyPath)),
+        Deno.errors.NotFound,
+      );
+      approved = true;
+      const emptyRun = JSON.parse((await turn(emptySpawn)).result);
+      assertEquals(emptyRun.run.ref, {
+        kind: "sentinel",
+        id: emptyCase,
+        revision: 1,
+      });
+      assertEquals(
+        readSentinelAssessment(emptyPath)?.result?.sharedGraph.snapshot?.nodes,
+        [],
+      );
+      assertEquals(JSON.parse(await Deno.readTextFile(emptyPath)), {
+        version: 1,
+        nodes: [],
+        edges: [],
+      });
+      assertEquals(
+        JSON.parse(confirmations.at(-1)!.split("\n").at(-1)!).initialGraph,
+        "empty",
+      );
+      const creationDigest = readSentinelEmptyCreationDigest(emptyPath, 1);
+      assert(creationDigest);
+      const stage = join(
+        baseDir,
+        "data",
+        "sentinel-linked-staging",
+        creationDigest,
+      );
+      await Deno.rename(dirname(emptyPath), stage);
+      const emptyApprovals = confirmations.length;
+      await withGateway(async (restartTurn) => {
+        assertStringIncludes(
+          (await restartTurn({ ...emptySpawn, childGoal: "A changed goal." }))
+            .result,
+          "unavailable",
+        );
+        await assertRejects(
+          () => Deno.lstat(dirname(emptyPath)),
+          Deno.errors.NotFound,
+        );
+        const retry = JSON.parse((await restartTurn(emptySpawn)).result);
+        await assertRejects(() => Deno.lstat(stage), Deno.errors.NotFound);
+        assertEquals(retry.link, emptyRun.link);
+        assertEquals(retry.run.details.runId, emptyRun.run.details.runId);
+        assertStringIncludes(
+          (await restartTurn({ ...emptySpawn, initialGraph: undefined }))
+            .result,
+          "unavailable",
+        );
+        assertEquals(confirmations.length, emptyApprovals);
+      }, reopenedWorkflows);
+
+      const collisionCase = "linked-empty-collision";
+      const collisionPath = resolveSentinelCasePath(baseDir, collisionCase);
+      const collisionGraph = JSON.stringify(childGraph);
+      duringConfirmation = () => {
+        Deno.mkdirSync(dirname(collisionPath));
+        Deno.writeTextFileSync(collisionPath, collisionGraph);
+      };
+      try {
+        assertStringIncludes(
+          (await turn({
+            ...emptySpawn,
+            targetId: collisionCase,
+            requestId: crypto.randomUUID(),
+          })).result,
+          "unavailable",
+        );
+      } finally {
+        duringConfirmation = undefined;
+      }
+      assertEquals(Deno.readTextFileSync(collisionPath), collisionGraph);
+      assertEquals(readSentinelAssessment(collisionPath), undefined);
 
       const cancelSentinel = {
         action: "cancel",

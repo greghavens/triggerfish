@@ -1,3 +1,5 @@
+import { emptyLinkedSentinelGraphDigest } from "../sentinel/linked_empty_case.ts";
+import { withSentinelSourceSnapshotLock } from "../sentinel/source_snapshot_lock.ts";
 import { parseSentinelLinkedSeedTask } from "../sentinel/linked_seed_task.ts";
 import {
   parseSentinelLinkedCaseSources,
@@ -652,6 +654,12 @@ export const operatorRunTool: ToolDefinition = {
     childDescription: {
       type: "string",
       description: "Optional display title for a linked Sentinel assessment.",
+    },
+    initialGraph: {
+      type: "string",
+      description:
+        "Create a linked Sentinel case with an empty local graph. Omit to use an existing published graph.",
+      enum: ["empty"],
     },
     goalProposal: {
       type: "object",
@@ -7874,6 +7882,7 @@ export function createOperatorRunToolExecutor(options: {
           childGoal,
           childDescription,
           goalProposal,
+          initialGraph,
           organizationId,
           seedTask: rawSeedTask,
           timeoutSeconds,
@@ -7902,6 +7911,7 @@ export function createOperatorRunToolExecutor(options: {
               "childGoal",
               "childDescription",
               "goalProposal",
+              "initialGraph",
               "organizationId",
               "seedTask",
               "timeoutSeconds",
@@ -7914,6 +7924,9 @@ export function createOperatorRunToolExecutor(options: {
           (sourceCases !== undefined &&
             (targetKind !== "sentinel" || !Array.isArray(sourceCases) ||
               !sourceCases.length || sourceCases.length > 4)) ||
+          (initialGraph !== undefined &&
+            (initialGraph !== "empty" || targetKind !== "sentinel" ||
+              rawSeedTask !== undefined || organizationId !== undefined)) ||
           (organizationId !== undefined &&
             (targetKind !== "sentinel" || typeof organizationId !== "string" ||
               !organizationId.trim() || organizationId.length > 256 ||
@@ -8056,6 +8069,22 @@ export function createOperatorRunToolExecutor(options: {
           JSON.stringify(["operator-spawn", linkScope, operatorId, request]),
         ).digest("hex");
         const target: OperatorRunRef = { kind: targetKind, id: targetId };
+        const emptyCreationDigest = initialGraph === "empty"
+          ? createHash("sha256").update(JSON.stringify([
+            "sentinel-linked-empty-v1",
+            childRequest,
+            parent,
+            target,
+            childGoal,
+            childDescription,
+            goalApproval,
+            timeoutSeconds,
+            modelProfile,
+            modelFallbackProfiles,
+            linkedCaseSources,
+            plannerHeartbeatSeconds,
+          ])).digest("hex")
+          : undefined;
         const readLinkedChild = async () => {
           const link = links.readRequest(linkScope, operatorId, request);
           if (!link) return;
@@ -8071,7 +8100,24 @@ export function createOperatorRunToolExecutor(options: {
           if (targetKind === "sentinel") {
             if (
               link.origin !== "spawn" || link.requestId !== request ||
-              other.id !== targetId || other.revision === undefined ||
+              other.id !== targetId || other.revision === undefined
+            ) return unavailable;
+            if (emptyCreationDigest) {
+              await withSentinelSourceSnapshotLock(
+                options.baseDir,
+                true,
+                () =>
+                  providers.sentinel.finishEmptyStart(
+                    other,
+                    emptyCreationDigest,
+                  ),
+              );
+            }
+            if (
+              !providers.sentinel.matchesStartEmpty(
+                other,
+                emptyCreationDigest,
+              ) ||
               !providers.sentinel.matchesStartGoal(other, childGoal) ||
               !providers.sentinel.matchesStartGoalApproval(
                 other,
@@ -8110,7 +8156,11 @@ export function createOperatorRunToolExecutor(options: {
         };
         const prior = await readLinkedChild();
         if (prior !== undefined) return prior;
-        const graphDigest = target.kind === "sentinel"
+        const graphDigest = emptyCreationDigest
+          ? providers.sentinel.canStartEmpty(target)
+            ? emptyLinkedSentinelGraphDigest
+            : undefined
+          : target.kind === "sentinel"
           ? providers.sentinel.publishedStartDigest(target)
           : undefined;
         if (
@@ -8123,12 +8173,15 @@ export function createOperatorRunToolExecutor(options: {
         if (organizationId !== undefined && !membership) return unavailable;
         if (
           !await options.confirm(
-            `Start and link this published run?\n${
+            `Start and link this ${
+              emptyCreationDigest ? "empty Sentinel case" : "published run"
+            }?\n${
               JSON.stringify({
                 parent,
                 target,
                 requestId: request,
                 ...(graphDigest && { graphDigest }),
+                ...(emptyCreationDigest && { initialGraph }),
                 ...(childGoal !== undefined && { childGoal }),
                 ...(childDescription !== undefined && { childDescription }),
                 ...(goalApproval && { goalApproval }),
@@ -8166,20 +8219,29 @@ export function createOperatorRunToolExecutor(options: {
         };
         try {
           if (target.kind === "sentinel" && graphDigest) {
-            providers.sentinel.startLinked(target, {
-              ...link,
-              graphDigest,
-              childGoal,
-              childDescription,
-              goalApproval,
-              membership,
-              seedTask,
-              timeoutSeconds,
-              modelProfile,
-              modelFallbackProfiles,
-              plannerHeartbeatSeconds,
-              linkedCaseSources,
-            });
+            const start = () =>
+              providers.sentinel.startLinked(target, {
+                ...link,
+                graphDigest,
+                emptyCreationDigest,
+                childGoal,
+                childDescription,
+                goalApproval,
+                membership,
+                seedTask,
+                timeoutSeconds,
+                modelProfile,
+                modelFallbackProfiles,
+                plannerHeartbeatSeconds,
+                linkedCaseSources,
+              });
+            if (emptyCreationDigest) {
+              await withSentinelSourceSnapshotLock(
+                options.baseDir,
+                true,
+                start,
+              );
+            } else start();
           } else {
             workflows?.start(target.id, ceiling, childRequest, link);
           }

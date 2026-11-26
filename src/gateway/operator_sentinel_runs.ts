@@ -1,3 +1,9 @@
+import {
+  canCreateEmptyLinkedSentinelCase,
+  publishEmptyLinkedSentinelCase,
+  readStagedEmptyLinkedSentinelCase,
+  stageEmptyLinkedSentinelCase,
+} from "../sentinel/linked_empty_case.ts";
 import type { SentinelCaseMembershipProof } from "../sentinel/case_membership.ts";
 import { ensureSentinelFormalGoalContract } from "./sentinel_goal_completion.ts";
 import type { SentinelLinkedSeedTask } from "../sentinel/linked_seed_task.ts";
@@ -23,6 +29,7 @@ import {
   readSentinelAssessmentRevision,
   readSentinelCaseStatus,
   readSentinelChildDescription,
+  readSentinelEmptyCreationDigest,
   readSentinelFallbackModelsForRevision,
   readSentinelFormalGoalApproval,
   readSentinelLinkedSourcesForRevision,
@@ -55,6 +62,9 @@ export function createOperatorSentinelRuns(
     runId: string,
   ): OperatorRunSummary | undefined;
   publishedStartDigest(ref: OperatorRunRef): string | undefined;
+  canStartEmpty(ref: OperatorRunRef): boolean;
+  matchesStartEmpty(ref: OperatorRunRef, creationDigest?: string): boolean;
+  finishEmptyStart(ref: OperatorRunRef, creationDigest: string): void;
   previewStartOrganization(
     ref: OperatorRunRef,
     organizationId: string,
@@ -82,6 +92,7 @@ export function createOperatorSentinelRuns(
       path: string;
       input: Omit<OperatorRunLinkInput, "right">;
       graphDigest: string;
+      emptyCreationDigest?: string;
       childGoal?: string;
       goalApproval?: SentinelFormalGoalApproval;
       membership?: SentinelCaseMembershipProof;
@@ -268,6 +279,31 @@ export function createOperatorSentinelRuns(
       ) return;
       return inspect(ref);
     },
+    canStartEmpty(ref) {
+      return ref.kind === "sentinel" && ref.revision === undefined &&
+        canCreateEmptyLinkedSentinelCase(baseDir, ref.id);
+    },
+    matchesStartEmpty(ref, creationDigest) {
+      const path = pathFor(ref);
+      return !!path && ref.revision !== undefined &&
+        readSentinelEmptyCreationDigest(path, ref.revision) === creationDigest;
+    },
+    finishEmptyStart(ref, creationDigest) {
+      if (
+        ref.kind !== "sentinel" || ref.revision === undefined || pathFor(ref) ||
+        !canCreateEmptyLinkedSentinelCase(baseDir, ref.id)
+      ) return;
+      const stage = readStagedEmptyLinkedSentinelCase(
+        baseDir,
+        ref.id,
+        creationDigest,
+      );
+      if (
+        !stage || readSentinelCaseStatus(stage)?.revision !== ref.revision ||
+        readSentinelEmptyCreationDigest(stage, ref.revision) !== creationDigest
+      ) return;
+      publishEmptyLinkedSentinelCase(baseDir, ref.id, creationDigest);
+    },
     publishedStartDigest(ref) {
       const path = pathFor(ref);
       if (
@@ -357,10 +393,20 @@ export function createOperatorSentinelRuns(
         timeoutSeconds;
     },
     startLinked(ref, link) {
-      const path = pathFor(ref);
-      if (!path || ref.id === "main" || ref.revision !== undefined) return;
+      if (
+        ref.kind !== "sentinel" || ref.id === "main" ||
+        ref.revision !== undefined
+      ) return;
+      const stage = link.emptyCreationDigest
+        ? stageEmptyLinkedSentinelCase(
+          baseDir,
+          ref.id,
+          link.emptyCreationDigest,
+        )
+        : pathFor(ref);
+      if (!stage) return;
       const started = startSentinelAssessment(
-        path,
+        stage,
         link.childGoal === undefined ? {} : { goal: link.childGoal },
         webContainmentConfigured,
         {
@@ -368,6 +414,16 @@ export function createOperatorSentinelRuns(
           caseId: ref.id,
         },
       );
+      if (
+        link.emptyCreationDigest &&
+        !publishEmptyLinkedSentinelCase(
+          baseDir,
+          ref.id,
+          link.emptyCreationDigest,
+        )
+      ) return;
+      const path = pathFor(ref);
+      if (!path) return;
       if (link.goalApproval) ensureSentinelFormalGoalContract(path, started);
       advanceAdaptiveSentinel(path, started);
       return inspect({ ...ref, revision: started.revision });

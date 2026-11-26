@@ -1410,6 +1410,7 @@ export function startSentinelAssessment(
     input: Omit<OperatorRunLinkInput, "right">;
     caseId: string;
     graphDigest: string;
+    emptyCreationDigest?: string;
     seedTask?: SentinelLinkedSeedTask;
     goalApproval?: SentinelFormalGoalApproval;
     membership?: SentinelCaseMembershipProof;
@@ -1614,6 +1615,22 @@ export function startSentinelAssessment(
             saveFormalGoalRequest(db, approval, formal.binding, started);
           }
           if (linkedStart) {
+            if (linkedStart.emptyCreationDigest !== undefined) {
+              if (!/^[a-f0-9]{64}$/.test(linkedStart.emptyCreationDigest)) {
+                throw new Error("Invalid linked Sentinel creation approval");
+              }
+              if (
+                !db.prepare("PRAGMA table_info(assessment_run_revisions)").all()
+                  .some(({ name }) => name === "emptyCreationDigest")
+              ) {
+                db.exec(
+                  "ALTER TABLE assessment_run_revisions ADD COLUMN emptyCreationDigest TEXT",
+                );
+              }
+              db.prepare(
+                "UPDATE assessment_run_revisions SET emptyCreationDigest = ? WHERE revision = ?",
+              ).run(linkedStart.emptyCreationDigest, started.revision);
+            }
             if (plan.goal !== undefined) {
               if (
                 !db.prepare("PRAGMA table_info(assessment_run_revisions)").all()
@@ -2480,6 +2497,28 @@ export function readSentinelOperatingConstraintVersion(
 ): SentinelOperatingConstraintRecord | undefined {
   if (!Number.isSafeInteger(version) || version < 1) return undefined;
   return operatingConstraintRecords(path, runId, 1, undefined, version)[0];
+}
+
+/** Bind a linked run to its original empty-graph creation approval. */
+export function readSentinelEmptyCreationDigest(
+  path: string,
+  revision: number,
+): string | undefined {
+  const db = openStore(path, false);
+  if (!db) return;
+  try {
+    if (!hasTable(db, "assessment_run_revisions")) return;
+    const digest = db.prepare(
+      "SELECT * FROM assessment_run_revisions WHERE revision = ?",
+    ).get(revision)?.emptyCreationDigest;
+    if (digest == null) return;
+    if (typeof digest !== "string" || !/^[a-f0-9]{64}$/.test(digest)) {
+      throw new Error("Invalid saved linked Sentinel creation approval");
+    }
+    return digest;
+  } finally {
+    db.close();
+  }
 }
 
 /** Read the title for this exact saved assessment revision. */
