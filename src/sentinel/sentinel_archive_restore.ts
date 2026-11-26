@@ -946,6 +946,7 @@ function validateArchivedTrafficFindingPublications(
             staged.finding.evidenceRevision,
             staged.finding.runId,
             staged.finding.targetId,
+            item,
           );
         if (
           !ref || ref.evidenceId !== item.evidenceId ||

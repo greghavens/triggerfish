@@ -74,6 +74,30 @@ export function isSentinelHintTrafficReference(
     typeof ref.digest === "string" && DIGEST.test(ref.digest);
 }
 
+/** Legacy singular or a reviewed, ordered set of exact traffic references. */
+export type SentinelHintTrafficSelection =
+  | SentinelHintTrafficReference
+  | readonly SentinelHintTrafficReference[];
+
+export function isSentinelHintTrafficSelection(
+  value: unknown,
+): value is SentinelHintTrafficSelection {
+  return isSentinelHintTrafficReference(value) ||
+    (Array.isArray(value) && value.length >= 2 && value.length <= 4 &&
+      value.every(isSentinelHintTrafficReference) &&
+      new Set(value.map(({ evidenceId }) => evidenceId)).size === value.length);
+}
+
+export function sentinelHintTrafficReferences(
+  selection: SentinelHintTrafficSelection | undefined,
+): readonly SentinelHintTrafficReference[] {
+  return !selection
+    ? []
+    : isSentinelHintTrafficReference(selection)
+    ? [selection]
+    : selection;
+}
+
 const METHODS = new Set([
   "GET",
   "HEAD",

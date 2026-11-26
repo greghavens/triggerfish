@@ -3,6 +3,8 @@ import { INCONCLUSIVE_RECHECK_TOOL } from "../sentinel/recheck_inconclusive.ts";
 import {
   readSentinelTrafficReceipt,
   type SentinelHintTrafficReference,
+  sentinelHintTrafficReferences,
+  type SentinelHintTrafficSelection,
 } from "../sentinel/traffic_receipts.ts";
 import { notifyCommittedEvidence } from "../core/evidence_task_progression.ts";
 import { readScopedSentinelSharedAssetDiscoveries } from "./sentinel_asset_discoveries.ts";
@@ -1650,18 +1652,15 @@ export function recordOperatorSentinelRunHint(
   note: string,
   operatorScope = "owner",
   assetIds?: readonly string[],
-  trafficReference?: SentinelHintTrafficReference,
+  trafficReference?: SentinelHintTrafficSelection,
 ) {
   const saved = withSentinelAssessmentWriteLock(snapshotPath, (state) => {
     if (
       !state?.active || state.revision !== revision ||
       (assetIds && !sentinelHintAssetsInScope(snapshotPath, state, assetIds)) ||
       (trafficReference && (assetIds?.length !== 1 ||
-        !readSentinelTrafficReceipt(
-          snapshotPath,
-          revision,
-          trafficReference,
-          assetIds[0],
+        sentinelHintTrafficReferences(trafficReference).some((ref) =>
+          !readSentinelTrafficReceipt(snapshotPath, revision, ref, assetIds[0])
         )))
     ) return;
     const runId = state.plan.runId ?? "sentinel-assessment";
@@ -1706,11 +1705,8 @@ export function reviewSentinelOperatorHintBatch(
       batch.hints.some(({ assetIds, trafficReference }) =>
         (assetIds && !sentinelHintAssetsInScope(path, state, assetIds)) ||
         (trafficReference && (assetIds?.length !== 1 ||
-          !readSentinelTrafficReceipt(
-            path,
-            batch.revision,
-            trafficReference,
-            assetIds[0],
+          sentinelHintTrafficReferences(trafficReference).some((ref) =>
+            !readSentinelTrafficReceipt(path, batch.revision, ref, assetIds[0])
           )))
       )
     ) return;
@@ -1746,7 +1742,7 @@ export function readSentinelOperatorAssetHint(
   requestId: string,
   text: string,
   assetIds: readonly string[],
-  trafficReference?: SentinelHintTrafficReference,
+  trafficReference?: SentinelHintTrafficSelection,
 ) {
   const store = openSentinelAdaptiveStore(storePath(path));
   try {
@@ -1770,6 +1766,7 @@ export function readSentinelOperatorTrafficHint(
   state: State,
   sourceHintId: number,
   assetId: string,
+  selected: SentinelHintTrafficReference,
 ) {
   const runId = state.plan.runId;
   if (
@@ -1782,6 +1779,7 @@ export function readSentinelOperatorTrafficHint(
     state.revision,
     runId,
     assetId,
+    selected,
   );
 }
 
@@ -1812,7 +1810,9 @@ export function readSentinelAssetTrafficHints(
     );
     return page.every(({ trafficReference }) =>
         trafficReference &&
-        readSentinelTrafficReceipt(path, revision, trafficReference, assetId)
+        sentinelHintTrafficReferences(trafficReference).every((ref) =>
+          readSentinelTrafficReceipt(path, revision, ref, assetId)
+        )
       )
       ? page
       : undefined;
@@ -5244,6 +5244,7 @@ export function createSentinelModelPlanner(
           current,
           link.sourceHint.id,
           targetId,
+          { evidenceId: link.trafficId, digest: link.trafficDigest },
         );
         if (
           link.sourceHint &&
@@ -6756,7 +6757,7 @@ export function createSentinelModelPlanner(
               "Report verified criteria in goalObservations as {criterionId,evidence:[{source,reference,detail}]}. Read other criteria with sentinel_goal_state (offset, limit). For an adaptive_task, match the required kind, depth and node and cite the completed ID (coverage must pass if required). For finding_recheck, cite the exact passing receipt for the original finding. For graph_fact, cite the exact receipt, matching any specified directed edge. Omit missing or uncertain proof.",
             ]
             : []),
-          "A trafficReference in operatorAssetHints identifies one retained source. Reopen it only with the case-scoped traffic reader and use it only for the anchored asset.",
+          "A trafficReference in operatorAssetHints identifies an exact retained source or ordered set of sources. Reopen it only with the case-scoped traffic reader and use it only for the anchored asset.",
           "For a follow-up supported by githubWorkflowReads, use sourceTaskId, sourceKind model_review and sourceWorkflowResultSha256. Keep the exact target.",
           ...(state.plan.linkedCaseSources
             ? [
@@ -6775,11 +6776,13 @@ export function createSentinelModelPlanner(
             sentinelHintAssetsInScope(snapshotPath, state, assetIds) &&
             (!trafficReference ||
               (revision === state.revision && assetIds.length === 1 &&
-                readSentinelTrafficReceipt(
-                  snapshotPath,
-                  revision,
-                  trafficReference,
-                  assetIds[0],
+                sentinelHintTrafficReferences(trafficReference).every((ref) =>
+                  readSentinelTrafficReceipt(
+                    snapshotPath,
+                    revision,
+                    ref,
+                    assetIds[0],
+                  )
                 )))
             ? [{
               id,

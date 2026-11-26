@@ -10071,7 +10071,8 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
       { trafficReference },
     ) => trafficReference);
     assert(
-      priorHint?.trafficReference && priorHint.revision &&
+      priorHint?.trafficReference &&
+        "evidenceId" in priorHint.trafficReference && priorHint.revision &&
         priorHint.assetIds?.[0],
     );
     assert(stopSentinelAssessment(peerPath));

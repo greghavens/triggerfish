@@ -1,6 +1,8 @@
 import {
-  isSentinelHintTrafficReference,
+  isSentinelHintTrafficSelection,
   type SentinelHintTrafficReference,
+  sentinelHintTrafficReferences,
+  type SentinelHintTrafficSelection,
 } from "./traffic_receipts.ts";
 import { isModelRouteIdentity } from "../core/model_route_identity.ts";
 import { readVerifiedPassingFindingRecheck } from "./worker_finding_evidence.ts";
@@ -1153,7 +1155,7 @@ export interface AdaptiveGraphRetryReceipt extends AdaptiveGraphRetryScope {
 export interface AdaptiveOperatorHintSelection {
   readonly note: string;
   readonly assetIds?: readonly string[];
-  readonly trafficReference?: SentinelHintTrafficReference;
+  readonly trafficReference?: SentinelHintTrafficSelection;
 }
 
 export interface AdaptiveOperatorHintBatch {
@@ -2831,6 +2833,7 @@ export function readAdaptiveOperatorTrafficHint(
   revision: number,
   runId: string,
   assetId: string,
+  selected: SentinelHintTrafficReference,
 ) {
   const db = openPrivateDatabase(path, true);
   try {
@@ -2854,9 +2857,11 @@ export function readAdaptiveOperatorTrafficHint(
     const ref: unknown = JSON.parse(row.trafficReference);
     if (
       !isDeepStrictEqual(assets, [assetId]) ||
-      !isSentinelHintTrafficReference(ref)
+      !isSentinelHintTrafficSelection(ref)
     ) return;
-    return ref;
+    return sentinelHintTrafficReferences(ref).find(({ evidenceId, digest }) =>
+      evidenceId === selected.evidenceId && digest === selected.digest
+    );
   } finally {
     db.close();
   }
@@ -3724,7 +3729,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
   function hintTraffic(row: { trafficReference?: unknown }) {
     if (row.trafficReference == null) return {};
     const trafficReference: unknown = JSON.parse(String(row.trafficReference));
-    if (!isSentinelHintTrafficReference(trafficReference)) {
+    if (!isSentinelHintTrafficSelection(trafficReference)) {
       throw new Error("Invalid saved Sentinel hint traffic reference");
     }
     return { trafficReference };
@@ -3737,7 +3742,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
     operatorScope: string,
     runId: string,
     anchors?: readonly string[],
-    trafficReference?: SentinelHintTrafficReference,
+    trafficReference?: SentinelHintTrafficSelection,
   ) {
     const existing = db.prepare(`
       SELECT hint.id, hint.evidenceRevision, hint.at, hint.text, hint.assetIds, hint.trafficReference, request.runId, request.operatorScope
@@ -3812,7 +3817,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
     evidenceRevision: number,
     time: number,
     assetIds?: readonly string[],
-    trafficReference?: SentinelHintTrafficReference,
+    trafficReference?: SentinelHintTrafficSelection,
   ) {
     const result = db.prepare(
       "INSERT INTO adaptive_case_hints (evidenceRevision, at, text, assetIds, trafficReference) VALUES (?, ?, ?, ?, ?)",
@@ -9125,14 +9130,14 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
       operatorScope: string,
       runId: string,
       assetIds?: readonly string[],
-      trafficReference?: SentinelHintTrafficReference,
+      trafficReference?: SentinelHintTrafficSelection,
     ) {
       const anchors = normalizeSentinelHintAssets(assetIds);
       if (
         (assetIds !== undefined && !anchors) ||
         (trafficReference !== undefined &&
           (anchors?.length !== 1 ||
-            !isSentinelHintTrafficReference(trafficReference)))
+            !isSentinelHintTrafficSelection(trafficReference)))
       ) return;
       const hint = boundedText(text, "case hint", 1000);
       operatorScope = boundedText(operatorScope, "operator scope", 256);
@@ -9198,7 +9203,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
             )) ||
           (trafficReference !== undefined &&
             (assetIds?.length !== 1 ||
-              !isSentinelHintTrafficReference(trafficReference)))
+              !isSentinelHintTrafficSelection(trafficReference)))
         )
       ) return;
       return transaction(db, () => {

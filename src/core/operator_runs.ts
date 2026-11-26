@@ -60,16 +60,20 @@ export type OperatorRunAction =
   | OperatorRunMutation;
 type MaybePromise<T> = T | Promise<T>;
 
+type OperatorRunTrafficReference = {
+  readonly evidenceId: string;
+  readonly digest: string;
+};
+
 export interface OperatorRunMutationContext {
   readonly requestId?: string;
   readonly note?: string;
   readonly taskId?: string;
   readonly expectedRunId?: string;
   readonly assetIds?: readonly string[];
-  readonly trafficReference?: {
-    readonly evidenceId: string;
-    readonly digest: string;
-  };
+  readonly trafficReference?:
+    | OperatorRunTrafficReference
+    | readonly OperatorRunTrafficReference[];
 }
 
 export interface OperatorRunProvider {
@@ -739,6 +743,11 @@ export class OperatorRunController {
       assetIds,
       trafficReference,
     } = context ?? {};
+    const sources = Array.isArray(trafficReference)
+      ? trafficReference
+      : trafficReference
+      ? [trafficReference]
+      : [];
     if (
       (requestId !== undefined && !bounded(requestId, 128)) ||
       (note !== undefined && !bounded(note, 4096)) ||
@@ -751,9 +760,15 @@ export class OperatorRunController {
           assetIds.some((id) => !bounded(id, 100)))) ||
       (trafficReference !== undefined &&
         (action !== "hint" || assetIds?.length !== 1 ||
-          !trafficReference || Object.keys(trafficReference).length !== 2 ||
-          !bounded(trafficReference.evidenceId, 100) ||
-          !/^[a-f0-9]{64}$/.test(trafficReference.digest)))
+          sources.length < (Array.isArray(trafficReference) ? 2 : 1) ||
+          sources.length > 4 ||
+          sources.some((source) =>
+            !source || Object.keys(source).length !== 2 ||
+            !bounded(source.evidenceId, 100) ||
+            !/^[a-f0-9]{64}$/.test(source.digest)
+          ) ||
+          new Set(sources.map(({ evidenceId }) => evidenceId)).size !==
+            sources.length))
     ) throw new Error("Invalid operator run mutation context");
     // Starts target a configured plan ID. All other actions target an existing run.
     const exact = action === "start" ? ref : (await this.inspect(ref))?.ref;

@@ -718,6 +718,7 @@ export function executeSentinelWorkerFindingTool(
                   state,
                   sourceHintId,
                   asset,
+                  { evidenceId: trafficEvidenceId, digest: trafficDigest },
                 );
               if (
                 sourceHintId !== undefined &&

@@ -13,7 +13,11 @@ import { normalizeSentinelRecheckNote } from "../sentinel/worker_finding_recover
 import { createSentinelFindingRemediationReader } from "../sentinel/finding_remediation.ts";
 import { reopenSentinelPeerCoverage } from "./sentinel_peer_coverage.ts";
 import { discoverSentinelFindingNodeTraffic } from "./sentinel_finding_traffic_tool.ts";
-import { isSentinelHintTrafficReference } from "../sentinel/traffic_receipts.ts";
+import {
+  isSentinelHintTrafficSelection,
+  type SentinelHintTrafficReference,
+  sentinelHintTrafficReferences,
+} from "../sentinel/traffic_receipts.ts";
 import {
   type CategorizedOperatorRun,
   type OperatorRunCategoryChange,
@@ -407,6 +411,22 @@ const sentinelQueueActions = new Map(
     ["cancel_task", "cancel"],
   ] as const,
 );
+
+function parseOperatorHintTraffic(args: Record<string, unknown>) {
+  const { trafficReference, trafficReferences } = args;
+  const raw = trafficReference ?? trafficReferences;
+  if (trafficReference === undefined && trafficReferences === undefined) return;
+  if (
+    (trafficReference !== undefined && trafficReferences !== undefined) ||
+    Array.isArray(raw) !== (trafficReferences !== undefined) ||
+    !isSentinelHintTrafficSelection(raw)
+  ) return null;
+  const canonical = ({ evidenceId, digest }: SentinelHintTrafficReference) => ({
+    evidenceId,
+    digest,
+  });
+  return "evidenceId" in raw ? canonical(raw) : raw.map(canonical);
+}
 
 export const operatorRunTool: ToolDefinition = {
   name: "operator_runs",
@@ -1009,6 +1029,12 @@ export const operatorRunTool: ToolDefinition = {
         properties: {
           note: { type: "string" },
           assetIds: { type: "array", items: { type: "string" } },
+          trafficReferences: {
+            type: "array",
+            items: { type: "object" },
+            description:
+              "Two to four exact retained references in order. Omit trafficReference.",
+          },
           trafficReference: {
             type: "object",
             required: ["evidenceId", "digest"],
@@ -1115,6 +1141,12 @@ export const operatorRunTool: ToolDefinition = {
     factId: {
       type: "string",
       description: "Exact retained Sentinel graph fact ID",
+    },
+    trafficReferences: {
+      type: "array",
+      items: { type: "object" },
+      description:
+        "Two to four exact {evidenceId,digest} traffic references for the same asset. Omit trafficReference.",
     },
     trafficReference: {
       type: "object",
@@ -2618,7 +2650,10 @@ export function createOperatorRunToolExecutor(options: {
       (action !== "worker_trace_result" || args.latestResult !== true ||
         args.stepIndices !== undefined || args.workflowRunNumber !== undefined)
     ) return unavailable;
-    if (args.trafficReference !== undefined && action !== "hint") {
+    if (
+      (args.trafficReference !== undefined ||
+        args.trafficReferences !== undefined) && action !== "hint"
+    ) {
       return unavailable;
     }
     const backgroundRole =
@@ -5505,58 +5540,57 @@ ${request}`)
           if (!hint || typeof hint !== "object" || Array.isArray(hint)) {
             return unavailable;
           }
-          const { note, assetIds: rawAssets, trafficReference } = hint;
+          const { note, assetIds: rawAssets } = hint;
+          const trafficReference = parseOperatorHintTraffic(hint);
           const assetIds = normalizeSentinelHintAssets(rawAssets);
           if (
             typeof note !== "string" || !note.trim() || note.length > 1000 ||
             note.includes("\0") || redactCredentialText(note) !== note ||
             (rawAssets !== undefined && !assetIds) ||
-            (trafficReference !== undefined &&
-              (assetIds?.length !== 1 ||
-                !isSentinelHintTrafficReference(trafficReference))) ||
+            trafficReference === null ||
+            (trafficReference !== undefined && assetIds?.length !== 1) ||
             Object.keys(hint).some((key) =>
-              !["note", "assetIds", "trafficReference"].includes(key)
+              !["note", "assetIds", "trafficReference", "trafficReferences"]
+                .includes(key)
             )
           ) return unavailable;
           selected.push({
             note: note.trim(),
             ...(assetIds && { assetIds }),
-            ...(trafficReference && {
-              trafficReference: {
-                evidenceId: trafficReference.evidenceId,
-                digest: trafficReference.digest,
-              },
-            }),
+            ...(trafficReference && { trafficReference }),
           });
         }
         const authorize = async () => {
           for (const { assetIds, trafficReference } of selected) {
-            if (!trafficReference) continue;
-            if (
-              !readProjectedSentinelTrafficReceipt(
-                path,
-                ref.id,
-                revision,
-                trafficReference,
-                assetIds?.[0],
-              ) ||
-              !await context.authorizeOwnerRunCall?.({
-                action: "traffic_get",
-                kind: "sentinel",
-                id: ref.id,
-                revision,
-                ...trafficReference,
-              }) ||
-              !await context.authorizeSavedResponse(
-                operatorRunTool.name,
-                safeProjection({
-                  caseId: ref.id,
+            for (
+              const source of sentinelHintTrafficReferences(trafficReference)
+            ) {
+              if (
+                !readProjectedSentinelTrafficReceipt(
+                  path,
+                  ref.id,
                   revision,
-                  ...trafficReference,
-                }),
-                "INTERNAL",
-              )
-            ) return false;
+                  source,
+                  assetIds?.[0],
+                ) ||
+                !await context.authorizeOwnerRunCall?.({
+                  action: "traffic_get",
+                  kind: "sentinel",
+                  id: ref.id,
+                  revision,
+                  ...source,
+                }) ||
+                !await context.authorizeSavedResponse(
+                  operatorRunTool.name,
+                  safeProjection({
+                    caseId: ref.id,
+                    revision,
+                    ...source,
+                  }),
+                  "INTERNAL",
+                )
+              ) return false;
+            }
           }
           return true;
         };
@@ -11839,11 +11873,11 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
           !digestPattern.test(args.requestId)
         ) return unavailable;
         const assetIds = normalizeSentinelHintAssets(args.assetIds);
-        const trafficReference = args.trafficReference;
+        const trafficReference = parseOperatorHintTraffic(args);
         if (
-          trafficReference !== undefined &&
-          (!isSentinelHintTrafficReference(trafficReference) ||
-            assetIds?.length !== 1 || !context?.authorizeOwnerRunCall)
+          trafficReference === null ||
+          (trafficReference !== undefined &&
+            (assetIds?.length !== 1 || !context?.authorizeOwnerRunCall))
         ) return unavailable;
         if (args.assetIds !== undefined) {
           if (
@@ -11863,31 +11897,38 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
             if (!context || !authorizeCall) return unavailable;
             const revision = ref.revision;
             authorizeTrafficHint = async () => {
-              const receipt = readProjectedSentinelTrafficReceipt(
-                path,
-                ref.id,
-                revision,
-                trafficReference,
-                assetIds[0],
-              );
-              if (
-                !receipt || !await authorizeCall({
-                  action: "traffic_get",
-                  kind: "sentinel",
-                  id: ref.id,
+              for (
+                const source of sentinelHintTrafficReferences(trafficReference)
+              ) {
+                const receipt = readProjectedSentinelTrafficReceipt(
+                  path,
+                  ref.id,
                   revision,
-                  ...trafficReference,
-                })
-              ) return false;
-              return await context.authorizeSavedResponse(
-                operatorRunTool.name,
-                safeProjection({
-                  caseId: ref.id,
-                  revision,
-                  ...trafficReference,
-                }),
-                "INTERNAL",
-              ) && await authorizeCall(args);
+                  source,
+                  assetIds[0],
+                );
+                if (
+                  !receipt || !await authorizeCall({
+                    action: "traffic_get",
+                    kind: "sentinel",
+                    id: ref.id,
+                    revision,
+                    ...source,
+                  })
+                ) return false;
+                if (
+                  !await context.authorizeSavedResponse(
+                    operatorRunTool.name,
+                    safeProjection({
+                      caseId: ref.id,
+                      revision,
+                      ...source,
+                    }),
+                    "INTERNAL",
+                  )
+                ) return false;
+              }
+              return await authorizeCall(args);
             };
             if (!await authorizeTrafficHint()) return unavailable;
           }

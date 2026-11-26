@@ -5332,7 +5332,7 @@ async function verifyInitialTrafficPublication(
   assetId: string,
   neighbor: { evidenceId: string; digest: string },
   mode: "resume" | "revoked" | "stale",
-  hinted: boolean,
+  hinted: boolean | "set",
 ) {
   const ref = {
     kind: "sentinel",
@@ -5343,26 +5343,57 @@ async function verifyInitialTrafficPublication(
   const batch = traffic.length > 1;
   const hintId = hinted
     ? await (async () => {
-      const trafficReference = {
-        evidenceId: traffic[0].evidenceId,
-        digest: traffic[0].digest,
+      const sources = traffic.map(({ evidenceId, digest }) => ({
+        evidenceId,
+        digest,
+      }));
+      const selection = hinted === "set"
+        ? { trafficReferences: sources }
+        : { trafficReference: sources[0] };
+      const request = {
+        ...ref,
+        action: "hint",
+        requestId: crypto.randomUUID(),
+        note: "Review this retained response.",
+        assetIds: [assetId],
+        ...selection,
       };
-      await withFindingAssignmentGateway(baseDir, () =>
-        Promise.resolve(true), async (turn) => {
-        const result = await turn({
-          ...ref,
-          action: "hint",
-          requestId: crypto.randomUUID(),
-          note: "Review this retained response.",
-          assetIds: [assetId],
-          trafficReference,
-        });
+      let approvals = 0;
+      let denyLast = hinted === "set";
+      await withFindingAssignmentGateway(baseDir, () => {
+        approvals++;
+        return Promise.resolve(true);
+      }, async (turn) => {
+        if (denyLast) {
+          const denied = await turn(request);
+          assertStringIncludes(denied, "unavailable");
+          assertEquals(approvals, 0);
+          assertEquals(readSentinelCaseHints(path, 10), []);
+          denyLast = false;
+        }
+        const result = await turn(request);
         assert(!result.startsWith("Error:"), result);
-      });
-      const hint = readSentinelCaseHints(path, 10).find((row) =>
-        row.trafficReference?.evidenceId === trafficReference.evidenceId
-      );
+        assertEquals(await turn(request), result);
+        assertEquals(approvals, 1);
+        if (hinted === "set") {
+          assertStringIncludes(
+            await turn({
+              ...request,
+              trafficReferences: [...sources].reverse(),
+            }),
+            "unavailable",
+          );
+        }
+      }, (hook, input) =>
+        !(denyLast && hook === "PRE_TOOL_CALL" &&
+          JSON.stringify(input).includes('"traffic_get"') &&
+          JSON.stringify(input).includes(sources.at(-1)!.evidenceId)));
+      const [hint] = readSentinelCaseHints(path, 10);
       assert(hint);
+      assertEquals(
+        hint.trafficReference,
+        hinted === "set" ? sources : sources[0],
+      );
       return hint.id;
     })()
     : undefined;
@@ -5370,7 +5401,8 @@ async function verifyInitialTrafficPublication(
     traffic.map(({ evidenceId, digest }, index) => ({
       evidenceId,
       digest,
-      ...(hintId !== undefined && index === 0 && { sourceHintId: hintId }),
+      ...(hintId !== undefined && (index === 0 || hinted === "set") &&
+        { sourceHintId: hintId }),
     }));
   const selectedArgs = (items: typeof refs) =>
     batch ? { trafficRefs: items } : {
@@ -5405,13 +5437,15 @@ async function verifyInitialTrafficPublication(
         ? [tool(report, {
           ...input,
           ...selectedArgs(
-            batch
+            batch && hinted !== "set"
               ? refs.map(({ evidenceId, digest }, index) => ({
                 evidenceId,
                 digest,
                 ...(index === 1 && { sourceHintId: hintId }),
               }))
-              : [{ ...refs[0], sourceHintId: hintId + 1000 }],
+              : refs.map((ref, index) =>
+                index === 0 ? { ...ref, sourceHintId: hintId + 1000 } : ref
+              ),
           ),
         })]
         : []),
@@ -5823,7 +5857,7 @@ async function testScopedReporterRestart(
   useBatch: boolean,
   denyMember = false,
   initialPublication?: "resume" | "revoked" | "stale",
-  hinted = false,
+  hinted: boolean | "set" = false,
 ) {
   const baseDir = await Deno.makeTempDir();
   const path = resolveSentinelCasePath(
@@ -6777,3 +6811,6 @@ Deno.test("Sentinel recovers approved traffic hint provenance for mixed initial 
 
 Deno.test("Sentinel recovers approved traffic hint provenance for a singular initial finding attachment", () =>
   testScopedReporterRestart(false, false, "resume", true));
+
+Deno.test("Sentinel preserves a reviewed ordered traffic hint set through initial finding recovery", () =>
+  testScopedReporterRestart(true, false, "resume", "set"));

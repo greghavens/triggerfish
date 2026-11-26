@@ -600,6 +600,7 @@ function attachForScope(
       state,
       sourceHintId,
       assetId,
+      { evidenceId, digest },
     );
     if (source?.evidenceId !== evidenceId || source.digest !== digest) {
       return unavailable;

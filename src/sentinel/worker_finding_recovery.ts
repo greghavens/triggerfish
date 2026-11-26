@@ -187,6 +187,7 @@ export function lookupSentinelPendingTrafficFinding(
       scope.evidenceRevision,
       scope.runId,
       scope.targetId,
+      item,
     );
     return ref?.evidenceId !== item.evidenceId || ref.digest !== item.digest;
   });
