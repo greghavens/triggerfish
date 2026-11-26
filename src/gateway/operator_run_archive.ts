@@ -134,7 +134,15 @@ export async function executeOperatorRunArchive(
   confirm: (message: string) => Promise<boolean>,
   workflows?: OperatorWorkflowRuns,
   ownerScope?: { sessionId: string; ceiling: ClassificationLevel },
-): Promise<Record<string, unknown> | string> {
+): Promise<
+  | { receipt: RunArchiveActionRecord }
+  | {
+    identity: RunArchiveIdentity;
+    records: RunArchiveActionRecord[];
+    nextBefore: number | null;
+  }
+  | string
+> {
   const { action, runId, requestId, archiveId, limit, before } = args;
   const history = action === "archive_history";
   const sentinel = ref.kind === "sentinel";

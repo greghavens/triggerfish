@@ -180,6 +180,18 @@ function project(row: Row): RunArchiveActionRecord {
   };
 }
 
+function createArchiveBatches(db: DatabaseSync) {
+  db.exec(`
+    CREATE TABLE run_archive_batches (
+      requestId TEXT PRIMARY KEY,
+      binding TEXT NOT NULL,
+      eligible TEXT NOT NULL,
+      createdAt INTEGER NOT NULL
+    ) STRICT;
+    PRAGMA user_version = 2;
+  `);
+}
+
 /** One request claims one action. An interrupted action remains pending without automatic replay. */
 export function openRunArchiveActions(path: string, now = Date.now) {
   const db = privateDatabase(path);
@@ -188,7 +200,11 @@ export function openRunArchiveActions(path: string, now = Date.now) {
     transaction(db, () => {
       const id = db.prepare("PRAGMA application_id").get()?.application_id;
       const version = db.prepare("PRAGMA user_version").get()?.user_version;
-      if (id === applicationId && version === 1) return;
+      if (id === applicationId && version === 2) return;
+      if (id === applicationId && version === 1) {
+        createArchiveBatches(db);
+        return;
+      }
       if (
         id !== 0 || version !== 0 ||
         db.prepare("SELECT 1 FROM sqlite_schema LIMIT 1").get()
@@ -217,8 +233,8 @@ export function openRunArchiveActions(path: string, now = Date.now) {
         CREATE UNIQUE INDEX run_archive_action_package
           ON run_archive_actions(archiveId) WHERE action = 'archive' AND status = 'succeeded';
         PRAGMA application_id = ${applicationId};
-        PRAGMA user_version = 1;
       `);
+      createArchiveBatches(db);
     });
   } catch (error) {
     db.close();
@@ -228,6 +244,28 @@ export function openRunArchiveActions(path: string, now = Date.now) {
     "SELECT * FROM run_archive_actions WHERE requestId = ?",
   );
   return {
+    readBatch(requestId: string) {
+      if (!uuid.test(requestId)) return undefined;
+      const row = db.prepare(
+        "SELECT binding, eligible FROM run_archive_batches WHERE requestId = ?",
+      ).get(requestId);
+      return row && {
+        binding: String(row.binding),
+        eligible: JSON.parse(String(row.eligible)) as string[],
+      };
+    },
+
+    admitBatch(
+      requestId: string,
+      binding: string,
+      eligible: readonly string[],
+    ) {
+      if (!uuid.test(requestId)) return false;
+      return db.prepare(
+        "INSERT OR IGNORE INTO run_archive_batches VALUES (?, ?, ?, ?)",
+      ).run(requestId, binding, JSON.stringify(eligible), now()).changes === 1;
+    },
+
     admit(raw: RunArchiveActionInput): RunArchiveActionAdmission | undefined {
       const input = normalize(raw);
       if (!input) return undefined;

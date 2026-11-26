@@ -305,6 +305,7 @@ import { executeOperatorInventoryAffiliation } from "./operator_inventory_affili
 import { executeOperatorInventoryWithdrawal } from "./operator_inventory_withdrawal.ts";
 import { executeOperatorAssetWithdrawal } from "./operator_asset_withdrawal.ts";
 import { executeOperatorRunArchive } from "./operator_run_archive.ts";
+import { executeOperatorRunArchiveBatch } from "./operator_run_archive_batch.ts";
 import { readOperatorSentinelInventory } from "./operator_sentinel_inventory.ts";
 import { createOperatorSentinelRuns } from "./operator_sentinel_runs.ts";
 import {
@@ -400,6 +401,7 @@ export const operatorRunTool: ToolDefinition = {
         "archive",
         "restore",
         "archive_history",
+        "archive_runs",
         "approval_history",
         "execution_traces",
         "execution_trace_payload",
@@ -1139,7 +1141,7 @@ export const operatorRunTool: ToolDefinition = {
     runTargets: {
       type: "array",
       description:
-        "Exact workflow run IDs or Sentinel case, revision and run IDs to pause or resume.",
+        "Exact workflow runs or Sentinel case, revision and run IDs. Archive batches accept stopped Sentinel runs only.",
       items: {
         type: "object",
         properties: {
@@ -3544,6 +3546,28 @@ ${
             display: committed.display,
           })
           : unavailable;
+      }
+      if (action === "archive_runs") {
+        const ceiling = context?.ceiling ?? "PUBLIC";
+        if (
+          !context?.authenticatedOwnerSessionId ||
+          !context.authorizeOwnerRunCall || !canFlowTo("INTERNAL", ceiling)
+        ) return unavailable;
+        const result = await executeOperatorRunArchiveBatch({
+          baseDir: options.baseDir,
+          args,
+          ownerSessionId: context.authenticatedOwnerSessionId,
+          ceiling,
+          authorize: context.authorizeOwnerRunCall,
+          confirm: options.confirm,
+          parent: ({ kind, id, revision }) =>
+            providers.sentinel.discovery({ kind, id, revision })?.spawnParent,
+        });
+        if (!result) return unavailable;
+        if ("declined" in result) {
+          return "Error: The operator declined the run action.";
+        }
+        return safeProjection(result);
       }
       if (
         action === "archive" || action === "restore" ||

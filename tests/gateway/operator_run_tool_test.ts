@@ -149,6 +149,7 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
   let approved = true;
   let sentinelModelAccess = true;
   let duringConfirmation: (() => void) | undefined;
+  let denyArchiveTarget: string | undefined;
   const evaluated: { hook: string; taint: string; target?: unknown }[] = [];
   let denied: "PRE_TOOL_CALL" | "POST_TOOL_RESPONSE" | "PRE_OUTPUT" | undefined;
   let allowTracePayload = true;
@@ -342,6 +343,18 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
         ) {
           assertEquals(input.operation_type, "read");
           assertEquals(auditInput?.operation_type, "read");
+        }
+        if (
+          denyArchiveTarget && hook === "PRE_TOOL_CALL" && runTool &&
+          call?.args?.action === "archive" &&
+          call.args.id === denyArchiveTarget
+        ) {
+          return Promise.resolve({
+            allowed: false,
+            action: "BLOCK",
+            ruleId: null,
+            duration: 0,
+          });
         }
         if (
           denyTrafficHintSource && hook === "PRE_TOOL_CALL" &&
@@ -5629,6 +5642,112 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
       );
       assertEquals(confirmations.length, cancelApprovals);
       assertEquals(readSentinelAssessment(childPath)?.active, false);
+
+      const archiveParent = {
+        ...linkedSentinel.run.ref,
+        revision: 2,
+        runId: readSentinelAssessment(childPath)!.plan.runId!,
+      };
+      const archiveLeafId = "archive-batch-leaf";
+      const spawnedLeaf = JSON.parse(
+        (await turn({
+          action: "spawn",
+          kind: "sentinel",
+          id: archiveParent.id,
+          revision: archiveParent.revision,
+          targetKind: "sentinel",
+          targetId: archiveLeafId,
+          initialGraph: "empty",
+          requestId: crypto.randomUUID(),
+        })).result,
+      ).run;
+      const archiveLeaf = {
+        ...spawnedLeaf.ref,
+        runId: spawnedLeaf.details.runId,
+      };
+      assertEquals(
+        JSON.parse(
+          (await turn({
+            action: "cancel",
+            ...archiveLeaf,
+          })).result,
+        ).run.status,
+        "stopped",
+      );
+      const unavailableArchive = {
+        kind: "sentinel",
+        id: "archive-batch-missing",
+        revision: 1,
+        runId: crypto.randomUUID(),
+      };
+      const changingId = "archive-batch-changing";
+      const changingPath = resolveSentinelCasePath(baseDir, changingId);
+      await Deno.mkdir(dirname(changingPath), { recursive: true, mode: 0o700 });
+      await Deno.writeTextFile(changingPath, JSON.stringify(childGraph));
+      const changing = startSentinelAssessment(changingPath);
+      const changingTarget = {
+        kind: "sentinel",
+        id: changingId,
+        revision: changing.revision,
+        runId: changing.plan.runId!,
+      };
+      stopSentinelAssessment(changingPath);
+      const archiveBatch = {
+        action: "archive_runs",
+        requestId: crypto.randomUUID(),
+        runTargets: [
+          archiveParent,
+          unavailableArchive,
+          archiveLeaf,
+          changingTarget,
+        ],
+      };
+      const beforeArchiveBatch = confirmations.length;
+      denied = "PRE_TOOL_CALL";
+      await turn(archiveBatch);
+      denied = undefined;
+      assertEquals(confirmations.length, beforeArchiveBatch);
+      duringConfirmation = () => {
+        startSentinelAssessment(changingPath);
+      };
+      const batch = JSON.parse((await turn(archiveBatch)).result);
+      duringConfirmation = undefined;
+      assertEquals(confirmations.length, beforeArchiveBatch + 1);
+      assertEquals(
+        JSON.parse(confirmations.at(-1)!.split("\n").at(-1)!).targets,
+        [archiveLeaf, archiveParent, changingTarget],
+      );
+      assertEquals(
+        batch.outcomes.map(({ status }: { status: string }) => status),
+        ["succeeded", "unavailable", "succeeded", "unavailable"],
+      );
+      assertEquals(batch.outcomes[1], {
+        target: unavailableArchive,
+        status: "unavailable",
+      });
+      await withGateway(async (reconnected) => {
+        assertEquals(
+          JSON.parse((await reconnected(archiveBatch)).result),
+          batch,
+        );
+        assertStringIncludes(
+          (await reconnected({
+            ...archiveBatch,
+            runTargets: [archiveParent],
+          })).result,
+          "unavailable",
+        );
+        assertEquals(confirmations.length, beforeArchiveBatch + 1);
+        for (const outcome of [batch.outcomes[0], batch.outcomes[2]]) {
+          const history = JSON.parse(
+            (await reconnected({
+              action: "archive_history",
+              ...outcome.target,
+            })).result,
+          );
+          assertEquals(history.records[0], outcome.receipt);
+        }
+      }, reopenedWorkflows);
 
       const deadlineCase = "deadline-child";
       const deadlinePath = resolveSentinelCasePath(baseDir, deadlineCase);
