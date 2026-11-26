@@ -298,6 +298,7 @@ import {
 } from "./sentinel_traffic_tool.ts";
 import {
   currentSentinelFindingContext,
+  currentSentinelFindingReceipts,
   executeSentinelWorkerFindingTool,
   isSentinelWorkerFindingTool,
   sentinelFindingReadTools,
@@ -1290,6 +1291,8 @@ interface ActiveTurn {
   readonly signal: AbortSignal;
   readonly readGraph: ReadGraph;
   findingContextRevision?: number;
+  findingReceiptRevision?: number;
+  requireCurrentFindingReceiptRevision?: boolean;
   pendingTelemetryFence?: {
     readonly tool: string;
     readonly revision?: unknown;
@@ -5067,6 +5070,18 @@ function createAgent(
             options.assessmentRevision ?? turn.findingContextRevision,
           ))
         ) return { ...result, allowed: false, action: "BLOCK" };
+        if (
+          result.allowed && name === "POST_TOOL_RESPONSE" &&
+          toolName === "sentinel_worker_findings" &&
+          typeof context.input.tool_response === "string" &&
+          context.input.tool_response.startsWith("{") &&
+          (!turn || !currentSentinelFindingReceipts(
+            options,
+            context.input.tool_response,
+            turn.findingReceiptRevision ?? options.assessmentRevision,
+            turn.requireCurrentFindingReceiptRevision,
+          ))
+        ) return { ...result, allowed: false, action: "BLOCK" };
         if (name === "PRE_TOOL_CALL" && plannerControl) {
           const permits = result.action === "REQUIRE_APPROVAL" ||
             (result.action === "ALLOW" && result.allowed);
@@ -5613,6 +5628,13 @@ function createAgent(
             options.snapshotPath,
           )?.revision;
         }
+        if (name === "sentinel_worker_findings") {
+          turn.requireCurrentFindingReceiptRevision =
+            args.revision === undefined;
+          turn.findingReceiptRevision = options.assessmentRevision ??
+            sentinelTrafficPolicyRevision(args.revision) ??
+            readSentinelAssessment(options.snapshotPath)?.revision;
+        }
         const result = executeSentinelWorkerFindingTool(
           options,
           name,
@@ -5626,18 +5648,31 @@ function createAgent(
           turn.approvedReporterTraffic,
         );
         if (
-          name === SENTINEL_RECHECK_CONTEXT_TOOL &&
+          (name === SENTINEL_RECHECK_CONTEXT_TOOL ||
+            name === "sentinel_worker_findings") &&
           fenceFindingContextHistory &&
           result.startsWith("{")
         ) {
-          const revision = turn.findingContextRevision;
+          const isContext = name === SENTINEL_RECHECK_CONTEXT_TOOL;
+          const revision = isContext
+            ? turn.findingContextRevision
+            : turn.findingReceiptRevision;
           const caseId = locateSentinelCase(options.snapshotPath)?.caseId;
-          const read = sentinelRecheckContextArgs(args);
+          const read = isContext ? sentinelRecheckContextArgs(args) : args;
           if (!caseId || !revision || !read) {
             return "Error: The requested finding context is unavailable.";
           }
+          const requireCurrentRevision =
+            turn.requireCurrentFindingReceiptRevision;
           const isCurrent = () =>
-            currentSentinelFindingContext(options, result, revision);
+            isContext
+              ? currentSentinelFindingContext(options, result, revision)
+              : currentSentinelFindingReceipts(
+                options,
+                result,
+                revision,
+                requireCurrentRevision,
+              );
           const sourceSession = session;
           const policy = {
             tool_name: name,
@@ -5652,7 +5687,9 @@ function createAgent(
             tool: name,
             revision,
             sources: [{
-              key: JSON.stringify([name, caseId, revision, read.findingId]),
+              key: createHash("sha256").update(
+                JSON.stringify([name, caseId, revision, read, result]),
+              ).digest("hex"),
               isCurrent,
               async authorize() {
                 if (!isCurrent()) return false;

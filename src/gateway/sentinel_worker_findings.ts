@@ -100,6 +100,52 @@ export function currentSentinelFindingContext(
     (!scope.assignedTaskId || !!assignedTask(scope));
 }
 
+function findingReceiptScope(path: string, revision: number) {
+  const runId = readSentinelRunIdForRevision(path, revision);
+  if (!runId) return;
+  const snapshot = readSentinelAssessmentRevision(path, revision)?.result
+    .sharedGraph.snapshot;
+  const saved = readSentinelOperatingConstraints(path, runId, revision)
+    ?.constraints;
+  const current = readSentinelOperatingConstraints(path, runId)?.constraints;
+  return {
+    runId,
+    allows: (targetId: string) => {
+      const target = { kind: "review_evidence", nodeId: targetId } as const;
+      return sentinelOperatingConstraintsAllow(saved, target, snapshot) &&
+        sentinelOperatingConstraintsAllow(current, target, snapshot);
+    },
+  };
+}
+
+/** Check every delivered receipt against the case's current read policy. */
+export function currentSentinelFindingReceipts(
+  scope: Scope,
+  response: string,
+  revision: number | undefined,
+  requireCurrentRevision = false,
+) {
+  if (
+    revision === undefined ||
+    (requireCurrentRevision &&
+      readSentinelAssessment(scope.snapshotPath)?.revision !== revision)
+  ) return false;
+  const { record, records } = JSON.parse(response);
+  const caseId = locateSentinelCase(scope.snapshotPath)?.caseId;
+  const policy = findingReceiptScope(scope.snapshotPath, revision);
+  return !!caseId && !!policy &&
+    (!scope.assignedTaskId || !!assignedTask(scope)) &&
+    (record ? [record] : records).every((item: {
+      caseId: string;
+      runId: string;
+      evidenceRevision: number;
+      targetId: string;
+    }) =>
+      item.caseId === caseId && item.runId === policy.runId &&
+      item.evidenceRevision <= revision && policy.allows(item.targetId)
+    );
+}
+
 /** Keep historical policy context scoped to the assigned asset. */
 function recheckConstraintProjection(
   policy: SentinelOperatingConstraintRecord | undefined,
@@ -457,22 +503,19 @@ export function executeSentinelWorkerFindingTool(
         signal,
         false,
         (state, caseId, store, target) => {
-          const runId = historicalRevision !== undefined &&
-              historicalRevision !== state.revision
-            ? readSentinelRunIdForRevision(
-              scope.snapshotPath,
-              historicalRevision,
-            )
-            : state.plan.runId;
-          if (!runId) return;
           const selectedRevision = historicalRevision ?? state.revision;
+          const policy = findingReceiptScope(
+            scope.snapshotPath,
+            selectedRevision,
+          );
+          if (!policy) return;
           const revisionFilter = revision ??
             (historicalRevision !== state.revision
               ? historicalRevision
               : undefined);
           const eligible = (record: ReturnType<typeof store.read>): boolean =>
             !!record && record.caseId === caseId &&
-            record.runId === runId &&
+            record.runId === policy.runId && policy.allows(record.targetId) &&
             (!allowReadTarget || allowReadTarget(record.targetId)) &&
             record.evidenceRevision <= selectedRevision &&
             (revisionFilter === undefined ||

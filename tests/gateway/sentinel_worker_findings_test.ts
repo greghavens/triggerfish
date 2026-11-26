@@ -70,6 +70,7 @@ import {
   pauseSentinelAssessment,
   readSentinelAssessment,
   readSentinelOperatingConstraintDigest,
+  readSentinelOperatingConstraints,
   recordSentinelOperatingConstraints,
   refreshSentinelAssessment,
   resumeSentinelAssessment,
@@ -1869,6 +1870,21 @@ Deno.test("Leased Sentinel workers report, recheck, and amend findings visible i
       });
       assertEquals(JSON.parse(String(earlierCategories.content)).findings, []);
     });
+    const matchingRun = readSentinelAssessment(path);
+    assert(matchingRun?.plan.runId);
+    const priorPolicyVersion = readSentinelOperatingConstraints(
+      path,
+      matchingRun.plan.runId,
+    )?.version;
+    assert(priorPolicyVersion);
+    assert(recordSentinelOperatingConstraints(path, {
+      runId: matchingRun.plan.runId,
+      evidenceRevision: matchingRun.revision,
+      expectedVersion: priorPolicyVersion,
+      requestId: crypto.randomUUID(),
+      operatorScope: "owner",
+      constraints: { deniedKinds: [] },
+    }));
     assert(stopSentinelAssessment(path));
     const latest = startSentinelAssessment(path, { goal: "New assessment" });
     assert(latest.plan.runId !== first.plan.runId);
@@ -7838,6 +7854,8 @@ Deno.test("Interactive Sentinel recheck context rejects withdrawn case access", 
     journal.close();
     assert(original);
     let result = "";
+    let findingTool = context;
+    let findingArgs: Record<string, unknown> = { findingId: original.id };
     let revokeOnResponse = false;
     let denyHistoryPre = false;
     const retainedFindingMarker = "Authorized original observation.";
@@ -7874,8 +7892,8 @@ Deno.test("Interactive Sentinel recheck context rejects withdrawn case access", 
             id: crypto.randomUUID(),
             type: "function",
             function: {
-              name: context,
-              arguments: JSON.stringify({ findingId: original.id }),
+              name: findingTool,
+              arguments: JSON.stringify(findingArgs),
             },
           }],
         });
@@ -7969,6 +7987,27 @@ Deno.test("Interactive Sentinel recheck context rejects withdrawn case access", 
       revokeOnResponse = false;
       await turn("Read the same exact finding a third time.");
       assertStringIncludes(result, "unavailable");
+      setPolicy(3, "app");
+      await turn("/sentinel off");
+      await turn("/sentinel on");
+      findingTool = findings;
+      findingArgs = { receiptId: original.id };
+      await turn("Read the exact retained worker receipt.");
+      assertEquals(JSON.parse(result).record.id, original.id);
+      await turn("Check prior context with the receipt still allowed.");
+      setPolicy(4, "other");
+      await turn("Check prior context after access to the receipt changes.");
+      assertEquals(memorySeen, [true, false, false, true, false]);
+      await turn("Read the withdrawn exact worker receipt.");
+      assertStringIncludes(result, "unavailable");
+      findingArgs = { beforeReceiptId: original.id };
+      await turn("Page from the withdrawn saved worker receipt.");
+      assertStringIncludes(result, "unavailable");
+      findingArgs = {};
+      await turn("List available worker receipts.");
+      assertEquals(JSON.parse(result).records, []);
+      findingTool = context;
+      findingArgs = { findingId: original.id };
       assert(stopSentinelAssessment(path));
       const next = startSentinelAssessment(path);
       assert(next.plan.runId && next.plan.runId !== state.plan.runId);
