@@ -2,38 +2,42 @@
 /// <reference path="../core/sqlite_types.d.ts" />
 import { dirname, join } from "@std/path";
 import { DatabaseSync } from "node:sqlite";
+import { parseSentinelPinnedFindingRead } from "./worker_goal_recovery.ts";
 
 interface Step {
   readonly outcome: "returned" | "error";
   readonly ordinal: number;
 }
 
+export type SentinelLinkedUsageStep = Step & {
+  readonly tool:
+    | "sentinel_shared_topology_source"
+    | "sentinel_shared_finding_source";
+  readonly taskId: string;
+  readonly target: string;
+  readonly assignedTarget: string;
+  readonly goalReceiptRead: {
+    readonly args: Readonly<Record<string, string>>;
+    readonly sha256: string;
+  };
+};
+
 export type SentinelLocalUsageStep =
-  & Step
-  & (
-    | {
-      readonly tool: "sentinel_graph_overview";
-      readonly plannerIdentity: string;
-      readonly attempt: number;
-    }
-    | {
-      readonly tool: "sentinel_assigned_target";
-      readonly taskId: string;
-      readonly target: string;
-    }
-    | {
-      readonly tool: "sentinel_shared_topology_source";
-      readonly taskId: string;
-      readonly target: string;
-      readonly assignedTarget: string;
-      readonly goalReceiptRead: {
-        readonly args: {
-          readonly evidenceId: string;
-          readonly sourceCase: string;
-        };
-        readonly sha256: string;
-      };
-    }
+  | SentinelLinkedUsageStep
+  | (
+    & Step
+    & (
+      | {
+        readonly tool: "sentinel_graph_overview";
+        readonly plannerIdentity: string;
+        readonly attempt: number;
+      }
+      | {
+        readonly tool: "sentinel_assigned_target";
+        readonly taskId: string;
+        readonly target: string;
+      }
+    )
   );
 
 export function readSentinelLocalUsageSteps(
@@ -41,6 +45,7 @@ export function readSentinelLocalUsageSteps(
   revision: number,
   runId: string,
   includeRetainedTopology = false,
+  includeRetainedFindingSources = false,
 ): readonly SentinelLocalUsageStep[] | undefined {
   const path = join(dirname(snapshotPath), "sentinel-adaptive.db");
   try {
@@ -146,14 +151,25 @@ export function readSentinelLocalUsageSteps(
         json_extract(step.value, '$.outcome') AS outcome,
         json_extract(step.value, '$.goalReceiptRead.args.evidenceId') AS evidence,
         json_extract(step.value, '$.goalReceiptRead.args.sourceCase') AS source,
+        json_extract(step.value, '$.goalReceiptRead.args.asset') AS localAsset,
+        json_extract(step.value, '$.goalReceiptRead.args.sourceAsset') AS sourceAsset,
+        json_extract(step.value, '$.goalReceiptRead.args.finding') AS findingId,
+        json_extract(step.value, '$.goalReceiptRead.args.snapshotDigest') AS snapshotDigest,
         json_extract(step.value, '$.goalReceiptRead.sha256') AS digest
       FROM selected JOIN json_each(selected.steps) step
       WHERE selected.rank = 1
         AND (json_extract(step.value, '$.tool') = 'sentinel_assigned_target'
-          OR (? AND json_extract(step.value, '$.tool') = 'sentinel_shared_topology_source'
-            AND json_extract(step.value, '$.outcome') = 'returned'))
+          OR (json_extract(step.value, '$.outcome') = 'returned' AND (
+            (? AND json_extract(step.value, '$.tool') = 'sentinel_shared_topology_source')
+            OR (? AND json_extract(step.value, '$.tool') = 'sentinel_shared_finding_source')
+          )))
       ORDER BY selected.id, ordinal LIMIT ?
-    `).all(key, Number(includeRetainedTopology), budget + 1 - retained.length);
+    `).all(
+      key,
+      Number(includeRetainedTopology),
+      Number(includeRetainedFindingSources),
+      budget + 1 - retained.length,
+    );
     for (const row of rows) {
       if (
         typeof row.id !== "string" || !/^adaptive:[a-f0-9]{64}$/.test(row.id) ||
@@ -181,6 +197,29 @@ export function readSentinelLocalUsageSteps(
             args: { evidenceId: row.target, sourceCase: row.source },
             sha256: row.digest,
           },
+        });
+        continue;
+      }
+      if (row.tool === "sentinel_shared_finding_source") {
+        const args = parseSentinelPinnedFindingRead({
+          asset: row.localAsset,
+          sourceCase: row.source,
+          sourceAsset: row.sourceAsset,
+          finding: row.findingId,
+          snapshotDigest: row.snapshotDigest,
+        });
+        if (
+          !args || row.target !== args.finding ||
+          typeof row.digest !== "string" || !/^[a-f0-9]{64}$/.test(row.digest)
+        ) return;
+        retained.push({
+          tool: row.tool,
+          taskId: row.id,
+          target: args.finding,
+          assignedTarget: row.nodeId,
+          ordinal: row.ordinal,
+          outcome: row.outcome,
+          goalReceiptRead: { args, sha256: row.digest },
         });
         continue;
       }

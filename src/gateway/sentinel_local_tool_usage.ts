@@ -2,7 +2,7 @@ import { isDeepStrictEqual } from "node:util";
 import { canFlowTo } from "../core/types/classification.ts";
 import {
   readSentinelLocalUsageSteps,
-  type SentinelLocalUsageStep,
+  type SentinelLinkedUsageStep,
 } from "../sentinel/local_tool_usage.ts";
 import type { OperatorRunToolContext } from "./operator_run_tool.ts";
 import { readSentinelFindingReceiptScope } from "./sentinel_worker_findings.ts";
@@ -14,12 +14,7 @@ export async function readAuthorizedSentinelLocalToolUsage(
   revision: number,
   args: Record<string, unknown>,
   context: OperatorRunToolContext | undefined,
-  reopenTopology?: (
-    step: Extract<
-      SentinelLocalUsageStep,
-      { tool: "sentinel_shared_topology_source" }
-    >,
-  ) => Promise<string | undefined>,
+  reopenLinked?: (step: SentinelLinkedUsageStep) => Promise<string | undefined>,
 ) {
   const owner = context?.authorizeOwnerRunCall;
   const authorizeTrace = context?.authorizeSentinelTraceRead;
@@ -38,12 +33,14 @@ export async function readAuthorizedSentinelLocalToolUsage(
       path,
       revision,
       scope.runId,
-      reopenTopology !== undefined,
+      args.includeRetainedTopology === true,
+      args.includeRetainedFindingSources === true,
     );
     if (
       !rows ||
       rows.some((step) =>
-        ("target" in step && !scope.allows(step.target)) ||
+        ("target" in step && step.tool !== "sentinel_shared_finding_source" &&
+          !scope.allows(step.target)) ||
         ("assignedTarget" in step && !scope.allows(step.assignedTarget))
       )
     ) return;
@@ -82,14 +79,14 @@ export async function readAuthorizedSentinelLocalToolUsage(
       !currentCase()
     ) return;
     const text = "goalReceiptRead" in step
-      ? await reopenTopology?.(step)
+      ? await reopenLinked?.(step)
       : metadata;
     if (
       !text || !currentCase() ||
       !await authorizeTrace(scope, step.tool, selector, text) || !currentCase()
     ) return;
     if (
-      "goalReceiptRead" in step && (text !== await reopenTopology?.(step) ||
+      "goalReceiptRead" in step && (text !== await reopenLinked?.(step) ||
         !currentCase())
     ) return;
     const role = "taskId" in step ? "worker" : "planner";

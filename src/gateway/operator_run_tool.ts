@@ -1204,6 +1204,11 @@ export const operatorRunTool: ToolDefinition = {
       description:
         "Include currently authorized linked topology receipts in the exact case tool usage report.",
     },
+    includeRetainedFindingSources: {
+      type: "boolean",
+      description:
+        "Include currently authorized linked finding receipts in the exact case tool usage report.",
+    },
     toolUsageAfter: {
       type: "string",
       description: "Cursor from the prior retained tool usage totals page.",
@@ -1803,7 +1808,10 @@ export function sentinelOperatorCaseReadParameterAllowed(
   action: unknown,
   parameter: string,
 ): boolean {
-  if (parameter === "includeRetainedTopology") {
+  if (
+    parameter === "includeRetainedTopology" ||
+    parameter === "includeRetainedFindingSources"
+  ) {
     return action === "case_local_tool_usage";
   }
   if (parameter === "findingId" || parameter === "before") {
@@ -9002,11 +9010,14 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
       }
       if (action === "case_local_tool_usage") {
         const includeTopology = args.includeRetainedTopology;
+        const includeFindings = args.includeRetainedFindingSources;
         if (
           ref.kind !== "sentinel" || ref.revision === undefined ||
           typeof args.runId !== "string" || !digestPattern.test(args.runId) ||
           (includeTopology !== undefined &&
             typeof includeTopology !== "boolean") ||
+          (includeFindings !== undefined &&
+            typeof includeFindings !== "boolean") ||
           Object.keys(args).some((key) =>
             ![
               "action",
@@ -9015,6 +9026,7 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
               "revision",
               "runId",
               "includeRetainedTopology",
+              "includeRetainedFindingSources",
             ].includes(key)
           ) ||
           !await controller.inspect(ref)
@@ -9027,7 +9039,7 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
           revision,
           args,
           context,
-          includeTopology === true
+          includeTopology === true || includeFindings === true
             ? (step) =>
               reopenSentinelSourceResult(
                 options.baseDir,
