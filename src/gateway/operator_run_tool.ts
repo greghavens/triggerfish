@@ -107,7 +107,10 @@ import {
   matchSentinelAssetDiscoveryDestination,
   verifySentinelAssetDiscovery,
 } from "../sentinel/asset_discovery_evidence.ts";
-import { readSentinelFindingGroup } from "../sentinel/finding_groups.ts";
+import {
+  readSentinelFindingAssetTree,
+  readSentinelFindingGroup,
+} from "../sentinel/finding_groups.ts";
 import { loadSentinelGraph } from "../sentinel/graph.ts";
 import { isSentinelFindingMutation } from "../sentinel/worker_finding_recovery.ts";
 import { executionFindingAsset } from "../sentinel/worker_finding_evidence.ts";
@@ -425,6 +428,7 @@ export const operatorRunTool: ToolDefinition = {
         "set_case_membership",
         "traces",
         "finding_groups",
+        "finding_asset_tree",
         "search_case_traces",
         "list_trace_workers",
         "worker_trace_progress",
@@ -941,6 +945,12 @@ export const operatorRunTool: ToolDefinition = {
         required: ["kind", "id"],
         additionalProperties: false,
       },
+    },
+    findingIds: {
+      type: "array",
+      description:
+        "One to sixteen exact selected finding IDs for finding_asset_tree.",
+      items: { type: "string" },
     },
     scopes: {
       type: "array",
@@ -2593,6 +2603,34 @@ ${
         return safeProjection({
           runs: (await controller.list(filter)).slice(0, 20),
         });
+      }
+      if (action === "finding_asset_tree") {
+        const { findingIds, id, revision } = args;
+        if (
+          !context?.authenticatedOwnerSessionId ||
+          !canFlowTo("INTERNAL", context.ceiling ?? "PUBLIC") ||
+          args.kind !== "sentinel" || !isSentinelCaseId(id) ||
+          typeof revision !== "number" || !Number.isSafeInteger(revision) ||
+          revision < 1 || !Array.isArray(findingIds) || !findingIds.length ||
+          findingIds.length > 16 ||
+          new Set(findingIds).size !== findingIds.length ||
+          findingIds.some((value) =>
+            typeof value !== "string" || !value || value.length > 4096 ||
+            /[\p{Cc}\p{Cf}]/u.test(value)
+          ) ||
+          Object.keys(args).some((key) =>
+            !["action", "kind", "id", "revision", "findingIds"].includes(key)
+          ) ||
+          !await controller.inspect({ kind: "sentinel", id, revision }) ||
+          context.authorizeSentinelCaseRead?.(id, revision) === false
+        ) return unavailable;
+        const tree = readSentinelFindingAssetTree(
+          resolveSentinelCasePath(options.baseDir, id),
+          id,
+          revision,
+          findingIds,
+        );
+        return tree ? safeProjection({ tree }) : unavailable;
       }
       if (action === "finding_groups") {
         const { scopes, limit = 1 } = args;

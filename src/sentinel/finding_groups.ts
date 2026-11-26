@@ -3,12 +3,14 @@ import { redactCredentialText } from "../core/logger/redactor.ts";
 import {
   readSentinelAssessmentRevision,
   readSentinelFindingReviews,
+  readSentinelOperatingConstraints,
   readSentinelRunIdForRevision,
 } from "./assessment_store.ts";
 import { loadSentinelGraph } from "./graph.ts";
 import {
   hasSentinelWorkerFindingJournal,
   openSentinelWorkerFindingStore,
+  readSentinelCaseFindingReceipts,
 } from "./worker_finding_store.ts";
 
 export function readSentinelFindingGroup(
@@ -85,4 +87,77 @@ export function readSentinelFindingGroup(
   } finally {
     journal?.close();
   }
+}
+
+/** Project only declared parents that are still in the authorized case scope. */
+export function readSentinelFindingAssetTree(
+  path: string,
+  caseId: string,
+  revision: number,
+  findingIds: readonly string[],
+) {
+  const state = readSentinelAssessmentRevision(path, revision);
+  const runId = readSentinelRunIdForRevision(path, revision);
+  if (!state?.result?.sharedGraph.snapshot || !runId) return;
+  const graph = loadSentinelGraph(state.result.sharedGraph.snapshot);
+  const saved = readSentinelOperatingConstraints(path, runId, revision)
+    ?.constraints.allowedAssetIds;
+  const current = readSentinelOperatingConstraints(path, runId)
+    ?.constraints.allowedAssetIds;
+  const savedScope = saved && new Set(saved);
+  const currentScope = current && new Set(current);
+  const assets = new Map(
+    graph.snapshot().nodes.flatMap((node) =>
+      node.kind === "asset" &&
+        (!savedScope || savedScope.has(node.id)) &&
+        (!currentScope || currentScope.has(node.id))
+        ? [[node.id, node] as const]
+        : []
+    ),
+  );
+  const imported = new Map(
+    graph.report().map((finding) => [finding.id, finding]),
+  );
+  const workers = readSentinelCaseFindingReceipts(path, findingIds);
+  const counts = new Map<string, { direct: number; aggregate: number }>();
+  for (const id of findingIds) {
+    const graphFinding = imported.get(id);
+    const worker = workers.get(id);
+    if (graphFinding && worker) return;
+    const affected = graphFinding?.assets ??
+      (worker?.kind === "finding" && worker.caseId === caseId &&
+          worker.runId === runId && worker.evidenceRevision <= revision
+        ? [worker.targetId]
+        : []);
+    const direct = new Set(affected.filter((assetId) => assets.has(assetId)));
+    if (!direct.size) return;
+    const touched = new Set<string>();
+    for (const assetId of direct) {
+      let node = assets.get(assetId);
+      while (node && !touched.has(node.id)) {
+        touched.add(node.id);
+        node = node.parentId ? assets.get(node.parentId) : undefined;
+      }
+    }
+    for (const assetId of touched) {
+      const count = counts.get(assetId) ?? { direct: 0, aggregate: 0 };
+      count.aggregate++;
+      if (direct.has(assetId)) count.direct++;
+      counts.set(assetId, count);
+      if (counts.size > 32) return;
+    }
+  }
+  const nodes = [...counts.entries()].sort(([left], [right]) =>
+    left.localeCompare(right)
+  ).map(([assetId, count]) => {
+    const { label, assetType, parentId } = assets.get(assetId)!;
+    return {
+      id: assetId,
+      label: redactCredentialText(label).slice(0, 128),
+      ...(assetType && { assetType }),
+      ...(parentId && counts.has(parentId) && { parentId }),
+      ...count,
+    };
+  });
+  return { caseId, runId, revision, findingTotal: findingIds.length, nodes };
 }

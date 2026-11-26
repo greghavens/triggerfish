@@ -325,6 +325,10 @@ In authenticated owner chat, use `operator_runs finding_groups` with
 `scopes` containing one to four exact case IDs and saved revisions. Each
 group reports its count of imported and worker findings and has an independent
 `offset` and `nextOffset`. The optional `limit` sets the page size per group.
+For up to sixteen selected `findingIds`, use `operator_runs finding_asset_tree`
+with `kind: sentinel`, the case `id`, and a saved `revision`. It shows the
+affected assets and their declared in-scope ancestors. Aggregate counts count
+each finding once per asset, even when it affects multiple descendants.
 
 ### Archive and restore a named assessment
 

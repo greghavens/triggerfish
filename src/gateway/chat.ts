@@ -1,4 +1,8 @@
-import { checkpointOwnerCompaction } from "./chat_compaction.ts";
+import {
+  checkpointOwnerCompaction,
+  compactOwnerContext,
+  ownerCompactionRequested,
+} from "./chat_compaction.ts";
 import { sentinelAssessmentModelRouting } from "./sentinel_model_routing.ts";
 import type { ManagedGoalTraceAccess } from "../core/goal_completion.ts";
 import type { ManagedTranscriptGrantReader } from "../core/conversation/managed_evidence.ts";
@@ -212,26 +216,34 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
     ...(config.runManagedGoalCommand ? [MANAGED_GOAL_STATE_TOOL] : []),
     ...(config.operatorRunExecutor ? [operatorRunTool] : []),
   ];
-  const enabledConfig: ChatSessionConfig = ownerTools.length
+  const canCompact = config.enableOwnerContextCompaction === true &&
+    config.messageStore !== undefined &&
+    !existingTool(compactOwnerContext.name);
+  const enabledConfig: ChatSessionConfig = ownerTools.length || canCompact
     ? {
       ...config,
       tools: [...config.tools ?? [], ...ownerTools],
-      ...(customTools && {
-        getExtraTools: () => {
-          const extra = config.getExtraTools?.() ?? [];
-          if (
-            !permitsDiagnostics ||
-            state.activeSessionId !== state.ownerSessionId
-          ) return extra;
-          const names = new Set(
-            [...config.tools ?? [], ...extra].map(({ name }) => name),
-          );
-          return [
-            ...extra,
-            ...customTools.definitions().filter(({ name }) => !names.has(name)),
-          ];
-        },
-      }),
+      ...(customTools || canCompact
+        ? {
+          getExtraTools: () => {
+            const extra = config.getExtraTools?.() ?? [];
+            const owner = state.activeSessionId === state.ownerSessionId;
+            const tools = canCompact && state.ownerCompactionActive && owner
+              ? [...extra, compactOwnerContext]
+              : extra;
+            if (!customTools || !permitsDiagnostics || !owner) return tools;
+            const names = new Set(
+              [...config.tools ?? [], ...tools].map(({ name }) => name),
+            );
+            return [
+              ...tools,
+              ...customTools.definitions().filter(({ name }) =>
+                !names.has(name)
+              ),
+            ];
+          },
+        }
+        : {}),
       hookRunner: {
         ...config.hookRunner,
         async evaluateHook(hook, context) {
@@ -316,6 +328,7 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
                       "worker_limit",
                       "assessment_concurrency",
                       "finding_groups",
+                      "finding_asset_tree",
                       "search_case_traces",
                       "list_trace_workers",
                       "worker_trace_progress",
@@ -366,6 +379,15 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
       },
       toolExecutor: (name, input, context) => {
         const owner = state.activeSessionId === state.ownerSessionId;
+        if (canCompact && name === compactOwnerContext.name) {
+          return Promise.resolve(
+            owner && state.ownerCompactionActive &&
+              canFlowTo(getSessionTaint(), ownerTargetClassification) &&
+              Object.keys(input).length === 0
+              ? ownerCompactionRequested
+              : "Error: Owner context compaction is unavailable.",
+          );
+        }
         if (customTools && name === customToolManage.name) {
           if (
             owner && (input.action === "inspect" || input.action === "apply") &&
@@ -394,10 +416,9 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
             session: getSession(),
             targetClassification: ownerTargetClassification,
             suppressToolEvents: true,
-          }).then((result) =>
-            result.ok
-              ? result.value
-              : "Error: The underlying operation is blocked."
+          }).then((result) => result.ok
+            ? result.value
+            : "Error: The underlying operation is blocked."
           );
         }
         if (name === operatorRunTool.name && config.operatorRunExecutor) {
@@ -1285,6 +1306,31 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
         ownerTargetClassification,
         sendEvent,
         signal,
+        undefined,
+        canCompact && config.messageStore
+          ? async (results) => {
+            if (
+              signal?.aborted || !results.some((result) =>
+                result.toolName === compactOwnerContext.name &&
+                !result.blocked && result.content === ownerCompactionRequested
+              )
+            ) return;
+            const taint = getSessionTaint();
+            if (!canFlowTo(taint, ownerTargetClassification)) return;
+            try {
+              const checkpoint = await checkpointOwnerCompaction(
+                config,
+                getSession(),
+                taint,
+                config.messageStore!,
+                { signal },
+              );
+              return checkpoint.replacement;
+            } catch {
+              chatLog.warn("Owner context could not be compacted");
+            }
+          }
+          : undefined,
       );
     },
     registerChannel: (channelType, channelConfig) =>

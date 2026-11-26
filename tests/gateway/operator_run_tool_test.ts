@@ -323,6 +323,7 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
             call?.args?.action === "finding_recheck_sources" ||
             call?.args?.action === "search_case_traces" ||
             call?.args?.action === "finding_groups" ||
+            call?.args?.action === "finding_asset_tree" ||
             call?.args?.action === "list_trace_workers" ||
             call?.args?.action === "worker_trace_result")
         ) {
@@ -1083,6 +1084,183 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
       denied = "PRE_OUTPUT";
       assertEquals((await turn(grouped)).response, undefined);
       denied = undefined;
+      const workerTree = JSON.parse(
+        (await turn({
+          action: "finding_asset_tree",
+          ...peer,
+          findingIds: [original.id],
+        })).result,
+      ).tree;
+      assertEquals(workerTree.findingTotal, 1);
+      assert(
+        workerTree.nodes.some((
+          { id, direct }: { id: string; direct: number },
+        ) => id === original.targetId && direct === 1),
+      );
+      const treeCase = "finding-hierarchy";
+      const treePath = resolveSentinelCasePath(baseDir, treeCase);
+      await Deno.mkdir(dirname(treePath), { recursive: true });
+      await Deno.writeTextFile(
+        treePath,
+        JSON.stringify({
+          version: 1,
+          nodes: [
+            {
+              id: "root",
+              kind: "asset",
+              label: "Authorized root",
+              assetType: "root_domain",
+            },
+            {
+              id: "service",
+              kind: "asset",
+              label: "Authorized service",
+              assetType: "service",
+              parentId: "root",
+            },
+            ...["application-a", "application-b", "private-parent"].map((
+              id,
+            ) => ({
+              id,
+              kind: "asset",
+              label: id,
+              assetType: "application",
+              parentId: "service",
+            })),
+            {
+              id: "endpoint",
+              kind: "asset",
+              label: "Detached by scope",
+              assetType: "endpoint",
+              parentId: "private-parent",
+            },
+            {
+              id: "selected-finding",
+              kind: "finding",
+              label: "Shared failure",
+              severity: "high",
+            },
+            {
+              id: "outside-finding",
+              kind: "finding",
+              label: "Excluded failure",
+              severity: "high",
+            },
+          ],
+          edges: [
+            "application-a",
+            "application-b",
+            "endpoint",
+            "private-parent",
+          ].map((to) => ({
+            from: "selected-finding",
+            to,
+            relation: "affects",
+          })).concat([{
+            from: "outside-finding",
+            to: "private-parent",
+            relation: "affects",
+          }]),
+        }),
+      );
+      const treeAssessment = startSentinelAssessment(treePath);
+      const treeRun = {
+        kind: "sentinel",
+        id: treeCase,
+        revision: treeAssessment.revision,
+      };
+      const chooseTree = {
+        action: "finding_asset_tree",
+        ...treeRun,
+        findingIds: ["selected-finding"],
+      };
+      const treeGrant = {
+        action: "set_case_membership",
+        ...treeRun,
+        runId: treeAssessment.plan.runId,
+        allowedAssetIds: [
+          "root",
+          "service",
+          "application-a",
+          "application-b",
+          "endpoint",
+        ],
+        expectedVersion: 0,
+        requestId: crypto.randomUUID(),
+      };
+      assertEquals(JSON.parse((await turn(treeGrant)).result).version, 1);
+      const groupedTree = JSON.parse((await turn(chooseTree)).result).tree;
+      assertEquals(groupedTree.findingTotal, 1);
+      assertEquals(groupedTree.nodes.map(({ id }: { id: string }) => id), [
+        "application-a",
+        "application-b",
+        "endpoint",
+        "root",
+        "service",
+      ]);
+      assertEquals(groupedTree.nodes[0].parentId, "service");
+      assertEquals(groupedTree.nodes[1].parentId, "service");
+      assertEquals(groupedTree.nodes[2].parentId, undefined);
+      assertEquals(groupedTree.nodes[3].aggregate, 1);
+      assertEquals(groupedTree.nodes[4].aggregate, 1);
+      assertEquals(groupedTree.nodes[4].direct, 0);
+      assert(!JSON.stringify(groupedTree).includes("private-parent"));
+      for (
+        const findingIds of [["outside-finding"], [
+          "selected-finding",
+          "unknown-finding",
+        ]]
+      ) {
+        const rejected = (await turn({ ...chooseTree, findingIds })).result;
+        assertStringIncludes(rejected, "unavailable");
+        assert(!rejected.includes("application-a"));
+      }
+      denied = "PRE_TOOL_CALL";
+      assert(!(await turn(chooseTree)).result.includes("application-a"));
+      denied = "POST_TOOL_RESPONSE";
+      assertEquals(
+        (await turn(chooseTree)).result,
+        "Tool response withheld by policy.",
+      );
+      denied = "PRE_OUTPUT";
+      assertEquals((await turn(chooseTree)).response, undefined);
+      denied = undefined;
+      await withGateway(async (reconnected) => {
+        assertEquals(
+          JSON.parse((await reconnected(chooseTree)).result).tree,
+          groupedTree,
+        );
+        assertEquals(
+          JSON.parse(
+            (await reconnected({
+              ...treeGrant,
+              allowedAssetIds: [
+                "root",
+                "application-a",
+                "application-b",
+                "endpoint",
+              ],
+              requestId: crypto.randomUUID(),
+              expectedVersion: 1,
+            })).result,
+          ).version,
+          2,
+        );
+        const tightened =
+          JSON.parse((await reconnected(chooseTree)).result).tree;
+        assertEquals(tightened.nodes.map(({ id }: { id: string }) => id), [
+          "application-a",
+          "application-b",
+          "endpoint",
+        ]);
+        assert(
+          tightened.nodes.every(({ parentId }: { parentId?: string }) =>
+            parentId === undefined
+          ),
+        );
+      });
+      assert(stopSentinelAssessment(treePath));
+      await Deno.remove(dirname(treePath), { recursive: true });
       const receiptAction = {
         action: "finding_receipt",
         ...peer,
