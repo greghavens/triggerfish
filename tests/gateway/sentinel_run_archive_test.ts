@@ -1,3 +1,4 @@
+import { querySentinelAssetInventory } from "../../src/sentinel/inventory_queries.ts";
 import { openApprovalInbox } from "../../src/core/approval_inbox.ts";
 import { createToolApprovalService } from "../../src/core/tool_approval_service.ts";
 import { decodeSentinelFeedLine } from "../../src/sentinel/feed_adapters.ts";
@@ -3607,7 +3608,8 @@ async function verifyPlannerArchive(
     | "traffic"
     | "facts"
     | "digests"
-    | "coverage",
+    | "coverage"
+    | "inventory-text",
 ) {
   const baseDir = await Deno.makeTempDir();
   const caseId = "planner-archive";
@@ -4184,6 +4186,29 @@ async function verifyPlannerArchive(
         args: { view: "assets", assetIds: ["db", "app"], limit: 1 },
       });
     }
+    if (mode === "inventory-text") {
+      const first = querySentinelAssetInventory(
+        state.result?.sharedGraph.snapshot,
+        {
+          assetText: "a",
+          limit: 1,
+          scopeBinding: JSON.stringify([path, state.revision, null]),
+        },
+      );
+      assert(first.nextCursor);
+      plannerCalls.splice(10, 2, {
+        name: "sentinel_case_inventory",
+        args: { view: "assets", assetText: " A ", limit: 1 },
+      }, {
+        name: "sentinel_case_inventory",
+        args: {
+          view: "assets",
+          assetText: "a",
+          limit: 1,
+          cursor: first.nextCursor,
+        },
+      });
+    }
     advanceAdaptiveSentinel(path, state);
     const revision = adaptiveRevision(state);
     const store = openSentinelAdaptiveStore(
@@ -4455,6 +4480,14 @@ async function verifyPlannerArchive(
       assertEquals(expanded.page.members[0].id, "asset:app");
       assertEquals(expanded.page.nextCursor, `${expanded.page.digest.id}:1`);
       assertEquals(round.reads[11].plannerDigestResult, undefined);
+    } else if (mode === "inventory-text") {
+      assertEquals(observed.assets.map(({ id }: { id: string }) => id), [
+        "app",
+      ]);
+      assertEquals(observed.nextCursor, plannerCalls[11].args.cursor);
+      const more = JSON.parse(responses[11]);
+      assertEquals(more.assets.map(({ id }: { id: string }) => id), ["db"]);
+      assertEquals(more.nextCursor, null);
     } else if (mode === "facts") {
       assertEquals(observed.id, recordedFacts[0]);
       const page = JSON.parse(responses[11]);
@@ -5175,7 +5208,7 @@ async function verifyPlannerArchive(
         const sha256 = createHash("sha256").update(responses[index]).digest(
           "hex",
         );
-        if (mode === "coverage" && index >= 10) {
+        if ((mode === "coverage" || mode === "inventory-text") && index >= 10) {
           assertEquals(round.reads?.[index].plannerCoverageResult, undefined);
         } else if (mode === "digests" && index >= 10) {
           assertEquals(round.reads?.[index].plannerDigestResult, undefined);
@@ -5229,7 +5262,7 @@ async function verifyPlannerArchive(
         "PRE_TOOL_CALL",
         "POST_TOOL_RESPONSE",
       ]);
-      if (mode === "coverage") {
+      if (mode === "coverage" || mode === "inventory-text") {
         policy.denyWorkerSourceAfter = false;
         assert(run.runId);
         const prior = readSentinelOperatingConstraints(path, run.runId);
@@ -5248,7 +5281,14 @@ async function verifyPlannerArchive(
           await turn({ ...resultRead, ordinal: 12 }),
           "unavailable",
         );
-        assertEquals(policy.workerSourceHooks.splice(0), ["PRE_TOOL_CALL"]);
+        if (mode === "coverage") {
+          assertEquals(policy.workerSourceHooks.splice(0), ["PRE_TOOL_CALL"]);
+        } else {
+          assertStringIncludes(
+            await turn({ ...resultRead, ordinal: 11 }),
+            "unavailable",
+          );
+        }
       }
       if (mode === "digests") {
         policy.denyWorkerSourceAfter = false;
@@ -5344,3 +5384,6 @@ Deno.test("dispatched Sentinel planner evidence digest pages survive archive and
 
 Deno.test("dispatched Sentinel planner coverage pages survive review changes and archive restore", () =>
   verifyPlannerArchive("coverage"));
+
+Deno.test("dispatched Sentinel planner literal inventory pages survive archive under current scope", () =>
+  verifyPlannerArchive("inventory-text"));

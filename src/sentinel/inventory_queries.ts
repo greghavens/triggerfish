@@ -519,17 +519,130 @@ export function readSentinelPlannerCoverageResult(
   }
 }
 
+type PlannerInventoryScope = {
+  readonly caseId: string;
+  readonly evidenceRevision: number;
+  readonly snapshotDigest: string;
+  readonly snapshot?: Snapshot;
+  readonly assetTextScope?:
+    & Pick<PageOptions, "scopeBinding">
+    & Pick<SentinelAssetInventoryOptions, "allowedAssetIds">;
+};
+
+function readPlannerInventoryTextPage(
+  args: Record<string, unknown>,
+  text: string,
+  scope?: PlannerInventoryScope,
+) {
+  const assetText = parseSentinelInventoryText(args.assetText);
+  const { cursor, limit = 5, alias, organizationId, assetType, parentId } =
+    args;
+  const exactType = sentinelAssetTypes.find((value) => value === assetType);
+  const cursorPattern = /^[a-f0-9]{64}\.[a-f0-9]{64}$/;
+  if (
+    !assetText || typeof text !== "string" || text.length > 6000 ||
+    redactCredentialText(text) !== text ||
+    Object.keys(args).some((key) =>
+      ![
+        "view",
+        "assetText",
+        "limit",
+        "cursor",
+        "alias",
+        "organizationId",
+        "assetType",
+        "parentId",
+      ].includes(key)
+    ) ||
+    [alias, organizationId, parentId].some((value) =>
+      value !== undefined &&
+      (typeof value !== "string" || !validIdentifier(value, 800) ||
+        redactCredentialText(value) !== value)
+    ) ||
+    (assetType !== undefined && !exactType) ||
+    typeof limit !== "number" || !Number.isSafeInteger(limit) || limit < 1 ||
+    limit > 10 ||
+    (cursor !== undefined &&
+      (typeof cursor !== "string" || !cursorPattern.test(cursor)))
+  ) return;
+  const filters = {
+    assetText,
+    ...(typeof alias === "string" && { alias }),
+    ...(typeof organizationId === "string" && { organizationId }),
+    ...(exactType && { assetType: exactType }),
+    ...(typeof parentId === "string" && { parentId }),
+    ...(cursor !== undefined && { cursor }),
+  };
+  try {
+    const page = JSON.parse(text);
+    if (
+      !page || Object.keys(page).length !== 6 ||
+      page._classification !== "INTERNAL" ||
+      !isSentinelCaseId(page.caseId) ||
+      !Number.isSafeInteger(page.evidenceRevision) ||
+      page.evidenceRevision < 1 ||
+      typeof page.snapshotDigest !== "string" ||
+      !/^[a-f0-9]{64}$/.test(page.snapshotDigest) ||
+      !Array.isArray(page.assets) || page.assets.length > limit ||
+      (page.nextCursor !== null &&
+        (typeof page.nextCursor !== "string" ||
+          !cursorPattern.test(page.nextCursor) ||
+          !page.assets.length ||
+          page.nextCursor.slice(65) !== hash(page.assets.at(-1).id)))
+    ) return;
+    const assetIds: string[] = [];
+    for (const row of page.assets) {
+      if (
+        !validIdentifier(row?.id) || row.kind !== "asset" ||
+        !validIdentifier(row.label)
+      ) return;
+      assetIds.push(row.id);
+    }
+    if (!isDeepStrictEqual(assetIds, [...new Set(assetIds)].sort())) return;
+    if (scope) {
+      if (
+        !scope.snapshot || !scope.assetTextScope ||
+        page.caseId !== scope.caseId ||
+        page.evidenceRevision !== scope.evidenceRevision ||
+        page.snapshotDigest !== scope.snapshotDigest
+      ) return;
+      const current = querySentinelAssetInventory(scope.snapshot, {
+        ...filters,
+        limit,
+        ...scope.assetTextScope,
+      });
+      const expected = JSON.stringify({
+        ...current,
+        caseId: scope.caseId,
+        evidenceRevision: scope.evidenceRevision,
+        _classification: "INTERNAL",
+      });
+      if (text !== expected) return;
+    }
+    return {
+      args: {
+        view: "assets" as const,
+        ...filters,
+        ...(args.limit !== undefined && { limit }),
+      },
+      assetIds,
+      requestedAssetIds: assetIds,
+      peerCoverage: undefined,
+    };
+  } catch {
+    return;
+  }
+}
+
 /** Preserve only exact planner asset pages and the existing coverage projection. */
 export function readSentinelPlannerInventoryResult(
   args: Record<string, unknown>,
   text: string,
-  scope?: {
-    caseId: string;
-    evidenceRevision: number;
-    snapshotDigest: string;
-    snapshot?: Snapshot;
-  },
+  scope?: PlannerInventoryScope,
 ) {
+  if (args?.view === "assets" && args.assetText !== undefined) {
+    return readPlannerInventoryTextPage(args, text, scope);
+  }
   if (args?.view === "coverage") {
     const coverage = readSentinelPlannerCoverageResult(args, text, scope);
     return coverage && { ...coverage, requestedAssetIds: coverage.assetIds };

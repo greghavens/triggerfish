@@ -8482,16 +8482,23 @@ ${
           const snapshot = inventory &&
             readSentinelAssessmentRevision(path, ref.revision)?.result
               .sharedGraph.snapshot;
+          const inventoryScope = () =>
+            snapshot && ({
+              caseId: ref.id,
+              evidenceRevision: ref.revision!,
+              snapshotDigest: digestSentinelSnapshot(snapshot),
+              snapshot,
+              assetTextScope: {
+                allowedAssetIds: readSentinelOperatingConstraints(path, runId)
+                  ?.constraints.allowedAssetIds,
+                scopeBinding: JSON.stringify([path, ref.revision, null]),
+              },
+            });
           const inventoryPage = inventory && snapshot &&
             readSentinelPlannerInventoryResult(
               inventory.args,
               inventory.text,
-              {
-                caseId: ref.id,
-                evidenceRevision: ref.revision,
-                snapshotDigest: digestSentinelSnapshot(snapshot),
-                snapshot,
-              },
+              inventoryScope() || undefined,
             );
           const digest = read.plannerDigestResult;
           const digestArgs = includeResult && digest &&
@@ -8559,6 +8566,13 @@ ${
                   allowed.includes(id)
                 );
             };
+            const textAllowed = () =>
+              inventory.args.assetText === undefined ||
+              !!readSentinelPlannerInventoryResult(
+                inventory.args,
+                inventory.text,
+                inventoryScope() || undefined,
+              );
             const peerCoverage = inventoryPage.peerCoverage;
             const peerAllowed = async () =>
               !peerCoverage ||
@@ -8573,7 +8587,8 @@ ${
               createHash("sha256").update(inventory.text).digest("hex") !==
                 inventory.sha256 ||
               !await authorize(scope, read.tool, selector, inventory.text) ||
-              !assetsAllowed() || !await peerAllowed() || !isCurrent()
+              !assetsAllowed() || !textAllowed() || !await peerAllowed() ||
+              !isCurrent()
             ) return unavailable;
             return safeProjection({
               ...selected,
