@@ -9013,30 +9013,65 @@ for (
         availableCredential = false;
         let schedulerReads = 0;
         let dependentCalls = 0;
+        let requestedTargetReads = 0;
+        let dispatchedTargetReads = 0;
+        let dependentOutputs = 0;
+        let savedTarget: string | undefined;
+        let resumedTarget: string | undefined;
+        const releaseInitial = Promise.withResolvers<void>();
+        const dependentSummary = "Reviewed the authorized dependent asset.";
         const dependentId = protectedDependent()?.id;
         assert(dependentId);
         const dependentRegistry = createProviderRegistry();
         dependentRegistry.register({
           name: "native-protected-gate-dependent",
           supportsStreaming: false,
-          complete() {
+          async complete(messages) {
             dependentCalls++;
-            return Promise.resolve({
-              content:
-                '{"summary":"Reviewed the authorized dependent asset.","followUps":[]}',
+            const toolResult = messages.findLast(({ role }) => role === "tool");
+            if (!toolResult) {
+              requestedTargetReads++;
+              return {
+                content: "",
+                toolCalls: [{
+                  type: "function",
+                  id: "read-protected-dependent-target",
+                  function: {
+                    name: "sentinel_assigned_target",
+                    arguments: "{}",
+                  },
+                }],
+                usage,
+              };
+            }
+            const target = String(toolResult.content);
+            assertStringIncludes(target, "dependent-app");
+            if (!savedTarget) {
+              savedTarget = target;
+              await releaseInitial.promise;
+            } else {
+              resumedTarget = target;
+            }
+            return {
+              content: JSON.stringify({
+                summary: dependentSummary,
+                followUps: [],
+              }),
               toolCalls: [],
               usage,
-            });
+            };
           },
         });
         dependentRegistry.setDefault("native-protected-gate-dependent");
         let gateClock = Date.now();
-        coordinator = createSentinelModelPlanner(
-          path,
-          (current, taskId, lease) =>
-            taskId && taskId !== dependentId
-              ? { execute: () => Promise.resolve(), clear() {} }
-              : createSentinelSubagent({
+        const startGateCoordinator = () =>
+          createSentinelModelPlanner(
+            path,
+            (current, taskId, lease) => {
+              if (taskId && taskId !== dependentId) {
+                return { execute: () => Promise.resolve(), clear() {} };
+              }
+              const agent = createSentinelSubagent({
                 snapshotPath: path,
                 sharedInventoryBaseDir: baseDir,
                 assessmentRevision: current.revision,
@@ -9061,6 +9096,10 @@ for (
                     ) {
                       schedulerReads++;
                     }
+                    if (
+                      taskId === dependentId && hook === "PRE_OUTPUT" &&
+                      String(input.content).includes(dependentSummary)
+                    ) dependentOutputs++;
                     return Promise.resolve({
                       allowed: true,
                       action: "ALLOW",
@@ -9069,11 +9108,34 @@ for (
                     });
                   },
                 },
-              }),
-          () =>
-            protectedDependent()?.status === "completed" ? () => {} : undefined,
-          () => gateClock,
-        );
+              });
+              if (taskId !== dependentId) return agent;
+              return {
+                ...agent,
+                execute(content, send, signal, trace, digests, checkpoint) {
+                  return agent.execute(
+                    content,
+                    send,
+                    signal,
+                    (step) => {
+                      if (
+                        step.tool === "sentinel_assigned_target"
+                      ) dispatchedTargetReads++;
+                      trace?.(step);
+                    },
+                    digests,
+                    checkpoint,
+                  );
+                },
+              };
+            },
+            () =>
+              protectedDependent()?.status === "completed"
+                ? () => {}
+                : undefined,
+            () => gateClock,
+          );
+        coordinator = startGateCoordinator();
         const wakes = startSentinelAssessmentCoordinator({
           snapshotPath: path,
           advanceAdaptive: (current) => coordinator?.advance(current),
@@ -9088,22 +9150,65 @@ for (
           assertEquals(dependentCalls, 0);
           availableCredential = true;
           gateClock += 2_001;
-          const { caseId, runId, evidenceRevision, id } = receipt;
-          notifyCommittedEvidence({
-            case: caseId,
-            run_id: runId,
-            revision: evidenceRevision,
-            observation_id: id,
-          });
+          const wake = () =>
+            notifyCommittedEvidence({
+              case: receipt.caseId,
+              run_id: receipt.runId,
+              revision: receipt.evidenceRevision,
+              observation_id: receipt.id,
+            });
+          wake();
+          const workerState = () =>
+            readAdaptiveSentinel(path, state, "revision")
+              ?.modelReviewStates.find(({ taskId }) => taskId === dependentId);
+          const settled = () =>
+            !!readAdaptiveSentinel(path, state, "revision")
+              ?.modelReviews.some(({ taskId }) => taskId === dependentId);
           await waitForCondition(
             () =>
-              !!readAdaptiveSentinel(path, state, "revision")?.modelReviews
-                .some(
-                  ({ taskId }) => taskId === dependentId,
-                ),
+              !!savedTarget && !!workerState()?.progressSteps?.some(
+                ({ tool, outcome }) =>
+                  tool === "sentinel_assigned_target" && outcome === "returned",
+              ),
             () => {},
             10_000,
           );
+          const progress = workerState()?.progressSteps;
+          const interrupted = coordinator;
+          interrupted.stop();
+          releaseInitial.resolve();
+          await waitForCondition(
+            () => !interrupted.hasInFlightWork(),
+            () => {},
+          );
+          assertEquals(workerState()?.progressSteps, progress);
+          assert(!settled());
+          const previousCalls = dependentCalls;
+          const previousOutputs = dependentOutputs;
+          const previousReads = schedulerReads;
+
+          availableCredential = false;
+          coordinator = startGateCoordinator();
+          wake();
+          await waitForCondition(
+            () =>
+              schedulerReads > previousReads && !coordinator?.hasInFlightWork(),
+            () => {},
+          );
+          assertEquals(dependentCalls, previousCalls);
+          assertEquals(dependentOutputs, previousOutputs);
+          assertEquals(workerState()?.progressSteps, progress);
+          assert(!settled());
+
+          availableCredential = true;
+          gateClock += 2_001;
+          wake();
+          await waitForCondition(settled, () => {}, 10_000);
+          assertEquals(resumedTarget, savedTarget);
+          assertEquals(requestedTargetReads, 1);
+          assertEquals(dispatchedTargetReads, 1);
+          assertEquals(dependentCalls, previousCalls + 1);
+          assert(dependentOutputs > previousOutputs);
           assertEquals(pendingProtectedGate()?.status, "completed");
           assertEquals(pendingProtectedGate()?.attempts, 0);
           assertEquals(
@@ -9114,9 +9219,9 @@ for (
           const gateId = pendingProtectedGate()?.id;
           assert(gateId);
           assertEquals(protectedDependent()?.prerequisites, [gateId]);
-          assertEquals(dependentCalls, 1);
           assertEquals(fetches, 1);
         } finally {
+          releaseInitial.resolve();
           wakes.stop();
         }
       }
