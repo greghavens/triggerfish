@@ -164,6 +164,7 @@ export const MAX_ADAPTIVE_TASKS = 1000;
 export const MAX_WORKER_NARRATIVES = MAX_ADAPTIVE_TASKS * 16;
 export const MAX_SENTINEL_DEPENDENCY_CONFIRMATION_CHARS = 8_000;
 const MAX_DEPENDENCY_REASON_CHARS = 300;
+const TERMINAL_MODEL_FAILURE_AVAILABLE_AT = Number.MAX_SAFE_INTEGER;
 export const MAX_ADAPTIVE_TASK_ATTEMPTS = 3;
 const MAX_OBSERVATION_BYTES = 1024 * 1024;
 const WORKFLOW_CHECKPOINT_TOOL = "sentinel_live_workflow_status";
@@ -10945,7 +10946,8 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
           ? "interrupted"
           : row.token != null && Number(row.availableAt) > time
           ? "running"
-          : attempts >= 2 + Number(row.operatorRetry)
+          : attempts >= 2 + Number(row.operatorRetry) ||
+              Number(row.availableAt) === TERMINAL_MODEL_FAILURE_AVAILABLE_AT
           ? "exhausted"
           : "retry_pending";
         return {
@@ -10999,7 +11001,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
         const row = db.prepare(`
           UPDATE adaptive_model_reviews SET operatorRetry = 1, availableAt = ?
           WHERE taskId = ? AND noteId IS NULL AND token IS NULL
-            AND attempts = 2 AND operatorRetry = 0
+            AND (attempts = 2 OR availableAt = ?) AND operatorRetry = 0
             AND taskId IN (
               SELECT id FROM adaptive_tasks WHERE revision = ? AND status = 'completed'
             )
@@ -11009,7 +11011,13 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
             AND NOT EXISTS (SELECT 1 FROM adaptive_worker_controls AS control
               WHERE control.revision = ? AND control.taskId = adaptive_model_reviews.taskId AND control.action = 'stop')
           RETURNING attempts
-        `).get(time, taskId(target), revision, revision);
+        `).get(
+          time,
+          taskId(target),
+          TERMINAL_MODEL_FAILURE_AVAILABLE_AT,
+          revision,
+          revision,
+        );
         if (!row) return false;
         event.run(
           revision,
@@ -11806,7 +11814,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
         | "authorization_wait"
         | "interrupted"
         | "failed",
-      reason?: "missing_recheck_result",
+      reason?: "missing_recheck_result" | "terminal_model_failure",
     ): boolean {
       return transaction(db, () => {
         if (activeRevision() !== revision) return false;
@@ -11905,7 +11913,9 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
               ? attempts - 1
               : attempts,
             outcome === "failed"
-              ? time + 15_000
+              ? reason === "terminal_model_failure"
+                ? TERMINAL_MODEL_FAILURE_AVAILABLE_AT
+                : time + 15_000
               : outcome === "authorization_wait"
               ? time + 2_000
               : time,

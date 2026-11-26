@@ -1,3 +1,7 @@
+import {
+  isTransientModelAvailabilityError,
+  ModelFailoverExhausted,
+} from "../agent/providers/retry.ts";
 import { readAgentProfile } from "../core/agent_profiles.ts";
 import { locateSentinelCase } from "../sentinel/cases.ts";
 import { sentinelModelRoleProfile } from "../sentinel/model_routes.ts";
@@ -51,19 +55,6 @@ interface SentinelModelRun {
   readonly revision: number;
   readonly role?: SentinelModelRole;
   readonly alternates?: readonly SelectedModelProfile[];
-}
-
-/** Use typed SDK statuses or the provider's status prefix. */
-function isAvailabilityFailure(error: unknown) {
-  if (!(error instanceof Error)) return false;
-  if ("status" in error && typeof error.status === "number") {
-    return error.status === 429 || error.status === 502 || error.status === 503;
-  }
-  return /^[A-Za-z\d ./_-]{1,96}\((?:429|502|503)\)(?::|$)/.test(
-    error.message,
-  ) ||
-    /^OpenRouter request failed after \d+ retries: (?:HTTP|API) (?:429|502|503):/
-      .test(error.message);
 }
 
 function runModelProvider(
@@ -158,6 +149,7 @@ function runModelProvider(
       const roleProfile = selected &&
         sentinelRoleModelSelection(run.path, selected.route, role)?.profile;
       let index = selected?.runnable ? selected.route.activeIndex : undefined;
+      let usedFailover = false;
       while (selected && index !== undefined) {
         signal?.throwIfAborted();
         active = resolveProvider(selected.route, index, roleProfile);
@@ -169,16 +161,20 @@ function runModelProvider(
           if (
             roleProfile ||
             !selected.scope ||
-            !isAvailabilityFailure(error) ||
+            !isTransientModelAvailabilityError(error) ||
             !resolveProvider(selected.route, index + 1, roleProfile)
-          ) throw error;
+          ) {
+            if (usedFailover) throw new ModelFailoverExhausted();
+            throw error;
+          }
           index = advanceSentinelModelFallback(
             run.path,
             selected.scope,
             index,
             selected.version,
           );
-          if (index === undefined) throw error;
+          if (index === undefined) throw new ModelFailoverExhausted();
+          usedFailover = true;
         }
       }
       throw new Error("The approved Sentinel model route is unavailable.");

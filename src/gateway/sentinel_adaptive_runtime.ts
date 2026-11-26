@@ -1,3 +1,8 @@
+import {
+  DEFAULT_BASE_DELAY_MS,
+  DEFAULT_MAX_RETRIES,
+  retrySleep,
+} from "../agent/providers/retry.ts";
 import { readAgentProfile } from "../core/agent_profiles.ts";
 import {
   MAX_PLANNER_CHECKPOINT_READS,
@@ -6976,6 +6981,7 @@ export function createSentinelModelPlanner(
     }
     const { task, token } = claim;
     let waitingForSourceAuthorization = false;
+    let terminalModelFailure = false;
     const byId = new Map(queue.map((item) => [item.id, item]));
     const protectedGates = protectedGateAncestors(task, byId);
     const constraints = operatingConstraints(snapshotPath, current);
@@ -7368,7 +7374,9 @@ export function createSentinelModelPlanner(
         const checkpointStore = openSentinelAdaptiveStore(
           storePath(snapshotPath),
         );
-        try {
+        const deliveredSteering = new Set<number>();
+        const executeAttempt = async (retry: number) => {
+          let modelFailure: boolean | undefined;
           const previousProgress = checkpointStore
             .readLeasedModelReviewProgress(
               revision,
@@ -7376,7 +7384,6 @@ export function createSentinelModelPlanner(
               token,
               state.revision,
             );
-          const deliveredSteering = new Set<number>();
           const resumedProgress = new Set<SentinelReviewStep>();
           const saveProgress = () =>
             checkpointStore.recordModelReviewProgress(
@@ -7404,6 +7411,17 @@ export function createSentinelModelPlanner(
                 args,
               ),
           );
+          if (retry > 0) {
+            // An earlier call has already run. An absent checkpoint or an
+            // unresolved mutation must go through the existing recovery path.
+            if (
+              !resume || checkpointStore.modelReviewStates(revision).some(
+                (entry) => entry.taskId === task.id && entry.outcomeUncertain,
+              )
+            ) return;
+            steps.length = 0;
+            inspectedEvidence.clear();
+          }
           const resumedPolicy = checkpointStore.resumedModelHoldPolicy(
             revision,
             task.id,
@@ -7456,6 +7474,10 @@ export function createSentinelModelPlanner(
             undefined,
             {
               resume,
+              onModelFailure: (transient) => {
+                modelFailure = transient;
+                terminalModelFailure = true;
+              },
               ...(pendingFinding && {
                 resumedPendingToolCall: {
                   id: `recovery-traffic-finding-${pendingRequest}`,
@@ -7848,6 +7870,34 @@ export function createSentinelModelPlanner(
               },
             },
           );
+          return modelFailure;
+        };
+        try {
+          for (let retry = 0;; retry++) {
+            const modelFailure = await executeAttempt(retry);
+            if (
+              modelFailure !== true || retry >= DEFAULT_MAX_RETRIES ||
+              review || !currentLease()
+            ) break;
+            try {
+              const deadline = Date.now() + DEFAULT_BASE_DELAY_MS * 2 ** retry;
+              for (let remaining = deadline - Date.now(); remaining > 0;) {
+                // An owner can stop a lease in another gateway connection
+                // without aborting this controller. Poll the durable lease.
+                await retrySleep(Math.min(remaining, 250), signal);
+                if (!currentLease()) return;
+                remaining = deadline - Date.now();
+              }
+            } catch {
+              return;
+            }
+            if (!currentLease()) return;
+            if (!await authorizeSources()) {
+              holdForAuthorization();
+              return;
+            }
+            if (!currentLease()) return;
+          }
         } finally {
           checkpointStore.close();
         }
@@ -8059,7 +8109,11 @@ export function createSentinelModelPlanner(
                   },
                 }
                 : "failed",
-              missingRecheckResult ? "missing_recheck_result" : undefined,
+              missingRecheckResult
+                ? "missing_recheck_result"
+                : terminalModelFailure
+                ? "terminal_model_failure"
+                : undefined,
             );
             const settled = recorded && !!acceptedReview;
             return {

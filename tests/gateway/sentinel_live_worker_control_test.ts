@@ -1,3 +1,4 @@
+import { ModelFailoverExhausted } from "../../src/agent/providers/retry.ts";
 import { assert, assertEquals, assertFalse } from "@std/assert";
 import { dirname, join } from "@std/path";
 import { createProviderRegistry } from "../../src/agent/llm.ts";
@@ -4089,3 +4090,200 @@ Deno.test("Reviewed Sentinel role routes resolve and dispatch independently of t
     await Deno.remove(baseDir, { recursive: true });
   }
 });
+
+for (
+  const scenario of [
+    "recovered",
+    "cancelled",
+    "stale",
+    "permanent",
+    "handled",
+    "revoked",
+    "exhausted",
+  ] as const
+) {
+  Deno.test(`Sentinel retries an exact worker checkpoint only when eligible (${scenario})`, async () => {
+    const baseDir = await Deno.makeTempDir();
+    const path = resolveSentinelCasePath(baseDir);
+    const asset = "retry-asset";
+    const registry = createProviderRegistry();
+    const outcome = Promise.withResolvers<void>();
+    let reads = 0;
+    let savedChecks = 0;
+    let modelTurns = 0;
+    const savedResults: unknown[] = [];
+    let assignment: { taskId: string; token: string } | undefined;
+    let fixtureRevision = 0;
+    const usage = { inputTokens: 1, outputTokens: 1 };
+    registry.register({
+      name: "retry-fixture",
+      supportsStreaming: false,
+      complete(messages) {
+        const saved = messages.findLast(({ role }) => role === "tool");
+        if (!saved) {
+          reads++;
+          return Promise.resolve({
+            content: "",
+            usage,
+            toolCalls: [{
+              id: "exact-retry-read",
+              type: "function",
+              function: {
+                name: "sentinel_assigned_target",
+                arguments: "{}",
+              },
+            }],
+          });
+        }
+        modelTurns++;
+        savedResults.push(saved.content);
+        outcome.resolve();
+        if (scenario === "handled") {
+          return Promise.reject(new ModelFailoverExhausted());
+        }
+        if (modelTurns === 1 || scenario !== "recovered") {
+          return Promise.reject(
+            Object.assign(new Error("fixture provider failure"), {
+              status: scenario === "permanent" ? 400 : 503,
+            }),
+          );
+        }
+        return Promise.resolve({
+          content: JSON.stringify({ summary: "Reviewed saved evidence." }),
+          usage,
+          toolCalls: [],
+        });
+      },
+    });
+    registry.setDefault("retry-fixture");
+    const planner = createSentinelModelPlanner(path, (state, taskId, token) => {
+      if (!taskId || !token || state.revision !== fixtureRevision) {
+        return {
+          execute(_message, send) {
+            send({ type: "response", text: "[]", taint: "INTERNAL" });
+            return Promise.resolve();
+          },
+          clear() {},
+        };
+      }
+      assertEquals(assignment, undefined);
+      assignment = { taskId, token };
+      return createSentinelSubagent({
+        snapshotPath: path,
+        assessmentRevision: state.revision,
+        assignedTaskId: taskId,
+        assignedTaskLeaseToken: token,
+        providerRegistry: registry,
+        allowModelAccess: true,
+        hookRunner: {
+          evaluateHook(hook, { input }) {
+            if (
+              hook === "PRE_TOOL_CALL" &&
+              input.tool_name === "sentinel_assigned_target"
+            ) savedChecks++;
+            const allowed = scenario !== "revoked" || savedChecks < 2;
+            return Promise.resolve({
+              allowed,
+              action: allowed ? "ALLOW" : "BLOCK",
+              ruleId: null,
+              duration: 0,
+            });
+          },
+        },
+      });
+    });
+    try {
+      await Deno.mkdir(dirname(path), { recursive: true });
+      await Deno.writeTextFile(
+        path,
+        JSON.stringify({
+          version: 1,
+          nodes: [{ kind: "asset", id: asset, label: "Exact retry evidence" }],
+          edges: [],
+        }),
+      );
+      const state = startSentinelAssessment(path);
+      fixtureRevision = state.revision;
+      advanceAdaptiveSentinel(path, state);
+      const store = openSentinelAdaptiveStore(
+        join(dirname(path), "sentinel-adaptive.db"),
+      );
+      try {
+        const revision = adaptiveRevision(state);
+        store.sync(revision, [{
+          kind: "impact",
+          nodeId: asset,
+          depth: 9,
+          reason: MODEL_ASSIGNMENT_REASON,
+        }], revision);
+      } finally {
+        store.close();
+      }
+      advanceAdaptiveSentinel(path, state);
+      planner.advance(state);
+      await until(() => modelTurns > 0);
+      await outcome.promise;
+      assert(assignment);
+      const taskId = assignment.taskId;
+      if (scenario === "cancelled") {
+        await withOwnerControl(baseDir, async (owner) => {
+          const response = await owner({
+            action: "stop",
+            kind: "sentinel",
+            id: "main",
+            revision: state.revision,
+            runId: state.plan.runId,
+            adaptiveRevision: adaptiveRevision(state),
+            taskId,
+            requestId: crypto.randomUUID(),
+          });
+          assert(!response.startsWith("Error:"), response);
+          assert(JSON.parse(response).receipt);
+          planner.advance(state);
+        });
+      } else if (scenario === "stale") {
+        await Deno.writeTextFile(
+          path,
+          JSON.stringify({
+            version: 1,
+            nodes: [{ kind: "asset", id: asset, label: "New revision" }],
+            edges: [],
+          }),
+        );
+        const next = refreshSentinelAssessment(path)!;
+        assert(next.revision > state.revision);
+        planner.advance(next);
+      }
+      if (scenario === "exhausted") await until(() => modelTurns >= 2);
+      await until(() => !planner.hasInFlightWork());
+      const review = readAdaptiveSentinel(path, state)?.modelReviewStates.find((
+        entry,
+      ) => entry.taskId === taskId);
+      assertEquals(reads, 1);
+      assert(savedResults.every((saved) => saved === savedResults[0]));
+      assertEquals(
+        modelTurns,
+        scenario === "recovered" ? 2 : scenario === "exhausted" ? 3 : 1,
+      );
+      if (scenario === "recovered" || scenario === "exhausted") {
+        assert(
+          savedChecks >= modelTurns,
+          "Each saved result must be reauthorized",
+        );
+      }
+      if (
+        scenario === "permanent" || scenario === "exhausted" ||
+        scenario === "handled"
+      ) {
+        assertEquals(review?.status, "exhausted");
+        assertEquals(review?.attempts, 1);
+      }
+      if (scenario === "recovered") assertEquals(review?.status, "completed");
+      if (scenario === "revoked") assertEquals(savedChecks, 2);
+    } finally {
+      planner.stop();
+      await until(() => !planner.hasInFlightWork());
+      await Deno.remove(baseDir, { recursive: true });
+    }
+  });
+}

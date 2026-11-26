@@ -524,6 +524,7 @@ export type SentinelReadTrace = SentinelReviewStep & {
 };
 
 export interface SentinelTurnCheckpointOptions {
+  readonly onModelFailure?: (transient: boolean) => void;
   readonly resume?: AgentTurnCheckpoint;
   readonly resumedPendingToolCall?: {
     readonly id: string;
@@ -1728,6 +1729,7 @@ function rememberIncidentRecommendationPage(
 }
 
 interface ActiveTurn {
+  modelFailure?: { readonly transient: boolean };
   readonly leasedTraceCalls: Map<string, SentinelWorkerTraceSearchArgs>;
   readonly approvedLeasedTraces: Map<string, SentinelWorkerTraceSearchArgs>;
   readonly incidentRecommendationPages: Map<number, IncidentRecommendationPage>;
@@ -6370,6 +6372,9 @@ function createAgent(
   const toolApprovalContext = workerApprovalContext ?? plannerApprovalContext;
 
   const baseConfig: OrchestratorConfig = {
+    onProtectedModelFailure(transient) {
+      if (active) active.modelFailure = { transient };
+    },
     ...(toolApprovalContext && { toolApprovalContext }),
     allowJsonResponse: options.assessmentRevision !== undefined,
     providerRegistry: registry,
@@ -12028,6 +12033,9 @@ function createAgent(
           });
         }
       } finally {
+        if (!signal.aborted && active?.modelFailure) {
+          checkpointOptions?.onModelFailure?.(active.modelFailure.transient);
+        }
         if (turnSession !== session) orchestrator.clearHistory(turnSession.id);
         active = undefined;
         release();

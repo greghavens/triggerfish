@@ -14,6 +14,7 @@ import type {
 } from "../../core/types/llm.ts";
 import { convertToolsToNativeFormat } from "../dispatch/tool_format.ts";
 import { detectRepetition } from "../dispatch/response_quality.ts";
+import { isTransientModelAvailabilityError } from "../providers/retry.ts";
 import { createLogger } from "../../core/logger/mod.ts";
 
 const log = createLogger("llm-streaming");
@@ -195,9 +196,16 @@ async function runLlmProviderCall(
       provider: provider.name,
       iteration: iterations,
       streaming: useStreaming,
-      ...(!ctx.toolPersistence && { err }),
+      ...(!ctx.toolPersistence && !ctx.workerBoundary && { err }),
     });
-    if (ctx.toolPersistence) throw new Error("The protected model call failed");
+    if (ctx.toolPersistence || ctx.workerBoundary) {
+      if (!ctx.signal?.aborted) {
+        ctx.state.config.onProtectedModelFailure?.(
+          isTransientModelAvailabilityError(err),
+        );
+      }
+      throw new Error("The protected model call failed");
+    }
     throw err;
   }
 }

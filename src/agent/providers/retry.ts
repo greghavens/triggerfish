@@ -22,8 +22,8 @@ const log = createLogger("provider-retry");
 const RETRYABLE_STATUS_CODES = new Set([429, 502, 503]);
 
 /** Default retry configuration. */
-const DEFAULT_MAX_RETRIES = 2;
-const DEFAULT_BASE_DELAY_MS = 1000;
+export const DEFAULT_MAX_RETRIES = 2;
+export const DEFAULT_BASE_DELAY_MS = 1000;
 
 /** Options for the retry decorator. */
 export interface RetryOptions {
@@ -42,18 +42,42 @@ export function isRetryableError(err: unknown): boolean {
   return false;
 }
 
+/** A route already attempted failover for this call. */
+export class ModelFailoverExhausted extends Error {
+  constructor() {
+    super("The approved model route could not complete the request.");
+  }
+}
+
+/** Recognize structured SDK status and known provider error prefixes. */
+export function isTransientModelAvailabilityError(error: unknown): boolean {
+  if (!(error instanceof Error) || error instanceof ModelFailoverExhausted) {
+    return false;
+  }
+  if ("status" in error && typeof error.status === "number") {
+    return RETRYABLE_STATUS_CODES.has(error.status);
+  }
+  return /^[A-Za-z\d ./_-]{1,96}\((?:429|502|503)\)(?::|$)/.test(
+    error.message,
+  ) ||
+    /^OpenRouter request failed after \d+ retries: (?:HTTP|API) (?:429|502|503):/
+      .test(error.message);
+}
+
 /** Sleep for the given duration, respecting an optional abort signal. */
-function retrySleep(ms: number, signal?: AbortSignal): Promise<void> {
-  if (signal?.aborted) return Promise.reject(signal.reason);
+export function retrySleep(ms: number, signal?: AbortSignal): Promise<void> {
+  if (!signal) return new Promise((resolve) => setTimeout(resolve, ms));
+  if (signal.aborted) return Promise.reject(signal.reason);
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(resolve, ms);
-    if (signal) {
-      const onAbort = () => {
-        clearTimeout(timer);
-        reject(signal.reason);
-      };
-      signal.addEventListener("abort", onAbort, { once: true });
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    function onAbort() {
+      clearTimeout(timer);
+      reject(signal?.reason);
     }
+    signal.addEventListener("abort", onAbort, { once: true });
   });
 }
 

@@ -164,6 +164,8 @@ export interface OrchestratorConfig {
   ) => readonly ToolDefinition[];
   /** Resolve the current reviewed turn budget and final response guidance. */
   readonly getMaxIterations?: () => number | undefined;
+  /** Signal an eligible protected model failure without exposing provider error data. */
+  readonly onProtectedModelFailure?: (transient: boolean) => void;
   readonly getIterationWrapupPrompt?: () => string | undefined;
   /** Soft turn deadline, independent of cancellation and hard lease deadlines. */
   readonly getTaskTimeoutWrapup?: () => {
