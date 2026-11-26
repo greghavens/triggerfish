@@ -3169,6 +3169,11 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
       assertEquals(unchanged.prerequisites, [assigned.receipt.taskId]);
       assertEquals(unchanged.dependencyProposal, undefined);
       const priority = { ...taskRead, action: "prioritize_task" };
+      await denyDuringRunReview(priority);
+      assertEquals(
+        JSON.parse((await turn(taskRead)).result).tasks[0].prioritized,
+        false,
+      );
       assertEquals(
         JSON.parse((await turn(priority)).result).action,
         "prioritize_task",
@@ -3323,6 +3328,11 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
       });
       sentinelModelAccess = true;
       assertEquals(confirmations.length, beforeModelRetry);
+      await denyDuringRunReview(retryReview);
+      assertEquals(
+        JSON.parse((await turn(modelTask)).result).tasks[0].modelReview.status,
+        "exhausted",
+      );
       assertEquals(
         JSON.parse((await turn(retryReview)).result).action,
         "retry_model_review",
@@ -3336,7 +3346,7 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
         },
       );
       assertStringIncludes((await turn(retryReview)).result, "unavailable");
-      assertEquals(confirmations.length, beforeModelRetry + 1);
+      assertEquals(confirmations.length, beforeModelRetry + 2);
       const capacity = { ...exact, action: "worker_limit" };
       const setCapacity = { ...capacity, action: "set_worker_limit", limit: 1 };
       const defaults = JSON.parse((await turn(capacity)).result);
@@ -3348,6 +3358,8 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
         "unavailable",
       );
       assertEquals(confirmations.length, beforeCapacity);
+      await denyDuringRunReview(setCapacity);
+      assertEquals(JSON.parse((await turn(capacity)).result), defaults);
       duringConfirmation = () => {
         const journal = openSentinelAdaptiveStore(
           join(dirname(path), "sentinel-adaptive.db"),
@@ -3367,13 +3379,15 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
       const limited = JSON.parse((await turn(setCapacity)).result);
       assertEquals(limited.effectiveLimit, 1);
       assertEquals(JSON.parse((await turn(setCapacity)).result), limited);
-      assertEquals(confirmations.length, beforeCapacity + 2);
+      assertEquals(confirmations.length, beforeCapacity + 3);
+      const resetCapacity = { ...capacity, action: "reset_worker_limit" };
+      await denyDuringRunReview(resetCapacity);
+      assertEquals(JSON.parse((await turn(capacity)).result), limited);
       await withGateway(async (reconnected) => {
         assertEquals(JSON.parse((await reconnected(capacity)).result), limited);
         assertEquals(
           JSON.parse(
-            (await reconnected({ ...capacity, action: "reset_worker_limit" }))
-              .result,
+            (await reconnected(resetCapacity)).result,
           ).effectiveLimit,
           3,
         );

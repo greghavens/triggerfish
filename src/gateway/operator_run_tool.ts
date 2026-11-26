@@ -5643,7 +5643,9 @@ ${request}`)
       if (queueAction) {
         const { taskId } = args;
         const modelRetry = queueAction === "retry_model_review";
+        const authorize = context?.authorizeOwnerRunCall;
         if (
+          !authorize || !context?.authenticatedOwnerSessionId ||
           (modelRetry && options.sentinelModelAccess !== true) ||
           ref.kind !== "sentinel" || ref.revision === undefined ||
           !canFlowTo("INTERNAL", context?.ceiling ?? "INTERNAL") ||
@@ -5685,6 +5687,7 @@ ${request}`)
         ) {
           return "Error: The operator declined the run action.";
         }
+        if (!await authorize(args)) return unavailable;
         controlSentinelTask(
           path,
           queue.revision,
@@ -5706,12 +5709,14 @@ ${request}`)
       ) {
         const writable = action !== "worker_limit";
         const setting = action === "set_worker_limit";
+        const authorize = context?.authorizeOwnerRunCall;
         const gatewayLimit = options.sentinelGatewayWorkerLimit ?? 2;
         const { limit } = args;
         if (
           ref.kind !== "sentinel" || ref.revision === undefined ||
           !canFlowTo("INTERNAL", context?.ceiling ?? "INTERNAL") ||
-          (writable && options.sentinelModelAccess !== true) ||
+          (writable && (!authorize || !context?.authenticatedOwnerSessionId ||
+            options.sentinelModelAccess !== true)) ||
           (setting
             ? typeof limit !== "number" || !Number.isSafeInteger(limit) ||
               limit < 1 || limit > gatewayLimit
@@ -5749,6 +5754,7 @@ ${request}`)
             return "Error: The operator declined the run action.";
           }
           if (
+            !await authorize?.(args) ||
             !updateSentinelWorkerLimit(path, {
               runId,
               revision: ref.revision,
