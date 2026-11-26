@@ -5300,7 +5300,9 @@ ${
       if (action === "enroll_goal_workflow") {
         const { runId, requestId, goalId, targetId } = args;
         const workflows = options.workflows;
+        const authorize = context?.authorizeOwnerRunCall;
         if (
+          !authorize || !context?.authenticatedOwnerSessionId ||
           !workflows || ref.kind !== "sentinel" || ref.revision === undefined ||
           !canFlowTo("INTERNAL", context?.ceiling ?? "INTERNAL") ||
           typeof runId !== "string" || !digestPattern.test(runId) ||
@@ -5354,7 +5356,7 @@ ${
         ) {
           return "Error: The operator declined the run action.";
         }
-        if (!eligible()) return unavailable;
+        if (!await authorize(args) || !eligible()) return unavailable;
         const enrollment = workflows.enrollGoal(
           request,
           selection,
@@ -5365,7 +5367,9 @@ ${
       if (action === "completed_graph_followup") {
         const { runId, requestId, taskKind, node, receiptId, note } = args;
         const finding = parseReviewedFindingFollowup(receiptId, note, context);
+        const authorize = context?.authorizeOwnerRunCall;
         if (
+          !authorize || !context?.authenticatedOwnerSessionId ||
           ref.kind !== "sentinel" || ref.revision === undefined ||
           !canFlowTo("INTERNAL", context?.ceiling ?? "INTERNAL") ||
           typeof runId !== "string" || !digestPattern.test(runId) ||
@@ -5430,6 +5434,7 @@ ${
             }`,
           )
         ) return "Error: The operator declined the run action.";
+        if (!await authorize(args)) return unavailable;
         const binding = before.binding;
         const result = reviewSentinelCompletedGraphFollowup(path, request, {
           binding,

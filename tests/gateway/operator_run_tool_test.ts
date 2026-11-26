@@ -6902,7 +6902,20 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
                 "operator declined",
               );
               approved = true;
+              duringConfirmation = () => {
+                denied = "PRE_TOOL_CALL";
+              };
+              try {
+                assertStringIncludes(
+                  (await restartTurn(followup)).result,
+                  "unavailable",
+                );
+              } finally {
+                duringConfirmation = undefined;
+                denied = undefined;
+              }
               const result = JSON.parse((await restartTurn(followup)).result);
+              assertEquals(confirmations.length, beforeFollowupApproval + 3);
               assertEquals(result.receipt.nodeId, followup.node);
               assertEquals(result.receipt.runId, followup.runId);
               assertEquals(result.receipt.constraintsVersion, 1);
@@ -7052,6 +7065,29 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
             "operator declined",
           );
           approved = true;
+          assertEquals(pendingAdapter.list(), []);
+          duringConfirmation = () => {
+            denied = "PRE_TOOL_CALL";
+          };
+          try {
+            assertStringIncludes(
+              (await ownerTurn(enrollment)).result,
+              "unavailable",
+            );
+          } finally {
+            duringConfirmation = undefined;
+            denied = undefined;
+          }
+          assertEquals(
+            pendingAdapter.goalEnrollment(enrollment.requestId, {
+              caseId: enrollment.id,
+              runId: enrollment.runId,
+              revision: enrollment.revision,
+              goalId: enrollment.goalId,
+              planId: enrollment.targetId,
+            }),
+            undefined,
+          );
           assertEquals(pendingAdapter.list(), []);
           const saved =
             JSON.parse((await ownerTurn(enrollment)).result).enrollment;
