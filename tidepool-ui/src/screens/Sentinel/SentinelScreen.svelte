@@ -46,6 +46,7 @@
 
   import { createFindingDownload, type FindingDownloadFormat } from "./finding_download.js";
 
+  import { createFindingEvidenceDownload } from "./finding_evidence_download.js";
   import { createTrafficDownload, type TrafficDownloadRequest, type TrafficDownloadSelection } from "./traffic_download.js";
   type ExportFormat = FindingDownloadFormat | "provenance" | "inventory" | "alerts" | "decisions" | "incidents";
   const incidentDispositions = ["investigating", "resolved", "dismissed", "requires_review"];
@@ -289,6 +290,7 @@
     cursor?: number | null;
   };
   let trafficDownload = $state.raw<ReturnType<typeof createTrafficDownload>>();
+  let findingEvidenceDownload = $state.raw<ReturnType<typeof createFindingEvidenceDownload>>();
   let findingDownload = $state.raw<ReturnType<typeof createFindingDownload>>();
   let historyDownload = $state.raw<{
     timelines: TimelineDownload[];
@@ -653,6 +655,7 @@
         completeRequest();
         historyDownload = undefined;
         findingDownload = undefined;
+        findingEvidenceDownload = undefined;
         trafficDownload = undefined;
         error =
           "The request timed out. Refresh to check the assessment status.";
@@ -913,6 +916,25 @@
         comparison = { ...comparison, workerHistory: [...(comparison.workerHistory ?? []), ...events], historyCursor };
       }
       completeRequest();
+    } else if ((pending === "export" || pending === "finding_traffic_download_page") &&
+      findingEvidenceDownload && message.requestId === pendingId) {
+      const download = findingEvidenceDownload;
+      const activeCase = caseId;
+      const currentRevision = assessment?.revision;
+      const expectedRequest = pendingId;
+      void download.accept(message).then(outcome => {
+        if (findingEvidenceDownload !== download || caseId !== activeCase ||
+          pendingId !== expectedRequest || assessment?.revision !== currentRevision ||
+          getConnectionState() !== "connected") return;
+        completeRequest();
+        if ("request" in outcome) {
+          request(outcome.topic, outcome.request);
+          return;
+        }
+        findingEvidenceDownload = undefined;
+        if ("error" in outcome) error = outcome.error;
+        else downloadReport("md-zip", [outcome.content], message.revision as number, undefined, "finding-evidence");
+      });
     } else if (pending === "finding_traffic_download_page" &&
       trafficDownload && message.requestId === pendingId) {
       const download = trafficDownload;
@@ -959,6 +981,7 @@
       }
       completeRequest();
     } else if (message.type === "error" || message.type === "sentinel_error") {
+      findingEvidenceDownload = undefined;
       trafficDownload = undefined;
       historyDownload = undefined;
       findingDownload = undefined;
@@ -976,7 +999,8 @@
     if (message.type === "ws_disconnected") {
       if (historyDownload) error = "The worker history download was interrupted.";
       if (findingDownload) error = "The findings download was interrupted.";
-      if (trafficDownload) error = "The retained traffic download was interrupted.";
+      if (trafficDownload || findingEvidenceDownload) error = "The retained traffic download was interrupted.";
+      findingEvidenceDownload = undefined;
       trafficDownload = undefined;
       findingDownload = undefined;
       historyDownload = undefined;
@@ -1053,6 +1077,15 @@
     if (!online || pending || revision === undefined) return;
     const download = createFindingDownload(caseId, revision, format, { findingFilter: {} }, reportLanguage);
     findingDownload = download;
+    request("export", download.initial);
+  }
+
+  function startFindingEvidenceDownload(findingId: string, payloadPart: TrafficDownloadSelection["payloadPart"]) {
+    const currentRevision = assessment?.revision;
+    const revision = displayedRevision;
+    if (pending || !online || revision === undefined || currentRevision === undefined) return;
+    const download = createFindingEvidenceDownload({ caseId, revision, currentRevision, findingId, payloadPart });
+    findingEvidenceDownload = download;
     request("export", download.initial);
   }
 
@@ -1188,6 +1221,7 @@
   function selectCase(id: string) {
     if (id === caseId || pending) return;
     caseId = id;
+    findingEvidenceDownload = undefined;
     trafficDownload = undefined;
     recheckLineage = undefined;
     sourceSnapshot = undefined;
@@ -2645,7 +2679,7 @@
               </section>
             {/if}
             <TrafficEvidence graph={displayGraph} language={workspaceLanguage} onFocus={focusDisplayedNode}
-              onDownload={startTrafficDownload} downloadDisabled={!online || !!pending || displayedRevision === undefined} />
+              onDownload={startTrafficDownload} onDownloadEvidence={startFindingEvidenceDownload} downloadDisabled={!online || !!pending || displayedRevision === undefined} />
           {/if}
         </div>
       {/key}

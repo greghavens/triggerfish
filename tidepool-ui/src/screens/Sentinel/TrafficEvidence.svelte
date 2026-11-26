@@ -3,10 +3,11 @@
   import { sentinelWorkspaceText, type WorkspaceLanguage } from "./workspace_language.js";
 
   type PayloadPart = "headers" | "request" | "response";
-  let { graph, onFocus, onDownload, downloadDisabled = false, language = "en" }: {
+  let { graph, onFocus, onDownload, onDownloadEvidence, downloadDisabled = false, language = "en" }: {
     graph: SentinelGraph | null;
     onFocus: (id: string) => void;
     onDownload?: (findingId: string, trafficLinkId: string, payloadPart: PayloadPart) => void;
+    onDownloadEvidence?: (findingId: string, payloadPart: PayloadPart) => void;
     downloadDisabled?: boolean;
     language?: WorkspaceLanguage;
   } = $props();
@@ -124,6 +125,12 @@
           onclick={() => onDownload?.(findingId.trim(), trafficLinkId.trim(), payloadPart)}>
           {t("Download retained traffic")}
         </button>
+        {#if onDownloadEvidence}
+          <button type="button" disabled={downloadDisabled || !/^worker-finding:[a-f0-9]{64}$/.test(findingId.trim())}
+            onclick={() => onDownloadEvidence?.(findingId.trim(), payloadPart)}>
+            {t("Finding ZIP with retained traffic")}
+          </button>
+        {/if}
       </div>
     </details>
   {/if}

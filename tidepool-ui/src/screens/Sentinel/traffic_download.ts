@@ -28,6 +28,35 @@ function record(value: unknown): Record<string, unknown> | undefined {
     : undefined;
 }
 
+/** Bind an authenticated page to the exact stored payload descriptors. */
+export function trafficDownloadProof(
+  selection: TrafficDownloadSelection,
+  message: Record<string, unknown>,
+  trafficDigest: string,
+  runId: string,
+) {
+  const page = record(message.page);
+  const link = record(page?.link);
+  const payload = record(page?.payload);
+  const descriptor = record(payload?.[descriptorKey[selection.payloadPart]]);
+  if (
+    message.type !== "finding_traffic_download_page" ||
+    message.caseId !== selection.caseId || message.revision !== selection.revision ||
+    message.payloadPart !== selection.payloadPart ||
+    page?.currentRevision !== selection.currentRevision ||
+    page.runId !== runId || typeof page.scopeVersion !== "number" ||
+    link?.caseId !== selection.caseId || link.evidenceRevision !== selection.revision ||
+    link.findingId !== selection.findingId || link.id !== selection.trafficLinkId ||
+    link.trafficDigest !== trafficDigest || payload?.offset !== 0 ||
+    !descriptor || typeof descriptor.sha256 !== "string" ||
+    !/^[a-f0-9]{64}$/.test(descriptor.sha256)
+  ) return;
+  return {
+    binding: JSON.stringify([page.runId, page.scopeVersion, trafficDigest, descriptor]),
+    sha256: descriptor.sha256,
+  };
+}
+
 export function createTrafficDownload(selection: TrafficDownloadSelection) {
   const { caseId, ...request } = selection;
   const initial = { ...request, offset: 0 };

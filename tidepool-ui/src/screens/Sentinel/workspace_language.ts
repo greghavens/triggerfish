@@ -112,6 +112,7 @@ const messages = {
   "Goals": ["Objetivos", "목표", "目标", "目標"],
   "Tasks": ["Tareas", "작업", "任务", "タスク"],
   "Observations": ["Observaciones", "관찰 기록", "观察记录", "観察記録"],
+  "Finding ZIP with retained traffic": ["ZIP del hallazgo con tráfico retenido", "보존된 트래픽이 포함된 발견 ZIP", "包含保留流量的发现 ZIP", "保持されたトラフィック付きの検出 ZIP"],
   "Download retained traffic": ["Descargar tráfico retenido", "보존된 트래픽 다운로드", "下载保留流量", "保持されたトラフィックをダウンロード"],
   "Finding receipt ID": ["ID del recibo del hallazgo", "발견 영수증 ID", "发现回执 ID", "所見の受領 ID"],
   "Traffic attachment ID": ["ID del adjunto de tráfico", "트래픽 첨부 ID", "流量附件 ID", "トラフィック添付 ID"],

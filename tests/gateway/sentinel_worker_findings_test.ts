@@ -4,6 +4,7 @@ import { createWorkflowObservationVerifier } from "../../src/gateway/scheduled_o
 import { subscribeCommittedEvidence } from "../../src/core/evidence_task_progression.ts";
 import { DatabaseSync } from "node:sqlite";
 import { INCONCLUSIVE_RECHECK_TOOL } from "../../src/sentinel/recheck_inconclusive.ts";
+import { createFindingEvidenceDownload } from "../../tidepool-ui/src/screens/Sentinel/finding_evidence_download.ts";
 import { createTrafficDownload } from "../../tidepool-ui/src/screens/Sentinel/traffic_download.ts";
 import type { ChatSession } from "../../src/gateway/chat_session_interface.ts";
 import { createFindingDownload } from "../../tidepool-ui/src/screens/Sentinel/finding_download.ts";
@@ -6469,6 +6470,79 @@ async function verifyTidepoolTrafficDownload(
       "error" in outcome,
       "The complete body digest must reject a corrupted page",
     );
+    const archive = async (mode: "ok" | "revoke" | "manifest") => {
+      const zip = createFindingEvidenceDownload(selection);
+      let response = await zip.accept(
+        await request("export", { caseId, ...zip.initial }),
+      );
+      const seenLinks = new Set<string>();
+      let count = 0;
+      while ("request" in response) {
+        assert(count++ < 40);
+        if (response.topic === "finding_traffic_download_page") {
+          const selection = response.request;
+          if (selection.offset === 0) {
+            if (mode === "revoke" && seenLinks.has(selection.trafficLinkId)) {
+              denied = "PRE_TOOL_CALL";
+            }
+            seenLinks.add(selection.trafficLinkId);
+          }
+          response = await zip.accept(
+            await request(response.topic, { caseId, ...selection }),
+          );
+        } else {
+          const next = await request(response.topic, {
+            caseId,
+            ...response.request,
+          });
+          response = await zip.accept(
+            mode === "manifest"
+              ? { ...next, content: String(next.content) + " " }
+              : next,
+          );
+        }
+      }
+      denied = undefined;
+      return response;
+    };
+    const zipped = await archive("ok");
+    assert("content" in zipped);
+    const contents = new Uint8Array(zipped.content);
+    const view = new DataView(zipped.content);
+    const found: string[] = [];
+    const decode = new TextDecoder();
+    for (let offset = 0; view.getUint32(offset, true) === 0x04034b50;) {
+      const length = view.getUint32(offset + 18, true);
+      const nameLength = view.getUint16(offset + 26, true);
+      const start = offset + 30 + nameLength;
+      const name = decode.decode(contents.subarray(offset + 30, start));
+      found.push(name);
+      if (name.endsWith("/response.bin")) {
+        assertEquals(
+          decode.decode(contents.subarray(start, start + length)),
+          "Boundary🙂".repeat(240),
+        );
+      }
+      if (name.endsWith("/manifest.json")) {
+        const manifest = JSON.parse(
+          decode.decode(contents.subarray(start, start + length)),
+        );
+        assertEquals(manifest.retainedPayload, {
+          part: "response",
+          sha256: createHash("sha256").update("Boundary🙂".repeat(240)).digest(
+            "hex",
+          ),
+          byteLength: new TextEncoder().encode("Boundary🙂".repeat(240)).length,
+        });
+      }
+      offset = start + length;
+    }
+    assert(found.includes("finding-01.md"));
+    assert(found.includes("evidence/finding-01/link-1/manifest.json"));
+    assert(found.includes("evidence/finding-01/link-1/response.bin"));
+    assert("error" in await archive("revoke"));
+    assert("error" in await archive("manifest"));
+
     revokeOnResponse = true;
     assertEquals((await page(first)).type, "error");
     revokeOnResponse = false;

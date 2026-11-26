@@ -20,6 +20,11 @@ function crc32(bytes: Uint8Array): number {
 export interface SentinelFindingZipRecord {
   readonly markdown: string;
   readonly manifests: readonly string[];
+  readonly payloads?: readonly {
+    readonly linkIndex: number;
+    readonly part: "request" | "response" | "headers";
+    readonly bytes: ArrayBuffer;
+  }[];
 }
 
 function findingName(index: number): string {
@@ -34,6 +39,10 @@ function recordEntries(record: SentinelFindingZipRecord, index: number) {
       name: `evidence/${name}/link-${link + 1}/manifest.json`,
       body,
     })),
+    ...(record.payloads ?? []).map(({ linkIndex, part, bytes }) => ({
+      name: `evidence/${name}/link-${linkIndex + 1}/${part}.bin`,
+      body: bytes,
+    })),
   ];
 }
 
@@ -44,7 +53,9 @@ export function sentinelFindingZipRecordBytes(
   return recordEntries(record, index).reduce(
     (bytes, entry) =>
       bytes + LOCAL_HEADER + CENTRAL_HEADER + 2 * entry.name.length +
-      encoder.encode(entry.body).byteLength,
+      (typeof entry.body === "string"
+        ? encoder.encode(entry.body).byteLength
+        : entry.body.byteLength),
     0,
   );
 }
@@ -57,7 +68,9 @@ export function encodeSentinelFindingZip(
   const entries = records.flatMap((record, index) =>
     recordEntries(record, offset + index).map(({ name, body }) => ({
       name: encoder.encode(name),
-      body: encoder.encode(body),
+      body: typeof body === "string"
+        ? encoder.encode(body)
+        : new Uint8Array(body),
     }))
   );
   if (entries.length > 0xffff) return;
