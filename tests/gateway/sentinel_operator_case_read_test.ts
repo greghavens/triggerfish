@@ -191,6 +191,10 @@ Deno.test("Authenticated Sentinel chat reads exact approved cross-case graph fin
   let result = "";
   let verifyWorkerBinding = false;
   let localInventory = false;
+  let localTelemetry:
+    | "sentinel_defense"
+    | "sentinel_incident_alerts"
+    | undefined;
   let rejectExecutorCeiling = false;
   let dispatched = 0;
   let reject: "PRE_TOOL_CALL" | "POST_TOOL_RESPONSE" | "PRE_OUTPUT" | undefined;
@@ -295,7 +299,7 @@ Deno.test("Authenticated Sentinel chat reads exact approved cross-case graph fin
             function: {
               name: localInventory
                 ? "sentinel_case_inventory"
-                : "operator_runs",
+                : localTelemetry ?? "operator_runs",
               arguments: JSON.stringify(next),
             },
           }]
@@ -318,7 +322,21 @@ Deno.test("Authenticated Sentinel chat reads exact approved cross-case graph fin
       allowSentinelModelAccess: true,
       hookRunner: {
         async evaluateHook(hook, { input, auditInput }) {
-          const selectsTool = input.tool_name === "operator_runs";
+          const selectsTool = input.tool_name === "operator_runs" ||
+            input.tool_name === localTelemetry && localTelemetry !== undefined;
+          if (
+            localTelemetry && input.tool_name === localTelemetry &&
+            (hook === "PRE_TOOL_CALL" || hook === "POST_TOOL_RESPONSE")
+          ) {
+            assertEquals(input.case_id, "approved");
+            if (
+              hook === "POST_TOOL_RESPONSE" &&
+              typeof input.tool_response === "string" &&
+              input.tool_response.includes(visibleAlert.subject)
+            ) {
+              assertEquals(input.evidence_revision, approved.revision);
+            }
+          }
           if (selectsTool || hook === "PRE_OUTPUT") hooks.push(hook);
           if (
             selectsTool && hook === "PRE_TOOL_CALL" &&
@@ -840,6 +858,42 @@ Deno.test("Authenticated Sentinel chat reads exact approved cross-case graph fin
     assertStringIncludes(result, "unavailable");
     assertEquals(constraintConfirmations, []);
     await turn("/sentinel case approved");
+    localTelemetry = "sentinel_defense";
+    const localCheck = { upstreamCheck: coverageCheck.upstreamCheck };
+    const alertsPath = sentinelAlertsPath(approved.path);
+    const uncommittedAlerts = await Deno.readTextFile(alertsPath);
+    await Deno.writeTextFile(alertsPath, "[]");
+    try {
+      await turn(
+        "Read selected-case detection through the direct tool after intake changes",
+        localCheck,
+      );
+    } finally {
+      await Deno.writeTextFile(alertsPath, uncommittedAlerts);
+    }
+    assertEquals(
+      JSON.parse(result).matches.map(({ alertId }: { alertId: string }) =>
+        alertId
+      ),
+      [visibleAlertId],
+    );
+    await turn("Reject an excluded exact alert through the direct tool", {
+      ...localCheck,
+      alertId: restrictedAlertId,
+    });
+    assertStringIncludes(result, "did not match");
+    assert(!result.includes(restrictedAlert.subject));
+    localTelemetry = "sentinel_incident_alerts";
+    await turn("Read exact scoped incident directly", {
+      incidentId: catalog.incidents[0].id,
+    });
+    assertEquals(JSON.parse(result).total, 2);
+    await turn("Reject revision drift in direct incident reads", {
+      incidentId: catalog.incidents[0].id,
+      revision: approved.revision + 1,
+    });
+    assertStringIncludes(result, "unavailable");
+    localTelemetry = undefined;
     await turn("Read selected case restrictions", {
       action: "constraints",
       ...exact,
@@ -1188,8 +1242,14 @@ Deno.test("Authenticated Sentinel chat reads exact approved cross-case graph fin
 
     await turn("/sentinel off");
     await turn("/sentinel on");
+    await turn("/sentinel case approved");
+    localTelemetry = "sentinel_defense";
+    const directAlert = {
+      upstreamCheck: coverageCheck.upstreamCheck,
+      alertId: visibleAlertId,
+    };
     await turn(independentContext);
-    await turn("Read a retained alert for this investigation", exactAlert);
+    await turn("Read a retained alert for this investigation", directAlert);
     assertStringIncludes(result, visibleAlert.subject);
     captureModelContext = true;
     await turn("Keep using the allowed context.");
@@ -1203,7 +1263,7 @@ Deno.test("Authenticated Sentinel chat reads exact approved cross-case graph fin
     assertStringIncludes(modelContext, independentContext);
     assert(!modelContext.includes(visibleAlert.subject));
     reject = undefined;
-    await turn("Read the authorized alert again", exactAlert);
+    await turn("Read the authorized alert again", directAlert);
     assertStringIncludes(result, visibleAlert.subject);
 
     captureModelContext = true;
@@ -1218,6 +1278,7 @@ Deno.test("Authenticated Sentinel chat reads exact approved cross-case graph fin
     assertStringIncludes(modelContext, independentContext);
     assert(!modelContext.includes(visibleAlert.subject));
 
+    localTelemetry = undefined;
     revokeTelemetry = "PRE_OUTPUT";
     const staleDelivery = await turn(
       "Narrow asset authority during destination review",

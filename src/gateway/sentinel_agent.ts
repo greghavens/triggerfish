@@ -312,6 +312,11 @@ interface SentinelTelemetryFence {
   readonly authorize: () => Promise<boolean>;
 }
 
+interface SentinelDirectTelemetryRead {
+  readonly name: string;
+  readonly args: Record<string, unknown>;
+}
+
 export interface SentinelAgentOptions {
   readonly operatorRunReader?: {
     readonly definition: ToolDefinition;
@@ -319,6 +324,7 @@ export interface SentinelAgentOptions {
       args: Record<string, unknown>,
       signal: AbortSignal,
       retainTelemetryFence?: (fence: SentinelTelemetryFence) => void,
+      directTelemetry?: SentinelDirectTelemetryRead,
     ) => Promise<string>;
   };
   readonly plannerExecutionEvidenceRunId?: string;
@@ -1259,7 +1265,10 @@ interface ActiveTurn {
   readonly controller: AbortController;
   readonly signal: AbortSignal;
   readonly readGraph: ReadGraph;
-  pendingTelemetryFence?: SentinelTelemetryFence;
+  pendingTelemetryFence?: SentinelTelemetryFence & {
+    readonly tool: string;
+    readonly revision: unknown;
+  };
   telemetryHistoryPrefix?: readonly HistoryEntry[];
   readonly outputLanguage: SentinelOutputLanguage;
   readonly send: ChatEventSender;
@@ -4298,8 +4307,16 @@ function createAgent(
             toolName === SENTINEL_INCIDENT_ALERTS_READ ||
             toolName === SENTINEL_DEFENSE_READ || traffic || plannerTodo ||
             digestRead || plannerControl);
+        const selectedDirectTelemetry = !!operatorRunReader &&
+          (toolName === SENTINEL_DEFENSE_READ ||
+            toolName === SENTINEL_INCIDENT_ALERTS_READ);
+        const pendingTelemetry = active?.pendingTelemetryFence;
         let evidenceRevision = options.assessmentRevision ??
-          (traffic || digestRead || selectedCaseCall
+          (selectedDirectTelemetry
+            ? sentinelTrafficPolicyRevision(call?.args?.revision) ??
+              sentinelTrafficPolicyRevision(pendingTelemetry?.revision) ??
+              readSentinelAssessment(options.snapshotPath)?.revision
+            : traffic || digestRead || selectedCaseCall
             ? sentinelTrafficPolicyRevision(call?.args?.revision)
             : undefined);
         if (
@@ -4386,7 +4403,7 @@ function createAgent(
         }
         if (
           name === "POST_TOOL_RESPONSE" && turn?.pendingTelemetryFence &&
-          toolName === operatorRunReader?.definition.name
+          toolName === turn.pendingTelemetryFence.tool
         ) {
           const fence = turn.pendingTelemetryFence;
           turn.pendingTelemetryFence = undefined;
@@ -4571,14 +4588,48 @@ function createAgent(
       if (++turn.reads > MAX_READS_PER_TURN) {
         return "Error: This turn reached the Sentinel graph read limit.";
       }
-      if (operatorRunReader?.definition.name === name) {
+      if (
+        operatorRunReader && (operatorRunReader.definition.name === name ||
+          name === SENTINEL_DEFENSE_READ ||
+          name === SENTINEL_INCIDENT_ALERTS_READ)
+      ) {
+        const direct = name !== operatorRunReader.definition.name
+          ? { name, args }
+          : undefined;
+        let request = args;
+        if (direct) {
+          const query = name === SENTINEL_DEFENSE_READ
+            ? sentinelDefenseReadArgs(args)
+            : sentinelIncidentAlertsArgs(args);
+          const caseId = locateSentinelCase(options.snapshotPath)?.caseId;
+          const revision =
+            (query && "revision" in query ? query.revision : undefined) ??
+              readSentinelAssessment(options.snapshotPath)?.revision;
+          if (!query || !caseId || !revision) {
+            return "Error: The selected Sentinel telemetry revision or request is unavailable.";
+          }
+          request = {
+            ...query,
+            action: name === SENTINEL_DEFENSE_READ
+              ? "defense_coverage"
+              : "incident_alerts",
+            kind: "sentinel",
+            id: caseId,
+            revision,
+          };
+        }
         turn.pendingTelemetryFence = undefined;
         const result = await operatorRunReader.execute(
-          args,
+          request,
           turn.signal,
           (fence) => {
-            turn.pendingTelemetryFence = fence;
+            turn.pendingTelemetryFence = {
+              ...fence,
+              tool: name,
+              revision: request.revision,
+            };
           },
+          direct,
         );
         if (result.length > MAX_TOOL_CHARS) {
           turn.pendingTelemetryFence = undefined;

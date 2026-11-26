@@ -884,6 +884,7 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
             authorize: () => Promise<boolean>;
           },
         ) => void,
+        directTelemetry?: { name: string; args: Record<string, unknown> },
       ) {
         const { action, kind, id, revision, runId } = args;
         const selectedControl = sentinelOperatorCaseControlActions.some((
@@ -921,7 +922,9 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
             state.sessionStates.get(state.ownerSessionId) !== owner
           ) return false;
           const casePath = resolveCase();
-          if (!selectedControl) return !!casePath;
+          if (!selectedControl) {
+            return directTelemetry ? casePath === selectedPath : !!casePath;
+          }
           if (casePath !== selectedPath) return false;
           const assessment = readSentinelAssessment(selectedPath);
           if (!assessment || assessment.plan.runId !== runId) return false;
@@ -974,31 +977,59 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
         if (!current()) return unavailable;
         if (scopedTelemetry && result.startsWith("{")) {
           if (!telemetryIsCurrent()) return unavailable;
+          const source = directTelemetry ??
+            { name: operatorRunTool.name, args };
+          const text = directTelemetry
+            ? JSON.stringify(JSON.parse(result).evidence)
+            : result;
+          if (!text) return unavailable;
+          const metadata = {
+            tool_name: source.name,
+            case_id: id,
+            evidence_revision: revision,
+            resource_classification: "INTERNAL",
+            operation_type: "read",
+          };
+          const policy: typeof orchestratorConfig = {
+            ...orchestratorConfig,
+            getSessionTaint: () => "INTERNAL",
+            hookRunner: {
+              ...orchestratorConfig.hookRunner,
+              evaluateHook(hook, context) {
+                return orchestratorConfig.hookRunner.evaluateHook(hook, {
+                  ...context,
+                  input: { ...context.input, ...metadata },
+                  auditInput: { ...context.auditInput, ...metadata },
+                });
+              },
+            },
+          };
           retainTelemetryFence?.({
             key: createHash("sha256").update(JSON.stringify([
               id,
               revision,
               telemetryRun,
               telemetryPolicy?.version,
-              args,
-              result,
+              source,
+              text,
             ])).digest("hex"),
             isCurrent: telemetryIsCurrent,
             async authorize() {
               if (
                 !telemetryIsCurrent() ||
-                !await authority.authorizeOwnerRunCall?.(args) ||
+                !await authorizeSavedToolCalls([source], policy, owner) ||
                 !telemetryIsCurrent()
               ) return false;
               const approved = await enforcePostToolResponse(
-                operatorRunTool.name,
-                { ...orchestratorConfig, getSessionTaint: () => "INTERNAL" },
+                source.name,
+                policy,
                 owner,
-                { resultText: result, blocked: false },
+                { resultText: text, blocked: false },
               );
               return !approved.blocked && telemetryIsCurrent();
             },
           });
+          return text;
         }
         return result;
       },
