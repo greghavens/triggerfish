@@ -3446,3 +3446,196 @@ Deno.test("Retained digest pages reauthorize every assignment before and after a
     await Deno.remove(directory, { recursive: true });
   }
 });
+
+Deno.test("Scoped incident discovery and assignment require every retained member asset", async () => {
+  const directory = await Deno.makeTempDir();
+  const caseId = "scoped-incident-membership";
+  const path = resolveSentinelCasePath(directory, caseId);
+  const names = ["approved", "excluded", "spare"];
+  const observedAt = "2026-01-01T00:00:00.000Z";
+  const alert = (
+    asset: string,
+    type: string,
+    subject: string,
+    minute: string,
+  ) => ({
+    asset,
+    subject,
+    type,
+    severity: "high",
+    observedAt: observedAt.replace("00:00:00", `00:${minute}:00`),
+    evidenceIds: [`${asset}-${type}-${minute}`],
+  });
+  const plannerInput = Promise.withResolvers<string>();
+  const held = Promise.withResolvers<void>();
+  let allowedIncident = "";
+  let mixedIncident = "";
+  let approvedReview = "";
+  const providers = createProviderRegistry();
+  providers.register({
+    name: "scoped-incident-membership",
+    supportsStreaming: false,
+    async complete(messages) {
+      const prompt = String(
+        messages.find(({ role }) => role === "user")?.content,
+      );
+      if (prompt.startsWith("Plan a defensive investigation")) {
+        plannerInput.resolve(prompt);
+        await held.promise;
+        return completion(JSON.stringify([{
+          kind: "trace",
+          nodeId: "approved",
+          depth: 8,
+        }]));
+      }
+      const saved = messages.findLast(({ role }) => role === "tool");
+      const binding = JSON.parse(prompt.slice(prompt.lastIndexOf("\n") + 1));
+      assertEquals(binding.target, allowedIncident);
+      approvedReview = binding.assignment;
+      assert(!prompt.includes(mixedIncident));
+      if (!saved) {
+        return completion("", "sentinel_incident_alerts", {
+          incidentId: allowedIncident,
+        });
+      }
+      assertEquals(JSON.parse(String(saved.content)).total, 2);
+      return completion(
+        '{"summary":"Reviewed both allowed incident members.","followUps":[]}',
+      );
+    },
+  });
+  providers.setDefault("scoped-incident-membership");
+  const planner = createSentinelModelPlanner(
+    path,
+    (state, assignment, token) =>
+      createSentinelSubagent({
+        snapshotPath: path,
+        assessmentRevision: state.revision,
+        plannerExecutionEvidenceRunId: assignment
+          ? undefined
+          : state.plan.runId,
+        assignedTaskId: assignment,
+        assignedTaskLeaseToken: token,
+        providerRegistry: providers,
+        hookRunner: allowHooks,
+        allowModelAccess: true,
+      }),
+  );
+  try {
+    await Deno.mkdir(dirname(path), { recursive: true, mode: 0o700 });
+    await Deno.writeTextFile(
+      path,
+      JSON.stringify({
+        version: 1,
+        nodes: names.map((id) => ({ id, kind: "asset", label: id })),
+        edges: [{ from: names[0], to: names[1], relation: "depends_on" }],
+      }),
+      { mode: 0o600 },
+    );
+    await Deno.writeTextFile(
+      sentinelAlertsPath(path),
+      JSON.stringify([
+        alert("approved", "integrity_change", "Allowed cohort", "00"),
+        alert("approved", "network_security_alert", "Allowed cohort", "00"),
+        alert("approved", "integrity_change", "Mixed cohort", "10"),
+        alert("excluded", "network_security_alert", "Mixed cohort", "10"),
+      ]),
+      { mode: 0o600 },
+    );
+    const state = startSentinelAssessment(path);
+    const runId = state.plan.runId;
+    assert(runId);
+    const candidates = state.result?.sharedGraph.observations.find(({ task }) =>
+      task === "incident_correlation"
+    )?.facts.candidates;
+    assert(Array.isArray(candidates));
+    allowedIncident = candidates.find((value) => !value.relatedAssetIds)?.id;
+    mixedIncident = candidates.find((value) =>
+      value.relatedAssetIds?.length === 2
+    )?.id;
+    assert(allowedIncident && mixedIncident);
+    const ref = {
+      kind: "sentinel",
+      id: caseId,
+      revision: state.revision,
+      runId,
+    };
+    const narrow = (expectedVersion: number, allowedAssetIds: string[]) => ({
+      ...ref,
+      action: "narrow_constraints",
+      requestId: crypto.randomUUID(),
+      expectedVersion,
+      deniedKinds: [],
+      allowedAssetIds,
+    });
+    await withArchivedPlannerRead(directory, async (read) => {
+      assertEquals(
+        JSON.parse(await read(narrow(0, ["approved", "spare"])))
+          .record.constraints.allowedAssetIds,
+        ["approved", "spare"],
+      );
+      advanceAdaptiveSentinel(path, readSentinelAssessment(path)!);
+      assertStringIncludes(
+        await read({
+          ...ref,
+          action: "assign",
+          requestId: crypto.randomUUID(),
+          adaptiveRevision: readAdaptiveSentinel(path, state)?.revision,
+          taskKind: "review_incident",
+          node: mixedIncident,
+        }),
+        "unavailable",
+      );
+    });
+    const deadline = Date.now() + 4000;
+    while (
+      !approvedReview || !readAdaptiveSentinel(path, state)
+        ?.modelReviews.some(({ taskId }) => taskId === approvedReview)
+    ) {
+      assert(Date.now() < deadline);
+      planner.advance(readSentinelAssessment(path)!);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    assert(
+      readAdaptiveSentinel(path, state)?.modelReviews.some((
+        { taskId, summary },
+      ) =>
+        taskId === approvedReview &&
+        summary === "Reviewed both allowed incident members."
+      ),
+    );
+    planner.advance(readSentinelAssessment(path)!);
+    const timeout = setTimeout(
+      () => plannerInput.reject(new Error("Scoped planner did not run")),
+      4000,
+    );
+    const prompt = await plannerInput.promise.finally(() =>
+      clearTimeout(timeout)
+    );
+    assertStringIncludes(prompt, allowedIncident);
+    assert(!prompt.includes(mixedIncident));
+    assert(!prompt.includes("Mixed cohort"));
+    await withArchivedPlannerRead(directory, async (read) => {
+      assertEquals(
+        JSON.parse(await read(narrow(1, ["spare"])))
+          .record.constraints.allowedAssetIds,
+        ["spare"],
+      );
+    });
+    held.resolve();
+    const settlement = Date.now() + 3000;
+    while (planner.hasInFlightWork() && Date.now() < settlement) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    assert(!planner.hasInFlightWork());
+    assert(
+      !readAdaptiveSentinel(path, state)?.tasks.some(({ depth }) =>
+        depth === 8
+      ),
+    );
+  } finally {
+    held.resolve();
+    planner.stop();
+    await Deno.remove(directory, { recursive: true });
+  }
+});

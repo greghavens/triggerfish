@@ -138,6 +138,7 @@ import {
 
 import {
   readSavedSentinelIncident,
+  readSavedSentinelIncidentAssetScopes,
   readSavedSentinelIncidentCandidate,
   readSavedSentinelIncidentCandidates,
   readSavedSentinelPlanningEvidence,
@@ -3202,15 +3203,31 @@ function decisionHoldScope(snapshotPath: string, revision: number) {
 
 function caseOperatingScope(snapshotPath: string, revision: number) {
   const state = readSentinelAssessment(snapshotPath);
-  const restrictions = state?.revision === revision
-    ? operatingConstraints(snapshotPath, state)
+  const constraints = state?.revision === revision
+    ? operatingConstraints(snapshotPath, state)?.constraints
     : undefined;
-  return (task: Pick<AdaptiveTaskRequest, "kind" | "nodeId">) =>
-    state?.revision === revision && sentinelOperatingConstraintsAllow(
-      restrictions?.constraints,
-      task,
-      state?.result?.sharedGraph.snapshot,
-    );
+  const snapshot = state?.result?.sharedGraph.snapshot;
+  let assetScopes: ReturnType<typeof readSavedSentinelIncidentAssetScopes>;
+  return (task: Pick<AdaptiveTaskRequest, "kind" | "nodeId">) => {
+    if (!state || state.revision !== revision) return false;
+    if (task.kind !== "review_incident" || !constraints?.allowedAssetIds) {
+      return sentinelOperatingConstraintsAllow(constraints, task, snapshot);
+    }
+    if (!task.nodeId || constraints.deniedKinds.includes(task.kind)) {
+      return false;
+    }
+    assetScopes ??=
+      readSavedSentinelIncidentAssetScopes(snapshotPath, revision) ??
+        new Map<string, readonly string[]>();
+    const assets = assetScopes.get(task.nodeId);
+    return !!assets?.length &&
+      assets.every((nodeId) =>
+        sentinelOperatingConstraintsAllow(constraints, {
+          kind: task.kind,
+          nodeId,
+        }, snapshot)
+      );
+  };
 }
 
 function automaticReviewScope(snapshotPath: string, revision: number) {
@@ -6316,8 +6333,13 @@ export function createSentinelModelPlanner(
           .values(),
       ].slice(0, 12);
       const focus = state.plan.traceNode ?? state.plan.impactAsset;
+      const allowsIncident = caseOperatingScope(snapshotPath, state.revision);
       const scopedIncidents = planningEvidence(snapshotPath, state).incidents
-        .filter((candidate) => incidentMatchesSentinelFocus(candidate, focus))
+        .filter((candidate) =>
+          typeof candidate.id === "string" &&
+          incidentMatchesSentinelFocus(candidate, focus) &&
+          allowsIncident({ kind: "review_incident", nodeId: candidate.id })
+        )
         .sort(compareSentinelIncidentPriority);
       const candidatesById = new Map(
         scopedIncidents.map((item) => [item.id, item]),

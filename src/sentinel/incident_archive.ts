@@ -85,6 +85,33 @@ function readSavedIncidentCorrelation(path: string, revision: number) {
     : undefined;
 }
 
+/** Resolve all contributing alerts to exact case assets for scoped incident work. */
+export function readSavedSentinelIncidentAssetScopes(
+  path: string,
+  revision: number,
+) {
+  const alerts = readSentinelAssessmentAlerts(path, revision);
+  const snapshot = readSentinelAssessmentRevision(path, revision)?.result
+    ?.sharedGraph.snapshot;
+  if (!alerts || !snapshot) return;
+  const graph = loadSentinelGraph(snapshot);
+  const scopes = new Map<string, readonly string[]>();
+  for (
+    const { id, alerts: contributing } of correlateSentinelIncidents(alerts, {
+      graph,
+    })
+      .candidates
+  ) {
+    const members = contributing.map(({ asset }) =>
+      graph.resolveAssetId(asset)
+    );
+    if (members.length && members.every((asset): asset is string => !!asset)) {
+      scopes.set(id, [...new Set(members)]);
+    }
+  }
+  return scopes;
+}
+
 export function readSavedSentinelPlanningEvidence(
   path: string,
   revision: number,
