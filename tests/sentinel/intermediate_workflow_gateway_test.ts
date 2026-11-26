@@ -1202,6 +1202,34 @@ async function verifyIntermediateWorkflowGateway(checkpointOnly: boolean) {
       [];
     const queueStore = openSentinelAdaptiveStore(database);
     try {
+      // Fill the planner frontier with unrelated queued work so the existing
+      // prerequisite is omitted while the task being revised stays visible.
+      const round = heldImpact.plannerRound;
+      assert(round);
+      const heldGate = pending.tasks.find(({ id, plannerRound }) =>
+        id !== futureGateId && plannerRound?.futureWorkflowOutcome !== undefined
+      );
+      assert(heldGate);
+      const filler = (["delivery", "dependent"] as const).flatMap((nodeId) =>
+        (["trace", "impact"] as const).flatMap((kind) =>
+          Array.from({ length: 16 }, (_, i) => ({
+            kind,
+            nodeId,
+            depth: i + 1,
+            prerequisites: [heldGate.id],
+            plannerRound: { identity: round.identity, attempt: round.attempt },
+          }))
+        )
+      ).filter((candidate) =>
+        !(candidate.nodeId === "dependent" && candidate.kind === "trace" &&
+          [7, 8].includes(candidate.depth)) &&
+        !completed.tasks.some(({ kind, nodeId, depth }) =>
+          candidate.kind === kind && candidate.nodeId === nodeId &&
+          candidate.depth === depth
+        )
+      ).slice(0, 30);
+      assertEquals(filler.length, 30);
+      queueStore.sync(completed.revision, filler, completed.revision);
       let prerequisite = heldImpact.id;
       for (const depth of [7, 8]) {
         const task = queueStore.sync(
