@@ -55,6 +55,7 @@ Deno.test("gateway reviews model retry edits and keeps monitoring metadata class
   let denyRollup = false;
   let exerciseFailure = () => Promise.resolve();
   let scopeOnApproval: ModelCallScope | undefined;
+  let supersedeCaseOnApproval: (() => void) | undefined;
   let recordDiagnostic: (scope?: ModelCallScope) => Promise<unknown> = () => {
     throw new Error("The diagnostic fixture provider is unavailable.");
   };
@@ -203,6 +204,9 @@ Deno.test("gateway reviews model retry edits and keeps monitoring metadata class
           confirm: async () => {
             reviews++;
             if (revokeOnReview) holds = true;
+            const supersede = supersedeCaseOnApproval;
+            supersedeCaseOnApproval = undefined;
+            supersede?.();
             if (scopeOnApproval) {
               const captured = scopeOnApproval;
               scopeOnApproval = undefined;
@@ -673,6 +677,21 @@ Deno.test("gateway reviews model retry edits and keeps monitoring metadata class
       await turn({ ...mutationScope, taskId: otherAssignmentId }),
       "unavailable",
     );
+    const historical = JSON.parse(await turn(scopeRequest));
+    const deleteAfterRestart = {
+      ...mutationScope,
+      requestId: crypto.randomUUID(),
+      modelScopeDigest: historical.digest,
+    };
+    supersedeCaseOnApproval = () => {
+      const replacement = startSentinelAssessment(casePath);
+      assert(replacement.revision > scope.revision);
+      assert(replacement.plan.runId !== scope.runId);
+    };
+    assertStringIncludes(await turn(deleteAfterRestart), "unavailable");
+    assertEquals(reviews, reviewsBeforeReplay + 1);
+    assertEquals(JSON.parse(await turn(scopeRequest)), historical);
+    assertEquals(JSON.parse(await turn(deleteAfterRestart)).deleted, 1);
   } finally {
     socket?.close();
     await gateway.stop();
