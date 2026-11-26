@@ -1439,6 +1439,13 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
               label: "Shared failure",
               severity: "high",
             },
+            ...["branch-finding", "branch-finding-next", "detached-finding"]
+              .map((id) => ({
+                id,
+                kind: "finding",
+                label: id,
+                severity: "medium",
+              })),
             {
               id: "outside-finding",
               kind: "finding",
@@ -1458,6 +1465,18 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
           })).concat([{
             from: "outside-finding",
             to: "private-parent",
+            relation: "affects",
+          }, {
+            from: "branch-finding",
+            to: "application-a",
+            relation: "affects",
+          }, {
+            from: "branch-finding-next",
+            to: "application-b",
+            relation: "affects",
+          }, {
+            from: "detached-finding",
+            to: "endpoint",
             relation: "affects",
           }]),
         }),
@@ -1488,6 +1507,41 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
         requestId: crypto.randomUUID(),
       };
       assertEquals(JSON.parse((await turn(treeGrant)).result).version, 1);
+      const branch = {
+        action: "finding_groups",
+        scopes: [{ ...treeRun, assetSubtreeId: "root" }],
+        includeFacets: true,
+        limit: 1,
+      };
+      const groupedBranch = JSON.parse((await turn(branch)).result);
+      assertEquals(groupedBranch.findingTotal, 2);
+      assertEquals(groupedBranch.groups[0].facets.total, 2);
+      assertEquals(
+        groupedBranch.groups[0].entries.map(({ id }: { id: string }) => id),
+        [
+          "branch-finding",
+        ],
+      );
+      assertEquals(groupedBranch.groups[0].nextOffset, 1);
+      const nextBranch = JSON.parse(
+        (await turn({
+          ...branch,
+          scopes: [{
+            ...branch.scopes[0],
+            offset: groupedBranch.groups[0].nextOffset,
+          }],
+        })).result,
+      );
+      assertEquals(nextBranch.groups[0].entries[0].id, "branch-finding-next");
+      assertEquals(nextBranch.groups[0].nextOffset, null);
+      assertEquals(nextBranch.groups[0].facets, groupedBranch.groups[0].facets);
+      for (const assetSubtreeId of ["private-parent", "unknown"]) {
+        assertStringIncludes(
+          (await turn({ ...branch, scopes: [{ ...treeRun, assetSubtreeId }] }))
+            .result,
+          "unavailable",
+        );
+      }
       const groupedTree = JSON.parse((await turn(chooseTree)).result).tree;
       assertEquals(groupedTree.findingTotal, 1);
       assertEquals(groupedTree.nodes.map(({ id }: { id: string }) => id), [
@@ -1557,6 +1611,10 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
             parentId === undefined
           ),
         );
+        const narrowedBranch = JSON.parse((await reconnected(branch)).result);
+        assertEquals(narrowedBranch.findingTotal, 0);
+        assertEquals(narrowedBranch.groups[0].facets.total, 0);
+        assertEquals(narrowedBranch.groups[0].entries, []);
       });
       const savedRatingSnapshot = treeAssessment.result?.sharedGraph.snapshot;
       assert(savedRatingSnapshot);

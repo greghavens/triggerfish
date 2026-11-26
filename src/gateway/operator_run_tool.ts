@@ -1380,6 +1380,10 @@ export const operatorRunTool: ToolDefinition = {
           revision: { type: "integer", minimum: 1 },
           offset: { type: "integer", minimum: 0 },
           categoryOffset: { type: "integer", minimum: 0 },
+          assetSubtreeId: {
+            type: "string",
+            description: "Exact authorized hierarchy root for finding_groups.",
+          },
           cursor: { type: "string" },
         },
       },
@@ -3880,6 +3884,7 @@ ${
           revision: number;
           offset: number;
           categoryOffset?: number;
+          assetSubtreeId?: string;
         }>();
         for (const scope of scopes) {
           if (!scope || typeof scope !== "object" || Array.isArray(scope)) {
@@ -3891,6 +3896,7 @@ ${
             revision,
             offset = 0,
             categoryOffset,
+            assetSubtreeId,
           } = scope;
           if (
             !isSentinelCaseId(id) || kind !== "sentinel" || selected.has(id) ||
@@ -3900,10 +3906,19 @@ ${
             categoryOffset !== undefined &&
               (!includeFacets || typeof categoryOffset !== "number" ||
                 !Number.isSafeInteger(categoryOffset) || categoryOffset < 0) ||
+            (assetSubtreeId !== undefined &&
+              (typeof assetSubtreeId !== "string" || !assetSubtreeId.trim() ||
+                assetSubtreeId.length > 4096 ||
+                /[\p{Cc}\p{Cf}]/u.test(assetSubtreeId))) ||
             Object.keys(scope).some((key) =>
-              !["kind", "id", "revision", "offset", "categoryOffset"].includes(
-                key,
-              )
+              ![
+                "kind",
+                "id",
+                "revision",
+                "offset",
+                "categoryOffset",
+                "assetSubtreeId",
+              ].includes(key)
             ) ||
             !await controller.inspect({ kind, id, revision }) ||
             context.authorizeSentinelCaseRead?.(id, revision) === false
@@ -3912,11 +3927,14 @@ ${
             revision,
             offset,
             ...(includeFacets && { categoryOffset: categoryOffset ?? 0 }),
+            ...(assetSubtreeId !== undefined && { assetSubtreeId }),
           });
         }
         const groups = [];
         let findingTotal = 0;
-        for (const [id, { revision, offset, categoryOffset }] of selected) {
+        for (const [id, selection] of selected) {
+          const { revision, offset, categoryOffset, assetSubtreeId } =
+            selection;
           const group = readSentinelFindingGroup(
             resolveSentinelCasePath(options.baseDir, id),
             id,
@@ -3926,6 +3944,7 @@ ${
             categoryOffset,
             filter,
             findingOrder,
+            assetSubtreeId,
           );
           if (!group) return unavailable;
           groups.push(group);

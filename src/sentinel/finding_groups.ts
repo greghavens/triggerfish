@@ -118,6 +118,7 @@ export function readSentinelFindingGroup(
   categoryOffset?: number,
   filter?: FindingExportFilter,
   order?: SentinelFindingOrder,
+  assetSubtreeId?: string,
 ) {
   const state = readSentinelAssessmentRevision(path, revision);
   if (!state) return;
@@ -145,7 +146,7 @@ export function readSentinelFindingGroup(
     ? openSentinelWorkerFindingStore(path)
     : undefined;
   try {
-    if (filter || order) {
+    if (filter || order || assetSubtreeId !== undefined) {
       const saved = readSentinelOperatingConstraints(path, runId, revision)
         ?.constraints;
       const current = readSentinelOperatingConstraints(path, runId)
@@ -156,6 +157,41 @@ export function readSentinelFindingGroup(
       ) =>
         sentinelOperatingConstraintsAllow(saved, { kind, nodeId }, snapshot) &&
         sentinelOperatingConstraintsAllow(current, { kind, nodeId }, snapshot);
+      const subtree = new Set<string>();
+      if (assetSubtreeId !== undefined) {
+        const savedAssets = saved?.allowedAssetIds &&
+          new Set(saved.allowedAssetIds);
+        const currentAssets = current?.allowedAssetIds &&
+          new Set(current.allowedAssetIds);
+        if (
+          saved?.deniedKinds.includes("review_evidence") ||
+          current?.deniedKinds.includes("review_evidence")
+        ) return;
+        const available = new Set(
+          snapshot?.nodes.flatMap((node) =>
+            node.kind === "asset" &&
+              (!savedAssets || savedAssets.has(node.id)) &&
+              (!currentAssets || currentAssets.has(node.id))
+              ? [node.id]
+              : []
+          ),
+        );
+        if (!available.has(assetSubtreeId)) return;
+        const children = new Map<string, string[]>();
+        for (const node of snapshot?.nodes ?? []) {
+          if (
+            node.kind !== "asset" || !node.parentId ||
+            !available.has(node.id) || !available.has(node.parentId)
+          ) continue;
+          const siblings = children.get(node.parentId) ?? [];
+          siblings.push(node.id);
+          children.set(node.parentId, siblings);
+        }
+        subtree.add(assetSubtreeId);
+        for (const parent of subtree) {
+          for (const child of children.get(parent) ?? []) subtree.add(child);
+        }
+      }
       const facets = categoryOffset === undefined
         ? undefined
         : findingFacets(categoryOffset);
@@ -163,6 +199,8 @@ export function readSentinelFindingGroup(
         const disposition = reviews.get(finding.id) ?? "open";
         if (
           !allowed("review_finding", finding.id) ||
+          (assetSubtreeId !== undefined &&
+            !finding.assets.some((asset) => subtree.has(asset))) ||
           (filter && !matchesFindingFilter(filter, {
             kind: "imported",
             assets: finding.assets,
@@ -198,6 +236,8 @@ export function readSentinelFindingGroup(
         ) return;
         if (
           !allowed("review_evidence", report.finding.targetId) ||
+          (assetSubtreeId !== undefined &&
+            !subtree.has(report.finding.targetId)) ||
           (filter && !matchesFindingFilter(filter, {
             kind: "worker",
             assets: [report.finding.targetId],
@@ -246,6 +286,7 @@ export function readSentinelFindingGroup(
         caseId,
         runId,
         revision,
+        ...(assetSubtreeId !== undefined && { assetSubtreeId }),
         total,
         imported: filteredGraph.length,
         worker: workerCount,
