@@ -14,6 +14,13 @@ import {
 } from "../../src/core/types/session.ts";
 import { createChatSession } from "../../src/gateway/chat.ts";
 import { createGatewayServer } from "../../src/gateway/server/server.ts";
+import { AgentRecoveryStore } from "../../src/core/agent_recovery_store.ts";
+import { assignmentRecoveryKey } from "../../src/core/durable_assignment.ts";
+import { createMemorySecretStore } from "../../src/core/secrets/mod.ts";
+import { buildWorkflowRecoveryExecutor } from "../../src/gateway/startup/factory/agent_recovery.ts";
+import { delegatedSubagentIdentity } from "../../src/gateway/startup/factory/delegated_agent_recovery.ts";
+import { buildOwnerSubagentRecoveryCommand } from "../../src/gateway/startup/factory/owner_subagent_recovery.ts";
+import { buildSubagentFactory } from "../../src/gateway/startup/factory/subagent.ts";
 import { createOrchestratorFactory } from "../../src/gateway/startup/factory/orchestrator_factory.ts";
 import { type TriggerFishConfig } from "../../src/core/config.ts";
 import { createToolFloorRegistry } from "../../src/core/security/tool_floors.ts";
@@ -51,7 +58,14 @@ Deno.test("Owner publishes and revises one local diagnostic alias through exact 
   let aliasAdvertised = false;
   let blocked: { hook: string; tool?: string } | undefined;
 
-  async function launch(healthcheck = true, collision = false) {
+  async function launch(
+    healthcheck = true,
+    collision = false,
+    runSubagentRecoveryCommand?: ReturnType<
+      typeof buildOwnerSubagentRecoveryCommand
+    >,
+    session = owner,
+  ) {
     const inbox = createToolApprovalService(join(dir, "approval-inbox.db"));
     const engine = createPolicyEngine();
     for (const rule of createDefaultRules()) engine.addRule(rule);
@@ -96,7 +110,8 @@ Deno.test("Owner publishes and revises one local diagnostic alias through exact 
       port: 0,
       token,
       chatSession: createChatSession({
-        session: owner,
+        session,
+        runSubagentRecoveryCommand,
         customToolsBaseDir: dir,
         targetClassification: target,
         providerRegistry: providers,
@@ -173,6 +188,16 @@ Deno.test("Owner publishes and revises one local diagnostic alias through exact 
       }
     }
     return {
+      async command(content: string) {
+        const frames = await exchange(
+          { type: "message", content },
+          ({ type }) => type === "turn_end",
+        );
+        const final = frames.findLast(({ type }) =>
+          type === "response" || type === "error"
+        );
+        return String(final?.text ?? final?.message);
+      },
       async turn(tool: string, args: Record<string, unknown> = {}) {
         const frames = await exchange({
           type: "message",
@@ -450,8 +475,13 @@ Deno.test("Owner publishes and revises one local diagnostic alias through exact 
       "Configuration loaded",
     );
 
-    const runCron = async (
+    const runModel = async (
       beforeCall?: () => Promise<void>,
+      delegatedRun?: (
+        factory: ReturnType<typeof createOrchestratorFactory>,
+        config: TriggerFishConfig,
+      ) => Promise<void>,
+      afterResult?: () => void,
     ) => {
       const results = new Map<
         string,
@@ -480,12 +510,14 @@ Deno.test("Owner publishes and revises one local diagnostic alias through exact 
             { function: definition }: { function: { name: string } },
           ) => definition.name === alias);
           if (tool) {
+            if (id === "matching") afterResult?.();
             results.set(id, {
               advertised: offered.get(id)!,
               result: String(tool.content),
             });
           } else {
             offered.set(id, available);
+            results.set(id, { advertised: available, result: "" });
             if (id === "matching") await beforeCall?.();
           }
           const message = tool
@@ -499,7 +531,11 @@ Deno.test("Owner publishes and revises one local diagnostic alias through exact 
                 function: { name: alias, arguments: "{}" },
               }],
             };
-          if (results.size === 2) response.resolve();
+          if (
+            [...results.values()].filter(({ result }) => result).length === 2
+          ) {
+            response.resolve();
+          }
           if (body.stream) {
             return new Response(
               `data: ${JSON.stringify({ choices: [{ delta: message }] })}\n\n` +
@@ -527,6 +563,8 @@ Deno.test("Owner publishes and revises one local diagnostic alias through exact 
         },
         channels: {},
         classification: { mode: "strict" },
+        ...(delegatedRun &&
+          { agent_recovery: { background_checklists: true } }),
       };
       const factory = createOrchestratorFactory(
         config,
@@ -543,17 +581,24 @@ Deno.test("Owner publishes and revises one local diagnostic alias through exact 
         5000,
       );
       try {
-        tickCronJobs({
-          orchestratorFactory: factory,
-          triggerMdPath: join(dir, "TRIGGER.md"),
-          webhooks: { enabled: false, sources: {} },
-          trigger: {
-            enabled: false,
-            intervalMinutes: 1,
-            classificationCeiling: "INTERNAL",
-          },
-        }, jobs);
-        await response.promise;
+        if (delegatedRun) {
+          await Promise.race([
+            delegatedRun(factory, config),
+            response.promise.then(() => new Promise<never>(() => {})),
+          ]);
+        } else {
+          tickCronJobs({
+            orchestratorFactory: factory,
+            triggerMdPath: join(dir, "TRIGGER.md"),
+            webhooks: { enabled: false, sources: {} },
+            trigger: {
+              enabled: false,
+              intervalMinutes: 1,
+              classificationCeiling: "INTERNAL",
+            },
+          }, jobs);
+          await response.promise;
+        }
         return results;
       } finally {
         clearTimeout(timeout);
@@ -561,7 +606,7 @@ Deno.test("Owner publishes and revises one local diagnostic alias through exact 
       }
     };
 
-    const offeredWithGrant = await runCron();
+    const offeredWithGrant = await runModel();
     const native = offeredWithGrant.get("matching");
     assert(native?.advertised);
     assertEquals(JSON.parse(native.result)._classification, "INTERNAL");
@@ -573,7 +618,7 @@ Deno.test("Owner publishes and revises one local diagnostic alias through exact 
     assertEquals(deniedNeighbor?.advertised, false);
     assert(!deniedNeighbor?.result.includes("Configuration loaded"));
     const oldGrant = await status();
-    const inFlight = await runCron(async () => {
+    const inFlight = await runModel(async () => {
       const removing = retire(oldGrant.revision);
       await gateway.approve(true, "retire");
       assertEquals(JSON.parse((await removing).text).retired, true);
@@ -589,7 +634,212 @@ Deno.test("Owner publishes and revises one local diagnostic alias through exact 
       JSON.parse((await restoreAlias).text).binding.cronJobId,
       undefined,
     );
-    assertEquals((await runCron()).get("matching")?.advertised, false);
+    assertEquals((await runModel()).get("matching")?.advertised, false);
+    const executionId = crypto.randomUUID();
+    const delegated = { parentSessionId: owner.id, executionId };
+    await Deno.writeTextFile(
+      proposal,
+      JSON.stringify({ name: alias, component: "config", delegated }),
+      { mode: 0o600 },
+    );
+    const delegatedProposal = await inspect();
+    assertEquals(delegatedProposal.binding.delegated, delegated);
+    const approveDelegated = apply(delegatedProposal.revision);
+    await gateway.approve(true);
+    assertEquals(
+      JSON.parse((await approveDelegated).text).binding.delegated,
+      delegated,
+    );
+    const identity = await delegatedSubagentIdentity(owner.id, executionId);
+    const key = await assignmentRecoveryKey(
+      identity.sessionId,
+      identity.executionId,
+    );
+    const recoveryPath = join(dir, "agent-recovery.db");
+    const withRecovery = <T>(fn: (store: AgentRecoveryStore) => T) => {
+      const store = new AgentRecoveryStore(recoveryPath);
+      try {
+        return fn(store);
+      } finally {
+        store.close();
+      }
+    };
+    const subagent = (
+      factory: ReturnType<typeof createOrchestratorFactory>,
+      config: TriggerFishConfig,
+    ) =>
+      buildOwnerSubagentRecoveryCommand(
+        buildSubagentFactory(factory, {
+          executionTracePath: join(dir, "execution-traces.db"),
+        }),
+        buildWorkflowRecoveryExecutor(
+          config,
+          dir,
+          createMemorySecretStore(),
+          undefined,
+          undefined,
+          false,
+          { checklistRole: "delegated" },
+        ),
+        (source) =>
+          buildWorkflowRecoveryExecutor(
+            config,
+            dir,
+            createMemorySecretStore(),
+            undefined,
+            source,
+            false,
+            { checklistRole: "delegated" },
+          ),
+      );
+    const task = "Run local diagnostic: matching job.";
+    let pause = true;
+    let pauseAfterResult = true;
+    const peer = await runModel(() => {
+      if (pause) {
+        pause = false;
+        assert(withRecovery((store) => store.requestPause(key, true)));
+      }
+      return Promise.resolve();
+    }, async (factory, config) => {
+      await gateway.stop();
+      gateway = await launch(true, false, subagent(factory, config));
+      assertStringIncludes(
+        await gateway.command(`/recover-subagent ${executionId} ${task}`),
+        "before dispatch",
+      );
+      assertEquals(withRecovery((store) => store.read(key)?.status), "paused");
+      await gateway.stop();
+      gateway = await launch(true, false, subagent(factory, config));
+      assertStringIncludes(
+        await gateway.command(
+          `/recover-subagent --resume-paused ${executionId} ${task}`,
+        ),
+        "paused",
+      );
+      const saved = withRecovery((store) => store.read(key));
+      assert(saved?.status === "paused" && saved.checkpoint);
+      assertEquals(saved.tools.length, 1);
+      assertEquals(saved.tools[0].name, alias);
+      assert(
+        saved.checkpoint.history.some(({ role, content }) =>
+          role === "tool" && String(content).includes("Configuration loaded")
+        ),
+      );
+      assertStringIncludes(
+        await gateway.command(
+          `/recover-subagent --resume-paused ${executionId} ${task}`,
+        ),
+        "Checked local diagnostics.",
+      );
+      assertEquals(
+        withRecovery((store) => store.read(key)?.status),
+        "finished",
+      );
+      assertStringIncludes(
+        await gateway.command(
+          `/recover-subagent ${crypto.randomUUID()} Run local diagnostic: neighboring job.`,
+        ),
+        "before dispatch",
+      );
+    }, () => {
+      if (pauseAfterResult) {
+        pauseAfterResult = false;
+        assert(withRecovery((store) => store.requestPause(key)));
+      }
+    });
+    assertEquals(peer.get("matching")?.advertised, true);
+    assertStringIncludes(
+      peer.get("matching")?.result ?? "",
+      "Configuration loaded",
+    );
+    assertEquals(peer.get("neighbor")?.advertised, false);
+    assert(!peer.get("neighbor")?.result.includes("Configuration loaded"));
+    const alternateOwner = createSession({
+      userId: "owner" as UserId,
+      channelId: "alternate-owner" as ChannelId,
+    });
+    const mismatched = await runModel(undefined, async (factory, config) => {
+      await gateway.stop();
+      gateway = await launch(
+        true,
+        false,
+        subagent(factory, config),
+        alternateOwner,
+      );
+      assertStringIncludes(
+        await gateway.command(
+          `/recover-subagent ${executionId} Run local diagnostic: neighboring job.`,
+        ),
+        "before dispatch",
+      );
+    });
+    assertEquals(mismatched.get("neighbor")?.advertised, false);
+    assert(
+      !mismatched.get("neighbor")?.result.includes("Configuration loaded"),
+    );
+    const rotatedExecution = crypto.randomUUID();
+    const rotatedRecipient = {
+      parentSessionId: owner.id,
+      executionId: rotatedExecution,
+    };
+    const stageDelegated = (component: string) =>
+      Deno.writeTextFile(
+        proposal,
+        JSON.stringify({ name: alias, component, delegated: rotatedRecipient }),
+        { mode: 0o600 },
+      );
+    await gateway.stop();
+    gateway = await launch();
+    await stageDelegated("config");
+    const approvedBefore = await inspect();
+    const bindRotated = apply(approvedBefore.revision);
+    await gateway.approve(true);
+    assertEquals(
+      JSON.parse((await bindRotated).text).binding.delegated,
+      rotatedRecipient,
+    );
+    const rotatedIdentity = await delegatedSubagentIdentity(
+      owner.id,
+      rotatedExecution,
+    );
+    const rotatedKey = await assignmentRecoveryKey(
+      rotatedIdentity.sessionId,
+      rotatedIdentity.executionId,
+    );
+    let diagnosticDeliveries = 0;
+    await runModel(undefined, async (factory, config) => {
+      await gateway.stop();
+      gateway = await launch(true, false, subagent(factory, config));
+      assertStringIncludes(
+        await gateway.command(`/recover-subagent ${rotatedExecution} ${task}`),
+        "paused",
+      );
+      const saved = withRecovery((store) => store.read(rotatedKey));
+      assert(saved?.status === "paused" && saved.checkpoint);
+      assertEquals(saved.tools.length, 1);
+      await stageDelegated("providers");
+      const replacement = await inspect();
+      const replaced = apply(replacement.revision);
+      await gateway.approve(true);
+      assertEquals(
+        JSON.parse((await replaced).text).binding.delegated,
+        rotatedRecipient,
+      );
+      assert(replacement.revision !== approvedBefore.revision);
+      assertStringIncludes(
+        await gateway.command(
+          `/recover-subagent --resume-paused ${rotatedExecution} ${task}`,
+        ),
+        "saved tool result is blocked",
+      );
+      assertEquals(diagnosticDeliveries, 1);
+    }, () => {
+      diagnosticDeliveries++;
+      if (diagnosticDeliveries === 1) {
+        assert(withRecovery((store) => store.requestPause(rotatedKey)));
+      }
+    });
     const invoked = actual.length;
     await gateway.stop();
     gateway = await launch(false);

@@ -1,3 +1,4 @@
+import { withDelegatedDiagnosticRecoveryPolicy } from "../../custom_tool_bindings.ts";
 import { managedObservationGrantDigest } from "./managed_scheduled_observation_grant.ts";
 import {
   type RecoveredGoalStateScope,
@@ -19,6 +20,7 @@ import {
 import { openExecutionTraces } from "../../../core/execution_traces.ts";
 import type { SessionId } from "../../../core/types/session.ts";
 import {
+  delegatedSubagentIdentity,
   delegatedSubagentSessionId,
   teamDeliveryExecutionId,
   teamDeliveryTraceSource,
@@ -557,6 +559,27 @@ export function buildWorkflowRecoveryExecutor(
         "scheduler",
       )
       : baseExecutionPolicy;
+    const diagnosticSource = !ownerChat &&
+        recheckSources.checklistRole === "delegated" &&
+        observationSource && typeof observationSource === "object" &&
+        "parentSessionId" in observationSource
+      ? observationSource
+      : undefined;
+    const diagnosticIdentity = diagnosticSource &&
+      await delegatedSubagentIdentity(
+        diagnosticSource.parentSessionId as SessionId,
+        diagnosticSource.executionId,
+      );
+    const exactExecutionPolicy = diagnosticSource && diagnosticIdentity &&
+        diagnosticIdentity.executionId === id &&
+        diagnosticIdentity.sessionId === options.session.id &&
+        diagnosticIdentity.channelId === options.session.channelId
+      ? withDelegatedDiagnosticRecoveryPolicy(
+        baseDir,
+        diagnosticSource,
+        executionPolicy,
+      )
+      : executionPolicy;
     const teamScope =
       (recoveredGoalRole === "team" || backgroundChecklistRole === "team") &&
         observationSource && typeof observationSource === "object" &&
@@ -726,7 +749,7 @@ export function buildWorkflowRecoveryExecutor(
           runRecoverableAgentTurn(
             path,
             id,
-            withExecutionChecklistRecoveryPolicy(executionPolicy, scope),
+            withExecutionChecklistRecoveryPolicy(exactExecutionPolicy, scope),
             orchestrator,
             teamScope && isCurrent
               ? {
@@ -745,7 +768,7 @@ export function buildWorkflowRecoveryExecutor(
       runRecoverableAgentTurn(
         path,
         id,
-        executionPolicy,
+        exactExecutionPolicy,
         orchestrator,
         options,
         control,

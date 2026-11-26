@@ -1,7 +1,6 @@
 import { liveProviderRouteSettings } from "../../agent/providers/live_routes.ts";
 import type { ModelsConfig } from "../../agent/providers/config.ts";
 import { readSentinelAdmissionSettings } from "../sentinel_admission_settings.ts";
-import { selectSentinelDelegatedObservationRead } from "../../core/config_types.ts";
 import { createWorkflowObservationVerifier } from "../scheduled_observation_tool.ts";
 import { listEffectiveModelProfiles } from "../../agent/llm.ts";
 /**
@@ -185,20 +184,15 @@ export function buildMainChatSession(
         { checklistRole: "delegated" },
       ),
       (source) =>
-        selectSentinelDelegatedObservationRead(
-            bootstrap.config.sentinel?.delegated_observation_reads,
-            source,
-          )
-          ? buildWorkflowRecoveryExecutor(
-            bootstrap.config,
-            bootstrap.baseDir,
-            toolInfra.mainKeychain,
-            undefined,
-            source,
-            false,
-            { checklistRole: "delegated" },
-          )
-          : undefined,
+        buildWorkflowRecoveryExecutor(
+          bootstrap.config,
+          bootstrap.baseDir,
+          toolInfra.mainKeychain,
+          undefined,
+          source,
+          false,
+          { checklistRole: "delegated" },
+        ),
     ),
     recoverAgentTurn: buildWorkflowRecoveryExecutor(
       bootstrap.config,

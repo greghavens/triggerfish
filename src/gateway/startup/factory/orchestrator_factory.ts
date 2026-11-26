@@ -1,3 +1,4 @@
+import { delegatedSubagentIdentity } from "./delegated_agent_recovery.ts";
 import { isCustomToolName } from "../../../core/custom_tool_intent.ts";
 import { createCustomToolBindings } from "../../custom_tool_bindings.ts";
 import { buildManagedDelegatedObservationGrant } from "./managed_delegated_observation_grant.ts";
@@ -351,18 +352,37 @@ export function createOrchestratorFactory(
           ? [scheduledGoalReportTool]
           : []),
       ];
+      const delegatedDiagnostic = options?.delegatedKind === "subagent" &&
+          recoverySessionId
+        ? options.delegatedObservationSource
+        : undefined;
+      const delegatedDiagnosticIdentity = delegatedDiagnostic &&
+        await delegatedSubagentIdentity(
+          delegatedDiagnostic.parentSessionId as SessionId,
+          delegatedDiagnostic.executionId,
+        );
+      const exactDelegatedDiagnostic =
+        delegatedDiagnosticIdentity?.sessionId === recoverySessionId &&
+          delegatedDiagnosticIdentity?.channelId === channelId
+          ? delegatedDiagnostic
+          : undefined;
       const cronDiagnosticJobId = !delegated && !isTrigger &&
-          ceiling && canFlowTo("INTERNAL", ceiling) &&
+        options?.cronJobId;
+      const diagnosticRecipient = ceiling && canFlowTo("INTERNAL", ceiling) &&
           tools.some(({ name }) => name === "healthcheck")
-        ? options?.cronJobId
+        ? exactDelegatedDiagnostic
+          ? { delegated: exactDelegatedDiagnostic }
+          : cronDiagnosticJobId
+          ? { cronJobId: cronDiagnosticJobId }
+          : undefined
         : undefined;
       const diagnosticBinding = (name: string) =>
-        cronDiagnosticJobId && !tools.some((tool) => tool.name === name)
-          ? diagnostics.read(name, cronDiagnosticJobId)
+        diagnosticRecipient && !tools.some((tool) => tool.name === name)
+          ? diagnostics.read(name, diagnosticRecipient)
           : undefined;
       const diagnosticDefinitions = () =>
-        cronDiagnosticJobId
-          ? diagnostics.definitions(cronDiagnosticJobId).filter(({ name }) =>
+        diagnosticRecipient
+          ? diagnostics.definitions(diagnosticRecipient).filter(({ name }) =>
             !tools.some((tool) => tool.name === name)
           )
           : [];
@@ -492,7 +512,7 @@ export function createOrchestratorFactory(
             }),
           },
         }),
-        hookRunner: cronDiagnosticJobId
+        hookRunner: diagnosticRecipient
           ? {
             ...infra.hookRunner,
             async evaluateHook(hook, context) {
@@ -523,7 +543,7 @@ export function createOrchestratorFactory(
         maxIterations: options?.maxIterations,
         maxToolResponseChars: isTrigger ? 8_000 : undefined,
         tools,
-        ...(cronDiagnosticJobId && { getExtraTools: diagnosticDefinitions }),
+        ...(diagnosticRecipient && { getExtraTools: diagnosticDefinitions }),
         toolExecutor: scopedToolExecutor,
         messageStore: factoryMessageStore,
         lineageStore: factoryLineageStore,
@@ -562,7 +582,7 @@ export function createOrchestratorFactory(
         getWorkspacePath: () =>
           resolveWorkspacePathForTaint(session.taint, workspacePaths),
         domainClassifier: infra.domainClassifier,
-        toolFloorRegistry: cronDiagnosticJobId
+        toolFloorRegistry: diagnosticRecipient
           ? {
             getFloor(name) {
               const previous = schedulerToolFloorRegistry?.getFloor(name) ??

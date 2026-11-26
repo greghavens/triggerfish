@@ -3,12 +3,15 @@
 
 import { join } from "@std/path";
 import { createHash } from "node:crypto";
+import type { AgentRecoveryPolicy } from "../core/agent_recovery.ts";
+import { redactCredentialText } from "../core/logger/redactor.ts";
 import { DatabaseSync } from "node:sqlite";
 import {
   customToolManageName,
   isCustomToolName,
   parseCustomToolMutation,
 } from "../core/custom_tool_intent.ts";
+import type { DelegatedObservationSource } from "../core/config_types.ts";
 import { isRealPathWithinJail } from "../core/security/path_jail.ts";
 import type {
   ToolDefinition,
@@ -19,6 +22,27 @@ interface Binding {
   readonly name: string;
   readonly component: "providers" | "config";
   readonly cronJobId?: string;
+  readonly delegated?: DelegatedObservationSource;
+}
+
+type DiagnosticRecipient =
+  | { readonly cronJobId: string }
+  | { readonly delegated: DelegatedObservationSource };
+
+const exactId = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/;
+
+function parseDelegated(
+  value: unknown,
+): DelegatedObservationSource | undefined {
+  if (
+    !value || typeof value !== "object" || Array.isArray(value) ||
+    Object.keys(value).length !== 2
+  ) return;
+  const { parentSessionId, executionId } = value as Record<string, unknown>;
+  if (
+    typeof parentSessionId === "string" && exactId.test(parentSessionId) &&
+    typeof executionId === "string" && exactId.test(executionId)
+  ) return { parentSessionId, executionId };
 }
 
 export const customToolManage: ToolDefinition = {
@@ -43,27 +67,51 @@ export const customToolManage: ToolDefinition = {
 
 function parseBinding(raw: unknown): Binding | undefined {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return;
-  const { name, component, cronJobId } = raw as Record<string, unknown>;
+  const { name, component, cronJobId, delegated: rawDelegated } = raw as Record<
+    string,
+    unknown
+  >;
+  const delegated = parseDelegated(rawDelegated);
   if (
-    Object.keys(raw).length === (cronJobId === undefined ? 2 : 3) &&
+    Object.keys(raw).length ===
+      (cronJobId === undefined && rawDelegated === undefined ? 2 : 3) &&
     isCustomToolName(name) &&
     (component === "providers" || component === "config") &&
+    (rawDelegated === undefined || (delegated && cronJobId === undefined)) &&
     (cronJobId === undefined ||
       (typeof cronJobId === "string" &&
         /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/.test(cronJobId)))
   ) {
-    return { name, component, ...(cronJobId && { cronJobId }) };
+    return {
+      name,
+      component,
+      ...(cronJobId && { cronJobId }),
+      ...(delegated && { delegated }),
+    };
   }
 }
 
 function storedBinding(row: Record<string, unknown> | undefined) {
   if (!row) return;
-  const { name, component, cronJobId } = row;
+  const { name, component, cronJobId, parentSessionId, executionId } = row;
   return parseBinding({
     name,
     component,
     ...(cronJobId !== null && { cronJobId }),
+    ...((parentSessionId !== null || executionId !== null) && {
+      delegated: { parentSessionId, executionId },
+    }),
   });
+}
+
+function matchesRecipient(binding: Binding, recipient?: DiagnosticRecipient) {
+  if (!recipient) return true;
+  if ("cronJobId" in recipient) {
+    return !!recipient.cronJobId && binding.cronJobId === recipient.cronJobId;
+  }
+  return !!binding.delegated &&
+    binding.delegated.parentSessionId === recipient.delegated.parentSessionId &&
+    binding.delegated.executionId === recipient.delegated.executionId;
 }
 
 function privateFile(path: string) {
@@ -121,6 +169,9 @@ export function createCustomToolBindings(baseDir: string) {
       db.exec(
         "CREATE TABLE IF NOT EXISTS custom_tool_cron_grants (name TEXT PRIMARY KEY, job_id TEXT NOT NULL)",
       );
+      db.exec(
+        "CREATE TABLE IF NOT EXISTS custom_tool_delegated_grants (name TEXT PRIMARY KEY, parent_id TEXT NOT NULL, execution_id TEXT NOT NULL)",
+      );
       return action(db);
     } finally {
       db.close();
@@ -159,25 +210,27 @@ export function createCustomToolBindings(baseDir: string) {
   }
 
   const bindingQuery = `
-    SELECT tool.name, tool.component, tool.revision, grant.job_id AS cronJobId
+    SELECT tool.name, tool.component, tool.revision, grant.job_id AS cronJobId,
+      delegated.parent_id AS parentSessionId, delegated.execution_id AS executionId
     FROM custom_tools AS tool
     LEFT JOIN custom_tool_cron_grants AS grant ON grant.name = tool.name
+    LEFT JOIN custom_tool_delegated_grants AS delegated ON delegated.name = tool.name
   `;
 
-  function active(cronJobId?: string) {
+  function active(recipient?: DiagnosticRecipient) {
     return withStore((db) =>
       db.prepare(bindingQuery + " ORDER BY tool.name LIMIT 64").all()
         .flatMap((row) => {
           const binding = storedBinding(row);
           return binding &&
-              (cronJobId === undefined || binding.cronJobId === cronJobId)
+              matchesRecipient(binding, recipient)
             ? [binding]
             : [];
         })
     );
   }
 
-  function read(name: string, cronJobId?: string) {
+  function read(name: string, recipient?: DiagnosticRecipient) {
     if (!isCustomToolName(name)) return;
     try {
       if (!privateFile(databasePath)) return;
@@ -187,7 +240,7 @@ export function createCustomToolBindings(baseDir: string) {
       const binding = storedBinding(row);
       if (
         !binding || !row || typeof row.revision !== "string" ||
-        (cronJobId !== undefined && binding.cronJobId !== cronJobId)
+        !matchesRecipient(binding, recipient)
       ) return;
       return { ...binding, revision: row.revision };
     } catch {
@@ -213,10 +266,10 @@ export function createCustomToolBindings(baseDir: string) {
         return;
       }
     },
-    definitions(cronJobId?: string): ToolDefinition[] {
+    definitions(recipient?: DiagnosticRecipient): ToolDefinition[] {
       try {
         if (!privateFile(databasePath)) return [];
-        return active(cronJobId).map(({ name, component }) => ({
+        return active(recipient).map(({ name, component }) => ({
           name,
           description:
             `Read the approved Triggerfish ${component} health diagnostic.`,
@@ -288,6 +341,10 @@ export function createCustomToolBindings(baseDir: string) {
               );
               db.prepare("DELETE FROM custom_tool_cron_grants WHERE name = ?")
                 .run(mutation.name);
+              db.prepare(
+                "DELETE FROM custom_tool_delegated_grants WHERE name = ?",
+              )
+                .run(mutation.name);
               db.exec("COMMIT");
               committed = true;
               return JSON.stringify({
@@ -331,6 +388,19 @@ export function createCustomToolBindings(baseDir: string) {
               db.prepare("DELETE FROM custom_tool_cron_grants WHERE name = ?")
                 .run(mutation.name);
             }
+            if (selected.binding.delegated) {
+              const { parentSessionId, executionId } =
+                selected.binding.delegated;
+              db.prepare(`
+                INSERT INTO custom_tool_delegated_grants VALUES (?, ?, ?)
+                ON CONFLICT(name) DO UPDATE SET parent_id=excluded.parent_id, execution_id=excluded.execution_id
+              `).run(mutation.name, parentSessionId, executionId);
+            } else {
+              db.prepare(
+                "DELETE FROM custom_tool_delegated_grants WHERE name = ?",
+              )
+                .run(mutation.name);
+            }
             if (current?.retired) {
               db.prepare("DELETE FROM retired_custom_tools WHERE name = ?").run(
                 mutation.name,
@@ -350,6 +420,109 @@ export function createCustomToolBindings(baseDir: string) {
       } catch {
         return "Error: The custom tool registry is unavailable.";
       }
+    },
+  };
+}
+
+function exactDiagnosticResult(
+  text: string,
+  binding: Binding & { revision: string },
+) {
+  if (
+    text.length > 1024 || !text.startsWith("{") ||
+    redactCredentialText(text) !== text
+  ) return;
+  try {
+    const result = JSON.parse(text);
+    if (
+      Object.keys(result).length !== 3 ||
+      result._classification !== "INTERNAL" ||
+      result.revision !== binding.revision ||
+      typeof result.diagnostic !== "string"
+    ) return;
+    const report: string = result.diagnostic;
+    if (binding.component === "config") {
+      return report ===
+          "# Healthcheck Report\n\n[OK] config: Configuration loaded\n\nOverall: HEALTHY"
+        ? report
+        : undefined;
+    }
+    const match =
+      /^# Healthcheck Report\n\n\[OK\] providers: Default provider: ([A-Za-z0-9_.:-]{1,96})\n/u
+        .exec(report);
+    return match && report ===
+        `# Healthcheck Report\n\n[OK] providers: Default provider: ${
+          match[1]
+        }\n     ${
+          JSON.stringify({ defaultProvider: match[1] })
+        }\n\nOverall: HEALTHY`
+      ? report
+      : undefined;
+  } catch {
+    return;
+  }
+}
+
+/** Allow only exact, sanitized local diagnostic results in an admitted delegated turn. */
+export function withDelegatedDiagnosticRecoveryPolicy(
+  baseDir: string,
+  source: DelegatedObservationSource,
+  policy: AgentRecoveryPolicy,
+): AgentRecoveryPolicy {
+  const registry = createCustomToolBindings(baseDir);
+  const current = (name: string) => registry.read(name, { delegated: source });
+  const saved = new Map<string, { diagnostic: string; revision: string }>();
+  return {
+    ...policy,
+    projectCall(call) {
+      if (!isCustomToolName(call.name)) return policy.projectCall(call);
+      return Object.keys(call.args).length === 0 && current(call.name)
+        ? {}
+        : undefined;
+    },
+    isReplaySafeRead(call) {
+      return isCustomToolName(call.name)
+        ? Object.keys(call.args).length === 0 && !!current(call.name)
+        : policy.isReplaySafeRead?.(call) === true;
+    },
+    projectResult(call, text) {
+      if (!isCustomToolName(call.name)) return policy.projectResult(call, text);
+      const binding = current(call.name);
+      return binding && exactDiagnosticResult(text, binding) ? text : undefined;
+    },
+    authorizeSavedProjection(receipt, text) {
+      if (!isCustomToolName(receipt.name)) {
+        return policy.authorizeSavedProjection?.(receipt, text) ?? true;
+      }
+      const binding = current(receipt.name);
+      const diagnostic = binding && exactDiagnosticResult(text, binding);
+      if (!binding || !diagnostic) return false;
+      saved.set(receipt.callId, { diagnostic, revision: binding.revision });
+      return true;
+    },
+    async authorize(receipt, sourceAuthorization) {
+      if (!isCustomToolName(receipt.name)) {
+        return await policy.authorize(receipt, sourceAuthorization);
+      }
+      const binding = current(receipt.name);
+      const projection = saved.get(receipt.callId);
+      saved.delete(receipt.callId);
+      if (
+        !binding || !sourceAuthorization ||
+        projection?.revision !== binding.revision ||
+        Object.keys(receipt.args).length !== 0 ||
+        !await sourceAuthorization.authorizeSavedCall({
+          name: "healthcheck",
+          args: { components: [binding.component] },
+        }, "INTERNAL") ||
+        current(receipt.name)?.revision !== binding.revision ||
+        !await sourceAuthorization.authorizeSavedResponse(
+          "healthcheck",
+          projection.diagnostic,
+          "INTERNAL",
+        )
+      ) return false;
+      return current(receipt.name)?.revision === binding.revision;
     },
   };
 }
