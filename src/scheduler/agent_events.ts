@@ -22,6 +22,7 @@ export interface AgentEventSubscription {
   readonly caseId?: string;
   readonly tool?: string;
   readonly tools?: readonly string[];
+  readonly includeToolErrors?: boolean;
   readonly instructions?: Readonly<Partial<Record<AgentEventKind, string>>>;
   readonly intervalMs?: number;
   readonly fireOnStart?: boolean;
@@ -36,6 +37,7 @@ export interface AgentEvent {
   readonly receipt: string;
   readonly caseId?: string;
   readonly tool?: string;
+  readonly outcome?: "error";
   readonly recordedAt?: number;
 }
 
@@ -79,6 +81,7 @@ export function parseAgentEventSubscription(
         "caseId",
         "tool",
         "tools",
+        "includeToolErrors",
         "instructions",
         "intervalMs",
         "fireOnStart",
@@ -103,6 +106,9 @@ export function parseAgentEventSubscription(
           ) ||
           new Set(tools).size !== tools.length
       : raw.tool !== undefined || tools !== undefined) ||
+    (raw.includeToolErrors !== undefined &&
+      (!kinds.includes("tool_completed") ||
+        typeof raw.includeToolErrors !== "boolean")) ||
     (kinds.includes("interval")
       ? typeof raw.intervalMs !== "number" ||
         !Number.isSafeInteger(raw.intervalMs) ||
@@ -126,6 +132,7 @@ export function parseAgentEventSubscription(
     ...(typeof raw.caseId === "string" && { caseId: raw.caseId }),
     ...(typeof raw.tool === "string" && { tool: raw.tool }),
     ...(Array.isArray(tools) && { tools: [...tools].sort() }),
+    ...(raw.includeToolErrors === true && { includeToolErrors: true }),
     ...(Object.keys(instructions).length && { instructions }),
     ...(typeof raw.intervalMs === "number" && { intervalMs: raw.intervalMs }),
     ...(raw.fireOnStart === true && { fireOnStart: true }),
@@ -189,8 +196,9 @@ export function openAgentEventSchedule(path: string, now = Date.now) {
       !receipt.test(event.receipt) ||
       (event.caseId !== undefined && !caseId.test(event.caseId)) ||
       (event.kind === "tool_completed"
-        ? !event.tool || !toolName.test(event.tool)
-        : event.tool !== undefined)
+        ? !event.tool || !toolName.test(event.tool) ||
+          (event.outcome !== undefined && event.outcome !== "error")
+        : event.tool !== undefined || event.outcome !== undefined)
     ) return false;
     if (
       event.recordedAt !== undefined &&
@@ -202,6 +210,7 @@ export function openAgentEventSchedule(path: string, now = Date.now) {
       receipt: event.receipt,
       caseId: event.caseId,
       tool: event.tool,
+      ...(event.outcome === "error" && { outcome: event.outcome }),
       recordedAt: event.recordedAt ?? now(),
     };
     return db.prepare(
@@ -270,7 +279,7 @@ export function openAgentEventSchedule(path: string, now = Date.now) {
             s.kinds.includes(e.kind) &&
             (!s.caseId || e.caseId === s.caseId) &&
             (e.kind !== "tool_completed" ||
-              (e.tool !== undefined &&
+              (e.tool !== undefined && (!e.outcome || s.includeToolErrors) &&
                 (e.tool === s.tool || s.tools?.includes(e.tool))))
           ? [e]
           : [];

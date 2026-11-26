@@ -78,7 +78,12 @@ export function sentinelAgentEventSources(
           try {
             for (const review of store.modelReviewNotes()) {
               for (const [index, step] of review.steps.entries()) {
-                if (step.outcome !== "returned" || !toolNames.has(step.tool)) {
+                if (
+                  !toolNames.has(step.tool) ||
+                  (step.outcome !== "returned" && step.outcome !== "error") ||
+                  (step.outcome === "error" &&
+                    step.tool === "sentinel_report_finding")
+                ) {
                   continue;
                 }
                 publish({
@@ -86,6 +91,7 @@ export function sentinelAgentEventSources(
                   receipt: `${review.taskId}:${index}`,
                   caseId,
                   tool: step.tool,
+                  ...(step.outcome === "error" && { outcome: "error" }),
                   recordedAt: Date.parse(review.at),
                 });
               }
@@ -119,7 +125,11 @@ export function sentinelAgentEventSources(
             backgroundOwner: null,
           });
           for (const hit of hits?.matches ?? []) {
-            if (hit.tool !== tool || hit.outcome !== "returned") continue;
+            if (
+              hit.tool !== tool ||
+              (hit.outcome !== "returned" && hit.outcome !== "failed") ||
+              (hit.outcome === "failed" && tool === "sentinel_report_finding")
+            ) continue;
             const source = journal.readRun(hit.role, hit.runId, "INTERNAL")
               ?.scope.sourceId;
             if (source?.startsWith("agent-event:")) continue;
@@ -127,6 +137,7 @@ export function sentinelAgentEventSources(
               kind: "tool_completed",
               receipt: hit.id,
               tool,
+              ...(hit.outcome === "failed" && { outcome: "error" }),
               recordedAt: Date.parse(hit.recordedAt),
             });
           }

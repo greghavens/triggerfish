@@ -1,5 +1,6 @@
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { createProviderRegistry } from "../../src/agent/llm.ts";
+import { openExecutionTraces } from "../../src/core/execution_traces.ts";
 import { createChatSession } from "../../src/gateway/chat.ts";
 import { createOperatorRunToolExecutor } from "../../src/gateway/operator_run_tool.ts";
 import { sentinelAgentEventSources } from "../../src/gateway/sentinel_agent_event_sources.ts";
@@ -206,7 +207,12 @@ Deno.test("Reviewed event subscription dispatches committed case metadata only o
           "tool_completed",
           "timeout",
         ],
-        tools: ["sentinel_assigned_target", "sentinel_worker_observation"],
+        tools: [
+          "sentinel_assigned_target",
+          "sentinel_worker_observation",
+          "sentinel_report_finding",
+          "list_directory",
+        ],
         instructions: {
           finding: "Review current finding metadata.",
           timeout: "Review the elapsed assessment deadline.",
@@ -274,6 +280,7 @@ Deno.test("Reviewed event subscription dispatches committed case metadata only o
             target: "local",
           },
           { tool: "sentinel_skipped", outcome: "returned", target: "local" },
+          { tool: "sentinel_assigned_target", outcome: "error" },
         ],
       }));
     } finally {
@@ -326,6 +333,7 @@ Deno.test("Reviewed event subscription dispatches committed case metadata only o
     assertStringIncludes(messages[0], `${taskId}:0`);
     assertStringIncludes(messages[0], `${taskId}:1`);
     assert(!messages[0].includes("sentinel_skipped"));
+    assert(!messages[0].includes(`${taskId}:3`));
     assertEquals(prompts[0], [
       "Review new assessments.",
       "Reviewed instruction for finding: Review current finding metadata.",
@@ -454,6 +462,19 @@ Deno.test("Reviewed event subscription dispatches committed case metadata only o
     assertEquals(messages.length, 3);
 
     scheduler.stop();
+    assertEquals(
+      JSON.parse(
+        await manage({
+          ...subscription,
+          expectedVersion: 1,
+          subscriptionSettings: {
+            ...subscription.subscriptionSettings,
+            includeToolErrors: true,
+          },
+        }),
+      ).saved.version,
+      2,
+    );
     const closed = startSentinelAssessment(path, { goal: "Retained goal" });
     assert(closed.plan.runId);
     advanceAdaptiveSentinel(path, closed);
@@ -480,11 +501,15 @@ Deno.test("Reviewed event subscription dispatches committed case metadata only o
       assert(
         endedQueue.finishModelReview(endedRevision, endedTaskId, claim.token, {
           note: "Private historical tool result.",
-          steps: [{
-            tool: "sentinel_assigned_target",
-            outcome: "returned",
-            target: "local",
-          }],
+          steps: [
+            {
+              tool: "sentinel_assigned_target",
+              outcome: "returned",
+              target: "local",
+            },
+            { tool: "sentinel_assigned_target", outcome: "error" },
+            { tool: "sentinel_report_finding", outcome: "error" },
+          ],
         }),
       );
     } finally {
@@ -526,6 +551,7 @@ Deno.test("Reviewed event subscription dispatches committed case metadata only o
     scheduler.start();
     await manage({ action: "agent_event_subscriptions" });
     assertEquals(messages.length, 4);
+
     assertStringIncludes(messages[3], '"kind":"goal_completed"');
     assertStringIncludes(
       messages[3],
@@ -537,6 +563,9 @@ Deno.test("Reviewed event subscription dispatches committed case metadata only o
     assert(!messages[3].includes("Private historical finding"));
     assertStringIncludes(messages[3], '"kind":"tool_completed"');
     assertStringIncludes(messages[3], `${endedTaskId}:0`);
+    assertStringIncludes(messages[3], `${endedTaskId}:1`);
+    assertStringIncludes(messages[3], '"outcome":"error"');
+    assert(!messages[3].includes(`${endedTaskId}:2`));
     assert(!messages[3].includes("Private historical tool result"));
     for (const run of [closed, replacement]) {
       assertStringIncludes(
@@ -553,6 +582,33 @@ Deno.test("Reviewed event subscription dispatches committed case metadata only o
     scheduler.start();
     await manage({ action: "agent_event_subscriptions" });
     assertEquals(messages.length, 4);
+
+    scheduler.stop();
+    const traces = openExecutionTraces(join(baseDir, "execution-traces.db"));
+    const backgroundScope = {
+      role: "scheduled" as const,
+      runId: "scheduled-fixture-run",
+      sessionId: "scheduled-fixture-session",
+      sourceId: "scheduler-fixture",
+    };
+    try {
+      assert(traces.admit(backgroundScope));
+      for (const outcome of ["failed", "blocked"] as const) {
+        assert(traces.appendNext(backgroundScope, {
+          tool: "list_directory",
+          outcome,
+          classification: "INTERNAL",
+        }));
+      }
+    } finally {
+      traces.close();
+    }
+    scheduler.start();
+    await manage({ action: "agent_event_subscriptions" });
+    assertEquals(messages.length, 5);
+    assertStringIncludes(messages[4], '"tool":"list_directory"');
+    assertStringIncludes(messages[4], '"outcome":"error"');
+    assert(!messages[4].includes('"outcome":"blocked"'));
   } finally {
     scheduler.stop();
     socket?.close();
