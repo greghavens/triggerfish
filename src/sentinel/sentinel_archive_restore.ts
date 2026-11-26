@@ -1,6 +1,7 @@
 import {
   projectRepositoryVisibility,
   repositoryVisibilityReceipt,
+  repositoryVisibilityRecheckBinding,
   repositoryVisibilityReference,
   SENTINEL_LIVE_REPOSITORY_VISIBILITY,
 } from "./github_repository_visibility.ts";
@@ -73,7 +74,10 @@ import {
 } from "./cases.ts";
 import { readSentinelChatSnapshot } from "./chat_mode.ts";
 import { loadSentinelGraph } from "./graph.ts";
-import { openSentinelAdaptiveStore } from "./adaptive_store.ts";
+import {
+  openSentinelAdaptiveStore,
+  readAdaptiveRepositoryVisibility,
+} from "./adaptive_store.ts";
 import {
   MAX_SENTINEL_RUN_TIMEOUT_SECONDS,
   parseSentinelAssessmentTemplateBinding,
@@ -107,7 +111,14 @@ import {
   decodeSentinelWorkerFindingPublications,
   sentinelWorkerFindingPublicationFile,
 } from "./worker_finding_publications.ts";
-import { readSentinelCaseFindingReceipts } from "./worker_finding_store.ts";
+import {
+  decodeExactSentinelFindingReceipt,
+  readSentinelCaseFindingReceipts,
+} from "./worker_finding_store.ts";
+import {
+  verifyWorkerFindingRecheck,
+  withRepositoryVisibilityVerification,
+} from "./worker_finding_evidence.ts";
 
 const snapshotFile = "sentinel.json";
 const assessmentFile = "sentinel-assessment.db";
@@ -797,7 +808,9 @@ function validateArchivedRepositoryVisibility(
         !/^[A-Za-z\d._:-]{1,224}$/.test(revision) ||
         typeof taskId !== "string" || !/^adaptive:[a-f0-9]{64}$/.test(taskId) ||
         typeof evidenceRevision !== "number" ||
-        !retained.includes(evidenceRevision) ||
+        !Number.isSafeInteger(evidenceRevision) ||
+        evidenceRevision < 1 ||
+        evidenceRevision > (retained.at(-1) ?? 0) ||
         typeof encoded !== "string" ||
         (controlClaimSha256 !== null &&
           (typeof controlClaimSha256 !== "string" ||
@@ -1275,6 +1288,173 @@ function validateAuxiliary(
       LIMIT 1`).get(caseId, revision, ...(hasRun ? [revision, runId] : []));
     if (invalid) throw new Error("Foreign Sentinel archive receipt scope");
   });
+}
+
+/** Bind retained native rechecks to the original finding and exact repository result. */
+function validateArchivedRepositoryRechecks(
+  findingsPath: string | undefined,
+  adaptivePath: string | undefined,
+  assessment: string,
+  caseId: string,
+) {
+  if (!findingsPath) return;
+  const findings = new DatabaseSync(findingsPath, { readOnly: true });
+  try {
+    findings.exec("PRAGMA trusted_schema = OFF");
+    const rows = findings.prepare(`SELECT * FROM receipts
+      WHERE json_type(input, '$.nativeRepositoryVisibility') IS NOT NULL
+      LIMIT 4097`).all();
+    if (!rows.length) return;
+    const invalid = () =>
+      new Error("Invalid archived Sentinel repository visibility recheck");
+    if (!adaptivePath || rows.length > 4096) throw invalid();
+    const adaptive = new DatabaseSync(adaptivePath, { readOnly: true });
+    try {
+      adaptive.exec("PRAGMA trusted_schema = OFF");
+      const assignment = adaptive.prepare(
+        `SELECT task.nodeId, task.kind, task.depth,
+          task.plannerRound
+        FROM adaptive_tasks AS task
+        JOIN adaptive_evidence_revisions AS mapping ON mapping.revision = task.revision
+        WHERE task.id = ? AND mapping.goalId = ? AND mapping.evidenceNumber = ?`,
+      );
+      const finding = findings.prepare("SELECT * FROM receipts WHERE id = ?");
+      for (const row of rows) {
+        const recheck = decodeExactSentinelFindingReceipt(row);
+        if (
+          recheck?.kind !== "recheck" || !recheck.nativeRepositoryVisibility ||
+          recheck.caseId !== caseId ||
+          readSentinelRunIdForRevision(assessment, recheck.evidenceRevision) !==
+            recheck.runId
+        ) throw invalid();
+        const originalRow = finding.get(recheck.findingId);
+        const original = originalRow &&
+          decodeExactSentinelFindingReceipt(originalRow);
+        if (
+          original?.kind !== "finding" || original.caseId !== caseId ||
+          original.runId !== recheck.runId ||
+          readSentinelRunIdForRevision(
+              assessment,
+              original.evidenceRevision,
+            ) !==
+            original.runId ||
+          original.evidenceRevision > recheck.evidenceRevision ||
+          original.targetId !== recheck.targetId ||
+          original.graphFindingId !== recheck.graphFindingId ||
+          original.controlId !== recheck.controlId
+        ) throw invalid();
+        const task = assignment.get(
+          recheck.taskId,
+          recheck.runId,
+          recheck.evidenceRevision,
+        );
+        const followup = typeof task?.plannerRound === "string"
+          ? JSON.parse(task.plannerRound)?.findingFollowup
+          : undefined;
+        const binding = repositoryVisibilityRecheckBinding(
+          followup?.nativeRepositoryVisibility,
+        );
+        const source = readAdaptiveRepositoryVisibility(
+          adaptivePath,
+          recheck.runId,
+          recheck.evidenceRevision,
+          recheck.taskId,
+          recheck.targetId,
+          true,
+        );
+        const snapshot = readSentinelAssessmentRevision(
+          assessment,
+          recheck.evidenceRevision,
+        )
+          ?.result.sharedGraph.snapshot;
+        const originalEvidence = snapshot?.nodes.find(({ id }) =>
+          id === original.evidenceId
+        );
+        if (
+          task?.nodeId !== recheck.targetId ||
+          task.kind !== "trace" || task.depth !== 1 ||
+          followup?.findingId !== original.id ||
+          followup.sourceTaskId !== original.taskId ||
+          followup.sourceAnalystSha256 !==
+            ("analyst" in original
+              ? createHash("sha256").update(JSON.stringify(original.analyst))
+                .digest("hex")
+              : undefined) ||
+          followup.evidenceId !== original.evidenceId ||
+          followup.sourceRevision !== original.evidenceRevision ||
+          followup.assignedRevision !== recheck.evidenceRevision ||
+          followup.snapshotDigest !== original.snapshotDigest ||
+          !binding || !source?.reference ||
+          source.reference.sourceStepIndex !==
+            recheck.nativeRepositoryVisibility.sourceStepIndex ||
+          source.reference.resultSha256 !==
+            recheck.nativeRepositoryVisibility.resultSha256 ||
+          source.receipt.repository !== binding.repository ||
+          source.receipt.repositoryId !== binding.repositoryId ||
+          !snapshot ||
+          digestSentinelSnapshot(snapshot) !== recheck.snapshotDigest ||
+          originalEvidence?.kind !== "evidence" ||
+          originalEvidence.executionSource?.resultSha256 !==
+            binding.originalSha256 ||
+          source.receipt.observedAt !== recheck.observedAt ||
+          (source.receipt.visibility === "private" ? "pass" : "fail") !==
+            recheck.outcome ||
+          recheck.observedAt <= original.observedAt ||
+          Date.parse(recheck.validUntil) - Date.parse(recheck.observedAt) !==
+            Date.parse(original.validUntil) - Date.parse(original.observedAt)
+        ) throw invalid();
+        const originalSnapshot = readSentinelAssessmentRevision(
+          assessment,
+          original.evidenceRevision,
+        )?.result.sharedGraph.snapshot;
+        if (!originalSnapshot) throw invalid();
+        const control = {
+          assetId: recheck.targetId,
+          findingId: recheck.graphFindingId,
+          controlId: recheck.controlId,
+        };
+        const initial = verifyWorkerFindingRecheck(
+          originalSnapshot,
+          {
+            caseId,
+            evidenceRevision: original.evidenceRevision,
+            evaluatedAt: original.evaluatedAt,
+          },
+          { ...control, evidenceId: original.evidenceId },
+          ({ id }) => id === original.evidenceId,
+        );
+        const latest = verifyWorkerFindingRecheck(
+          withRepositoryVisibilityVerification(
+            snapshot,
+            recheck.evidenceId,
+            recheck.targetId,
+            recheck.controlId,
+            recheck,
+          ),
+          {
+            caseId,
+            evidenceRevision: recheck.evidenceRevision,
+            evaluatedAt: recheck.evaluatedAt,
+          },
+          { ...control, evidenceId: recheck.evidenceId },
+          ({ id }) => id === recheck.evidenceId,
+        );
+        if (
+          initial?.outcome !== "fail" ||
+          initial.snapshotDigest !== original.snapshotDigest ||
+          initial.observedAt !== original.observedAt ||
+          initial.validUntil !== original.validUntil ||
+          latest?.outcome !== recheck.outcome ||
+          latest.observedAt !== recheck.observedAt ||
+          latest.validUntil !== recheck.validUntil
+        ) throw invalid();
+      }
+    } finally {
+      adaptive.close();
+    }
+  } finally {
+    findings.close();
+  }
 }
 
 /** Require the two archived journal halves to name the same finished publication. */
@@ -1768,9 +1948,17 @@ export async function restoreVerifiedSentinelCaseArchive(
     validateAuxiliary(source, name, caseId, runId, revision);
     return [{ name, source }];
   });
+  const findings = auxiliary.find(({ name }) =>
+    name === "sentinel-worker-findings.db"
+  )?.source;
+  validateArchivedRepositoryRechecks(
+    findings,
+    adaptive,
+    assessment,
+    caseId,
+  );
   validateArchivedTrafficFindingPublications(
-    auxiliary.find(({ name }) => name === "sentinel-worker-findings.db")
-      ?.source,
+    findings,
     auxiliary.find(({ name }) => name === "sentinel-finding-traffic-links.db")
       ?.source,
     adaptive,

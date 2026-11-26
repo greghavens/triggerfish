@@ -1,4 +1,12 @@
 import { createWorkflowRunRegistry } from "../../src/workflow/registry.ts";
+import {
+  withVerifiedRunArchive,
+  writeRunArchive,
+} from "../../src/core/run_archive.ts";
+import {
+  permittedSentinelRestoreArtifacts,
+  restoreVerifiedSentinelCaseArchive,
+} from "../../src/sentinel/sentinel_archive_restore.ts";
 import { createOperatorWorkflowRuns } from "../../src/gateway/operator_workflow_runs.ts";
 import { createWorkflowObservationVerifier } from "../../src/gateway/scheduled_observation_tool.ts";
 import { subscribeCommittedEvidence } from "../../src/core/evidence_task_progression.ts";
@@ -8511,12 +8519,16 @@ for (
       });
       assertEquals(measured, [receipt]);
       assert(!JSON.stringify(receipt).includes(credentialRef));
+      const archiveId = crypto.randomUUID();
+      const runRef = {
+        kind: "sentinel",
+        id: caseId,
+        runId,
+        revision: state.revision,
+      };
       await withFindingAssignmentGateway(
         baseDir,
-        () =>
-          Promise.reject(
-            new Error("Saved report reads must not require approval."),
-          ),
+        () => Promise.resolve(scenario.outcome === "fail"),
         async (turn) => {
           const readRef = {
             kind: "sentinel",
@@ -8548,6 +8560,23 @@ for (
             finding,
           );
           assert(!JSON.stringify(revoked).includes(receipt.id));
+          if (scenario.outcome === "fail") {
+            assertEquals(
+              JSON.parse(await turn({ ...runRef, action: "cancel" })).run
+                .status,
+              "stopped",
+            );
+            assertEquals(
+              JSON.parse(
+                await turn({
+                  ...runRef,
+                  action: "archive",
+                  requestId: archiveId,
+                }),
+              ).receipt.status,
+              "succeeded",
+            );
+          }
         },
         undefined,
         undefined,
@@ -8563,6 +8592,104 @@ for (
           ),
         reader,
       );
+      if (scenario.outcome === "fail") {
+        coordinator.stop();
+        await Deno.rename(
+          dirname(path),
+          join(baseDir, "before-native-restore"),
+        );
+        const directory = join(baseDir, "data", "run-archives", archiveId);
+        const manifest = JSON.parse(
+          await Deno.readTextFile(join(directory, "manifest.json")),
+        );
+        const alteredPath = join(baseDir, "altered-native-adaptive.db");
+        await Deno.copyFile(
+          join(directory, "sentinel-adaptive.db"),
+          alteredPath,
+        );
+        const altered = new DatabaseSync(alteredPath);
+        try {
+          altered.prepare(
+            "DELETE FROM adaptive_repository_visibility_results WHERE taskId = ?",
+          ).run(selectedTask);
+        } finally {
+          altered.close();
+        }
+        const damaged = join(baseDir, "missing-native-recheck-source");
+        await writeRunArchive(
+          damaged,
+          manifest.identity,
+          manifest.artifacts.map(({ name }: { name: string }) => ({
+            name,
+            sourcePath: name === "sentinel-adaptive.db"
+              ? alteredPath
+              : join(directory, name),
+          })),
+          permittedSentinelRestoreArtifacts,
+        );
+        await assertRejects(
+          () =>
+            withVerifiedRunArchive(
+              damaged,
+              baseDir,
+              {
+                expectedKind: "sentinel",
+                permittedNames: permittedSentinelRestoreArtifacts,
+              },
+              (archive) => restoreVerifiedSentinelCaseArchive(baseDir, archive),
+            ),
+          Error,
+          "Invalid archived Sentinel repository visibility recheck",
+        );
+        await assertRejects(
+          () => Deno.lstat(dirname(path)),
+          Deno.errors.NotFound,
+        );
+        availableCredential = true;
+        await withFindingAssignmentGateway(
+          baseDir,
+          () => Promise.resolve(true),
+          async (turn) => {
+            assertEquals(
+              JSON.parse(
+                await turn({
+                  ...runRef,
+                  action: "restore",
+                  archiveId,
+                  requestId: crypto.randomUUID(),
+                }),
+              ).receipt.status,
+              "succeeded",
+            );
+            assertEquals(readSentinelAssessment(path)?.paused, true);
+            const { runId: _runId, ...ref } = runRef;
+            assertEquals(
+              JSON.parse(
+                await turn({
+                  ...ref,
+                  action: "finding_receipt",
+                  receiptId: receipt.id,
+                }),
+              ).record,
+              receipt,
+            );
+          },
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          false,
+          undefined,
+          (payload) =>
+            Promise.resolve(
+              payload.kind === original.kind &&
+                payload.repo === original.repo &&
+                payload.repositoryId === original.repositoryId,
+            ),
+          reader,
+        );
+      }
+      assertEquals(fetches, 1);
       assertEquals(fetches, 1);
     } finally {
       coordinator?.stop();

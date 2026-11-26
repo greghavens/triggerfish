@@ -603,6 +603,22 @@ function decode(row: Row): SentinelWorkerFindingJournalRecord {
   };
 }
 
+/** Decode a journal receipt and require the persisted identity to match. */
+export function decodeExactSentinelFindingReceipt(row: Row) {
+  if (row.reportVersion != null) return;
+  const receipt = decode(row);
+  const input = receipt.kind === "finding"
+    ? normalizeFinding(receipt)
+    : normalizeRecheck(receipt);
+  if (
+    row.input !== JSON.stringify(input) ||
+    row.revision !== receipt.evidenceRevision ||
+    row.findingId !== (receipt.kind === "recheck" ? receipt.findingId : null) ||
+    receipt.id !== findingReceiptId(input)
+  ) return;
+  return receipt;
+}
+
 function decodeAmendment(row: Row): SentinelWorkerFindingReportAmendment {
   return {
     ...normalizeAmendment(JSON.parse(String(row.input))),
