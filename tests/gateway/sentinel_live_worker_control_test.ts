@@ -2181,8 +2181,30 @@ Deno.test("Reviewed Sentinel role routes resolve and dispatch independently of t
       name: provider,
       model: provider + "-version",
       supportsStreaming: false,
-      complete() {
+      complete(_messages, tools) {
         calls.push(provider);
+        if (provider === "planner-model") {
+          const definitions = tools as {
+            function?: {
+              name?: string;
+              parameters?: { properties?: { view?: { enum?: string[] } } };
+            };
+          }[];
+          assertEquals(
+            definitions.find((tool) =>
+              tool.function?.name === "sentinel_case_inventory"
+            )?.function?.parameters?.properties?.view?.enum,
+            [
+              "assets",
+              "organizations",
+            ],
+          );
+          assert(
+            definitions.some((tool) =>
+              tool.function?.name === "sentinel_defense"
+            ),
+          );
+        }
         if (provider === "worker-model" && workerUnavailable) {
           return Promise.reject(
             Object.assign(new Error("Unavailable"), { status: 503 }),
@@ -2228,7 +2250,9 @@ Deno.test("Reviewed Sentinel role routes resolve and dispatch independently of t
         }),
       );
     }
-    const assessment = startSentinelAssessment(path);
+    const assessment = startSentinelAssessment(path, {
+      inventoryCoverageEnabled: false,
+    });
     const runId = assessment.plan.runId;
     assert(runId);
     const ref = {
@@ -2452,6 +2476,17 @@ Deno.test("Reviewed Sentinel role routes resolve and dispatch independently of t
         await request({ ...ref, action: "model_route" }),
       );
       assertEquals(restored.version, 5);
+      const coverage = JSON.parse(
+        await request({
+          action: "inventory",
+          kind: ref.kind,
+          id: ref.id,
+          revision: ref.revision,
+          view: "coverage",
+        }),
+      );
+      assertEquals(coverage.page.enabled, false);
+      assertEquals(coverage.page.assets, undefined);
       assertEquals(restored.roles.interactive.source, "run");
       assertEquals(restored.roles.worker.profile.provider, "worker-model");
       assertEquals(
