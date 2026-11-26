@@ -8,13 +8,15 @@
  */
 
 import { join } from "@std/path";
+import { isDeepStrictEqual } from "node:util";
 import {
   isRealPathWithinJail,
   resolveWithinJail,
 } from "../../core/security/path_jail.ts";
 import { sanitizePathForPrompt } from "../../core/security/path_sanitization.ts";
 import { createLogger } from "../../core/logger/logger.ts";
-import { parse as parseYaml } from "@std/yaml";
+import { parse as parseYaml, stringify as stringifyYaml } from "@std/yaml";
+import { redactCredentialText } from "../../core/logger/redactor.ts";
 import type { ClassificationLevel } from "../../core/types/classification.ts";
 import { parseClassification } from "../../core/types/classification.ts";
 import type { SkillSource } from "../../core/types/skills.ts";
@@ -79,7 +81,8 @@ export interface SkillDraftRevision {
   readonly skill: Skill;
   readonly sourceApproval: SkillDraftReceipt;
   readonly sourceContent: string;
-  readonly replacementBody: string;
+  readonly replacementBody?: string;
+  readonly replacementDescription?: string;
   readonly content: string;
   readonly digest: string;
 }
@@ -230,7 +233,7 @@ function optionalTextArray(value: unknown): boolean {
 function readWorkspaceSkillText(
   workspace: string,
   path: string,
-  filename: "SKILL.md" | "SKILL.revision.md",
+  filename: "SKILL.md" | "SKILL.revision.md" | "SKILL.revision.description",
 ): string | undefined {
   const markdown = join(path, filename);
   try {
@@ -404,6 +407,32 @@ async function readExactDraft(
   };
 }
 
+/** A fixed local text file may revise only the descriptive frontmatter. */
+function withRevisedDescription(frontmatter: string, source: string) {
+  const description = source.trim();
+  if (
+    !description || description.length > 512 ||
+    /[\p{Cc}\p{Cf}]/u.test(description) ||
+    redactCredentialText(description) !== description
+  ) return;
+  const before = parseFrontmatter(frontmatter);
+  const selector = /^description:[^\n]*(?:\n[ \t][^\n]*)*/m;
+  if (
+    !before || typeof before.description !== "string" ||
+    !selector.test(frontmatter)
+  ) {
+    return;
+  }
+  const replacement = stringifyYaml({ description }).trimEnd();
+  const updated = frontmatter.replace(selector, () => replacement);
+  return isDeepStrictEqual(parseFrontmatter(updated), {
+      ...before,
+      description,
+    })
+    ? updated
+    : undefined;
+}
+
 async function readExactRevision(
   workspace: string,
   name: string,
@@ -416,10 +445,28 @@ async function readExactRevision(
     draft.skill.path,
     "SKILL.revision.md",
   );
-  if (!replacementBody?.trim()) return undefined;
+  const replacementDescription = readWorkspaceSkillText(
+    workspace,
+    draft.skill.path,
+    "SKILL.revision.description",
+  );
+  if (
+    (replacementBody !== undefined && !replacementBody.trim()) ||
+    (replacementBody === undefined &&
+      existingPath(join(draft.skill.path, "SKILL.revision.md"))) ||
+    (replacementDescription === undefined &&
+      existingPath(join(draft.skill.path, "SKILL.revision.description"))) ||
+    (replacementBody === undefined && replacementDescription === undefined)
+  ) return;
   const frontmatter = frontmatterPattern.exec(draft.content)?.[0];
-  if (!frontmatter) return undefined;
-  const content = frontmatter + "\n" + replacementBody;
+  if (!frontmatter) return;
+  const revised = replacementDescription === undefined
+    ? frontmatter
+    : withRevisedDescription(frontmatter, replacementDescription);
+  if (!revised) return;
+  const content = revised + "\n" +
+    (replacementBody ?? draft.content.slice(frontmatter.length + 1));
+  if (content === draft.content) return;
   if (new TextEncoder().encode(content).length > maxDraftBytes) {
     return undefined;
   }
@@ -430,6 +477,7 @@ async function readExactRevision(
     sourceApproval: draft.skill.draftApproval,
     sourceContent: draft.content,
     replacementBody,
+    replacementDescription,
     content,
     digest,
   };
@@ -451,8 +499,18 @@ function replaceDraftIfCurrent(
       !approvals?.has(revision.digest) &&
       readWorkspaceSkillText(workspace, path, "SKILL.md") ===
         revision.sourceContent &&
-      readWorkspaceSkillText(workspace, path, "SKILL.revision.md") ===
-        revision.replacementBody;
+      (revision.replacementBody === undefined
+        ? !existingPath(join(path, "SKILL.revision.md"))
+        : readWorkspaceSkillText(workspace, path, "SKILL.revision.md") ===
+          revision.replacementBody) &&
+      (revision.replacementDescription === undefined
+        ? !existingPath(join(path, "SKILL.revision.description"))
+        : readWorkspaceSkillText(
+          workspace,
+          path,
+          "SKILL.revision.description",
+        ) ===
+          revision.replacementDescription);
   };
   if (!current()) return false;
   const target = join(path, "SKILL.md");

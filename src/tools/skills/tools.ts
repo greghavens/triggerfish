@@ -148,7 +148,7 @@ export function buildSkillAdministrationToolDefinitions(): readonly ToolDefiniti
   }, {
     name: "inspect_skill_revision",
     description:
-      "Preview one exact approved workspace skill revision. The proposed Markdown body comes from SKILL.revision.md beside the approved SKILL.md. The preview preserves the skill's frontmatter and does not activate the proposed text.",
+      "Preview one exact approved workspace skill revision. SKILL.revision.md supplies an optional replacement body, and SKILL.revision.description supplies an optional one-line description, beside the approved SKILL.md. The preview preserves all other metadata and leaves the proposed text inactive.",
     parameters: {
       skill_name: {
         type: "string",
@@ -159,7 +159,7 @@ export function buildSkillAdministrationToolDefinitions(): readonly ToolDefiniti
   }, {
     name: "stage_skill_revision",
     description:
-      "Request owner confirmation to stage the reviewed body from SKILL.revision.md as a pending revision. Existing approval receipts are retained. The revised text needs its own approval.",
+      "Request owner confirmation to stage the reviewed body or description as a pending revision. Existing approval receipts are retained. The revision needs its own approval.",
     parameters: {
       skill_name: {
         type: "string",

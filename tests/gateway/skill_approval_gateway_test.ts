@@ -817,3 +817,115 @@ Deno.test("Owner withdrawal retires only the approved workspace skill digest and
     await Deno.remove(dir, { recursive: true });
   }
 });
+
+Deno.test("Owner stages a description-only skill revision without changing grants or body", async () => {
+  const dir = await Deno.makeTempDir();
+  try {
+    const skillName = "description-fixture";
+    const description = "Review verified inventory: current evidence only.";
+    const body = "## Guidance\nUse the case's reviewed inventory.";
+    const authored = await createSkillAuthor({
+      skillsDir: join(dir, "workspaces", "main", "skills"),
+      userCeiling: "INTERNAL",
+    }).create({
+      name: skillName,
+      description: "Prior description",
+      classificationCeiling: "INTERNAL",
+      requiresTools: ["read_file"],
+      networkDomains: [],
+      content: body,
+    });
+    assert(authored.ok);
+    const file = join(authored.value.path, "SKILL.md");
+    const proposal = join(authored.value.path, "SKILL.revision.description");
+    const original = await Deno.readTextFile(file);
+    const selector = { skill_name: skillName };
+    const read = { ...selector, type: "USER_PROVIDED" };
+    let changeDuringReview = false;
+    const confirm = async (prompt: string) => {
+      if (changeDuringReview && prompt.startsWith("Stage a pending revision")) {
+        await Deno.writeTextFile(proposal, "A different description.\n");
+      }
+      return true;
+    };
+    let firstApproval: Record<string, unknown>;
+    let proposedDigest = "";
+    await withGateway(dir, confirm, () => undefined, async (turn) => {
+      const draft = JSON.parse(
+        (await turn("inspect_skill_draft", selector)).result,
+      );
+      firstApproval = JSON.parse(
+        (await turn("approve_skill", {
+          ...selector,
+          digest: draft.digest,
+        })).result,
+      ).approval;
+      await Deno.writeTextFile(
+        proposal,
+        "New description\nclassification_ceiling: SECRET\n",
+      );
+      assertStringIncludes(
+        (await turn("inspect_skill_revision", selector)).result,
+        "unavailable",
+      );
+      await Deno.writeTextFile(proposal, description + "\n");
+      const reviewed = JSON.parse(
+        (await turn("inspect_skill_revision", selector)).result,
+      );
+      assertEquals(reviewed.source_approval, firstApproval);
+      assertStringIncludes(reviewed.content, description);
+      assertStringIncludes(reviewed.content, body);
+      proposedDigest = reviewed.revision_digest;
+      const stage = {
+        ...selector,
+        source_digest: reviewed.source_digest,
+        revision_digest: proposedDigest,
+      };
+      changeDuringReview = true;
+      assertStringIncludes(
+        (await turn("stage_skill_revision", stage)).result,
+        "changed before staging",
+      );
+      assertEquals(await Deno.readTextFile(file), original);
+      changeDuringReview = false;
+      await Deno.writeTextFile(proposal, description + "\n");
+      assertEquals(
+        JSON.parse((await turn("stage_skill_revision", stage)).result).status,
+        "PENDING_APPROVAL",
+      );
+      assertEquals(
+        JSON.parse((await turn("read_skill", read)).result).found,
+        false,
+      );
+      const updated = await Deno.readTextFile(file);
+      assertEquals(
+        updated,
+        original.replace("Prior description", "'" + description + "'"),
+      );
+    });
+    await withGateway(dir, confirm, () => undefined, async (turn) => {
+      const pending = JSON.parse(
+        (await turn("inspect_skill_draft", selector)).result,
+      );
+      assertEquals(pending.approval_history, [firstApproval]);
+      assertEquals(pending.approval, null);
+      const approved = JSON.parse(
+        (await turn("approve_skill", {
+          ...selector,
+          digest: proposedDigest,
+        })).result,
+      ).approval;
+      assertEquals(approved.digest, proposedDigest);
+      assert(approved.receiptId !== firstApproval.receiptId);
+      const reopened = JSON.parse((await turn("read_skill", read)).result);
+      assertEquals(reopened.approval_receipt_id, approved.receiptId);
+      assertEquals(reopened.classification_ceiling, "INTERNAL");
+      assertEquals(reopened.requires_tools, ["read_file"]);
+      assertEquals(reopened.network_domains, []);
+      assertStringIncludes(reopened.content, description);
+      assertStringIncludes(reopened.content, body);
+    });
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
