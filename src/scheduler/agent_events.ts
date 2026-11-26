@@ -24,6 +24,7 @@ export interface AgentEventSubscription {
   readonly tools?: readonly string[];
   readonly instructions?: Readonly<Partial<Record<AgentEventKind, string>>>;
   readonly intervalMs?: number;
+  readonly fireOnStart?: boolean;
   readonly merge: "none" | "by_case" | "all";
   readonly maxConcurrent: number;
   readonly enabled: boolean;
@@ -80,6 +81,7 @@ export function parseAgentEventSubscription(
         "tools",
         "instructions",
         "intervalMs",
+        "fireOnStart",
         "merge",
         "maxConcurrent",
         "enabled",
@@ -106,6 +108,8 @@ export function parseAgentEventSubscription(
         !Number.isSafeInteger(raw.intervalMs) ||
         raw.intervalMs < 60_000 || raw.intervalMs > 30 * 86_400_000
       : raw.intervalMs !== undefined) ||
+    (raw.fireOnStart !== undefined &&
+      (!kinds.includes("interval") || typeof raw.fireOnStart !== "boolean")) ||
     typeof raw.enabled !== "boolean" ||
     (raw.merge !== "none" && raw.merge !== "by_case" && raw.merge !== "all") ||
     typeof raw.maxConcurrent !== "number" ||
@@ -124,6 +128,7 @@ export function parseAgentEventSubscription(
     ...(Array.isArray(tools) && { tools: [...tools].sort() }),
     ...(Object.keys(instructions).length && { instructions }),
     ...(typeof raw.intervalMs === "number" && { intervalMs: raw.intervalMs }),
+    ...(raw.fireOnStart === true && { fireOnStart: true }),
   };
 }
 
@@ -325,6 +330,7 @@ export function openAgentEventSchedule(path: string, now = Date.now) {
             "SELECT COALESCE(MAX(sequence),0) maximum FROM agent_event_receipts",
           ).get()?.maximum,
         );
+        const registered = now();
         db.prepare(`INSERT INTO agent_event_subscriptions VALUES (?,?,?,?,?,?)
           ON CONFLICT(id) DO UPDATE SET version=excluded.version,spec=excluded.spec,
           cursor=excluded.cursor,next_interval=excluded.next_interval,registered_at=excluded.registered_at`)
@@ -333,8 +339,10 @@ export function openAgentEventSchedule(path: string, now = Date.now) {
             version,
             JSON.stringify(s),
             cursor,
-            s.intervalMs ? now() + s.intervalMs : null,
-            now(),
+            s.intervalMs
+              ? registered + (s.fireOnStart ? 0 : s.intervalMs)
+              : null,
+            registered,
           );
         db.prepare(`UPDATE agent_event_deliveries SET state='revoked'
           WHERE subscription=? AND state='queued'`).run(s.id);

@@ -390,6 +390,36 @@ Deno.test("Reviewed event subscription dispatches committed case metadata only o
     const afterRestart = await manage({ action: "agent_event_subscriptions" });
     assertEquals(JSON.parse(afterRestart).deliveries.length, 2);
     assertEquals(messages.length, 2);
+
+    scheduler.stop();
+    const interval = {
+      ...subscription,
+      subscriptionSettings: {
+        id: "interval-health",
+        agent: "review-agent",
+        kinds: ["interval"],
+        intervalMs: 60_000,
+        fireOnStart: true,
+        merge: "none",
+        maxConcurrent: 1,
+        enabled: true,
+      },
+    };
+    assertEquals(JSON.parse(await manage(interval)).saved.version, 1);
+    scheduler.start();
+    const intervalLedger = await manage({
+      action: "agent_event_subscriptions",
+    });
+    assertEquals(JSON.parse(intervalLedger).deliveries.length, 3);
+    assertEquals(messages.length, 3);
+    assertStringIncludes(messages[2], '"kind":"interval"');
+    scheduler.stop();
+    scheduler.start();
+    const intervalRestart = await manage({
+      action: "agent_event_subscriptions",
+    });
+    assertEquals(JSON.parse(intervalRestart).deliveries.length, 3);
+    assertEquals(messages.length, 3);
   } finally {
     scheduler.stop();
     socket?.close();
