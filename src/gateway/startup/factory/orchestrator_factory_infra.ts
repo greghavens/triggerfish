@@ -1,3 +1,4 @@
+import { createApprovalAdvisor } from "../../../core/policy/approval_advice.ts";
 import { withReviewedToolRules } from "../../../core/policy/reviewed_tool_rules.ts";
 import { enableLiveProviderRoutes } from "../../../agent/providers/live_routes.ts";
 /**
@@ -116,6 +117,11 @@ export function initializeFactoryInfra(
     registry,
     hookRunner: {
       ...withReviewedToolRules(createHookRunner(engine), baseDir),
+      reviewApprovalAdvice: createApprovalAdvisor(
+        baseDir,
+        registry,
+        models.live_route_allowlists,
+      ),
       toolApprovalInbox: createToolApprovalService(
         join(baseDir, "tool-approvals.db"),
       ),

@@ -1,4 +1,7 @@
-import { executeReviewedRuleAction, reviewedRuleActions } from "./operator_reviewed_rules.ts";
+import {
+  executeReviewedRuleAction,
+  reviewedRuleActions,
+} from "./operator_reviewed_rules.ts";
 import { sentinelRoleModelSelection } from "./sentinel_model_routing.ts";
 import {
   executeNamedRecordAction,
@@ -517,7 +520,8 @@ export const operatorRunTool: ToolDefinition = {
   parameters: {
     reviewedRule: {
       type: "object",
-      description: "Exact restrictive rule with effect (ask or block), enabled, and optional tool, caseId, runId, and assetId selectors.",
+      description:
+        "Exact restrictive rule with effect (ask or block), enabled, and optional tool, caseId, runId, and assetId selectors.",
     },
     action: {
       type: "string",
@@ -3066,6 +3070,7 @@ export function createOperatorRunToolExecutor(options: {
     ceiling: ClassificationLevel,
   ) => readonly EffectiveModelProfile[];
   readonly sentinelProfiles?: () => readonly SelectedModelProfile[];
+  readonly approvalReviewerProfiles?: () => readonly SelectedModelProfile[];
 }): OperatorRunToolExecutor {
   const providers = {
     sentinel: createOperatorSentinelRuns(
@@ -3263,7 +3268,13 @@ export function createOperatorRunToolExecutor(options: {
     }
     const action = args.action;
     if (reviewedRuleActions.some((name) => name === action)) {
-      return await executeReviewedRuleAction(options.baseDir, args, context, options.confirm);
+      return await executeReviewedRuleAction(
+        options.baseDir,
+        args,
+        context,
+        options.confirm,
+        options.approvalReviewerProfiles,
+      );
     }
     if (namedRecordActions.some((name) => name === action)) {
       return await executeNamedRecordAction(

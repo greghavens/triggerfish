@@ -1,3 +1,4 @@
+import { listSelectableModelProfiles } from "../../core/model_profile_selection.ts";
 import { liveProviderRouteSettings } from "../../agent/providers/live_routes.ts";
 import type { ModelsConfig } from "../../agent/providers/config.ts";
 import { readSentinelAdmissionSettings } from "../sentinel_admission_settings.ts";
@@ -162,6 +163,12 @@ export function buildMainChatSession(
         : undefined,
       profiles: (ceiling) =>
         listEffectiveModelProfiles(toolInfra.registry, ceiling),
+      approvalReviewerProfiles: () =>
+        listSelectableModelProfiles(
+          toolInfra.registry,
+          "INTERNAL",
+          liveRouteAllowlist,
+        ),
       sentinelProfiles: bootstrap.config.sentinel?.allow_model_access === true
         ? sentinelAssessmentModelRouting(
           toolInfra.registry,

@@ -1,3 +1,7 @@
+import {
+  approvalAdviceStore,
+  createApprovalAdvisor,
+} from "../../src/core/policy/approval_advice.ts";
 import { createToolApprovalService } from "../../src/core/tool_approval_service.ts";
 import { withReviewedToolRules } from "../../src/core/policy/reviewed_tool_rules.ts";
 import { assertEquals, assertStringIncludes } from "@std/assert";
@@ -21,6 +25,10 @@ Deno.test("Reviewed restrictive tool rules retain exact versions across gateway 
   let toolResult = "";
   let allow = true;
   let reviews = 0;
+  let baseAsks = false;
+  let adviceCalls = 0;
+  let blockAdvisorOutput = false;
+  let adviceOutputChecks = 0;
   const inbox = createToolApprovalService(join(baseDir, "approvals.db"));
   const registry = createProviderRegistry();
   registry.register({
@@ -53,6 +61,23 @@ Deno.test("Reviewed restrictive tool rules retain exact versions across gateway 
       return Promise.resolve({ content, usage, toolCalls: [] });
     },
   });
+  registry.register({
+    name: "advisor-fixture",
+    supportsStreaming: false,
+    complete(history, tools) {
+      adviceCalls++;
+      assertEquals(tools, []);
+      assertEquals(JSON.parse(String(history.at(-1)?.content)), {
+        tool: "operator_runs",
+        assignmentScoped: false,
+      });
+      return Promise.resolve({
+        content: "caution",
+        usage: { inputTokens: 7, outputTokens: 1 },
+        toolCalls: [],
+      });
+    },
+  });
   registry.setDefault("named-conversation-fixture");
   const open = (messages: ReturnType<typeof createMessageStore>) =>
     createGatewayServer({
@@ -68,16 +93,40 @@ Deno.test("Reviewed restrictive tool rules retain exact versions across gateway 
         messageStore: messages,
         hookRunner: withReviewedToolRules({
           toolApprovalInbox: inbox,
-          evaluateHook: () =>
-            Promise.resolve({
-              allowed: true,
-              action: "ALLOW",
-              ruleId: null,
+          reviewApprovalAdvice: createApprovalAdvisor(baseDir, registry, {
+            INTERNAL: ["advisor-fixture"],
+          }),
+          evaluateHook: (hook, context) => {
+            if (
+              hook === "PRE_OUTPUT" &&
+              context.input.operation === "tool_approval_advice"
+            ) {
+              adviceOutputChecks++;
+              assertEquals(context.input.destination, "advisor-fixture");
+              return Promise.resolve({
+                allowed: !blockAdvisorOutput,
+                action: blockAdvisorOutput ? "BLOCK" : "ALLOW",
+                ruleId: blockAdvisorOutput ? "fixture-output-policy" : null,
+                duration: 0,
+              });
+            }
+            const ask = baseAsks && hook === "PRE_TOOL_CALL" &&
+              context.input.tool_name === "operator_runs" &&
+              (context.input.tool_call as
+                  | { args?: Record<string, unknown> }
+                  | undefined)
+                  ?.args?.action === "list";
+            return Promise.resolve({
+              allowed: !ask,
+              action: ask ? "REQUIRE_APPROVAL" : "ALLOW",
+              ruleId: ask ? "fixture-base-policy" : null,
               duration: 0,
-            }),
+            });
+          },
         }, baseDir),
         operatorRunExecutor: createOperatorRunToolExecutor({
           baseDir,
+          approvalReviewerProfiles: () => [{ provider: "advisor-fixture" }],
           confirm: () => {
             reviews++;
             return Promise.resolve(allow);
@@ -230,6 +279,20 @@ Deno.test("Reviewed restrictive tool rules retain exact versions across gateway 
             reviewer.removeEventListener("message", receive);
           });
         }
+        const reviewerSetting = {
+          action: "set_reviewed_tool_reviewer",
+          modelProfile: "advisor-fixture",
+          expectedVersion: 0,
+          requestId: crypto.randomUUID(),
+        };
+        assertEquals(
+          JSON.parse(await manage(reviewerSetting)).setting.version,
+          1,
+        );
+        assertEquals(
+          JSON.parse(await manage(reviewerSetting)).setting.version,
+          1,
+        );
         for (const approved of [false, true]) {
           const turn = manage({ action: "list" });
           let id: string | undefined;
@@ -252,6 +315,117 @@ Deno.test("Reviewed restrictive tool rules retain exact versions across gateway 
           );
           if (approved) assertEquals(typeof JSON.parse(await turn), "object");
           else assertStringIncludes(await turn, "denied");
+        }
+        assertEquals(adviceCalls, 0);
+        assertEquals(
+          JSON.parse(
+            await manage({
+              ...rule,
+              expectedVersion: 4,
+              requestId: crypto.randomUUID(),
+              reviewedRule: { effect: "ask", enabled: false },
+            }),
+          ).result.version,
+          5,
+        );
+        baseAsks = true;
+        try {
+          const turn = manage({ action: "list" });
+          let advisorId: string | undefined;
+          for (let attempt = 0; attempt < 50 && !advisorId; attempt++) {
+            const page = await request({ type: "approval_inbox_list" });
+            const result = page.result as {
+              records: { id: string; status: string }[];
+            };
+            const pending = result.records.find((item) =>
+              item.status === "pending"
+            );
+            if (
+              pending &&
+              approvalAdviceStore(baseDir).read(pending.id)?.verdict ===
+                "caution"
+            ) {
+              advisorId = pending.id;
+            } else {
+              await new Promise((resolve) => setTimeout(resolve, 10));
+            }
+          }
+          if (!advisorId) {
+            throw new Error(
+              "Advisory result did not preserve pending approval",
+            );
+          }
+          assertEquals(adviceCalls, 1);
+          assertEquals(adviceOutputChecks, 1);
+          assertEquals(
+            (await request({
+              type: "approval_inbox_decide",
+              approvalId: advisorId,
+              approved: false,
+            })).ok,
+            true,
+          );
+          assertStringIncludes(await turn, "denied");
+          assertEquals(
+            JSON.parse(
+              await manage({
+                action: "reviewed_tool_advice",
+                id: advisorId,
+              }),
+            ).advice,
+            {
+              id: advisorId,
+              version: 1,
+              verdict: "caution",
+              inputTokens: 7,
+              outputTokens: 1,
+            },
+          );
+          assertEquals(
+            JSON.parse(
+              await manage({
+                action: "reviewed_tool_reviewer",
+              }),
+            ).usage,
+            [{
+              version: 1,
+              requests: 1,
+              profile: { provider: "advisor-fixture" },
+              inputTokens: 7,
+              outputTokens: 1,
+            }],
+          );
+          blockAdvisorOutput = true;
+          const blockedTurn = manage({ action: "list" });
+          let blockedId: string | undefined;
+          for (let attempt = 0; attempt < 50 && !blockedId; attempt++) {
+            const page = await request({ type: "approval_inbox_list" });
+            const result = page.result as {
+              records: { id: string; status: string }[];
+            };
+            blockedId = result.records.find((item) => item.status === "pending")
+              ?.id;
+            if (!blockedId) {
+              await new Promise((resolve) => setTimeout(resolve, 10));
+            }
+          }
+          if (!blockedId) {
+            throw new Error("Output denial changed the tool approval gate");
+          }
+          assertEquals(adviceOutputChecks, 2);
+          assertEquals(adviceCalls, 1);
+          assertEquals(approvalAdviceStore(baseDir).read(blockedId), undefined);
+          assertEquals(
+            (await request({
+              type: "approval_inbox_decide",
+              approvalId: blockedId,
+              approved: false,
+            })).ok,
+            true,
+          );
+          assertStringIncludes(await blockedTurn, "denied");
+        } finally {
+          baseAsks = false;
         }
       } finally {
         reviewer.close();

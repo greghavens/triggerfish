@@ -526,6 +526,38 @@ export async function dispatchSecurityEnforcedToolCall(
       tool: call.name,
       args: call.args,
       ruleId: preToolResult.ruleId,
+      advise: config.hookRunner.reviewApprovalAdvice,
+      authorizeAdvice: async (profile, content) => {
+        const taint = config.getSessionTaint?.() ?? currentTaint;
+        if (
+          activity.aborted || !canFlowTo(taint, "INTERNAL") ||
+          (secCtx.resourceClassification &&
+            !canFlowTo(secCtx.resourceClassification, "INTERNAL")) ||
+          !isDeepStrictEqual(
+            owner?.scopeForCall?.(call.name, call.args),
+            scope,
+          ) ||
+          (owner?.isCurrent && !await owner.isCurrent(session.id))
+        ) return false;
+        const target = {
+          target_classification: "INTERNAL",
+          destination: profile.provider,
+          operation: "tool_approval_advice",
+        };
+        const output = await config.hookRunner.evaluateHook("PRE_OUTPUT", {
+          session: { ...session, taint },
+          input: { ...target, content },
+          auditInput: target,
+        });
+        return output.allowed && output.action === "ALLOW" &&
+          !activity.aborted &&
+          (config.getSessionTaint?.() ?? currentTaint) === taint &&
+          isDeepStrictEqual(
+            owner?.scopeForCall?.(call.name, call.args),
+            scope,
+          ) &&
+          (!owner?.isCurrent || await owner.isCurrent(session.id));
+      },
       signal: activity,
     });
     if (!release) return blocked;

@@ -1,3 +1,4 @@
+import type { PendingApprovalAdvice } from "../approval_advice.ts";
 import type { ToolApprovalService } from "../../tool_approval_service.ts";
 
 /**
@@ -59,6 +60,9 @@ export interface HookRunnerOptions {
 /** Runner that evaluates hooks against the policy engine. */
 export interface HookRunner {
   readonly toolApprovalInbox?: ToolApprovalService;
+  readonly reviewApprovalAdvice?: (
+    input: PendingApprovalAdvice,
+  ) => Promise<void>;
   /** Evaluate a hook against the policy engine. Returns a promise resolving to the decision. */
   evaluateHook(hook: HookType, context: HookContext): Promise<HookResult>;
 }

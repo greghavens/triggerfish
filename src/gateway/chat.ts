@@ -430,6 +430,8 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
                       "linked_findings",
                       "linked_worker_review",
                       "reviewed_tool_rules",
+                      "reviewed_tool_reviewer",
+                      "reviewed_tool_advice",
                       "finding_traffic",
                       "finding_traffic_set_receipt",
                       "finding_traffic_candidates",

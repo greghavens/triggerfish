@@ -1,3 +1,4 @@
+import type { PendingApprovalAdvice } from "./policy/approval_advice.ts";
 import {
   parseSentinelScopeRuleIntent,
   sentinelScopeRuleToolName,
@@ -145,6 +146,8 @@ function buildToolApprovalService(path: string) {
       readonly tool: string;
       readonly args: Record<string, unknown>;
       readonly ruleId: string | null;
+      readonly advise?: (input: PendingApprovalAdvice) => Promise<void>;
+      readonly authorizeAdvice?: PendingApprovalAdvice["authorize"];
       readonly signal: AbortSignal;
     }) {
       const {
@@ -267,6 +270,25 @@ function buildToolApprovalService(path: string) {
         canProject: (incident || scopeRule) && input.canProject,
       });
       signal.addEventListener("abort", abandon, { once: true });
+      if (input.advise && input.authorizeAdvice) {
+        const authorize = input.authorizeAdvice;
+        void Promise.resolve().then(() =>
+          input.advise?.({
+            id,
+            tool,
+            scoped: assignmentId !== undefined,
+            ruleId,
+            signal,
+            authorize,
+            isCurrent: () =>
+              !signal.aborted &&
+              waits.has(id) &&
+              use((db) => db.read(toolApprovalOwnerScope, id))?.status ===
+                "pending" &&
+              (!input.canProject || input.canProject()),
+          })
+        ).catch(() => undefined);
+      }
       let released = false;
       try {
         if (!signal.aborted) await settled.promise;

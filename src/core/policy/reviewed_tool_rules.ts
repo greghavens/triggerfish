@@ -25,6 +25,9 @@ export const reviewedRuleActions = [
   "reviewed_tool_rules",
   "set_reviewed_tool_rule",
   "delete_reviewed_tool_rule",
+  "reviewed_tool_reviewer",
+  "set_reviewed_tool_reviewer",
+  "reviewed_tool_advice",
 ] as const;
 const fields = ["tool", "caseId", "runId", "assetId"] as const;
 
