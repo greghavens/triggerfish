@@ -8,7 +8,11 @@ import {
   parseChatGoalApprovalReview,
 } from "./chat_goal_intent.ts";
 import { parseCustomToolMutation } from "./custom_tool_intent.ts";
-import { openApprovalInbox } from "./approval_inbox.ts";
+import {
+  openApprovalInbox,
+  parseSentinelSteeringNote,
+  sentinelPlannerSteerToolName,
+} from "./approval_inbox.ts";
 
 export interface ToolApprovalContext {
   readonly runId?: string;
@@ -126,6 +130,10 @@ function buildToolApprovalService(path: string) {
             { expectedRequestId: args.expectedRequestId }),
         });
       if (goalAction && !chatGoal) return undefined;
+      const steering = tool === sentinelPlannerSteerToolName
+        ? parseSentinelSteeringNote(args.note)
+        : undefined;
+      if (tool === sentinelPlannerSteerToolName && !steering) return undefined;
       const request = use((db) =>
         db.submit({
           id,
@@ -135,6 +143,7 @@ function buildToolApprovalService(path: string) {
           assignmentId,
           tool,
           ...(chatGoal && { chatGoal }),
+          ...(steering && { sentinelSteeringNote: steering }),
           ...(custom &&
             { customTool: { action: custom.action, name: custom.name } }),
           ...(lifecycle && {

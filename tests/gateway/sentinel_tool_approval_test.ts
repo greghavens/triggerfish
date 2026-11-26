@@ -320,14 +320,18 @@ for (
 }
 
 for (
-  const outcome of [
-    "approved",
-    "denied",
-    "replaced-lease",
-    "revoked-policy",
+  const [action, outcome] of [
+    ["stop", "approved"],
+    ["stop", "denied"],
+    ["stop", "replaced-lease"],
+    ["stop", "revoked-policy"],
+    ["steer", "approved"],
+    ["steer", "denied"],
+    ["steer", "replaced-lease"],
+    ["steer", "unsafe-note"],
   ] as const
 ) {
-  Deno.test(`Planner stop request honors ${outcome} through the reconnected owner approval inbox`, async () => {
+  Deno.test(`Planner ${action} request honors ${outcome} through the reconnected owner approval inbox`, async () => {
     const baseDir = await Deno.makeTempDir();
     const path = resolveSentinelCasePath(baseDir);
     const file = join(dirname(path), "sentinel-adaptive.db");
@@ -336,15 +340,20 @@ for (
     );
     const token = crypto.randomUUID();
     const requestId = crypto.randomUUID();
-    const name = "sentinel_request_worker_stop";
+    const name = `sentinel_request_worker_${action}`;
+    const steeringNote = outcome === "unsafe-note"
+      ? "Bearer fake_fixture_credential"
+      : "Summarize the service evidence already returned.";
+    const activeWorker = action === "steer" && outcome === "approved";
     const hooksSeen: string[] = [];
     let policyRevoked = false;
     let withheldReceipt = false;
     const hookRunner: HookRunner = {
       toolApprovalInbox,
-      evaluateHook(hook, { input }) {
+      evaluateHook(hook, { input, auditInput }) {
         if (input.tool_name === name) {
           hooksSeen.push(hook);
+          assert(!JSON.stringify(auditInput ?? {}).includes(steeringNote));
           assertEquals(input.case_id, "main");
           assertEquals(input.resource_classification, "INTERNAL");
         }
@@ -403,7 +412,11 @@ for (
             type: "function",
             function: {
               name,
-              arguments: JSON.stringify({ ...candidates[0], requestId }),
+              arguments: JSON.stringify({
+                ...candidates[0],
+                requestId,
+                ...(action === "steer" && { note: steeringNote }),
+              }),
             },
           }],
         });
@@ -436,6 +449,74 @@ for (
         });
       },
     );
+    const reachedBoundary = Promise.withResolvers<void>();
+    const releaseBoundary = Promise.withResolvers<void>();
+    const delivered = Promise.withResolvers<void>();
+    let activeLease: { id: string; token: string } | undefined;
+    let committedWorkerResult: unknown;
+    const workerProvider = createProviderRegistry();
+    workerProvider.register({
+      name: "worker-steering",
+      supportsStreaming: false,
+      async complete(messages) {
+        const result = messages.filter(({ role }) => role === "tool");
+        const instructions = messages.filter(({ content }) =>
+          String(content).includes(steeringNote)
+        );
+        const usage = { inputTokens: 1, outputTokens: 1 };
+        const read = (id: string) => ({
+          content: "",
+          usage,
+          toolCalls: [{
+            id,
+            type: "function",
+            function: { name: assigned, arguments: "{}" },
+          }],
+        });
+        if (!result.length) return read("original-record");
+        assertEquals(result.length, 1);
+        if (!instructions.length) {
+          committedWorkerResult = result[0].content;
+          reachedBoundary.resolve();
+          await releaseBoundary.promise;
+          return read("superseded-worker-step");
+        }
+        assertEquals(result[0].content, committedWorkerResult);
+        assertEquals(instructions.length, 1);
+        delivered.resolve();
+        return {
+          content: '{"summary":"Reviewed the saved evidence.","followUps":[]}',
+          usage,
+          toolCalls: [],
+        };
+      },
+    });
+    workerProvider.setDefault("worker-steering");
+    const reviewer = activeWorker
+      ? createSentinelModelPlanner(
+        path,
+        (state, taskId, token) => {
+          if (!taskId || !token) {
+            return {
+              clear() {},
+              execute() {
+                return Promise.resolve();
+              },
+            };
+          }
+          activeLease = { id: taskId, token };
+          return createSentinelSubagent({
+            snapshotPath: path,
+            assessmentRevision: state.revision,
+            assignedTaskId: taskId,
+            assignedTaskLeaseToken: token,
+            providerRegistry: workerProvider,
+            hookRunner,
+            allowModelAccess: true,
+          });
+        },
+      )
+      : undefined;
     let initialSocket: Awaited<ReturnType<typeof connect>> | undefined;
     let reconnected: Awaited<ReturnType<typeof connect>> | undefined;
     try {
@@ -461,21 +542,59 @@ for (
           reason: MODEL_ASSIGNMENT_REASON,
         }], revision);
         advanceAdaptiveSentinel(path, state);
-        const lease = store.claimModelReview(
+        if (reviewer) {
+          reviewer.advance(state);
+          await reachedBoundary.promise;
+        }
+        const claimed = !reviewer && store.claimModelReview(
           revision,
           MODEL_ASSIGNMENT_REASON,
           ({ nodeId }) => nodeId === "service",
         );
+        const lease = claimed
+          ? { id: claimed.task.id, token: claimed.token }
+          : activeLease;
         assert(lease);
-        selectedTask = lease.task.id;
+        selectedTask = lease.id;
         const { port } = await gateway.start();
         initialSocket = await connect(port, token);
         planner.advance(state);
+        if (outcome === "unsafe-note") {
+          const timeout = AbortSignal.timeout(2500);
+          const result = await Promise.race([
+            completed.promise,
+            new Promise<never>((_, reject) =>
+              timeout.addEventListener("abort", () => reject(timeout.reason), {
+                once: true,
+              })
+            ),
+          ]);
+          assert(!result.includes(steeringNote));
+          assertEquals(
+            (await initialSocket.request({ type: "approval_inbox_list" }))
+              .result,
+            { records: [], nextBefore: null },
+          );
+          assertEquals(
+            store.modelReviewControls(revision, selectedTask).steering,
+            [],
+          );
+          return;
+        }
+
         const entry = await pendingInbox(initialSocket);
         assertEquals(entry.assignmentId, selectedTask);
         assertEquals(entry.runId, runId);
         assertEquals(entry.tool, name);
         assertStringIncludes(entry.description, selectedTask);
+        assertEquals(
+          toolApprovalInbox.list().records.find(({ id }) => id === entry.id)
+            ?.sentinelSteeringNote,
+          action === "steer" ? steeringNote : undefined,
+        );
+        if (action === "steer") {
+          assertStringIncludes(entry.description, steeringNote);
+        }
         assert(!JSON.stringify(entry).includes(lease.token));
         assertEquals(
           store.modelReviewControls(revision, selectedTask).stopped,
@@ -483,7 +602,7 @@ for (
         );
         await initialSocket.close();
         reconnected = await connect(port, token);
-        assertEquals((await pendingInbox(reconnected)).id, entry.id);
+        assertEquals(await pendingInbox(reconnected), entry);
         if (outcome === "replaced-lease") {
           assert(
             store.finishModelReview(
@@ -528,31 +647,44 @@ for (
           id === entry.id
         );
         if (outcome === "approved") {
-          assertEquals(controls.stopped, true);
+          assertEquals(controls.stopped, action === "stop");
           assertEquals(JSON.parse(result).receipt.taskId, selectedTask);
           assertEquals(JSON.parse(result).receipt.requestId, requestId);
           assert(hooksSeen.includes("POST_TOOL_RESPONSE"));
           assert(withheldReceipt);
           assertEquals(terminal?.status, "completed");
           assertEquals((await reconnected.request(decide)).ok, true);
-          assert(
-            store.finishModelReview(
-              revision,
-              selectedTask,
-              lease.token,
-              "interrupted",
-            ),
-          );
-          assertEquals(
-            store.claimModelReview(
-              revision,
-              MODEL_ASSIGNMENT_REASON,
-              ({ id }) => id === selectedTask,
-            ),
-            null,
-          );
+          if (action === "steer") {
+            assertEquals(controls.steering.length, 1);
+            assertEquals(controls.steering[0].note, steeringNote);
+            assertEquals(JSON.parse(result).receipt.note, steeringNote);
+            releaseBoundary.resolve();
+            await delivered.promise;
+            assertEquals(
+              store.modelReviewControls(revision, selectedTask).steering.length,
+              1,
+            );
+          } else {
+            assert(
+              store.finishModelReview(
+                revision,
+                selectedTask,
+                lease.token,
+                "interrupted",
+              ),
+            );
+            assertEquals(
+              store.claimModelReview(
+                revision,
+                MODEL_ASSIGNMENT_REASON,
+                ({ id }) => id === selectedTask,
+              ),
+              null,
+            );
+          }
         } else {
           assertEquals(controls.stopped, false);
+          assertEquals(controls.steering.length, 0);
           assertStringIncludes(result.toLowerCase(), "approval");
           assertEquals(
             terminal?.status,
@@ -563,6 +695,8 @@ for (
         store.close();
       }
     } finally {
+      releaseBoundary.resolve();
+      reviewer?.stop();
       planner.stop();
       await reconnected?.close();
       await initialSocket?.close();

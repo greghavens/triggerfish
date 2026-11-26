@@ -1,3 +1,4 @@
+import { redactCredentialText } from "./logger/redactor.ts";
 /** Durable metadata-only approvals for one trusted tool dispatch. */
 /// <reference path="./sqlite_types.d.ts" />
 
@@ -38,6 +39,7 @@ export interface ApprovalInboxRequest {
   readonly mcpLifecycle?: McpLifecycleReview;
   readonly chatGoal?: ChatGoalApprovalReview;
   readonly customTool?: CustomToolApprovalReview;
+  readonly sentinelSteeringNote?: string;
   /** Trusted context fingerprint. Never projected from the journal. */
   readonly binding: string;
   readonly expiresAt: number;
@@ -54,6 +56,7 @@ export interface ApprovalInboxRecord {
   readonly mcpLifecycle?: McpLifecycleReview;
   readonly chatGoal?: ChatGoalApprovalReview;
   readonly customTool?: CustomToolApprovalReview;
+  readonly sentinelSteeringNote?: string;
   readonly status: ApprovalInboxStatus;
   readonly decision?: ApprovalInboxDecision;
   readonly dispatchOutcome?: ApprovalInboxDispatchOutcome;
@@ -229,6 +232,17 @@ function projectCustomToolReview(
   }
 }
 
+export const sentinelPlannerSteerToolName = "sentinel_request_worker_steer";
+
+export function parseSentinelSteeringNote(value: unknown): string | undefined {
+  if (
+    typeof value !== "string" || !value.trim() || value.trim() !== value ||
+    value.length > 1000 || /[\p{Cc}\p{Cf}]/u.test(value) ||
+    redactCredentialText(value) !== value
+  ) return;
+  return value;
+}
+
 function project(row: Row | undefined): ApprovalInboxRecord | undefined {
   if (!row) return undefined;
   const tool = String(row.tool);
@@ -239,6 +253,9 @@ function project(row: Row | undefined): ApprovalInboxRecord | undefined {
   const customTool = tool === customToolManageName
     ? projectCustomToolReview(row.customTool)
     : undefined;
+  const steering = tool === sentinelPlannerSteerToolName
+    ? parseSentinelSteeringNote(row.sentinelSteeringNote)
+    : undefined;
   return {
     id: String(row.id),
     scope: String(row.scope),
@@ -247,8 +264,10 @@ function project(row: Row | undefined): ApprovalInboxRecord | undefined {
     ...(typeof row.assignmentId === "string" &&
       { assignmentId: row.assignmentId }),
     tool,
-    description: tool === "sentinel_request_worker_stop" &&
-        typeof row.assignmentId === "string"
+    description: steering && typeof row.assignmentId === "string"
+      ? `Approve steering Sentinel assignment '${row.assignmentId}': ${steering}`
+      : tool === "sentinel_request_worker_stop" &&
+          typeof row.assignmentId === "string"
       ? `Approve stopping Sentinel assignment '${row.assignmentId}'.`
       : customTool
       ? "Approve " + customTool.action + " for custom tool '" +
@@ -270,6 +289,7 @@ function project(row: Row | undefined): ApprovalInboxRecord | undefined {
     ...(review && { mcpLifecycle: review }),
     ...(chatGoal && { chatGoal }),
     ...(customTool && { customTool }),
+    ...(steering && { sentinelSteeringNote: steering }),
     status: row.status as ApprovalInboxStatus,
     ...((row.decision === "approved" || row.decision === "denied") && {
       decision: row.decision,
@@ -296,11 +316,19 @@ export function openApprovalInbox(path: string, now = Date.now) {
     transaction(db, () => {
       const id = db.prepare("PRAGMA application_id").get()?.application_id;
       const version = db.prepare("PRAGMA user_version").get()?.user_version;
-      if (id === applicationId && version === 6) return;
+      if (id === applicationId && version === 7) return;
+      if (id === applicationId && version === 6) {
+        db.exec(`
+          ALTER TABLE approval_requests ADD COLUMN sentinelSteeringNote TEXT;
+          PRAGMA user_version = 7;
+        `);
+        return;
+      }
       if (id === applicationId && version === 5) {
         db.exec(`
           ALTER TABLE approval_requests ADD COLUMN customTool TEXT;
-          PRAGMA user_version = 6;
+          ALTER TABLE approval_requests ADD COLUMN sentinelSteeringNote TEXT;
+          PRAGMA user_version = 7;
         `);
         return;
       }
@@ -308,7 +336,8 @@ export function openApprovalInbox(path: string, now = Date.now) {
         db.exec(`
           ALTER TABLE approval_requests ADD COLUMN chatGoal TEXT;
           ALTER TABLE approval_requests ADD COLUMN customTool TEXT;
-          PRAGMA user_version = 6;
+          ALTER TABLE approval_requests ADD COLUMN sentinelSteeringNote TEXT;
+          PRAGMA user_version = 7;
         `);
         return;
       }
@@ -318,7 +347,8 @@ export function openApprovalInbox(path: string, now = Date.now) {
           ALTER TABLE approval_requests ADD COLUMN mcpConnectorId TEXT;
           ALTER TABLE approval_requests ADD COLUMN chatGoal TEXT;
           ALTER TABLE approval_requests ADD COLUMN customTool TEXT;
-          PRAGMA user_version = 6;
+          ALTER TABLE approval_requests ADD COLUMN sentinelSteeringNote TEXT;
+          PRAGMA user_version = 7;
         `);
         return;
       }
@@ -329,7 +359,8 @@ export function openApprovalInbox(path: string, now = Date.now) {
           ALTER TABLE approval_requests ADD COLUMN mcpConnectorId TEXT;
           ALTER TABLE approval_requests ADD COLUMN chatGoal TEXT;
           ALTER TABLE approval_requests ADD COLUMN customTool TEXT;
-          PRAGMA user_version = 6;
+          ALTER TABLE approval_requests ADD COLUMN sentinelSteeringNote TEXT;
+          PRAGMA user_version = 7;
         `);
         return;
       }
@@ -348,7 +379,8 @@ export function openApprovalInbox(path: string, now = Date.now) {
           ALTER TABLE approval_requests ADD COLUMN mcpConnectorId TEXT;
           ALTER TABLE approval_requests ADD COLUMN chatGoal TEXT;
           ALTER TABLE approval_requests ADD COLUMN customTool TEXT;
-          PRAGMA user_version = 6;
+          ALTER TABLE approval_requests ADD COLUMN sentinelSteeringNote TEXT;
+          PRAGMA user_version = 7;
         `);
         return;
       }
@@ -371,6 +403,7 @@ export function openApprovalInbox(path: string, now = Date.now) {
           mcpConnectorId TEXT,
           chatGoal TEXT,
           customTool TEXT,
+          sentinelSteeringNote TEXT,
           binding TEXT NOT NULL,
           status TEXT NOT NULL CHECK (status IN ('pending','approved','denied','claimed','completed','stale')),
           decision TEXT CHECK (decision IN ('approved','denied')),
@@ -383,7 +416,7 @@ export function openApprovalInbox(path: string, now = Date.now) {
         );
         CREATE INDEX approval_by_scope ON approval_requests(scope, sequence DESC);
         PRAGMA application_id = ${applicationId};
-        PRAGMA user_version = 6;
+        PRAGMA user_version = 7;
       `);
     });
   } catch (error) {
@@ -411,6 +444,7 @@ export function openApprovalInbox(path: string, now = Date.now) {
         mcpLifecycle,
         chatGoal,
         customTool,
+        sentinelSteeringNote,
         binding,
         expiresAt,
       } = raw;
@@ -424,7 +458,11 @@ export function openApprovalInbox(path: string, now = Date.now) {
       const encodedCustomTool = approvedCustomTool
         ? JSON.stringify(approvedCustomTool)
         : null;
+      const steering = parseSentinelSteeringNote(sentinelSteeringNote);
       if (
+        (tool === sentinelPlannerSteerToolName
+          ? !steering || assignmentId === undefined
+          : sentinelSteeringNote !== undefined) ||
         !id || !exactReference(scope) || !exactReference(sessionId) ||
         runId !== undefined && !exactReference(runId) ||
         assignmentId !== undefined && !exactReference(assignmentId) ||
@@ -455,14 +493,15 @@ export function openApprovalInbox(path: string, now = Date.now) {
               previous.mcpConnectorId === (mcpLifecycle?.connectorId ?? null) &&
               previous.chatGoal === encodedGoalReview &&
               previous.customTool === encodedCustomTool &&
+              previous.sentinelSteeringNote === (steering ?? null) &&
               previous.binding === binding && previous.expiresAt === expiresAt
             ? project(previous)
             : undefined;
         }
         if (expiresAt <= at) return undefined;
         const row = db.prepare(`
-          INSERT INTO approval_requests (id,scope,sessionId,runId,assignmentId,tool,mcpLifecycleAction,mcpConnectorId,chatGoal,customTool,binding,status,createdAt,updatedAt,expiresAt)
-          VALUES (?,?,?,?,?,?,?,?,?,?,?,'pending',?,?,?)
+          INSERT INTO approval_requests (id,scope,sessionId,runId,assignmentId,tool,mcpLifecycleAction,mcpConnectorId,chatGoal,customTool,sentinelSteeringNote,binding,status,createdAt,updatedAt,expiresAt)
+          VALUES (?,?,?,?,?,?,?,?,?,?,?,?,'pending',?,?,?)
           ON CONFLICT(id) DO NOTHING RETURNING *
         `).get(
           id,
@@ -475,6 +514,7 @@ export function openApprovalInbox(path: string, now = Date.now) {
           mcpLifecycle?.connectorId ?? null,
           encodedGoalReview,
           encodedCustomTool,
+          steering ?? null,
           binding,
           at,
           at,
