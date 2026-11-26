@@ -2506,8 +2506,9 @@ Deno.test("Leased proof binds post-authorized same-target task results to formal
       const receipt = JSON.parse(actual.results[1][1]);
       assertEquals(receipt.proof.reference, own);
       assertStringIncludes(receipt.proof.detail, opened.observationSha256);
-      assertEquals(JSON.parse(actual.results[0][1]).task, peer);
-      assertStringIncludes(actual.results[1][2], "unavailable");
+      assertStringIncludes(actual.results[0][1], "unavailable");
+      assertEquals(JSON.parse(actual.results[0][2]).task, wrong);
+      assertStringIncludes(actual.results[1][2], "exact evidence");
       assert(
         store.recordModelReviewProgress(
           revision,
@@ -2527,21 +2528,27 @@ Deno.test("Leased proof binds post-authorized same-target task results to formal
         taskId: claim.task.id,
         stepIndices: [proofIndex],
       };
-      const peerReadIndex = actual.trace.findIndex((step) =>
-        step.taskObservationPage?.task === peer
+      const sameTargetReadIndex = actual.trace.findIndex((step) =>
+        step.taskObservationPage?.task === wrong
       );
-      assert(peerReadIndex >= 0);
-      const peerReadTrace = { ...proofTrace, stepIndices: [peerReadIndex] };
+      assert(sameTargetReadIndex >= 0);
+      assert(
+        !actual.trace.some((step) => step.taskObservationPage?.task === peer),
+      );
+      const sameTargetReadTrace = {
+        ...proofTrace,
+        stepIndices: [sameTargetReadIndex],
+      };
       await ownerFacts(baseDir, async (turn) => {
         assertEquals(
-          JSON.parse(await turn(peerReadTrace)).result,
-          JSON.parse(actual.results[0][1]),
+          JSON.parse(await turn(sameTargetReadTrace)).result,
+          JSON.parse(actual.results[0][2]),
         );
       });
       await ownerFacts(
         baseDir,
         async (turn) => {
-          assertStringIncludes(await turn(peerReadTrace), "unavailable");
+          assertStringIncludes(await turn(sameTargetReadTrace), "unavailable");
         },
         false,
         "POST_TOOL_RESPONSE",
