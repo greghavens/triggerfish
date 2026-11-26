@@ -2,7 +2,10 @@ import { resolveSentinelCaseMembership } from "../../src/sentinel/case_membershi
 import { sentinelAlertsPath } from "../../src/sentinel/paths.ts";
 import { sentinelAlertReference } from "../../src/sentinel/telemetry.ts";
 import { addSentinelCaseHint } from "../../src/gateway/sentinel_adaptive_runtime.ts";
-import { buildSentinelProvenance } from "../../src/sentinel/provenance.ts";
+import {
+  buildSentinelProvenance,
+  sentinelIncidentProvenanceId,
+} from "../../src/sentinel/provenance.ts";
 import { openSentinelWorkerFindingStore } from "../../src/sentinel/worker_finding_store.ts";
 import {
   applySentinelWorkerFindingPublications,
@@ -5045,6 +5048,222 @@ Deno.test("Planner and leased worker reauthorize paginated shared topology throu
         }
       },
     );
+  } finally {
+    planner.stop();
+    await Deno.remove(directory, { recursive: true });
+  }
+});
+
+Deno.test("Scoped incident details and retained paths hide mixed-asset finding references", async () => {
+  const directory = await Deno.makeTempDir();
+  const caseId = "incident-finding-scope";
+  const path = resolveSentinelCasePath(directory, caseId);
+  const visibleAsset = "included-app";
+  const excludedAsset = "excluded-app";
+  const visibleFinding = "allowed-finding";
+  const mixedFinding = "mixed-finding";
+  let node = "";
+  let phase = 0;
+  let now = Date.now();
+  const pages: string[][] = [];
+  const providers = createProviderRegistry();
+  providers.register({
+    name: "incident-finding-scope",
+    supportsStreaming: false,
+    complete(messages) {
+      const reads = messages.filter(({ role }) => role === "tool");
+      if (!reads.length) {
+        return Promise.resolve(
+          completion("", "sentinel_provenance_node", { node }),
+        );
+      }
+      if (reads.length === 1) {
+        return Promise.resolve(completion("", "sentinel_path", {
+          graph: "provenance",
+          from: node,
+          to: `asset:${visibleAsset}`,
+          depth: 1,
+        }));
+      }
+      if (reads.length === 2) {
+        return Promise.resolve(completion("", "sentinel_provenance_search", {
+          query: "Incident candidate",
+          origin: "assessment",
+        }));
+      }
+      pages[phase] = reads.map(({ content }) => String(content));
+      return Promise.resolve(completion("[]"));
+    },
+  });
+  providers.setDefault("incident-finding-scope");
+  const planner = createSentinelModelPlanner(
+    path,
+    (state, task) =>
+      task
+        ? { execute: () => Promise.resolve(), clear() {} }
+        : createSentinelSubagent({
+          snapshotPath: path,
+          assessmentRevision: state.revision,
+          plannerExecutionEvidenceRunId: state.plan.runId,
+          providerRegistry: providers,
+          hookRunner: allowHooks,
+          allowModelAccess: true,
+        }),
+    undefined,
+    () => now,
+  );
+  try {
+    await Deno.mkdir(dirname(path), { recursive: true, mode: 0o700 });
+    await Deno.writeTextFile(
+      path,
+      JSON.stringify({
+        version: 1,
+        nodes: [
+          ...[visibleAsset, excludedAsset].map((id) => ({
+            id,
+            kind: "asset",
+            label: id,
+          })),
+          ...[visibleFinding, mixedFinding].map((id) => ({
+            id,
+            kind: "finding",
+            label: id,
+            severity: "medium",
+          })),
+        ],
+        edges: [
+          { from: visibleFinding, to: visibleAsset, relation: "affects" },
+          { from: mixedFinding, to: visibleAsset, relation: "affects" },
+          { from: mixedFinding, to: excludedAsset, relation: "affects" },
+        ],
+      }),
+      { mode: 0o600 },
+    );
+    await Deno.writeTextFile(
+      sentinelAlertsPath(path),
+      JSON.stringify(
+        ["integrity_change", "network_security_alert"].map((type, index) => ({
+          type,
+          asset: visibleAsset,
+          subject: "Retained incident fixture",
+          severity: "high",
+          observedAt: `2026-01-01T00:00:0${index}.000Z`,
+          evidenceIds: [`incident-evidence-${index}`],
+        })),
+      ),
+      { mode: 0o600 },
+    );
+    const state = startSentinelAssessment(path);
+    const runId = state.plan.runId;
+    assert(runId);
+    const candidate = state.result?.sharedGraph.observations.find(({ task }) =>
+      task === "incident_correlation"
+    )?.facts.candidates;
+    assert(Array.isArray(candidate) && candidate.length === 1);
+    node = sentinelIncidentProvenanceId(candidate[0].id);
+    const ref = { kind: "sentinel", id: caseId, revision: state.revision };
+    const settle = async () => {
+      const deadline = Date.now() + 3000;
+      while (
+        (!pages[phase] || planner.hasInFlightWork()) && Date.now() < deadline
+      ) {
+        planner.advance(readSentinelAssessment(path)!);
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+      assert(pages[phase] && !planner.hasInFlightWork());
+    };
+    const retained = (roundIndex: number, pageIndex: number) => {
+      const sha256 = createHash("sha256").update(pages[roundIndex][pageIndex])
+        .digest("hex");
+      const read = (
+        { goalReceiptRead }: { goalReceiptRead?: { sha256: string } },
+      ) => goalReceiptRead?.sha256 === sha256;
+      const round = readAdaptiveSentinel(path, state)?.modelPlannerHistory.find(
+        ({ reads }) => reads?.some(read),
+      );
+      assert(round);
+      return {
+        ...ref,
+        action: "planner_reads",
+        plannerIdentity: round.identity,
+        attempt: round.attempt,
+        ordinal: round.reads!.findIndex(read) + 1,
+        includeResult: true,
+      };
+    };
+    await settle();
+    assertEquals(
+      JSON.parse(pages[0][0]).node.incident.findingIds.toSorted(),
+      [visibleFinding, mixedFinding].sort(),
+    );
+    const originalPath = JSON.parse(pages[0][1]).path;
+    assertEquals(
+      originalPath.nodes[0].incident.findingIds.toSorted(),
+      [visibleFinding, mixedFinding].sort(),
+    );
+    const beforeScope = [retained(0, 0), retained(0, 1)];
+    const retainedSearch = retained(0, 2);
+    await withArchivedPlannerRead(directory, async (read) => {
+      for (const [index, selector] of beforeScope.entries()) {
+        assertEquals(
+          JSON.parse(await read(selector)).result,
+          JSON.parse(pages[0][index]),
+        );
+      }
+      const narrowed = JSON.parse(
+        await read({
+          ...ref,
+          runId,
+          action: "narrow_constraints",
+          expectedVersion: 0,
+          requestId: crypto.randomUUID(),
+          allowedAssetIds: [visibleAsset],
+          deniedKinds: [],
+        }),
+      );
+      assertEquals(narrowed.record.constraints.allowedAssetIds, [visibleAsset]);
+    });
+    phase = 1;
+    now += 61_000;
+    await settle();
+    assertEquals(JSON.parse(pages[1][0]).node.incident.findingIds, [
+      visibleFinding,
+    ]);
+    const currentPath = JSON.parse(pages[1][1]).path;
+    assertEquals(currentPath.nodes[0].incident.findingIds, [visibleFinding]);
+    assertEquals(currentPath.edges, originalPath.edges);
+    assertEquals(
+      currentPath.nodes.map(({ id }: { id: string }) => id),
+      originalPath.nodes.map(({ id }: { id: string }) => id),
+    );
+    assert(pages[1].every((text) => !text.includes(mixedFinding)));
+    assertEquals(pages[1][2], pages[0][2]);
+    const afterScope = [retained(1, 0), retained(1, 1)];
+    for (const archived of [false, true]) {
+      if (archived) {
+        await archiveAndRestoreDigestFixture(directory, path, {
+          ...ref,
+          kind: "sentinel",
+        }, runId);
+      }
+      await withArchivedPlannerRead(directory, async (read) => {
+        for (const [index, selector] of beforeScope.entries()) {
+          assertStringIncludes(await read(selector), "unavailable");
+          assertEquals(
+            JSON.parse(await read(afterScope[index])).result,
+            JSON.parse(pages[1][index]),
+          );
+        }
+        assertEquals(
+          JSON.parse(await read(retainedSearch)).result,
+          JSON.parse(pages[0][2]),
+        );
+        const forensic = JSON.parse(
+          await read({ ...ref, action: "node", node }),
+        );
+        assert(forensic.page.node.incident.findingIds.includes(mixedFinding));
+      });
+    }
   } finally {
     planner.stop();
     await Deno.remove(directory, { recursive: true });

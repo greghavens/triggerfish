@@ -3464,13 +3464,14 @@ export function reopenSentinelProvenanceNode(
   }, true);
 }
 
-interface InventoryReferenceFields {
+interface RetainedProvenanceReferences {
   readonly parentId?: unknown;
   readonly relationshipSources?: unknown;
+  readonly incident?: unknown;
 }
 
-function sameInventoryReferences(
-  saved: InventoryReferenceFields,
+function sameRetainedProvenanceReferences(
+  saved: RetainedProvenanceReferences,
   current: object,
 ): boolean {
   return saved.parentId ===
@@ -3480,7 +3481,11 @@ function sameInventoryReferences(
       "relationshipSources" in current
         ? current.relationshipSources
         : undefined,
-    );
+    ) &&
+    (!("incident" in saved) || isDeepStrictEqual(
+      saved.incident,
+      "incident" in current ? current.incident : undefined,
+    ));
 }
 
 /** Reauthorize saved identities without replacing the original review or note. */
@@ -3501,7 +3506,9 @@ export function allowsRetainedSentinelProvenancePage(
   const page = JSON.parse(text);
   if (args.node !== undefined) {
     const node = visible.inspect(args.node);
-    if (!node || !sameInventoryReferences(page.node, node.node)) return false;
+    if (!node || !sameRetainedProvenanceReferences(page.node, node.node)) {
+      return false;
+    }
     const current = new Set(visible.snapshot().nodes.map(({ id }) => id));
     const unresolved = new Set(
       node.connections.flatMap((item) =>
@@ -3529,10 +3536,12 @@ export function allowsRetainedSentinelProvenancePage(
       complete.connections.length === node.connections.length;
   }
   if (
-    !page.nodes.every((saved: InventoryReferenceFields & { id: string }) => {
-      const current = visible.inspect(saved.id)?.node;
-      return !!current && sameInventoryReferences(saved, current);
-    })
+    !page.nodes.every(
+      (saved: RetainedProvenanceReferences & { id: string }) => {
+        const current = visible.inspect(saved.id)?.node;
+        return !!current && sameRetainedProvenanceReferences(saved, current);
+      },
+    )
   ) return false;
   const count = (graph: typeof visible) =>
     graph.searchNodes(args.query ?? "", args.kind, args.origin).length;
@@ -3791,12 +3800,12 @@ export function allowsSavedSentinelProvenancePath(
   const savedPage = JSON.parse(saved);
   const paths = savedPage.path ? [savedPage.path] : savedPage.paths ?? [];
   return paths.every((route: {
-    nodes: (InventoryReferenceFields & { id: string })[];
+    nodes: (RetainedProvenanceReferences & { id: string })[];
     edges: { from: string; to: string; relation: string }[];
   }) =>
     route.nodes.every((saved) => {
       const current = nodes.get(saved.id);
-      return !!current && sameInventoryReferences(saved, current);
+      return !!current && sameRetainedProvenanceReferences(saved, current);
     }) &&
     route.edges.every((edge) => edge && edges.has(key(edge)))
   );

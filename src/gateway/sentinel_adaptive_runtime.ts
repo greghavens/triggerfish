@@ -2022,14 +2022,30 @@ export function readSentinelProvenance(
       return true;
     },
     (reference) => inventory.has(reference),
-    (node) =>
-      node.origin === "imported"
-        ? scopeSentinelInventoryReferences(
+    (node) => {
+      if (node.origin === "imported") {
+        return scopeSentinelInventoryReferences(
           node,
           (id) => inventory.has(id),
           caseId,
-        )
-        : node,
+        );
+      }
+      if (!node.incident) return node;
+      const findingIds = node.incident.findingIds.filter((id) =>
+        inventory.has(id)
+      );
+      if (findingIds.length === node.incident.findingIds.length) return node;
+      const gaps = findingIds.length ? node.incident.gaps : [
+        ...new Set([
+          ...(node.incident.gaps ?? []),
+          "no_exact_asset_finding_link",
+        ]),
+      ];
+      return {
+        ...node,
+        incident: { ...node.incident, findingIds, ...(gaps && { gaps }) },
+      };
+    },
   );
   return { revision: state.revision, graph: projection };
 }
