@@ -54,7 +54,10 @@ import {
   startSentinelAssessment,
   stopSentinelAssessment,
 } from "../sentinel/assessment_store.ts";
-import { readSentinelWorkerFindingReport } from "../sentinel/worker_finding_store.ts";
+import {
+  readScopedSentinelWorkerFindingReport,
+  readSentinelFindingReceiptScope,
+} from "./sentinel_worker_findings.ts";
 import {
   advanceAdaptiveSentinel,
   readAdaptiveSentinel,
@@ -213,8 +216,13 @@ export function createOperatorSentinelRuns(
     const adaptive = current.revision === publicRef.revision
       ? readAdaptiveSentinel(path, current, "revision")
       : readHistoricalAdaptiveSentinel(path, publicRef.revision);
-    const workerFindings = readSentinelWorkerFindingReport(
+    const findingScope = readSentinelFindingReceiptScope(
       path,
+      publicRef.revision,
+    );
+    const workerFindings = readScopedSentinelWorkerFindingReport(
+      path,
+      publicRef.id,
       publicRef.revision,
     );
     const modelFallbackProfiles = readSentinelFallbackModelsForRevision(
@@ -260,7 +268,10 @@ export function createOperatorSentinelRuns(
           deadlineAt: state.plan.deadlineAt,
         }),
         findings: state.result.sharedGraph.snapshot?.nodes
-          .filter((node) => node.kind === "finding")
+          .filter((node) =>
+            node.kind === "finding" &&
+            findingScope?.allows(node.id, "review_finding")
+          )
           .slice(0, 6)
           .map(({ id, label }) => ({ id, label })) ?? [],
         reportedFindings: workerFindings?.findings.slice(0, 6)

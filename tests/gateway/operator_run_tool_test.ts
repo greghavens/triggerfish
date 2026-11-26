@@ -1514,6 +1514,12 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
         ...treeRun,
         findingIds: ["selected-finding"],
       };
+      const inspectFindings = { action: "inspect", ...treeRun };
+      const unrestrictedPreview =
+        JSON.parse((await turn(inspectFindings)).result).run.details;
+      assert(unrestrictedPreview.findings.some(
+        ({ id }: { id: string }) => id === "outside-finding",
+      ));
       const treeGrant = {
         action: "set_case_membership",
         ...treeRun,
@@ -1670,7 +1676,27 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
           id !== "outside-finding" && id !== "selected-finding"
         ),
       );
+      const scopedPreview =
+        JSON.parse((await turn(inspectFindings)).result).run.details;
+      assertEquals(
+        scopedPreview.reportedFindings.map(({ id }: { id: string }) => id),
+        [
+          ratedFinding.id,
+        ],
+      );
+      assertEquals(
+        scopedPreview.findings.map(({ id }: { id: string }) => id).sort(),
+        ["branch-finding", "branch-finding-next", "detached-finding"],
+      );
       await withGateway(async (reconnected) => {
+        const reopenedPreview = JSON.parse(
+          (await reconnected(inspectFindings)).result,
+        ).run.details;
+        assertEquals(
+          reopenedPreview.reportedFindings,
+          scopedPreview.reportedFindings,
+        );
+        assertEquals(reopenedPreview.findings, scopedPreview.findings);
         const secondPage = JSON.parse(
           (await reconnected({
             ...defaultFindings,
