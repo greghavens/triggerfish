@@ -6752,7 +6752,9 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
           requestId,
         } = args;
         const update = action === "set_case_membership";
+        const authorize = context?.authorizeOwnerRunCall;
         if (
+          (update && (!authorize || !context?.authenticatedOwnerSessionId)) ||
           ref.kind !== "sentinel" || ref.revision === undefined ||
           typeof runId !== "string" || !digestPattern.test(runId) ||
           (organizationId === undefined
@@ -6847,6 +6849,7 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
             }`,
           )
         ) return "Error: The operator declined the run action.";
+        if (!await authorize?.(args)) return unavailable;
         const committed = recordSentinelOperatingConstraints(path, {
           runId: activeRunId,
           evidenceRevision: ref.revision,

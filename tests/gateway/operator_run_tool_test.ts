@@ -3476,6 +3476,22 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
       assertStringIncludes((await turn(trafficHint)).result, "unavailable");
       assertEquals(confirmations.length, beforeMembership + 1);
 
+      const exactMembershipBeforeReview = readSentinelOperatingConstraints(
+        peerPath,
+        peerRunId,
+      );
+      await denyDuringRunReview({
+        ...updateMembership,
+        organizationId: undefined,
+        allowedAssetIds: ["peer-unselected"],
+        expectedVersion: 1,
+        requestId: crypto.randomUUID(),
+      });
+      assertEquals(
+        readSentinelOperatingConstraints(peerPath, peerRunId),
+        exactMembershipBeforeReview,
+      );
+
       duringConfirmation = () => {
         const snapshot = JSON.parse(Deno.readTextFileSync(peerPath));
         snapshot.nodes.push({
