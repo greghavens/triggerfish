@@ -2261,6 +2261,104 @@ export function reviewSentinelAssignmentBatch(
   return outcome;
 }
 
+export function reviewSentinelStoppedGraphRetry(
+  path: string,
+  scope: {
+    runId: string;
+    revision: number;
+    adaptiveRevision: string;
+    taskId: string;
+    stopRequestId: string;
+    requestId: string;
+  },
+  approved = false,
+) {
+  const result = withSentinelAssessmentWriteLock(path, (state) => {
+    if (
+      !state?.active || state.plan.runId !== scope.runId ||
+      state.revision !== scope.revision
+    ) return;
+    const store = openSentinelAdaptiveStore(storePath(path));
+    try {
+      const revision = revisionForStore(state, store);
+      if (
+        revision !== scope.adaptiveRevision ||
+        store.activeRevision() !== revision ||
+        store.stoppedModelReviewRequestId(revision, scope.taskId) !==
+          scope.stopRequestId
+      ) return;
+      const tasks = store.list(revision);
+      const source = tasks.find(({ id }) => id === scope.taskId);
+      if (
+        !source || source.status !== "completed" ||
+        (source.kind !== "trace" && source.kind !== "impact") ||
+        !source.nodeId ||
+        !state.result?.sharedGraph.snapshot?.nodes.some(({ kind, id }) =>
+          kind === "asset" && id === source.nodeId
+        ) ||
+        !decisionAllowsClaim(path, state.revision)(source)
+      ) return;
+      const fresh = validatedOperatorTask(
+        path,
+        state,
+        source.kind,
+        source.nodeId,
+      );
+      const task = {
+        ...fresh,
+        depth: source.depth,
+        prerequisites: source.prerequisites,
+        plannerRound: {
+          identity: `operator:${scope.requestId}`,
+          attempt: 1,
+          stoppedRetry: {
+            sourceTaskId: source.id,
+            stopRequestId: scope.stopRequestId,
+          },
+        },
+      };
+      const childId = sentinelAdaptiveTaskId(revision, task);
+      const prior = store.readOperatorAssignmentIntent(scope.requestId);
+      if (prior) {
+        return prior.runId === scope.runId &&
+            prior.evidenceRevision === scope.revision &&
+            prior.adaptiveRevision === revision && prior.taskId === childId
+          ? { receipt: prior }
+          : undefined;
+      }
+      if (
+        store.peerFindingVerifications(revision).length ||
+        tasks.some(({ id }) => id === childId)
+      ) return;
+      if (!approved) return { eligible: true } as const;
+      const receipt = store.recordOperatorAssignmentIntent({
+        requestId: scope.requestId,
+        runId: scope.runId,
+        evidenceRevision: scope.revision,
+        adaptiveRevision: revision,
+        task,
+        reason: OPERATOR_ASSIGNMENT_REASON,
+      });
+      return receipt && { receipt, state };
+    } finally {
+      store.close();
+    }
+  });
+  if (result && "state" in result && result.state) {
+    advanceAdaptiveSentinel(path, result.state);
+    const caseId = locateSentinelCase(path)?.caseId;
+    if (caseId && !result.state.paused) {
+      notifyCommittedEvidence({
+        case: caseId,
+        run_id: scope.runId,
+        revision: scope.revision,
+        observation_id: `stopped-worker-retry:${scope.requestId}`,
+      });
+    }
+  }
+  return result;
+}
+
 export function requestSentinelWorkerControl(
   snapshotPath: string,
   revision: string,
@@ -3052,7 +3150,7 @@ export function advanceAdaptiveSentinel(snapshotPath: string, state: State) {
         state.revision,
         goal,
         OPERATOR_ASSIGNMENT_REASON,
-      )
+      ).filter(({ task }) => !task.plannerRound?.stoppedRetry)
       : [];
     const priorByCurrentId = new Map(
       [...priorAssignments].reverse().map((entry) => [
@@ -5435,7 +5533,16 @@ export function createSentinelModelPlanner(
             }
             : undefined;
         }
-        return parseModelReview(state, task, review, steps, inspectedEvidence);
+        const parsed = parseModelReview(
+          state,
+          task,
+          review,
+          steps,
+          inspectedEvidence,
+        );
+        return parsed && task.plannerRound?.stoppedRetry
+          ? { ...parsed, followUps: [] }
+          : parsed;
       } finally {
         worker.clear();
       }

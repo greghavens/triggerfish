@@ -145,7 +145,11 @@ async function withOwnerControl(
     typeof createOperatorRunToolExecutor
   >[0]["sentinelProfiles"],
   allowCall: () => boolean = () => true,
-  options: { sentinelMode?: boolean; onConfirm?: () => void } = {},
+  options: {
+    sentinelMode?: boolean;
+    onConfirm?: () => void;
+    graphRetries?: boolean;
+  } = {},
 ) {
   const approvals: string[] = [];
   const providers = createProviderRegistry();
@@ -235,6 +239,7 @@ async function withOwnerControl(
     operatorRunExecutor: createOperatorRunToolExecutor({
       baseDir,
       sentinelProfiles,
+      sentinelModelAccess: options.graphRetries,
       confirm(message) {
         approvals.push(message);
         options.onConfirm?.();
@@ -328,7 +333,7 @@ Deno.test("Owner socket steers and stops one exact leased worker with a shared T
   registry.register({
     name: "worker-control-fixture",
     supportsStreaming: false,
-    async complete(messages) {
+    async complete(messages, tools) {
       modelCalls++;
       const results = messages.filter(({ role }) => role === "tool").map((
         { content },
@@ -345,6 +350,27 @@ Deno.test("Owner socket steers and stops one exact leased worker with a shared T
         sawRead = true;
         await releaseStaleDecision.promise;
         return read("superseded-by-steering");
+      }
+      if (modelCalls === 4 || modelCalls === 5) {
+        const definitions = tools as { function?: { name?: string } }[];
+        assertEquals(definitions.map(({ function: tool }) => tool?.name), [
+          "sentinel_assigned_target",
+        ]);
+        assertEquals(notes, []);
+        if (modelCalls === 4) {
+          assertEquals(results, []);
+          return read("fresh-approved-retry");
+        }
+        assertEquals(results.length, 1);
+        assert(results[0].includes("primary-asset"));
+        return {
+          content: JSON.stringify({
+            summary: "Reviewed the pinned local graph in the fresh assignment.",
+            followUps: [{ kind: "trace", nodeId: "primary-asset" }],
+          }),
+          usage,
+          toolCalls: [],
+        };
       }
       assertEquals(modelCalls, 3);
       assertEquals(results, seenResults);
@@ -673,6 +699,87 @@ Deno.test("Owner socket steers and stops one exact leased worker with a shared T
         assertEquals(assignedWorkers, 1);
         assertEquals(modelCalls, 3);
         assertEquals(toolCalls, 1);
+        const retry = {
+          action: "retry_model_review",
+          kind: "sentinel",
+          id: "main",
+          revision: current.revision,
+          runId: current.plan.runId,
+          adaptiveRevision: fields.revision,
+          taskId: fields.taskId,
+          stopRequestId: stopId,
+          requestId: crypto.randomUUID(),
+        };
+        let child: string | undefined;
+        let allowRetry = true;
+        let revokeRetryOnConfirmation = true;
+        await withOwnerControl(
+          baseDir,
+          async (owner, approvals) => {
+            assert(
+              (await owner({ ...retry, stopRequestId: crypto.randomUUID() }))
+                .startsWith("Error:"),
+            );
+            assert(
+              (await owner({ ...retry, revision: current.revision + 1 }))
+                .startsWith("Error:"),
+            );
+            assertEquals(approvals, []);
+            assert((await owner(retry)).startsWith("Error:"));
+            assertEquals(approvals.length, 1);
+            assertEquals(assignedWorkers, 1);
+            allowRetry = true;
+            revokeRetryOnConfirmation = false;
+            const admitted = JSON.parse(await owner(retry));
+            assertEquals(admitted.sourceTaskId, fields.taskId);
+            assertEquals(admitted.stopRequestId, stopId);
+            child = admitted.receipt.taskId;
+            assert(child && child !== fields.taskId);
+            assertEquals(JSON.parse(await owner(retry)), admitted);
+            assert(
+              (await owner({ ...retry, requestId: crypto.randomUUID() }))
+                .startsWith("Error:"),
+            );
+            assertEquals(approvals.length, 2);
+          },
+          undefined,
+          () => allowRetry,
+          {
+            graphRetries: true,
+            onConfirm() {
+              if (revokeRetryOnConfirmation) allowRetry = false;
+            },
+          },
+        );
+        assert(child);
+        restarted.advance(current);
+        await until(() =>
+          adaptive()?.modelReviews.some(({ taskId }) => taskId === child) ===
+            true
+        );
+        assertEquals(assignedWorkers, 2);
+        assertEquals(modelCalls, 5);
+        assertEquals(toolCalls, 2);
+        assertFalse(
+          adaptive()?.modelReviews.some(({ taskId }) =>
+            taskId === fields.taskId
+          ),
+        );
+        const reusedStop = await request("worker_stop", {
+          ...fields,
+          controlRequestId: stopId,
+        });
+        assertEquals(reusedStop.receipt, stopReceipt);
+        const projected = (await request("worker_status"))
+          .workers as WorkerStatus[];
+        assertEquals(
+          projected.find(({ taskId }) => taskId === fields.taskId)?.status,
+          "stopped",
+        );
+        assertEquals(
+          projected.find(({ taskId }) => taskId === child)?.status,
+          "completed",
+        );
       } finally {
         restarted.stop();
       }

@@ -3725,7 +3725,10 @@ function createAgent(
   const assignedReview = readAssignedModelReview(options);
   const reporter = assignedReview?.kind === "report_finding";
   const findingFollowup = assignedReview?.plannerRound?.findingFollowup;
-  const toolDefs = reporter
+  const graphOnlyRetry = !!assignedReview?.plannerRound?.stoppedRetry;
+  const toolDefs = graphOnlyRetry
+    ? [assignedTargetTool]
+    : reporter
     ? availableTools.filter(({ name }) =>
       [
         "sentinel_worker_findings",

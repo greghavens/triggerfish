@@ -743,6 +743,10 @@ export interface AdaptiveFindingFollowup {
 }
 
 export interface AdaptivePlannerRound {
+  readonly stoppedRetry?: {
+    readonly sourceTaskId: string;
+    readonly stopRequestId: string;
+  };
   readonly findingFollowup?: AdaptiveFindingFollowup;
   readonly passingRecheckId?: string;
   readonly passingRecheckForFindingId?: string;
@@ -1904,6 +1908,13 @@ export function sentinelAdaptiveTaskId(
           receipt.committedObservation.observationId,
         ]]
         : []),
+      ...(request.plannerRound?.stoppedRetry
+        ? [[
+          "stopped_retry",
+          request.plannerRound.stoppedRetry.sourceTaskId,
+          request.plannerRound.stoppedRetry.stopRequestId,
+        ]]
+        : []),
       ...(request.plannerRound?.findingFollowup
         ? [[
           "finding_followup",
@@ -2094,7 +2105,19 @@ function normalizePlannerRound(round: AdaptivePlannerRound | undefined) {
     priorAssignedTargetCitations,
     carriedAssignedTargetCitations,
     findingFollowup,
+    stoppedRetry,
   } = round;
+  if (
+    stoppedRetry !== undefined && (
+      !/^operator:[a-f0-9-]{36}$/.test(identity) || attempt !== 1 ||
+      !stoppedRetry ||
+      !/^adaptive:[a-f0-9]{64}$/.test(stoppedRetry.sourceTaskId) ||
+      !operatorAssignmentRequestId(stoppedRetry.stopRequestId) ||
+      Object.keys(round).some((key) =>
+        !["identity", "attempt", "stoppedRetry"].includes(key)
+      )
+    )
+  ) throw new Error("Invalid stopped Sentinel worker retry");
   if (
     findingFollowup !== undefined && (
       !/^operator:[a-f0-9-]{36}$/.test(identity) ||
@@ -2234,6 +2257,13 @@ function normalizePlannerRound(round: AdaptivePlannerRound | undefined) {
   ) throw new Error("Invalid committed observation citation");
   return {
     identity: revisionKey(identity),
+    ...(stoppedRetry &&
+      {
+        stoppedRetry: {
+          sourceTaskId: stoppedRetry.sourceTaskId,
+          stopRequestId: stoppedRetry.stopRequestId,
+        },
+      }),
     ...(findingFollowup && {
       findingFollowup: {
         findingId: findingFollowup.findingId,
@@ -2303,6 +2333,18 @@ function normalizeTask(revision: string, request: AdaptiveTaskRequest) {
   }
   const identity = normalizeIdentity(request);
   const plannerRound = normalizePlannerRound(request.plannerRound);
+  if (
+    plannerRound?.stoppedRetry && (
+      (identity.kind !== "trace" && identity.kind !== "impact") ||
+      request.evidenceIds?.length || request.carriedFrom ||
+      request.reviewedFrom ||
+      request.reuseObservation || request.carriedAssignedTargetCitations?.length
+    )
+  ) {
+    throw new Error(
+      "Stopped worker retry requires independent read-only graph work",
+    );
+  }
   if (
     plannerRound?.findingFollowup &&
     (identity.kind !== "trace" || identity.depth !== 1 ||
@@ -4249,7 +4291,8 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
     FROM adaptive_tasks AS task
     LEFT JOIN adaptive_model_reviews AS review ON review.taskId = task.id
     WHERE task.revision = ? AND (task.reason = ? OR task.kind = 'review_incident'
-      OR json_type(task.plannerRound, '$.findingFollowup') = 'object')
+      OR json_type(task.plannerRound, '$.findingFollowup') = 'object'
+      OR json_type(task.plannerRound, '$.stoppedRetry') = 'object')
       AND task.status = 'completed' AND task.factSatisfaction IS NULL AND review.noteId IS NULL
       AND (COALESCE(review.attempts, 0) < 2 + COALESCE(review.operatorRetry, 0)
         OR (task.kind = 'report_finding' AND EXISTS (
@@ -6571,6 +6614,14 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
         }
         return result?.receipt;
       });
+    },
+
+    stoppedModelReviewRequestId(revision: string, id: string) {
+      if (mutationPending(revision, id)) return undefined;
+      const row = db.prepare(
+        "SELECT requestId FROM adaptive_worker_controls WHERE revision = ? AND taskId = ? AND action = 'stop'",
+      ).get(revisionKey(revision), taskId(id));
+      return typeof row?.requestId === "string" ? row.requestId : undefined;
     },
 
     modelReviewControls(revision: string, id: string) {

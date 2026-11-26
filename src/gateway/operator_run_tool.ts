@@ -283,6 +283,7 @@ import {
   reviewSentinelAssignmentBatch,
   reviewSentinelGraphRetries,
   reviewSentinelOperatorHintBatch,
+  reviewSentinelStoppedGraphRetry,
   sentinelHintAssetsInScope,
   submitSentinelAssignmentIntent,
   updateSentinelWorkerLimit,
@@ -888,6 +889,11 @@ export const operatorRunTool: ToolDefinition = {
     targetRevision: {
       type: "integer",
       description: "Exact linked Sentinel evidence revision",
+    },
+    stopRequestId: {
+      type: "string",
+      description:
+        "For an explicit graph-only retry_model_review, the exact durable worker stop request UUID.",
     },
     requestId: {
       type: "string",
@@ -4543,6 +4549,69 @@ ${
         return result?.receipt
           ? safeProjection({ run: ref, receipt: result.receipt })
           : unavailable;
+      }
+      if (action === "retry_model_review" && args.stopRequestId !== undefined) {
+        const { runId, adaptiveRevision, taskId, stopRequestId, requestId } =
+          args;
+        if (
+          !context?.authenticatedOwnerSessionId ||
+          !canFlowTo("INTERNAL", context.ceiling ?? "PUBLIC") ||
+          options.sentinelModelAccess !== true || ref.kind !== "sentinel" ||
+          ref.revision === undefined ||
+          typeof runId !== "string" || !digestPattern.test(runId) ||
+          typeof stopRequestId !== "string" ||
+          !digestPattern.test(stopRequestId) ||
+          typeof requestId !== "string" || !digestPattern.test(requestId) ||
+          typeof adaptiveRevision !== "string" ||
+          !/^[a-f0-9]{64}$/.test(adaptiveRevision) ||
+          typeof taskId !== "string" ||
+          !/^adaptive:[a-f0-9]{64}$/.test(taskId) ||
+          Object.keys(args).some((key) =>
+            ![
+              "action",
+              "kind",
+              "id",
+              "revision",
+              "runId",
+              "adaptiveRevision",
+              "taskId",
+              "stopRequestId",
+              "requestId",
+            ].includes(key)
+          ) ||
+          !await controller.inspect(ref)
+        ) return unavailable;
+        const path = resolveSentinelCasePath(options.baseDir, ref.id);
+        const scope = {
+          runId: runId.toLowerCase(),
+          revision: ref.revision,
+          adaptiveRevision,
+          taskId,
+          stopRequestId: stopRequestId.toLowerCase(),
+          requestId: requestId.toLowerCase(),
+        };
+        const before = reviewSentinelStoppedGraphRetry(path, scope);
+        const response = (receipt: unknown) =>
+          safeProjection({
+            run: ref,
+            receipt,
+            sourceTaskId: taskId,
+            stopRequestId: scope.stopRequestId,
+          });
+        if (before?.receipt) return response(before.receipt);
+        if (!before?.eligible) return unavailable;
+        if (
+          !await options.confirm(
+            `Retry this exact stopped Sentinel assignment as a fresh graph-only review?\n${
+              JSON.stringify({ ref, ...scope })
+            }`,
+          )
+        ) {
+          return "Error: The operator declined the run action.";
+        }
+        if (!await context.authorizeOwnerRunCall?.(args)) return unavailable;
+        const admitted = reviewSentinelStoppedGraphRetry(path, scope, true);
+        return admitted?.receipt ? response(admitted.receipt) : unavailable;
       }
       if (action === "retry_graph_tasks") {
         const { runId, adaptiveRevision, requestId, taskIds } = args;
