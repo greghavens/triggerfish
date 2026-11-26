@@ -2043,6 +2043,9 @@ async function verifyOperatorNativeRecheck(options: {
           ).digest,
           requestId: crypto.randomUUID(),
           title,
+          severity: version === 1 ? "high" : "low",
+          findingCategory: version === 1 ? "Control coverage" : "Access policy",
+          disposition: version === 1 ? "confirmed" : "dismissed",
           summary: "Reviewed finding evidence from the original control.",
         });
         assertEquals(JSON.parse(result).amendment.version, version + 1);
@@ -2774,8 +2777,14 @@ async function verifyOperatorNativeRecheck(options: {
         );
         if (options.alternate) {
           assertEquals(
-            reviewedBaseline.reviewedReport.title,
-            "Reviewed report title",
+            reviewedBaseline.reviewedReport,
+            {
+              title: "Reviewed report title",
+              summary: "Reviewed finding evidence from the original control.",
+              severity: "high",
+              findingCategory: "Control coverage",
+              disposition: "confirmed",
+            },
           );
         }
         if (options.noResult) {

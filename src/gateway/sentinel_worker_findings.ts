@@ -46,6 +46,7 @@ import {
   verifyWorkerFindingRecheck,
 } from "../sentinel/worker_finding_evidence.ts";
 import {
+  findingReportMetadata,
   hasSentinelWorkerFindingJournal,
   normalizeFindingReportCategory,
   openSentinelWorkerFindingStore,
@@ -575,7 +576,7 @@ export function executeSentinelWorkerFindingTool(
               ...(selectedFinding === finding.id &&
                 task?.plannerRound?.recheckNote &&
                 { recheckNote: task.plannerRound.recheckNote }),
-              ...(baseline && reviewedReport
+              ...(baseline && report && reviewedReport
                 ? {
                   reportVersion: baseline.reportVersion,
                   recheckBaseline: baseline,
@@ -590,6 +591,10 @@ export function executeSentinelWorkerFindingTool(
                   reviewedReport: {
                     title: reviewedReport.title,
                     summary: reviewedReport.summary,
+                    ...findingReportMetadata(
+                      report.amendments,
+                      baseline.reportVersion,
+                    ),
                   },
                 }
                 : report && { reportVersion: report.version }),
