@@ -425,6 +425,10 @@ import {
   attachOperatorNativeWorkflowControl,
   projectExecutionRecheckSource,
 } from "./operator_execution_evidence.ts";
+import {
+  executeOperatorScopeSentryImport,
+  type ScopeSentryConnector,
+} from "./operator_scopesentry_import.ts";
 import { executeOperatorInventoryAffiliation } from "./operator_inventory_affiliation.ts";
 import { executeOperatorInventoryWithdrawal } from "./operator_inventory_withdrawal.ts";
 import { executeOperatorAssetWithdrawal } from "./operator_asset_withdrawal.ts";
@@ -663,6 +667,7 @@ export const operatorRunTool: ToolDefinition = {
         "discovery_proposals",
         "propose_graph_fact_discovery",
         "preview_inventory_withdrawal",
+        "import_scopesentry_inventory",
         "preview_inventory_affiliation",
         "affiliate_inventory_asset",
         "withdraw_inventory_host",
@@ -1544,6 +1549,21 @@ export const operatorRunTool: ToolDefinition = {
       type: "string",
       description: "Unique display name for the reviewed shared company scope",
     },
+    sourceDimension: {
+      type: "string",
+      enum: ["project", "task"],
+      description:
+        "Selection dimension for the exact retained inventory import",
+    },
+    sourceSelection: {
+      type: "string",
+      description:
+        "Exact ScopeSentry project ID or task name for a reviewed inventory import",
+    },
+    page: {
+      type: "integer",
+      description: "One-based page of the selected retained inventory",
+    },
     organizationId: {
       type: "string",
       description: "Exact organization ID declared in the selected case",
@@ -1855,6 +1875,9 @@ export interface OperatorRunToolContext {
     destination: SentinelLiveWorkflowDestination,
     revision: number,
     taskId: string,
+  ) => Promise<boolean>;
+  readonly authorizeInventoryConnectorCall?: (
+    call: RecoveryToolCall,
   ) => Promise<boolean>;
   readonly authorizeSavedCall: (call: RecoveryToolCall) => Promise<boolean>;
   readonly authorizeSavedResponse: (
@@ -3086,6 +3109,7 @@ export function createOperatorRunToolExecutor(options: {
   readonly baseDir: string;
   readonly confirm: (message: string) => Promise<boolean>;
   readonly workflows?: OperatorWorkflowRuns;
+  readonly scopeSentryConnector?: ScopeSentryConnector;
   readonly notificationChannels?: OperatorNotificationChannels;
   readonly resumeScheduledExecution?: (id: string) => Promise<boolean>;
   readonly readLiveWorkflow?: ReturnType<
@@ -6142,6 +6166,21 @@ ${
           ref,
           args,
           options.confirm,
+        );
+        return typeof result === "string" ? result : safeProjection(result);
+      }
+      if (action === "import_scopesentry_inventory") {
+        if (ref.kind !== "sentinel" || !await controller.inspect(ref)) {
+          return unavailable;
+        }
+        const result = await executeOperatorScopeSentryImport(
+          options.baseDir,
+          ref,
+          args,
+          options.scopeSentryConnector,
+          context,
+          options.confirm,
+          options.webContainmentConfigured,
         );
         return typeof result === "string" ? result : safeProjection(result);
       }

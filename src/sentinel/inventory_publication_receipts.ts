@@ -5,7 +5,10 @@ import { DatabaseSync } from "node:sqlite";
 import { join, resolve } from "@std/path";
 import { assertOperatorSourceDirectoryInfo } from "./source_snapshot_lock.ts";
 
-type InventoryPublicationNamespace = "withdrawal" | "affiliation";
+type InventoryPublicationNamespace =
+  | "withdrawal"
+  | "affiliation"
+  | "scopesentry";
 const uuid = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i;
 type Row = NonNullable<ReturnType<ReturnType<DatabaseSync["prepare"]>["get"]>>;
 
@@ -81,10 +84,16 @@ export function openSentinelInventoryPublicationReceipts<
   normalize: (input: T) => T | undefined,
   now = Date.now,
 ) {
-  const applicationId = namespace === "withdrawal" ? 0x53495752 : 0x53494152;
-  const table = namespace === "withdrawal"
-    ? "inventory_withdrawals"
-    : "inventory_affiliations";
+  const applicationId = {
+    withdrawal: 0x53495752,
+    affiliation: 0x53494152,
+    scopesentry: 0x53495352,
+  }[namespace];
+  const table = {
+    withdrawal: "inventory_withdrawals",
+    affiliation: "inventory_affiliations",
+    scopesentry: "inventory_scopesentry_imports",
+  }[namespace];
   const db = privateDatabase(baseDir, namespace);
   try {
     db.exec("PRAGMA busy_timeout = 5000; PRAGMA trusted_schema = OFF");

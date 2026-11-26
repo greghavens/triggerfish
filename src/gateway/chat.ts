@@ -925,6 +925,14 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
         });
         return outcome.allowed && isCurrent();
       },
+      async authorizeInventoryConnectorCall(call) {
+        if (
+          !isCurrent() || call.name !== "mcp_scopesentry_list_assets" ||
+          !existingTool(call.name)
+        ) return false;
+        return await authorizeSavedToolCalls([call], policy, session) &&
+          isCurrent();
+      },
       authorizeSavedCall(call) {
         if (
           !isCurrent() || !config.tools?.some(({ name }) => name === call.name)

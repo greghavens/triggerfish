@@ -144,6 +144,12 @@ export function buildMainChatSession(
       resumeScheduledExecution: coreInfra.schedulerService
         ?.resumeScheduledExecution,
       readLiveWorkflow,
+      scopeSentryConnector: toolInfra.mcpWiring?.executor
+        ? {
+          lookup: () => toolInfra.mcpWiring?.getConnectorTools("scopesentry"),
+          execute: toolInfra.mcpWiring.executor,
+        }
+        : undefined,
       readRepositoryVisibility: configuredSentinelRepositoryVisibilityReader(
         bootstrap.config,
         bootstrap.baseDir,
