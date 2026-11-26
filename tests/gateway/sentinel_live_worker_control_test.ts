@@ -149,7 +149,7 @@ async function withOwnerControl(
   allowCall: () => boolean = () => true,
   options: {
     sentinelMode?: boolean;
-    onConfirm?: () => void;
+    onConfirm?: () => void | Promise<void>;
     graphRetries?: boolean;
     deniesSavedTarget?: (hook: string) => boolean;
   } = {},
@@ -245,10 +245,10 @@ async function withOwnerControl(
       baseDir,
       sentinelProfiles,
       sentinelModelAccess: options.graphRetries,
-      confirm(message) {
+      async confirm(message) {
         approvals.push(message);
-        options.onConfirm?.();
-        return Promise.resolve(true);
+        await options.onConfirm?.();
+        return true;
       },
     }),
     enableStreaming: false,
@@ -1462,6 +1462,14 @@ async function verifyInteractiveCaseControl(manual = false) {
   const delegatedEntered = Promise.withResolvers<AbortSignal>();
   const allowFirst = Promise.withResolvers<void>();
   const allowSecond = Promise.withResolvers<void>();
+  const replacementEntered = Promise.withResolvers<AbortSignal>();
+  const allowReplacement = Promise.withResolvers<void>();
+  const newerEntered = Promise.withResolvers<AbortSignal>();
+  const allowNewer = Promise.withResolvers<void>();
+  const allowBackground = Promise.withResolvers<void>();
+  let backgroundSignal: AbortSignal | undefined;
+  let backgroundTaskId: string | undefined;
+  let background: ReturnType<typeof createSentinelModelPlanner> | undefined;
   const completedFirst = "Committed first-case context";
   const stale = "Uncommitted response from paused case";
   const usage = { inputTokens: 1, outputTokens: 1 };
@@ -1482,6 +1490,16 @@ async function verifyInteractiveCaseControl(manual = false) {
         assert(JSON.stringify(messages).includes(completedFirst));
         assertFalse(JSON.stringify(messages).includes(stale));
         return result("Prior context retained");
+      }
+      if (prompt.includes("Hold the replacement interactive turn")) {
+        replacementEntered.resolve(signal);
+        await allowReplacement.promise;
+        return result("Replacement turn finished");
+      }
+      if (prompt.includes("Hold a newer interactive turn")) {
+        newerEntered.resolve(signal);
+        await allowNewer.promise;
+        return result("Newer turn finished");
       }
       const delegated = prompt.includes(
         "Suspend the delegated interactive turn",
@@ -1511,7 +1529,17 @@ async function verifyInteractiveCaseControl(manual = false) {
       await Deno.mkdir(dirname(path), { recursive: true });
       await Deno.writeTextFile(
         path,
-        JSON.stringify({ version: 1, nodes: [], edges: [] }),
+        JSON.stringify({
+          version: 1,
+          nodes: manual && path === firstPath
+            ? [{
+              id: "background-asset",
+              label: "Background asset",
+              kind: "asset",
+            }]
+            : [],
+          edges: [],
+        }),
       );
       startSentinelAssessment(path, { goal: "Review configured case." });
     }
@@ -1585,6 +1613,76 @@ async function verifyInteractiveCaseControl(manual = false) {
         completedFirst,
       ),
     );
+    if (manual) {
+      const workerProviders = createProviderRegistry();
+      workerProviders.register({
+        name: "background-during-remote-stop",
+        supportsStreaming: false,
+        async complete(messages, _tools, options) {
+          const graph = messages.findLast(({ role }) => role === "tool");
+          if (!graph) {
+            return {
+              content: "",
+              toolCalls: [{
+                id: "background-assigned-read",
+                type: "function",
+                function: { name: "sentinel_assigned_target", arguments: "{}" },
+              }],
+              usage,
+            };
+          }
+          assert(String(graph.content).includes("background-asset"));
+          backgroundSignal ??= options.signal as AbortSignal;
+          await allowBackground.promise;
+          return {
+            content: '{"summary":"Completed independent background review."}',
+            toolCalls: [],
+            usage,
+          };
+        },
+      });
+      workerProviders.setDefault("background-during-remote-stop");
+      const initial = readSentinelAssessment(firstPath)!;
+      advanceAdaptiveSentinel(firstPath, initial);
+      background = createSentinelModelPlanner(
+        firstPath,
+        (state, taskId, lease) => {
+          if (!taskId || !lease) {
+            return {
+              execute(_content, send) {
+                send({
+                  type: "response",
+                  taint: "INTERNAL",
+                  text: '[{"kind":"impact","nodeId":"background-asset"}]',
+                });
+                return Promise.resolve();
+              },
+              clear() {},
+            };
+          }
+          backgroundTaskId ??= taskId;
+          return createSentinelSubagent({
+            snapshotPath: firstPath,
+            assessmentRevision: state.revision,
+            assignedTaskId: taskId,
+            assignedTaskLeaseToken: lease,
+            hookRunner: {
+              evaluateHook: () =>
+                Promise.resolve({
+                  allowed: true,
+                  action: "ALLOW",
+                  ruleId: null,
+                  duration: 0,
+                }),
+            },
+            providerRegistry: workerProviders,
+            allowModelAccess: true,
+          });
+        },
+      );
+      background.advance(initial);
+      await until(() => !!backgroundSignal);
+    }
     const interrupted = first("Suspend the first interactive turn");
     const unrelated = second("Leave the second interactive turn active");
     const [firstSignal, secondSignal] = await Promise.all([
@@ -1599,12 +1697,14 @@ async function verifyInteractiveCaseControl(manual = false) {
       revision: state.revision,
       runId: state.plan.runId,
     };
+    let stoppedTurnId: string | undefined;
     if (manual) {
       const status = { ...pause, action: "interactive_turns" };
       let stop: Record<string, unknown> | undefined;
       await withOwnerControl(baseDir, async (request, approvals) => {
         const firstTurns = JSON.parse(await request(status)).turns;
         assertEquals(firstTurns.length, 1);
+        stoppedTurnId = firstTurns[0].id;
         assertEquals(firstTurns[0].startedRevision, state.revision);
         const secondState = readSentinelAssessment(secondPath)!;
         const other = {
@@ -1707,7 +1807,111 @@ async function verifyInteractiveCaseControl(manual = false) {
         "Prior context retained",
       ),
     );
-    if (manual) return;
+    if (manual) {
+      assert(backgroundSignal && backgroundTaskId && stoppedTurnId);
+      assertFalse(backgroundSignal.aborted);
+      assertEquals(
+        readAdaptiveSentinel(firstPath, state)?.modelReviewStates.find((
+          { taskId },
+        ) => taskId === backgroundTaskId)?.status,
+        "running",
+      );
+      const replacement = first("Hold the replacement interactive turn");
+      const replacementSignal = await replacementEntered.promise;
+      let replacementTurnId: string | undefined;
+      await withOwnerControl(baseDir, async (request, approvals) => {
+        const status = { ...pause, action: "interactive_turns" };
+        const [turn] = JSON.parse(await request(status)).turns;
+        assert(turn.id !== stoppedTurnId);
+        replacementTurnId = turn.id;
+        assert((await request({
+          ...status,
+          action: "stop_interactive_turn",
+          turnId: stoppedTurnId,
+        })).includes("unavailable"));
+        assertEquals(approvals.length, 0);
+        assertFalse(replacementSignal.aborted);
+        assertFalse(backgroundSignal?.aborted);
+      });
+      assert(replacementTurnId);
+      const status = { ...pause, action: "interactive_turns" };
+      let newer: Promise<readonly string[]> | undefined;
+      let newerSignal: AbortSignal | undefined;
+      let newerTurnId: string | undefined;
+      await withOwnerControl(
+        baseDir,
+        async (request, approvals) => {
+          assert((await request({
+            ...status,
+            action: "stop_interactive_turn",
+            turnId: replacementTurnId,
+          })).includes("unavailable"));
+          assertEquals(approvals.length, 1);
+          assert(newerSignal);
+          assertFalse(newerSignal.aborted);
+          const [turn] = JSON.parse(await request(status)).turns;
+          assert(turn.id !== replacementTurnId);
+          newerTurnId = turn.id;
+          assertFalse(backgroundSignal?.aborted);
+        },
+        undefined,
+        () => true,
+        {
+          async onConfirm() {
+            allowReplacement.resolve();
+            assert(
+              (await replacement).join("").includes(
+                "Replacement turn finished",
+              ),
+            );
+            newer = first("Hold a newer interactive turn");
+            newerSignal = await newerEntered.promise;
+          },
+        },
+      );
+      assert(newerTurnId);
+      allowBackground.resolve();
+      await until(() =>
+        readAdaptiveSentinel(firstPath, state)?.modelReviews.some((
+          { taskId, summary },
+        ) =>
+          taskId === backgroundTaskId &&
+          summary === "Completed independent background review."
+        ) === true
+      );
+      await Deno.writeTextFile(
+        firstPath,
+        JSON.stringify({
+          version: 1,
+          nodes: [{
+            id: "background-asset",
+            label: "Refreshed background asset",
+            kind: "asset",
+          }],
+          edges: [],
+        }),
+      );
+      const refreshed = refreshSentinelAssessment(firstPath)!;
+      assertEquals(refreshed.revision, state.revision + 1);
+      await withOwnerControl(baseDir, async (request, approvals) => {
+        const scoped = { ...status, revision: refreshed.revision };
+        assertEquals(JSON.parse(await request(scoped)).turns, []);
+        for (const revision of [state.revision, refreshed.revision]) {
+          assert((await request({
+            ...scoped,
+            revision,
+            action: "stop_interactive_turn",
+            turnId: newerTurnId,
+          })).includes("unavailable"));
+        }
+        assertEquals(approvals.length, 0);
+        assertFalse(newerSignal?.aborted);
+      });
+      allowNewer.resolve();
+      assert((await newer)?.join("").includes("Newer turn finished"));
+      assertEquals(readSentinelAssessment(firstPath)?.active, true);
+      return;
+    }
     await withOwnerControl(baseDir, async (request) => {
       assertEquals(
         JSON.parse(await request({ ...pause, action: "resume" })).run.status,
@@ -1729,6 +1933,11 @@ async function verifyInteractiveCaseControl(manual = false) {
   } finally {
     allowFirst.resolve();
     allowSecond.resolve();
+    allowReplacement.resolve();
+    allowNewer.resolve();
+    allowBackground.resolve();
+    background?.stop();
+    if (background) await until(() => !background?.hasInFlightWork());
     for (const socket of sockets) socket.close();
     await gateway?.stop();
     await Deno.remove(baseDir, { recursive: true });

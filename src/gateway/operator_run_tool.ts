@@ -3848,12 +3848,13 @@ ${
           return safeProjection({
             run: ref,
             runId: exactRunId,
-            turns: listSentinelInteractiveTurns(path, exactRunId),
+            turns: listSentinelInteractiveTurns(path, exactRunId, ref.revision),
           });
         }
         const selected = readSentinelInteractiveTurn(
           path,
           exactRunId,
+          ref.revision,
           (turnId as string).toLowerCase(),
         );
         if (!selected) return unavailable;
@@ -3866,7 +3867,12 @@ ${JSON.stringify({ run: ref, runId: exactRunId, turn: selected })}`,
         if (!await context.authorizeOwnerRunCall(args) || !current()) {
           return unavailable;
         }
-        return stopSentinelInteractiveTurn(path, exactRunId, selected.id)
+        return stopSentinelInteractiveTurn(
+            path,
+            exactRunId,
+            ref.revision,
+            selected.id,
+          )
           ? safeProjection({
             run: ref,
             runId: exactRunId,

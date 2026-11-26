@@ -29,29 +29,44 @@ export function registerSentinelInteractiveTurn(
   };
 }
 
-export function listSentinelInteractiveTurns(path: string, runId: string) {
+export function listSentinelInteractiveTurns(
+  path: string,
+  runId: string,
+  revision: number,
+) {
   return [...(liveTurns.get(resolve(path))?.values() ?? [])]
-    .filter((turn) => turn.runId === runId && !turn.signal.aborted)
+    .filter((turn) =>
+      turn.runId === runId && turn.startedRevision === revision &&
+      !turn.signal.aborted
+    )
     .slice(0, 20).map(({ id, startedRevision }) => ({ id, startedRevision }));
 }
 
 export function readSentinelInteractiveTurn(
   path: string,
   runId: string,
+  revision: number,
   id: string,
 ) {
   const turn = liveTurns.get(resolve(path))?.get(id);
-  if (turn?.runId !== runId || turn.signal.aborted) return;
+  if (
+    turn?.runId !== runId || turn.startedRevision !== revision ||
+    turn.signal.aborted
+  ) return;
   return { id: turn.id, startedRevision: turn.startedRevision };
 }
 
 export function stopSentinelInteractiveTurn(
   path: string,
   runId: string,
+  revision: number,
   id: string,
 ) {
   const turn = liveTurns.get(resolve(path))?.get(id);
-  if (turn?.runId !== runId || turn.signal.aborted) return false;
+  if (
+    turn?.runId !== runId || turn.startedRevision !== revision ||
+    turn.signal.aborted
+  ) return false;
   turn.cancel();
   return true;
 }
