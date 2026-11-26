@@ -216,7 +216,11 @@ function admitPlans(configuration: readonly OperatorWorkflowPlan[]) {
           !/^[a-z0-9](?:[a-z0-9-]{0,46}[a-z0-9])?$/.test(proof.case) ||
           !RUN_ID.test(proof.run_id) || !Number.isSafeInteger(proof.revision) ||
           proof.revision < 1 ||
-          ("finding_id" in proof
+          ("goal_id" in proof
+            ? Object.keys(proof).length !== 4 ||
+              typeof proof.goal_id !== "string" ||
+              !/^[a-z0-9][a-z0-9_-]{0,63}$/.test(proof.goal_id)
+            : "finding_id" in proof
             ? Object.keys(proof).length !== 4 ||
               typeof proof.finding_id !== "string" ||
               !/^worker-finding:[a-f0-9]{64}$/.test(proof.finding_id)
@@ -266,6 +270,15 @@ function admitPlans(configuration: readonly OperatorWorkflowPlan[]) {
           ? { type: "wait", wait: `PT${wait}S` }
           : { type: "set", set: { step: step.id } },
       });
+    }
+    const evidenceKinds = [...requirements.values()];
+    if (
+      evidenceKinds.some((proof) => "goal_id" in proof) &&
+      evidenceKinds.some((proof) => !("goal_id" in proof))
+    ) {
+      throw new Error(
+        "Goal-conditioned workflows must use local goal proof or record-only steps.",
+      );
     }
     plans.set(plan.id, {
       id: plan.id,
@@ -401,7 +414,9 @@ export function createOperatorWorkflowRuns(
         verified.caseId === requirement.case &&
         verified.runId === requirement.run_id &&
         verified.revision === requirement.revision &&
-        ("finding_id" in requirement
+        ("goal_id" in requirement
+          ? "goalId" in verified && verified.goalId === requirement.goal_id
+          : "finding_id" in requirement
           ? "findingRecheckId" in verified &&
             verified.findingId === requirement.finding_id
           : "finding_recheck_id" in requirement
@@ -429,7 +444,7 @@ export function createOperatorWorkflowRuns(
       const requirement = run.plan.requirements.get(step.name);
       if (
         !requirement ||
-        !("require_current_pass" in requirement ||
+        !("goal_id" in requirement || "require_current_pass" in requirement ||
           "finding_recheck_id" in requirement || "finding_id" in requirement)
       ) continue;
       const original = journal
@@ -442,6 +457,19 @@ export function createOperatorWorkflowRuns(
       const evidence = original && "evidence" in original
         ? original.evidence
         : original;
+      if ("goal_id" in requirement) {
+        const current = await resolveEvidence(requirement);
+        if (
+          !evidence || !("goalId" in evidence) ||
+          !current || !("goalId" in current) ||
+          evidence.resultSha256 !== current.resultSha256
+        ) {
+          throw new Error(
+            "A committed Sentinel goal proof is no longer current.",
+          );
+        }
+        continue;
+      }
       if ("finding_recheck_id" in requirement || "finding_id" in requirement) {
         if (
           !evidence || !("findingRecheckId" in evidence) ||
@@ -569,7 +597,12 @@ export function createOperatorWorkflowRuns(
                 throw new Error("The committed evidence wait expired.");
               }
             }
-            const address = "finding_id" in requirement
+            const address = "goal_id" in requirement
+              ? {
+                ...requirement,
+                observation_id: `goal:${requirement.goal_id}`,
+              }
+              : "finding_id" in requirement
               ? { ...requirement, observation_id: requirement.finding_id }
               : "finding_recheck_id" in requirement
               ? {

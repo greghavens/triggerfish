@@ -36,7 +36,16 @@ interface WorkflowStepEvidenceSource {
   readonly resultSha256: string;
 }
 
-export type WorkflowStepEvidence =
+export interface WorkflowGoalCompletionEvidence {
+  readonly caseId: string;
+  readonly runId: string;
+  readonly revision: number;
+  readonly goalId: string;
+  readonly completedAt: string;
+  readonly resultSha256: string;
+}
+
+type WorkflowWorkerStepEvidence =
   & WorkflowStepEvidenceSource
   & (
     | {
@@ -59,6 +68,10 @@ export type WorkflowStepEvidence =
     }
   );
 
+export type WorkflowStepEvidence =
+  | WorkflowWorkerStepEvidence
+  | WorkflowGoalCompletionEvidence;
+
 export function validWorkflowStepEvidence(
   value: unknown,
 ): value is WorkflowStepEvidence {
@@ -67,6 +80,16 @@ export function validWorkflowStepEvidence(
   const timestamp = (at: unknown) =>
     typeof at === "string" && Number.isFinite(Date.parse(at)) &&
     new Date(at).toISOString() === at;
+  const binding = /^[a-z0-9](?:[a-z0-9-]{0,46}[a-z0-9])?$/.test(e.caseId) &&
+    /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(e.runId) &&
+    Number.isSafeInteger(e.revision) && e.revision > 0 &&
+    /^[a-f0-9]{64}$/.test(e.resultSha256);
+  if ("goalId" in e) {
+    return binding && Object.keys(value).length === 6 &&
+      typeof e.goalId === "string" &&
+      /^[a-z0-9][a-z0-9_-]{0,63}$/.test(e.goalId) &&
+      timestamp(e.completedAt);
+  }
   const exactSource = "findingRecheckId" in e
     ? Object.keys(value).length === 9 &&
       typeof e.findingRecheckId === "string" &&
@@ -95,10 +118,7 @@ export function validWorkflowStepEvidence(
     ("findingRecheckId" in e ||
       Number.isSafeInteger(e.sourceStepIndex) && e.sourceStepIndex >= 0 &&
         e.sourceStepIndex < 16) &&
-    /^[a-z0-9](?:[a-z0-9-]{0,46}[a-z0-9])?$/.test(e.caseId) &&
-    /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(e.runId) &&
-    Number.isSafeInteger(e.revision) && e.revision > 0 &&
-    /^[a-f0-9]{64}$/.test(e.resultSha256);
+    binding;
 }
 
 export function validWorkflowWaitDeadline(

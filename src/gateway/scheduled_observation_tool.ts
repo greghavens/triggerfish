@@ -1,3 +1,4 @@
+import { readSentinelWorkflowGoalProof } from "./sentinel_goal_completion.ts";
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import {
@@ -597,6 +598,13 @@ export function createWorkflowObservationVerifier(
     };
     const state = current();
     if (!state) return;
+    if ("goal_id" in requirement) {
+      try {
+        return await readSentinelWorkflowGoalProof(path, requirement);
+      } catch {
+        return undefined;
+      }
+    }
     if ("finding_recheck_id" in requirement || "finding_id" in requirement) {
       const snapshot = state.result?.sharedGraph.snapshot;
       if (!snapshot) return;

@@ -1,5 +1,9 @@
 import { assert, assertEquals, assertMatch, assertRejects } from "@std/assert";
-import { join } from "@std/path";
+import { dirname, join } from "@std/path";
+import { createOperatorWorkflowRuns } from "../../src/gateway/operator_workflow_runs.ts";
+import { createWorkflowObservationVerifier } from "../../src/gateway/scheduled_observation_tool.ts";
+import { resolveSentinelCasePath } from "../../src/sentinel/cases.ts";
+import { createWorkflowRunRegistry } from "../../src/workflow/registry.ts";
 import { createProviderRegistry } from "../../src/agent/llm.ts";
 import { createPolicyEngine } from "../../src/core/policy/engine.ts";
 import { createHookRunner } from "../../src/core/policy/hooks/hooks.ts";
@@ -36,8 +40,8 @@ function goal(id: string, reference: string): SentinelFormalGoal {
   };
 }
 
-async function until(check: () => boolean) {
-  for (let attempt = 0; attempt < 100; attempt++) {
+async function until(check: () => boolean, maxAttempts = 100) {
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
     if (check()) return;
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
@@ -47,8 +51,8 @@ async function until(check: () => boolean) {
 Deno.test("authenticated Sentinel chat drafts, approves and extends independently evidenced goals", async () => {
   const directory = await Deno.makeTempDir();
   const mainPath = join(directory, "sentinel.json");
-  const caseDirectory = join(directory, "local-service");
-  const path = join(caseDirectory, "sentinel.json");
+  const path = resolveSentinelCasePath(directory, "local-service");
+  const caseDirectory = dirname(path);
   const draft = [
     goal("inventory", "draft-placeholder"),
     goal("coverage", "proof-b"),
@@ -248,7 +252,7 @@ Deno.test("authenticated Sentinel chat drafts, approves and extends independentl
   }
 
   try {
-    await Deno.mkdir(caseDirectory);
+    await Deno.mkdir(caseDirectory, { recursive: true });
     await Deno.writeTextFile(
       mainPath,
       JSON.stringify({
@@ -273,7 +277,11 @@ Deno.test("authenticated Sentinel chat drafts, approves and extends independentl
             label: `Published ${id}`,
           })),
         ],
-        edges: [],
+        edges: ["proof-a", "proof-b", "proof-c"].map((id) => ({
+          from: id,
+          to: "service-asset",
+          relation: "observed_on",
+        })),
       }),
     );
     const status = "assessment goals status";
@@ -348,6 +356,42 @@ Deno.test("authenticated Sentinel chat drafts, approves and extends independentl
         replay.initialOperatingConstraints,
         starting.initialOperatingConstraints,
       );
+      const exactRunId = readSentinelAssessment(path)?.plan.runId;
+      assert(exactRunId);
+      const watched = {
+        case: "local-service",
+        run_id: exactRunId,
+        revision: initialRevision,
+        goal_id: "inventory",
+      };
+      const verifier = createWorkflowObservationVerifier(directory);
+      assertEquals(await verifier(watched), undefined);
+      const localPlan = {
+        id: "record-goal-check",
+        classification: "INTERNAL" as const,
+        steps: [
+          { id: "verified-goal", satisfiedBy: watched, evidenceWaitSeconds: 5 },
+          { id: "record" },
+        ],
+      };
+      const workflowPath = join(directory, "operator-workflow-runs.db");
+      const workflows = createOperatorWorkflowRuns(
+        createWorkflowRunRegistry(),
+        [localPlan],
+        workflowPath,
+        verifier,
+      );
+      const admitted = workflows.start(localPlan.id);
+      assert(admitted);
+      await until(() =>
+        workflows.traces(admitted.runId, "INTERNAL")?.events.some(({ event }) =>
+          event === "step_waiting"
+        ) === true
+      );
+      assertEquals(
+        workflows.inspect(admitted.runId)?.steps[1].status,
+        "pending",
+      );
       await tick();
       const first = JSON.parse(await turn(status));
       assertEquals(first.active, false, JSON.stringify({ first, rounds }));
@@ -357,6 +401,30 @@ Deno.test("authenticated Sentinel chat drafts, approves and extends independentl
       initialEvidence = JSON.parse(await turn(evidence(initialRevision)));
       assertEquals(initialEvidence, first.completion);
       assertEquals(first.completion.status, "completed");
+      const receipt = await verifier(watched);
+      assert(receipt && "goalId" in receipt);
+      await until(
+        () => workflows.inspect(admitted.runId)?.status === "completed",
+        400,
+      );
+      const reopened = createOperatorWorkflowRuns(
+        createWorkflowRunRegistry(),
+        [localPlan],
+        workflowPath,
+        verifier,
+      );
+      const settled = reopened.traces(admitted.runId, "INTERNAL")?.events.find((
+        { event },
+      ) => event === "step_satisfied");
+      assert(settled && "evidence" in settled);
+      assertEquals(settled.evidence, receipt);
+      assertEquals(receipt.goalId, watched.goal_id);
+      assertEquals(receipt.revision, initialRevision);
+      assertEquals(
+        await verifier({ ...watched, goal_id: "missing" }),
+        undefined,
+      );
+
       assertEquals(
         first.completion.observations.map((
           { criterionId }: { criterionId: string },
@@ -373,6 +441,7 @@ Deno.test("authenticated Sentinel chat drafts, approves and extends independentl
         })
       }`;
       const appended = JSON.parse(await turn(add));
+      assertEquals(await verifier(watched), undefined);
       assertEquals(appended.active, true);
       assertEquals(appended.activeFormalGoalIds, ["followup"]);
       assertEquals(appended.appliedRevision, initialRevision + 1);

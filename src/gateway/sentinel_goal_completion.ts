@@ -1,3 +1,8 @@
+import { canFlowTo } from "../core/types/classification.ts";
+import { sentinelOperatingConstraintsAllow } from "../sentinel/operating_constraints.ts";
+import { readSentinelChatSnapshot } from "../sentinel/chat_mode.ts";
+import { isDeepStrictEqual } from "node:util";
+import type { WorkflowGoalCompletionEvidence } from "./operator_workflow_journal.ts";
 import { sentinelGoalProofArguments } from "../sentinel/worker_goal_recovery.ts";
 import { readSentinelCaseGraphFacts } from "../sentinel/worker_graph_facts.ts";
 import { digestSentinelSnapshot } from "../sentinel/shared_inventory.ts";
@@ -23,6 +28,7 @@ import {
   completeSentinelAssessmentGoal,
   readSentinelAssessment,
   readSentinelAssessmentRevision,
+  readSentinelOperatingConstraints,
   settleSentinelAssessmentDeadline,
   withSentinelAssessmentWriteLock,
 } from "../sentinel/assessment_store.ts";
@@ -172,6 +178,94 @@ export function readSentinelGoalCompletionAtRevision(
 ) {
   const state = goalAssessmentAtRevision(path, revision);
   return state && readSentinelGoalCompletionForState(path, state);
+}
+
+/** Revalidate an exact completed formal goal using only current local graph evidence. */
+export async function readSentinelWorkflowGoalProof(
+  path: string,
+  scope: {
+    readonly case: string;
+    readonly run_id: string;
+    readonly revision: number;
+    readonly goal_id: string;
+  },
+): Promise<WorkflowGoalCompletionEvidence | undefined> {
+  const state = readSentinelAssessment(path);
+  const snapshot = state?.result?.sharedGraph.snapshot;
+  const completion = state?.completion;
+  if (
+    !state || !snapshot || !completion || state.plan.runId !== scope.run_id ||
+    state.revision !== scope.revision ||
+    !completion.formalGoalIds?.includes(scope.goal_id)
+  ) return;
+  const goal = state.plan.formalGoals?.find(({ id }) => id === scope.goal_id);
+  const record = readSentinelGoalCompletionForState(path, state);
+  if (!goal || record?.status !== "completed" || !record.completedAt) return;
+  if (goal.criteria.some(({ source }) => source !== "graph_evidence")) return;
+
+  const published = loadSentinelGraph(await readSentinelChatSnapshot(path))
+    .snapshot();
+  const savedNodes = new Map(snapshot.nodes.map((node) => [node.id, node]));
+  const publishedNodes = new Map(
+    published.nodes.map((node) => [node.id, node]),
+  );
+  const policy = readSentinelOperatingConstraints(
+    path,
+    scope.run_id,
+    scope.revision,
+  );
+  const verify = goalEvidenceVerifier(path, state, record);
+  const evidence = [];
+  for (const criterion of goal.criteria) {
+    const id = `${goal.id}/${criterion.id}`;
+    const saved = record.observations.find(({ criterionId }) =>
+      criterionId === id
+    );
+    const proof = saved?.evidence.find((proof) =>
+      proof.source === "graph_evidence" &&
+      proof.reference === criterion.reference &&
+      canFlowTo(proof.classification ?? "INTERNAL", "INTERNAL") &&
+      verify(id, proof) &&
+      isDeepStrictEqual(
+        savedNodes.get(proof.reference),
+        publishedNodes.get(proof.reference),
+      ) &&
+      sentinelOperatingConstraintsAllow(
+        policy?.constraints,
+        { kind: "review_evidence", nodeId: proof.reference },
+        published,
+      )
+    );
+    if (!proof) return;
+    evidence.push({ id, proof, node: savedNodes.get(proof.reference) });
+  }
+  const current = readSentinelAssessment(path);
+  if (
+    current?.revision !== scope.revision ||
+    current.plan.runId !== scope.run_id ||
+    !isDeepStrictEqual(current.completion, completion) ||
+    !isDeepStrictEqual(
+      readSentinelOperatingConstraints(path, scope.run_id, scope.revision),
+      policy,
+    )
+  ) return;
+  const resultSha256 = createHash("sha256").update(JSON.stringify({
+    caseId: scope.case,
+    runId: scope.run_id,
+    revision: scope.revision,
+    goal,
+    completion,
+    evidence,
+    completedAt: record.completedAt,
+  })).digest("hex");
+  return {
+    caseId: scope.case,
+    runId: scope.run_id,
+    revision: scope.revision,
+    goalId: scope.goal_id,
+    completedAt: completion.at,
+    resultSha256,
+  };
 }
 
 export function readSentinelWorkerGoalProofTraceReceipt(
