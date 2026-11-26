@@ -491,12 +491,11 @@ export async function startServicesAndChannels(
       createSentinelSubagent({
         ...modelRouting.workerOptions(
           state.plan.modelProfile,
-          state.plan.modelFallbackProfiles && state.plan.runId
+          state.plan.runId
             ? {
               path: casePath,
               runId: state.plan.runId,
               revision: state.revision,
-              alternates: state.plan.modelFallbackProfiles,
             }
             : undefined,
         ),

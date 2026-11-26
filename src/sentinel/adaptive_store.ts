@@ -5537,7 +5537,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
       }
         WHERE identity = ? OR (? = 1 AND (
           identity GLOB ? OR identity GLOB ? OR identity GLOB ?
-          OR identity GLOB ? OR identity GLOB ? OR identity GLOB ?
+          OR identity GLOB ? OR identity GLOB ? OR identity GLOB ? OR identity GLOB ?
         ))
           OR identity IN (SELECT value FROM json_each(?))
         ORDER BY started, identity, attempt`)
@@ -5550,6 +5550,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
           `${base}:goal:*`,
           `${base}:constraints:*`,
           `${base}:heartbeat:*`,
+          `${base}:route:*`,
           JSON.stringify(referencedRounds.map(revisionKey)),
         ).map((row) => {
           const hint = /:hint:(\d+)(?:$|:review:|:goal:|:constraints:|:obs:)/
@@ -7531,12 +7532,14 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
           WHERE revision = ? AND status = 'queued' AND dependencyRecommendation IS NOT NULL
           AND COALESCE(
             json_extract(dependencyRecommendation, '$.planningIdentity') != ?
+            AND json_extract(dependencyRecommendation, '$.planningIdentity') NOT GLOB ?
             AND json_extract(dependencyRecommendation, '$.planningIdentity') NOT GLOB ?,
             ?)
         `).all(
           revision,
           planningIdentity,
           `${planningIdentity}:heartbeat:*`,
+          `${planningIdentity}:route:*`,
           Number(hasDecisions),
         );
         const clear = db.prepare(

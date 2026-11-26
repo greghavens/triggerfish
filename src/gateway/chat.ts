@@ -309,6 +309,7 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
                     [
                       "list",
                       "profiles",
+                      "model_route",
                       "inspect",
                       "graph",
                       "findings",

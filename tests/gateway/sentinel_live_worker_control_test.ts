@@ -1772,3 +1772,204 @@ Deno.test("An approved linked run fails over only the unfinished model call and 
     await Deno.remove(baseDir, { recursive: true });
   }
 });
+
+Deno.test("A reviewed model route replacement preserves the running response and applies to the next call", async () => {
+  const baseDir = await Deno.makeTempDir();
+  const caseId = "route-review";
+  const path = resolveSentinelCasePath(baseDir, caseId);
+  const registry = createProviderRegistry();
+  const pausedCall = Promise.withResolvers<void>();
+  const releaseCall = Promise.withResolvers<void>();
+  const allowedNames = ["replacement", "secondary"];
+  const calls: string[] = [];
+  const usage = { inputTokens: 1, outputTokens: 1 };
+  let preservedResult = "";
+  let committedTool = 0;
+  registry.register({
+    name: "default",
+    model: "previous",
+    supportsStreaming: false,
+    async complete() {
+      calls.push("default");
+      pausedCall.resolve();
+      await releaseCall.promise;
+      return {
+        content: "",
+        usage,
+        toolCalls: [{
+          id: "committed-after-review",
+          type: "function",
+          function: { name: "sentinel_graph_overview", arguments: "{}" },
+        }],
+      };
+    },
+  });
+  for (const name of ["replacement", "secondary"]) {
+    registry.register({
+      name,
+      model: name + "-model",
+      supportsStreaming: false,
+      complete(messages) {
+        calls.push(name);
+        preservedResult = String(
+          messages.findLast(({ role }) => role === "tool")?.content,
+        );
+        return Promise.resolve({ content: "[]", usage, toolCalls: [] });
+      },
+    });
+  }
+  registry.setDefault("default");
+  const routing = sentinelAssessmentModelRouting(registry, {
+    INTERNAL: allowedNames,
+  });
+  const hookRunner: HookRunner = {
+    evaluateHook(hook, { input }) {
+      if (
+        hook === "POST_TOOL_RESPONSE" &&
+        input.tool_name === "sentinel_graph_overview"
+      ) {
+        committedTool++;
+      }
+      return Promise.resolve({
+        allowed: true,
+        action: "ALLOW",
+        ruleId: null,
+        duration: 0,
+      });
+    },
+  };
+  let running: Promise<void> | undefined;
+  let agent: ReturnType<typeof createSentinelSubagent> | undefined;
+  try {
+    await Deno.mkdir(dirname(path), { recursive: true });
+    await Deno.writeTextFile(
+      path,
+      JSON.stringify({ version: 1, nodes: [], edges: [] }),
+    );
+    const assessment = startSentinelAssessment(path);
+    const runId = assessment.plan.runId;
+    assert(runId);
+    const ref = {
+      kind: "sentinel",
+      id: caseId,
+      revision: assessment.revision,
+      runId,
+    };
+    const makeAgent = () =>
+      createSentinelSubagent({
+        ...routing.workerOptions(undefined, {
+          path,
+          runId,
+          revision: ref.revision,
+        }),
+        snapshotPath: path,
+        assessmentRevision: ref.revision,
+        plannerExecutionEvidenceRunId: runId,
+        hookRunner,
+      });
+    agent = makeAgent();
+    running = agent.execute("Review saved inventory.", () => {});
+    await pausedCall.promise;
+
+    const change = {
+      ...ref,
+      action: "set_model_route",
+      expectedVersion: 0,
+      requestId: crypto.randomUUID(),
+      modelProfile: "replacement",
+      fallbackModelProfiles: ["secondary"],
+      activeModelProfile: "secondary",
+    };
+    let permitCall = false;
+    await withOwnerControl(
+      baseDir,
+      async (request, approvals) => {
+        assert((await request(change)).includes("blocked"));
+        permitCall = true;
+        assertEquals(
+          JSON.parse(await request({ ...ref, action: "model_route" })).version,
+          0,
+        );
+        assert(
+          (await request({ ...change, runId: crypto.randomUUID() })).startsWith(
+            "Error:",
+          ),
+        );
+        assert(
+          (await request({ ...change, activeModelProfile: "default" }))
+            .startsWith("Error:"),
+        );
+        assertEquals(approvals.length, 0);
+        const edited = JSON.parse(await request(change));
+        assertEquals(edited.edit.before, { activeIndex: 0 });
+        assertEquals(edited.edit.after, {
+          primary: { provider: "replacement", model: "replacement-model" },
+          alternates: [{ provider: "secondary", model: "secondary-model" }],
+          activeIndex: 1,
+        });
+        assertEquals(JSON.parse(await request(change)), edited);
+        assert(
+          (await request({ ...change, requestId: crypto.randomUUID() }))
+            .startsWith("Error:"),
+        );
+        assertEquals(approvals.length, 1);
+        releaseCall.resolve();
+        await running;
+        assertEquals(calls, ["default", "secondary"]);
+        assertEquals(committedTool, 1);
+        assert(preservedResult.startsWith("{"));
+
+        allowedNames.pop();
+        const revoked = makeAgent();
+        try {
+          await revoked.execute("Review again after revocation.", () => {});
+        } finally {
+          revoked.clear();
+        }
+        assertEquals(calls, ["default", "secondary"]);
+        allowedNames.push("secondary");
+
+        assertEquals(
+          JSON.parse(await request({ ...ref, action: "cancel" })).run.status,
+          "stopped",
+        );
+        const archiveId = crypto.randomUUID();
+        assertEquals(
+          JSON.parse(
+            await request({
+              ...ref,
+              action: "archive",
+              requestId: archiveId,
+            }),
+          ).receipt.status,
+          "succeeded",
+        );
+        await Deno.rename(dirname(path), join(baseDir, "old-route-case"));
+        assertEquals(
+          JSON.parse(
+            await request({
+              ...ref,
+              action: "restore",
+              archiveId,
+              requestId: crypto.randomUUID(),
+            }),
+          ).receipt.status,
+          "succeeded",
+        );
+        const restored = JSON.parse(
+          await request({ ...ref, action: "model_route" }),
+        );
+        assertEquals(restored.route, edited.edit.after);
+        assertEquals(restored.history, [edited.edit]);
+        assertEquals(restored.version, 1);
+      },
+      routing.list,
+      () => permitCall,
+    );
+  } finally {
+    releaseCall.resolve();
+    await running?.catch(() => {});
+    agent?.clear();
+    await Deno.remove(baseDir, { recursive: true });
+  }
+});

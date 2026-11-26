@@ -1,3 +1,7 @@
+import {
+  type SentinelModelRoute,
+  sentinelModelRouteEditLimit,
+} from "../sentinel/model_routes.ts";
 import { emptyLinkedSentinelGraphDigest } from "../sentinel/linked_empty_case.ts";
 import { withSentinelSourceSnapshotLock } from "../sentinel/source_snapshot_lock.ts";
 import { parseSentinelLinkedSeedTask } from "../sentinel/linked_seed_task.ts";
@@ -157,6 +161,7 @@ import {
   readSentinelFormalGoalApproval,
   readSentinelGitHubWorkflowReadReceipt,
   readSentinelIncidentReviews,
+  readSentinelModelRoute,
   readSentinelOperatingConstraintHistory,
   readSentinelOperatingConstraints,
   readSentinelOperatingConstraintVersion,
@@ -167,6 +172,7 @@ import {
   recordSentinelFindingReview,
   recordSentinelIncidentReview,
   recordSentinelOperatingConstraints,
+  replaceSentinelModelRoute,
   sentinelFindingDispositions,
   type SentinelFormalGoalApproval,
   sentinelIncidentDispositions,
@@ -356,6 +362,8 @@ export const operatorRunTool: ToolDefinition = {
         "stop",
         "hint",
         "profiles",
+        "model_route",
+        "set_model_route",
         "graph",
         "graph_overview",
         "findings",
@@ -694,6 +702,11 @@ export const operatorRunTool: ToolDefinition = {
       description:
         "Up to three distinct approved INTERNAL provider names in failover order.",
     },
+    activeModelProfile: {
+      type: "string",
+      description:
+        "Approved provider in the replacement chain to use for subsequent calls",
+    },
     modelProfile: {
       type: "string",
       description:
@@ -885,6 +898,7 @@ export const operatorRunTool: ToolDefinition = {
 };
 
 export const sentinelOperatorCaseReadActions = [
+  "model_route",
   "graph_overview",
   "graph",
   "findings",
@@ -903,6 +917,7 @@ export const sentinelOperatorCaseReadActions = [
 
 export const sentinelOperatorCaseReadParameters = [
   "action",
+  "runId",
   "kind",
   "id",
   "revision",
@@ -3013,6 +3028,127 @@ export function createOperatorRunToolExecutor(options: {
           requestId,
         );
         return proposed ? safeProjection({ proposal: proposed }) : unavailable;
+      }
+
+      if (action === "model_route" || action === "set_model_route") {
+        const {
+          runId,
+          requestId,
+          expectedVersion,
+          modelProfile,
+          fallbackModelProfiles,
+          activeModelProfile,
+        } = args;
+        const editing = action === "set_model_route";
+        if (
+          ref.kind !== "sentinel" || ref.revision === undefined ||
+          !canFlowTo("INTERNAL", context?.ceiling ?? "INTERNAL") ||
+          typeof runId !== "string" || !digestPattern.test(runId) ||
+          Object.keys(args).some((key) =>
+            ![
+              "action",
+              "kind",
+              "id",
+              "revision",
+              "runId",
+              ...(editing
+                ? [
+                  "requestId",
+                  "expectedVersion",
+                  "modelProfile",
+                  "fallbackModelProfiles",
+                  "activeModelProfile",
+                ]
+                : []),
+            ].includes(key)
+          ) ||
+          !await controller.inspect(ref)
+        ) return unavailable;
+        const path = resolveSentinelCasePath(options.baseDir, ref.id);
+        const scope = { runId: runId.toLowerCase(), revision: ref.revision };
+        const saved = readSentinelModelRoute(path, scope);
+        if (!saved) return unavailable;
+        if (!editing) {
+          const { route, history, version } = saved;
+          return safeProjection({ route, history, version });
+        }
+        if (
+          typeof requestId !== "string" || !digestPattern.test(requestId) ||
+          typeof expectedVersion !== "number" ||
+          !Number.isSafeInteger(expectedVersion) || expectedVersion < 0 ||
+          !isModelProfileName(modelProfile) ||
+          (activeModelProfile !== undefined &&
+            !isModelProfileName(activeModelProfile)) ||
+          (fallbackModelProfiles !== undefined &&
+            (!Array.isArray(fallbackModelProfiles) ||
+              fallbackModelProfiles.length < 1 ||
+              fallbackModelProfiles.length > 3 ||
+              !fallbackModelProfiles.every(isModelProfileName)))
+        ) return unavailable;
+        const select = (): SentinelModelRoute | undefined => {
+          const profiles = options.sentinelProfiles?.() ?? [];
+          const primary = profiles.find(({ provider }) =>
+            provider === modelProfile
+          );
+          if (!primary) return;
+          const alternates = Array.isArray(fallbackModelProfiles) &&
+            parseModelFallbackProfiles(
+              fallbackModelProfiles.map((name) =>
+                profiles.find(({ provider }) => provider === name)
+              ),
+              primary,
+            );
+          if (fallbackModelProfiles !== undefined && !alternates) return;
+          const activeIndex = activeModelProfile === undefined
+            ? 0
+            : [primary, ...(alternates || [])].findIndex(({ provider }) =>
+              provider === activeModelProfile
+            );
+          if (activeIndex < 0) return;
+          return { primary, ...(alternates && { alternates }), activeIndex };
+        };
+        const after = select();
+        if (!after) return unavailable;
+        const request = requestId.toLowerCase();
+        const earlier = saved.history.find((edit) =>
+          edit.requestId === request
+        );
+        if (earlier) {
+          return earlier.version === expectedVersion + 1 &&
+              isDeepStrictEqual(earlier.after, after)
+            ? safeProjection({ edit: earlier })
+            : unavailable;
+        }
+        if (
+          saved.version !== expectedVersion ||
+          saved.version >= sentinelModelRouteEditLimit ||
+          isDeepStrictEqual(saved.route, after)
+        ) return unavailable;
+        if (
+          !await options.confirm(
+            `Replace the model route for this exact Sentinel assessment?
+${
+              JSON.stringify({
+                caseId: ref.id,
+                ...scope,
+                requestId: request,
+                expectedVersion,
+                before: saved.route,
+                after,
+              })
+            }`,
+          )
+        ) return "Error: The operator declined the run action.";
+        if (
+          !await controller.inspect(ref) || !isDeepStrictEqual(select(), after)
+        ) return unavailable;
+        const edit = replaceSentinelModelRoute(path, scope, {
+          requestId: request,
+          expectedVersion,
+          before: saved.route,
+          after,
+        });
+        return edit ? safeProjection({ edit }) : unavailable;
       }
 
       if (action === "discovery_proposals") {
@@ -8098,6 +8234,7 @@ export function createOperatorRunToolExecutor(options: {
             : undefined;
           if (!other || other.kind !== targetKind) return unavailable;
           if (targetKind === "sentinel") {
+            const originalRoute = providers.sentinel.startModelRoute(other);
             if (
               link.origin !== "spawn" || link.requestId !== request ||
               other.id !== targetId || other.revision === undefined
@@ -8137,11 +8274,11 @@ export function createOperatorRunToolExecutor(options: {
               providers.sentinel.plannerHeartbeat(other) !==
                 plannerHeartbeatSeconds ||
               !isDeepStrictEqual(
-                providers.sentinel.modelProfile(other),
+                originalRoute?.primary,
                 modelProfile,
               ) ||
               !isDeepStrictEqual(
-                providers.sentinel.fallbackModels(other),
+                originalRoute?.alternates,
                 modelFallbackProfiles,
               )
             ) return unavailable;

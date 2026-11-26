@@ -4913,7 +4913,11 @@ export function createSentinelModelPlanner(
         draining ||= controller.signal.aborted;
       }
       if (activePlan || draining) return;
-      let roundIdentity = baseIdentity;
+      const modelRouteVersion = state.plan.modelRouteHistory?.length;
+      const journalIdentity = modelRouteVersion
+        ? `${baseIdentity}:route:${modelRouteVersion}`
+        : baseIdentity;
+      let roundIdentity = journalIdentity;
       const heartbeatSeconds = state.plan.plannerHeartbeatSeconds ??
         defaultHeartbeatSeconds;
       if (
@@ -4922,14 +4926,14 @@ export function createSentinelModelPlanner(
         const store = openSentinelAdaptiveStore(storePath(snapshotPath), now);
         try {
           roundIdentity = store.modelPlannerHeartbeat(
-            baseIdentity,
+            journalIdentity,
             heartbeatSeconds * 1_000,
-          ) ?? baseIdentity;
+          ) ?? journalIdentity;
         } finally {
           store.close();
         }
       }
-      const heartbeat = roundIdentity !== baseIdentity;
+      const heartbeat = roundIdentity !== journalIdentity;
       const formalGoalSet = state.plan.activeFormalGoalIds?.length
         ? JSON.stringify([state.plan.runId, state.plan.activeFormalGoalIds])
         : undefined;

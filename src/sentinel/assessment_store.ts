@@ -1,4 +1,11 @@
 import {
+  parseSentinelModelRoute,
+  type SentinelModelRoute,
+  type SentinelModelRouteEdit,
+  sentinelModelRouteEditLimit,
+  validSentinelModelRouteHistory,
+} from "./model_routes.ts";
+import {
   parseSentinelLinkedSeedTask,
   type SentinelLinkedSeedTask,
 } from "./linked_seed_task.ts";
@@ -103,6 +110,7 @@ export type AssessmentPlan =
     readonly modelProfile?: SelectedModelProfile;
     readonly modelFallbackProfiles?: readonly SelectedModelProfile[];
     readonly modelFallbackIndex?: number;
+    readonly modelRouteHistory?: readonly SentinelModelRouteEdit[];
     readonly plannerHeartbeatSeconds?: number;
     readonly linkedCaseSources?: readonly SentinelLinkedCaseSource[];
     readonly childDescription?: string;
@@ -2750,11 +2758,139 @@ export function readSentinelFallbackModelsForRevision(
   }
 }
 
+function savedModelRoute(plan: AssessmentPlan, revision: number) {
+  const route = parseSentinelModelRoute({
+    primary: plan.modelProfile,
+    alternates: plan.modelFallbackProfiles,
+    activeIndex: plan.modelFallbackIndex ?? 0,
+  });
+  const history = plan.modelRouteHistory ?? [];
+  if (
+    !route || !plan.runId || (plan.modelRouteHistory !== undefined &&
+      !validSentinelModelRouteHistory(
+        plan.modelRouteHistory,
+        plan.runId,
+        revision,
+        route,
+      ))
+  ) return;
+  return { route, history, version: history.length };
+}
+
+export function readSentinelModelRoute(
+  path: string,
+  scope: { readonly runId: string; readonly revision: number },
+) {
+  const current = readSentinelAssessment(path);
+  if (
+    !current || current.revision !== scope.revision ||
+    current.plan.runId !== scope.runId
+  ) return;
+  const saved = savedModelRoute(current.plan, current.revision);
+  return saved && {
+    ...saved,
+    runnable: current.active && !current.paused &&
+      (current.plan.deadlineAt === undefined ||
+        Date.now() < current.plan.deadlineAt),
+  };
+}
+
+/** Commit one exact approved update, independent of model call and worker state. */
+export function replaceSentinelModelRoute(
+  path: string,
+  scope: { readonly runId: string; readonly revision: number },
+  input: {
+    readonly requestId: string;
+    readonly expectedVersion: number;
+    readonly before: SentinelModelRoute;
+    readonly after: SentinelModelRoute;
+  },
+) {
+  const after = parseSentinelModelRoute(input.after);
+  if (!after?.primary || !constraintUuid.test(input.requestId)) return;
+  const db = openStore(path, false);
+  if (!db) return;
+  try {
+    return transact(db, () => {
+      const row = getRow(db);
+      if (!row || row.revision !== scope.revision) return;
+      const plan = JSON.parse(row.plan) as AssessmentPlan;
+      if (plan.runId !== scope.runId) return;
+      const current = savedModelRoute(plan, row.revision);
+      if (!current) return;
+      const prior = current.history.find(({ requestId }) =>
+        requestId === input.requestId
+      );
+      if (prior) {
+        return prior.version === input.expectedVersion + 1 &&
+            isDeepStrictEqual(prior.after, after)
+          ? prior
+          : undefined;
+      }
+      if (
+        input.expectedVersion !== current.version ||
+        current.history.length >= sentinelModelRouteEditLimit ||
+        !isDeepStrictEqual(input.before, current.route) ||
+        isDeepStrictEqual(current.route, after)
+      ) return;
+      const applied: SentinelModelRouteEdit = {
+        requestId: input.requestId,
+        runId: scope.runId,
+        revision: scope.revision,
+        version: current.version + 1,
+        operator: "owner",
+        approvedAt: new Date().toISOString(),
+        before: current.route,
+        after,
+      };
+      db.prepare("UPDATE assessment SET plan = ? WHERE id = 1").run(
+        JSON.stringify({
+          ...plan,
+          modelProfile: after.primary,
+          modelFallbackProfiles: after.alternates,
+          modelFallbackIndex: after.activeIndex || undefined,
+          modelRouteHistory: [...current.history, applied],
+        }),
+      );
+      return applied;
+    });
+  } finally {
+    db.close();
+  }
+}
+
+/** Linked start receipts bind initial approved choices even when the active route changes. */
+export function readSentinelLinkedStartModelRoute(
+  path: string,
+  revision: number,
+) {
+  const db = openStore(path, false);
+  if (!db) return;
+  try {
+    if (!hasTable(db, "assessment_run_revisions")) return;
+    const stored = db.prepare(
+      "SELECT * FROM assessment_run_revisions WHERE revision = ?",
+    ).get(revision);
+    return stored && parseSentinelModelRoute({
+      primary: typeof stored.modelProfile === "string"
+        ? JSON.parse(stored.modelProfile)
+        : undefined,
+      alternates: typeof stored.modelFallbackProfiles === "string"
+        ? JSON.parse(stored.modelFallbackProfiles)
+        : undefined,
+      activeIndex: 0,
+    });
+  } finally {
+    db.close();
+  }
+}
+
 /** Advance once, leaving the approved model choices and evidence revision intact. */
 export function advanceSentinelModelFallback(
   path: string,
   scope: { readonly runId: string; readonly revision: number },
   failedIndex: number,
+  expectedVersion = 0,
 ) {
   const db = openStore(path, false);
   if (!db) return;
@@ -2770,6 +2906,7 @@ export function advanceSentinelModelFallback(
       const index = plan.modelFallbackIndex ?? 0;
       if (
         plan.runId !== scope.runId || !fallbacks ||
+        (plan.modelRouteHistory?.length ?? 0) !== expectedVersion ||
         (plan.deadlineAt !== undefined && Date.now() >= plan.deadlineAt) ||
         !Number.isSafeInteger(failedIndex) || failedIndex < 0 ||
         failedIndex >= fallbacks.length || !Number.isSafeInteger(index) ||

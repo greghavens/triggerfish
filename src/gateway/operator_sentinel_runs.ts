@@ -1,3 +1,4 @@
+import type { SentinelModelRoute } from "../sentinel/model_routes.ts";
 import {
   canCreateEmptyLinkedSentinelCase,
   publishEmptyLinkedSentinelCase,
@@ -33,6 +34,7 @@ import {
   readSentinelFallbackModelsForRevision,
   readSentinelFormalGoalApproval,
   readSentinelLinkedSourcesForRevision,
+  readSentinelLinkedStartModelRoute,
   readSentinelLinkedStartSeed,
   readSentinelModelProfileForRevision,
   readSentinelOperatingConstraintVersion,
@@ -74,6 +76,7 @@ export function createOperatorSentinelRuns(
   fallbackModels(
     ref: OperatorRunRef,
   ): readonly SelectedModelProfile[] | undefined;
+  startModelRoute(ref: OperatorRunRef): SentinelModelRoute | undefined;
   plannerHeartbeat(ref: OperatorRunRef): number | undefined;
   linkedCaseSources(
     ref: OperatorRunRef,
@@ -345,6 +348,12 @@ export function createOperatorSentinelRuns(
       const path = pathFor(ref);
       return path && ref.revision !== undefined
         ? readSentinelPlannerHeartbeatForRevision(path, ref.revision)
+        : undefined;
+    },
+    startModelRoute(ref) {
+      const path = pathFor(ref);
+      return path && ref.revision !== undefined
+        ? readSentinelLinkedStartModelRoute(path, ref.revision)
         : undefined;
     },
     fallbackModels(ref) {

@@ -83,6 +83,11 @@ Sentinel advances the saved route after an availability failure before
 that model call returns a response. It reuses completed tool exchanges.
 New child runs inherit the chain with the parent profile when both are
 omitted. A revoked or changed profile prevents model dispatch.
+Use `operator_runs model_route` to inspect the current route and prior
+operator decisions. To replace it, use `set_model_route` with the exact case,
+run, revision, current `expectedVersion`, and request ID. The approval shows
+the full previous and replacement routes. Set `activeModelProfile` to begin
+with a specific approved provider in the chain.
 To direct the child's shared discovery reads, pass up to four
 `sourceCases` entries with an existing `caseId` and exact saved `revision`.
 The approval includes the resolved source run identities. The planner

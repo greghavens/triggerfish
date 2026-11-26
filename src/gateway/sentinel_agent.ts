@@ -3548,9 +3548,9 @@ function createAgent(
         return provider.model;
       },
       supportsStreaming: false,
-      ...(provider.contextWindow !== undefined
-        ? { contextWindow: provider.contextWindow }
-        : {}),
+      get contextWindow() {
+        return provider.contextWindow;
+      },
       async complete(messages, tools, callOptions) {
         const signal = active?.signal;
         signal?.throwIfAborted();

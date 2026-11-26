@@ -1,3 +1,7 @@
+import {
+  parseSentinelModelRoute,
+  validSentinelModelRouteHistory,
+} from "./model_routes.ts";
 import { parseSentinelLinkedCaseSources } from "./linked_case_sources.ts";
 import { validPlannerHeartbeatSeconds } from "../core/evidence_task_progression.ts";
 import {
@@ -351,6 +355,7 @@ function restoreAssessment(
       linkedCaseSources,
       modelFallbackProfiles,
       modelFallbackIndex,
+      modelRouteHistory,
     } = object(JSON.parse(row.plan));
     if (
       linkedCaseSources !== undefined &&
@@ -392,6 +397,24 @@ function restoreAssessment(
         (row.active === SENTINEL_ASSESSMENT_TIMED_OUT &&
           Date.parse(row.updatedAt) !== deadlineAt))
     ) throw new Error("Invalid archived Sentinel assessment deadline");
+    if (modelRouteHistory !== undefined) {
+      const route = parseSentinelModelRoute({
+        primary: modelProfile,
+        alternates: modelFallbackProfiles,
+        activeIndex: modelFallbackIndex ?? 0,
+      });
+      if (
+        !route ||
+        !validSentinelModelRouteHistory(
+          modelRouteHistory,
+          runId,
+          revision,
+          route,
+        )
+      ) {
+        throw new Error("Invalid archived Sentinel model route history");
+      }
+    }
     const archived = db.prepare(
       "SELECT result FROM assessment_history WHERE revision = ?",
     ).get(revision);
