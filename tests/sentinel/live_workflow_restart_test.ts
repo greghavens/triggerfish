@@ -2664,7 +2664,7 @@ for (
           const journal = openSentinelWorkerFindingStore(path);
           try {
             const original = journal.readFinding(saved.findingId);
-            assert(original);
+            assert(original?.taskId !== undefined);
             const added = journal.recordFinding({
               ...original,
               evidenceRevision: assessment.revision,
@@ -2684,7 +2684,9 @@ for (
           const journal = openSentinelWorkerFindingStore(path);
           try {
             const [original] = journal.list(assessment.revision);
-            assert(original?.kind === "finding");
+            assert(
+              original?.kind === "finding" && original.taskId !== undefined,
+            );
             const added = journal.recordFinding({
               ...original,
               requestId: "new-discovery-finding",
