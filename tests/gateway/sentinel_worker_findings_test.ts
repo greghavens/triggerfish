@@ -1,3 +1,4 @@
+import { createFindingDownload } from "../../tidepool-ui/src/screens/Sentinel/finding_download.ts";
 import { startSentinelAssessmentCoordinator } from "../../src/gateway/sentinel_assessment_service.ts";
 import { createMemorySecretStore } from "../../src/core/secrets/mod.ts";
 import { buildWorkflowRecoveryExecutor } from "../../src/gateway/startup/factory/agent_recovery.ts";
@@ -3968,7 +3969,7 @@ for (
   );
 }
 
-Deno.test("Single-file Sentinel finding exports retain the output byte limit", async () => {
+Deno.test("Tidepool assembles oversized exact-version finding downloads without saving stale pages", async () => {
   const baseDir = await Deno.makeTempDir();
   try {
     const path = resolveSentinelCasePath(baseDir);
@@ -3977,7 +3978,7 @@ Deno.test("Single-file Sentinel finding exports retain the output byte limit", a
       path,
       JSON.stringify({
         version: 1,
-        nodes: Array.from({ length: 140 }, (_, index) => ({
+        nodes: Array.from({ length: 280 }, (_, index) => ({
           id: `finding-${index}`,
           kind: "finding",
           label: "🔍".repeat(256),
@@ -3988,25 +3989,149 @@ Deno.test("Single-file Sentinel finding exports retain the output byte limit", a
     );
     const state = startSentinelAssessment(path);
     await withTidepool(baseDir, async (_list, _provenance, request) => {
-      const selection = {
+      const scope = { findingFilter: {} };
+      for (const format of ["csv", "findings-json"] as const) {
+        const download = createFindingDownload(
+          "main",
+          state.revision,
+          format,
+          scope,
+        );
+        const oversized = await request("export", {
+          caseId: "main",
+          ...download.initial,
+        });
+        assertEquals(oversized.type, "error");
+        assertEquals(oversized.code, "finding_export_byte_limit");
+        assertEquals(oversized.content, undefined);
+        let outcome = download.accept(oversized);
+        let pages = 0;
+        while ("request" in outcome && pages < 25) {
+          const response = await request("export", {
+            caseId: "main",
+            ...outcome.request,
+          });
+          assertEquals(response.type, "export");
+          outcome = download.accept(response);
+          pages++;
+        }
+        assert(pages > 1);
+        assert("content" in outcome);
+        const content = await new Blob([...outcome.content]).text();
+        if (format === "csv") {
+          const lines = content.trimEnd().split("\r\n");
+          assertEquals(lines.length, 281);
+          assertEquals(
+            lines.filter((line) => line.startsWith('"case_id"')).length,
+            1,
+          );
+          assertEquals(
+            new Set(lines.slice(1).map((line) => line.split(",")[2])).size,
+            280,
+          );
+        } else {
+          const result = JSON.parse(content);
+          assertEquals(result.caseId, "main");
+          assertEquals(result.revision, state.revision);
+          assertEquals(result.findings.length, 280);
+          assertEquals(
+            new Set(result.findings.map(({ id }: { id: string }) => id)).size,
+            280,
+          );
+        }
+      }
+      const stale = createFindingDownload(
+        "main",
+        state.revision,
+        "findings-json",
+        scope,
+      );
+      const firstRequest = stale.accept(
+        await request("export", {
+          caseId: "main",
+          ...stale.initial,
+        }),
+      );
+      assert("request" in firstRequest);
+      const more = stale.accept(
+        await request("export", {
+          caseId: "main",
+          ...firstRequest.request,
+        }),
+      );
+      assert("request" in more);
+      const update = await request("review_finding", {
         caseId: "main",
         revision: state.revision,
-        format: "csv",
-        findingFilter: {},
-      };
-      const oversized = await request("export", selection);
-      assertEquals(oversized.type, "error");
-      assertEquals(oversized.content, undefined);
-      const page = await request("export", {
-        ...selection,
-        findingPageSize: 16,
+        findingId: "finding-0",
+        disposition: "confirmed",
+        note: "New reviewed disposition",
       });
-      assertEquals(page.type, "export");
-      assertEquals((page.findingPage as { total: number }).total, 140);
+      assertEquals(update.type, "sentinel_state");
+      const expired = await request("export", {
+        caseId: "main",
+        ...more.request,
+      });
+      assertEquals(expired.type, "error");
+      assert("error" in stale.accept(expired));
     });
   } finally {
     await Deno.remove(baseDir, { recursive: true });
   }
+});
+
+Deno.test("Finding download assembly shrinks oversized pages and rejects oversized artifacts", () => {
+  const download = createFindingDownload("main", 1, "csv", {
+    findingFilter: {},
+  });
+  const scope = { caseId: "main", revision: 1, format: "csv" };
+  const byteLimit = {
+    ...scope,
+    type: "error",
+    code: "finding_export_byte_limit",
+  };
+  const initial = download.accept(byteLimit);
+  assert("request" in initial);
+  assertEquals(initial.request.findingPageSize, 16);
+  const smaller = download.accept(byteLimit);
+  assert("request" in smaller);
+  assertEquals(smaller.request.findingPageSize, 8);
+  const digest = "1".repeat(64);
+  const header =
+    '"case_id","evidence_revision","finding_id","title","exact_record"\r\n';
+  const count = 8;
+  const total = 288;
+  let offset = 0;
+  while (offset < total) {
+    const end = offset + count;
+    const content = header +
+      Array.from(
+        { length: count },
+        (_, index) =>
+          `"main","1","finding-${offset + index}","${
+            "x".repeat(32_000)
+          }","{}"\r\n`,
+      ).join("");
+    const outcome = download.accept({
+      ...scope,
+      type: "export",
+      content,
+      findingPage: {
+        manifestDigest: digest,
+        offset,
+        count,
+        total,
+        nextCursor: end === total ? null : `finding-export:${digest}:${end}`,
+      },
+    });
+    if ("error" in outcome) {
+      assertEquals(end, 264);
+      return;
+    }
+    assert("request" in outcome);
+    offset = end;
+  }
+  throw new Error("The export exceeded the aggregate byte limit");
 });
 
 Deno.test("Gateway publication requires the exact saved workflow attempt and evidence revision", () =>

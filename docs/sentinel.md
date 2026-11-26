@@ -315,15 +315,18 @@ the source `kind` (`imported` or `worker`), or a case-insensitive text
 `query` on saved report titles and summaries. Filter findings by their
 saved `severity` or analyst `disposition`, and worker findings by
 `findingCategory`. An empty
-filter selects every finding in the case at that revision. Over-limit reports require narrower
-filters or exact IDs.
+filter selects every finding in the case at that revision. Larger reports can
+use narrower filters, exact IDs, or paged results.
 
 To export a larger selection, set `findingPageSize` to 1–16 and repeat the
 same request with the returned `findingPage.nextCursor` until it is null.
 Each page names its offset, count, complete selection total and manifest
 digest. The cursor binds the case, saved revision, filter or selected IDs,
 format and reviewed report inputs. If selected evidence or decisions change,
-start a new export. Each page can carry up to 256 KiB of report content.
+start a new export. Each page can carry up to 256 KiB of report content. In
+Tidepool, **Findings CSV** and **Findings JSON** can assemble these pages into
+a single download of up to 8 MiB when the direct export reaches its byte limit. The
+download aborts if the report selection changes before all pages arrive.
 
 The `md-zip` response provides a base64 ZIP with one Markdown file per finding,
 a suggested `filename`, and `contentType: application/zip`. Each file retains the

@@ -1389,6 +1389,10 @@ export function createTidepoolSentinelHandler(
                 "Select findings or a finding filter and an exact evidence revision to export.",
               );
             }
+            let exceedsByteLimit = false;
+            const markByteLimit = () => {
+              exceedsByteLimit = true;
+            };
             const page = paged
               ? renderScopedSentinelFindingsPage(
                 path,
@@ -1399,6 +1403,7 @@ export function createTidepoolSentinelHandler(
                 language,
                 message.findingPageSize ?? 16,
                 message.findingCursor,
+                markByteLimit,
               )
               : undefined;
             const content = paged
@@ -1410,7 +1415,22 @@ export function createTidepoolSentinelHandler(
                 selection,
                 format,
                 language,
+                markByteLimit,
               );
+            if (content === undefined && exceedsByteLimit) {
+              send({
+                topic: "sentinel",
+                type: "error",
+                code: "finding_export_byte_limit",
+                caseId,
+                revision: state.revision,
+                format,
+                message: paged
+                  ? "The finding report page exceeds the byte limit. Request a smaller page."
+                  : "The finding report exceeds the byte limit. Request paged results.",
+              });
+              return;
+            }
             if (content === undefined) {
               throw new SentinelAssignmentError(
                 paged

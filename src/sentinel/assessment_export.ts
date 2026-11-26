@@ -374,6 +374,7 @@ export function renderScopedSentinelFindings(
   selection: string[] | FindingExportFilter,
   format: ScopedFindingExportFormat,
   language: SentinelReportLanguage,
+  onByteLimit?: () => void,
 ): string | undefined {
   return renderFindingExport(
     path,
@@ -382,6 +383,8 @@ export function renderScopedSentinelFindings(
     selection,
     format,
     language,
+    undefined,
+    onByteLimit,
   )?.content;
 }
 
@@ -394,6 +397,7 @@ export function renderScopedSentinelFindingsPage(
   language: SentinelReportLanguage,
   size: unknown,
   cursor: unknown,
+  onByteLimit?: () => void,
 ) {
   if (
     typeof size !== "number" || !Number.isSafeInteger(size) ||
@@ -416,6 +420,7 @@ export function renderScopedSentinelFindingsPage(
       offset: match ? Number(match[2]) : 0,
       ...(match && { manifestDigest: match[1] }),
     },
+    onByteLimit,
   );
 }
 
@@ -428,6 +433,7 @@ function renderFindingExport(
   format: ScopedFindingExportFormat,
   language: SentinelReportLanguage,
   page?: FindingExportPageRequest,
+  onByteLimit?: () => void,
 ): { content: string; findingPage?: FindingExportPage } | undefined {
   const explicit = Array.isArray(selection);
   if (locateSentinelCase(path)?.caseId !== caseId) return;
@@ -778,14 +784,19 @@ function renderFindingExport(
         MAX_FINDING_EXPORT_BYTES,
         page?.offset,
       );
-      return zip === undefined ? undefined : { content: zip, findingPage };
+      if (zip === undefined) {
+        onByteLimit?.();
+        return;
+      }
+      return { content: zip, findingPage };
     }
     content = renderMarkdown(records);
   }
-  return new TextEncoder().encode(content).byteLength <=
-      MAX_FINDING_EXPORT_BYTES
-    ? { content, findingPage }
-    : undefined;
+  if (new TextEncoder().encode(content).byteLength > MAX_FINDING_EXPORT_BYTES) {
+    onByteLimit?.();
+    return;
+  }
+  return { content, findingPage };
 }
 
 /** Export an inert Markdown report separating imported data and analyst review. */

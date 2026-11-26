@@ -44,7 +44,9 @@
     type DecisionHistoryPage,
   } from "./types.js";
 
-  type ExportFormat = "csv" | "markdown" | "provenance" | "inventory" | "alerts" | "decisions" | "incidents";
+  import { createFindingDownload, type FindingDownloadFormat } from "./finding_download.js";
+
+  type ExportFormat = FindingDownloadFormat | "markdown" | "provenance" | "inventory" | "alerts" | "decisions" | "incidents";
   const incidentDispositions = ["investigating", "resolved", "dismissed", "requires_review"];
   type DecisionDetail = {
     id: number; kind: "finding" | "incident"; subjectId: string; revision: number;
@@ -284,6 +286,7 @@
     pages: WorkerHistory[] | null;
     cursor?: number | null;
   };
+  let findingDownload = $state.raw<ReturnType<typeof createFindingDownload>>();
   let historyDownload = $state.raw<{
     timelines: TimelineDownload[];
     finish: (timelines: { revision: number; events: WorkerHistory | null }[]) => void;
@@ -646,6 +649,7 @@
       requestTimeout = setTimeout(() => {
         completeRequest();
         historyDownload = undefined;
+        findingDownload = undefined;
         error =
           "The request timed out. Refresh to check the assessment status.";
       }, 15000);
@@ -905,6 +909,21 @@
         comparison = { ...comparison, workerHistory: [...(comparison.workerHistory ?? []), ...events], historyCursor };
       }
       completeRequest();
+    } else if ((message.type === "export" || message.type === "error") &&
+      pending === "export" && findingDownload && message.requestId === pendingId) {
+      const outcome = findingDownload.accept(message);
+      completeRequest();
+      if ("request" in outcome) {
+        request("export", outcome.request);
+      } else {
+        findingDownload = undefined;
+        if ("content" in outcome) {
+          downloadReport(message.format as FindingDownloadFormat, outcome.content,
+            message.revision as number, undefined, "findings");
+        } else {
+          error = outcome.error;
+        }
+      }
     } else if (message.type === "export" && pending === "export") {
       const { format, content } = message;
       if (
@@ -918,6 +937,7 @@
       completeRequest();
     } else if (message.type === "error" || message.type === "sentinel_error") {
       historyDownload = undefined;
+      findingDownload = undefined;
       error =
         typeof message.message === "string"
           ? message.message
@@ -931,6 +951,8 @@
     if (message.type === "ws_connected") request("status");
     if (message.type === "ws_disconnected") {
       if (historyDownload) error = "The worker history download was interrupted.";
+      if (findingDownload) error = "The findings download was interrupted.";
+      findingDownload = undefined;
       historyDownload = undefined;
       completeRequest();
     }
@@ -1000,16 +1022,24 @@
     downloadReport("markdown", lines.join("\n") + "\n", revision, undefined, "worker-history");
   }
 
-  function downloadReport(format: ExportFormat, content: string, revision?: number, baseline?: number, suffix?: string) {
+  function startFindingDownload(format: FindingDownloadFormat) {
+    const revision = historical?.revision ?? assessment?.revision;
+    if (!online || pending || revision === undefined) return;
+    const download = createFindingDownload(caseId, revision, format, { findingFilter: {} });
+    findingDownload = download;
+    request("export", download.initial);
+  }
+
+  function downloadReport(format: ExportFormat, content: string | readonly string[], revision?: number, baseline?: number, suffix?: string) {
     const mime =
       format === "csv"
         ? "text/csv;charset=utf-8"
-        : format === "provenance" || format === "inventory" || format === "alerts" || format === "decisions" || format === "incidents"
+        : format === "provenance" || format === "inventory" || format === "alerts" || format === "decisions" || format === "incidents" || format === "findings-json"
         ? "application/json;charset=utf-8"
         : "text/markdown;charset=utf-8";
     const extension = format === "csv" ? "csv" : format === "markdown" ? "md" : "json";
     if (format === "inventory" || format === "alerts" || format === "decisions" || format === "incidents") suffix = format;
-    const url = URL.createObjectURL(new Blob([content], { type: mime }));
+    const url = URL.createObjectURL(new Blob(typeof content === "string" ? [content] : [...content], { type: mime }));
     const link = document.createElement("a");
     link.href = url;
     const revisions = baseline === undefined
@@ -1973,6 +2003,14 @@
                     onclick={() => request("export", { format: "markdown", revision: historical?.revision, language: reportLanguage })}
                   >
                     Markdown
+                  </button>
+                  <button type="button" class="button" disabled={!online || !!pending}
+                    onclick={() => startFindingDownload("csv")}>
+                    {t("Findings CSV")}
+                  </button>
+                  <button type="button" class="button" disabled={!online || !!pending}
+                    onclick={() => startFindingDownload("findings-json")}>
+                    {t("Findings JSON")}
                   </button>
                   <button type="button" class="button" disabled={!online || !!pending}
                     onclick={() => request("export", { format: "provenance", revision: historical?.revision })}>

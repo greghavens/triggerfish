@@ -137,6 +137,8 @@ const messages = {
   "Search traffic": ["Buscar tráfico", "트래픽 검색", "搜索流量", "トラフィックを検索"],
   "Export": ["Exportar", "내보내기", "导出", "エクスポート"],
   "Exporting…": ["Exportando…", "내보내는 중…", "正在导出…", "エクスポート中…"],
+  "Findings CSV": ["Hallazgos (CSV)", "발견 사항 (CSV)", "发现结果（CSV）", "検出事項（CSV）"],
+  "Findings JSON": ["Hallazgos (JSON)", "발견 사항 (JSON)", "发现结果（JSON）", "検出事項（JSON）"],
   "Provenance JSON": ["Procedencia (JSON)", "출처 정보 (JSON)", "溯源信息（JSON）", "来歴（JSON）"],
   "Inventory JSON": ["Inventario (JSON)", "인벤토리 (JSON)", "清单（JSON）", "インベントリ（JSON）"],
   "Alerts JSON": ["Alertas (JSON)", "경보 (JSON)", "告警（JSON）", "アラート（JSON）"],
