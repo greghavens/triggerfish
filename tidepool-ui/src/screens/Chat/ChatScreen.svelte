@@ -13,6 +13,11 @@
   <div class="chat-main">
     <StatusBar />
     <MessageList />
+    {#if !side.visible}
+      <button class="open-side-questions" onclick={() => sendMessage("/btw")}>
+        Side questions
+      </button>
+    {/if}
     {#if side.visible}
       <section class="side-questions" aria-label="Side question history">
         <header>
@@ -47,6 +52,11 @@
     display: flex;
     flex-direction: column;
     min-width: 0;
+  }
+
+  .open-side-questions {
+    align-self: flex-start;
+    margin: 0 16px;
   }
 
   .side-questions {
