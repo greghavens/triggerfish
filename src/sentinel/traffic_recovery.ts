@@ -34,6 +34,7 @@ const searchFields = [
   "family",
   "evidenceId",
   "origin",
+  "urlContains",
   "hostname",
   "method",
   "status",

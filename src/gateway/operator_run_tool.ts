@@ -757,6 +757,7 @@ export const operatorRunTool: ToolDefinition = {
     family: sentinelTrafficSearchTool.parameters.family,
     origin: sentinelTrafficSearchTool.parameters.origin,
     authority: sentinelTrafficSearchTool.parameters.authority,
+    urlContains: sentinelTrafficSearchTool.parameters.urlContains,
     hostname: sentinelTrafficSearchTool.parameters.hostname,
     method: sentinelTrafficSearchTool.parameters.method,
     status: sentinelTrafficSearchTool.parameters.status,

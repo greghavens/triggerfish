@@ -67,6 +67,11 @@ export const sentinelTrafficSearchTool: ToolDefinition = {
       description:
         "Exact retained HTTP hostname with optional port, across HTTP and HTTPS. Use brackets for IPv6. Omit scheme, path and credentials.",
     },
+    urlContains: {
+      type: "string",
+      description:
+        "Literal case-insensitive substring of the retained HTTP origin (scheme, host, and port). Request paths, query strings, and credentials are absent from retained URL metadata.",
+    },
     hostname: { type: "string", description: "Exact normalized DNS hostname" },
     method: { type: "string", description: "Exact normalized HTTP method" },
     status: { type: "integer", description: "Exact HTTP status" },

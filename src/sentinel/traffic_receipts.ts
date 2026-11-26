@@ -48,6 +48,7 @@ export interface SentinelTrafficReceiptQuery {
   readonly evidenceId?: string;
   readonly origin?: string;
   readonly authority?: string;
+  readonly urlContains?: string;
   readonly hostname?: string;
   readonly method?: string;
   readonly status?: number;
@@ -585,6 +586,7 @@ export function validSentinelTrafficReceiptQuery(
     hostname,
     origin,
     authority,
+    urlContains,
     method,
     status,
     from,
@@ -602,6 +604,10 @@ export function validSentinelTrafficReceiptQuery(
       (typeof hostname !== "string" || !HOST.test(hostname))) ||
     (origin !== undefined && !httpOrigin(origin)) ||
     (authority !== undefined && !parseHttpAuthority(authority)) ||
+    (urlContains !== undefined &&
+      (typeof urlContains !== "string" || urlContains.length > 128 ||
+        !/^[a-z0-9.:[\]/_%~-]+$/i.test(urlContains) ||
+        redactCredentialText(urlContains) !== urlContains)) ||
     (method !== undefined && !METHODS.has(method)) ||
     (status !== undefined &&
       (!Number.isInteger(status) ||
@@ -632,6 +638,7 @@ export function readSentinelTrafficReceiptPage(
     hostname,
     origin,
     authority,
+    urlContains,
     method,
     status,
     from,
@@ -650,6 +657,7 @@ export function readSentinelTrafficReceiptPage(
   );
   if (!available) return undefined;
   const selectedAuthority = parseHttpAuthority(authority);
+  const urlSubstring = urlContains?.toLowerCase();
   const phrase = bodyContains?.toLowerCase();
   const header = headerContains?.toLowerCase();
   const results = available.filter(
@@ -673,6 +681,8 @@ export function readSentinelTrafficReceiptPage(
         (selectedAuthority === undefined ||
           (http &&
             matchesHttpAuthority(observation.origin, selectedAuthority))) &&
+        (urlSubstring === undefined ||
+          (http && observation.origin.toLowerCase().includes(urlSubstring))) &&
         (method === undefined || (http && observation.method === method)) &&
         (status === undefined || (http && observation.status === status)) &&
         (from === undefined || (at !== undefined && at >= from)) &&
@@ -699,6 +709,7 @@ export function readSentinelTrafficReceiptPage(
     until,
     ...(phrase === undefined ? [] : ["reviewed-text", phrase]),
     ...(header === undefined ? [] : ["reviewed-header", header]),
+    ...(urlSubstring === undefined ? [] : ["retained-url", urlSubstring]),
     ...(selectedAuthority === undefined
       ? []
       : ["http-authority", selectedAuthority.host, selectedAuthority.port]),

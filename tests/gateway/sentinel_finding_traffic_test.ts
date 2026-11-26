@@ -1084,7 +1084,7 @@ Deno.test("Leased workers attach only exact saved traffic and authenticated Tide
   }
 });
 
-Deno.test("Authenticated retained HTTP authority search separates ports and binds cursors to scope", async () => {
+Deno.test("Authenticated retained HTTP authority and URL searches bind cursors to scope", async () => {
   const baseDir = await Deno.makeTempDir();
   const path = resolveSentinelCasePath(baseDir, caseId);
   try {
@@ -1166,6 +1166,53 @@ Deno.test("Authenticated retained HTTP authority search separates ports and bind
       origins.slice(2, 4).sort(),
     );
     for (const result of rejected) assertStringIncludes(result, "unavailable");
+    const urlQuery = {
+      ...query,
+      authority: undefined,
+      urlContains: "DUAL.EXAMPLE:8443",
+    };
+    const [firstUrl, pathOnly, literalPercent, malformedUrl] =
+      await readTrafficThroughGateway(baseDir, [
+        urlQuery,
+        { ...urlQuery, urlContains: "/unretained" },
+        { ...urlQuery, urlContains: "%" },
+        { ...urlQuery, urlContains: "https://user@dual.example" },
+      ]);
+    const urlPage = JSON.parse(firstUrl);
+    assert(urlPage.nextCursor);
+    assertEquals(projectedOrigins(JSON.parse(pathOnly)), []);
+    assertEquals(projectedOrigins(JSON.parse(literalPercent)), []);
+    assertStringIncludes(malformedUrl, "unavailable");
+    const [continuedUrl, wrongFilter] = await readTrafficThroughGateway(
+      baseDir,
+      [
+        {
+          ...urlQuery,
+          urlContains: "dual.example:8443",
+          cursor: urlPage.nextCursor,
+        },
+        {
+          ...urlQuery,
+          urlContains: "dual.example",
+          cursor: urlPage.nextCursor,
+        },
+      ],
+    );
+    assertEquals(
+      [
+        ...projectedOrigins(urlPage),
+        ...projectedOrigins(JSON.parse(continuedUrl)),
+      ].sort(),
+      origins.slice(2, 4).sort(),
+    );
+    assertStringIncludes(wrongFilter, "unavailable");
+    const [blockedUrl] = await readTrafficThroughGateway(
+      baseDir,
+      [urlQuery],
+      (hook) => hook !== "PRE_TOOL_CALL",
+    );
+    assert(!blockedUrl.includes("dual.example"));
+
     const lease = createLease(path, state, observations[3].assetId);
     const worker = await runWorker(path, lease, [[
       call(search, { revision: state.revision, authority: query.authority }),
@@ -1173,11 +1220,27 @@ Deno.test("Authenticated retained HTTP authority search separates ports and bind
         revision: state.revision,
         authority: "other.example:8443",
       }),
+      call(search, { revision: state.revision, urlContains: "DUAL.EXAMPLE" }),
+      call(search, { revision: state.revision, urlContains: "other.example" }),
     ]]);
     assertEquals(projectedOrigins(JSON.parse(worker.responses[0][0])), [
       origins[3],
     ]);
     assertEquals(projectedOrigins(JSON.parse(worker.responses[0][1])), []);
+    assertEquals(projectedOrigins(JSON.parse(worker.responses[0][2])), [
+      origins[3],
+    ]);
+    assertEquals(projectedOrigins(JSON.parse(worker.responses[0][3])), []);
+    for (
+      const hook of [
+        "PRE_TOOL_CALL:" + search,
+        "POST_TOOL_RESPONSE:" + search,
+        "PRE_OUTPUT",
+      ]
+    ) {
+      assert(worker.checks.includes(hook));
+    }
+
     assert(state.plan.runId);
     assert(recordSentinelOperatingConstraints(path, {
       runId: state.plan.runId,
@@ -1190,12 +1253,17 @@ Deno.test("Authenticated retained HTTP authority search separates ports and bind
         allowedAssetIds: [observations[2].assetId],
       },
     }));
-    const [narrowed, staleCursor] = await readTrafficThroughGateway(baseDir, [
-      query,
-      { ...query, cursor: page.nextCursor },
-    ]);
+    const [narrowed, staleCursor, narrowedUrl, staleUrlCursor] =
+      await readTrafficThroughGateway(baseDir, [
+        query,
+        { ...query, cursor: page.nextCursor },
+        urlQuery,
+        { ...urlQuery, cursor: urlPage.nextCursor },
+      ]);
     assertEquals(projectedOrigins(JSON.parse(narrowed)), [origins[2]]);
+    assertEquals(projectedOrigins(JSON.parse(narrowedUrl)), [origins[2]]);
     assertStringIncludes(staleCursor, "unavailable");
+    assertStringIncludes(staleUrlCursor, "unavailable");
   } finally {
     await Deno.remove(baseDir, { recursive: true });
   }
