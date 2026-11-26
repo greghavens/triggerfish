@@ -387,6 +387,7 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
                       "discovery_proposals",
                       "facts",
                       "list_digests",
+                      "case_local_tool_usage",
                       "expand_digest",
                       "node",
                       "traces",

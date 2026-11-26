@@ -19,6 +19,7 @@ import {
   reviewedRuleActions,
 } from "./operator_reviewed_rules.ts";
 import { sentinelRoleModelSelection } from "./sentinel_model_routing.ts";
+import { readAuthorizedSentinelLocalToolUsage } from "./sentinel_local_tool_usage.ts";
 import {
   executeNamedRecordAction,
   namedRecordActions,
@@ -666,6 +667,7 @@ export const operatorRunTool: ToolDefinition = {
         "facts",
         "save_digest",
         "list_digests",
+        "case_local_tool_usage",
         "expand_digest",
         "node",
         "inventory",
@@ -1730,6 +1732,7 @@ export const sentinelOperatorCaseReadActions = [
   "finding_lineage",
   ...sentinelScopedTelemetryReadActions,
   "list_digests",
+  "case_local_tool_usage",
   "expand_digest",
   "traces",
   "list_trace_workers",
@@ -8986,6 +8989,26 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
           context?.ceiling ?? "INTERNAL",
         );
         return page ? safeProjection({ run: ref, page }) : unavailable;
+      }
+      if (action === "case_local_tool_usage") {
+        if (
+          ref.kind !== "sentinel" || ref.revision === undefined ||
+          typeof args.runId !== "string" || !digestPattern.test(args.runId) ||
+          Object.keys(args).some((key) =>
+            !["action", "kind", "id", "revision", "runId"].includes(key)
+          ) ||
+          !await controller.inspect(ref)
+        ) return unavailable;
+        const usage = await readAuthorizedSentinelLocalToolUsage(
+          resolveSentinelCasePath(options.baseDir, ref.id),
+          ref.id,
+          ref.revision,
+          args,
+          context,
+        );
+        return usage?.runId === args.runId
+          ? safeProjection({ run: ref, ...usage })
+          : unavailable;
       }
       if (
         action === "save_digest" || action === "list_digests" ||

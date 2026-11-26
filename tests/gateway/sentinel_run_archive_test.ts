@@ -2983,6 +2983,12 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
     let exactLink: unknown;
     let earlierLink: unknown;
     let archiveReceipt: unknown;
+    const localUsageQuery = {
+      action: "case_local_tool_usage",
+      ...exact,
+      runId: state.plan.runId,
+    };
+    let localUsage: unknown;
     await withGateway(baseDir, async (turn, approvals, policy) => {
       policy.denyArchive = true;
       assert((await turn(request)).length);
@@ -2992,6 +2998,29 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
       assert(exactLink);
       earlierLink = JSON.parse(await turn(earlierLinkRequest)).link;
       assert(earlierLink);
+      const usage = await turn(localUsageQuery);
+      assert(usage.startsWith("{"), usage);
+      localUsage = JSON.parse(usage);
+      const rollup = JSON.parse(usage).totals;
+      assertEquals(
+        rollup.find(({ role }: { role: string }) => role === "planner"),
+        {
+          role: "planner",
+          tool: "sentinel_graph_overview",
+          calls: 1,
+          failed: 0,
+        },
+      );
+      assert(
+        rollup.some(({ role, tool, calls }: {
+          role: string;
+          tool: string;
+          calls: number;
+        }) =>
+          role === "worker" && tool === "sentinel_assigned_target" && calls > 0
+        ),
+      );
+      assert(!usage.includes("sentinel_finding_traffic_links"));
       archiveReceipt = JSON.parse(await turn(request)).receipt;
       assertEquals((archiveReceipt as { status: string }).status, "succeeded");
       assertEquals(JSON.parse(await turn(request)).receipt, archiveReceipt);
@@ -3889,6 +3918,17 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
         id: exact.id,
         revision: exact.revision,
       };
+      assertEquals(JSON.parse(await turn(localUsageQuery)), localUsage);
+      policy.denyWorkerSourceBefore = true;
+      assertStringIncludes(await turn(localUsageQuery), "unavailable");
+      policy.denyWorkerSourceBefore = false;
+      policy.denyWorkerSourceAfter = true;
+      assertStringIncludes(await turn(localUsageQuery), "unavailable");
+      policy.denyWorkerSourceAfter = false;
+      assertStringIncludes(
+        await turn({ ...localUsageQuery, id: "archive-peer" }),
+        "unavailable",
+      );
       const plannerPage = JSON.parse(await turn(plannerQuery));
       assertEquals(plannerPage.page, [{
         plannerIdentity: `${revision}:obs:archive-fixture`,
