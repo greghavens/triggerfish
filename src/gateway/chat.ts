@@ -923,6 +923,11 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
       },
     };
   }
+  const reservedAgentProfiles = new Set([
+    "sentinel-goals",
+    "sentinel-reporter",
+    "sentinel-recheck",
+  ]);
   let activeAgentProfileId: string | undefined;
   const runtimeConfig = withAgentProfileRuntime(orchestratorConfig, () => {
     if (
@@ -1712,7 +1717,9 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
             return;
           }
           if (
-            id !== "off" && !readAgentProfile(config.customToolsBaseDir, id)
+            id !== "off" &&
+            (reservedAgentProfiles.has(id) ||
+              !readAgentProfile(config.customToolsBaseDir, id))
           ) {
             sendEvent({
               type: "error",

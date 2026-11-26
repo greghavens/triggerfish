@@ -23,15 +23,28 @@ Deno.test("Reviewed agent profiles persist history and restrict a selected gatew
   let confirmations = 0;
   let allowed = true;
   let invoked = 0;
+  let timeoutSummaries = 0;
   registry.register({
     name: "agent-profile-fixture",
     supportsStreaming: false,
-    complete(messages, tools) {
+    async complete(messages, tools) {
       const usage = { inputTokens: 1, outputTokens: 1 };
       modelPrompt = messages.filter(({ role }) => role === "system")
         .map(({ content }) => content).join("\n");
       advertised = JSON.stringify(tools ?? []);
       const last = messages.at(-1);
+      if (
+        typeof last?.content === "string" &&
+        last.content.startsWith("[SYSTEM] Task deadline reached.")
+      ) {
+        assertStringIncludes(last.content, "State what remained undone.");
+        assertEquals(tools, []);
+        timeoutSummaries++;
+        return { content: "Timed-out work summarized.", usage, toolCalls: [] };
+      }
+      if (last?.content === "Run a slow task.") {
+        await new Promise((resolve) => setTimeout(resolve, 1100));
+      }
       if (last?.role === "tool") {
         result = String(last.content);
         return Promise.resolve({ content: "Done.", usage, toolCalls: [] });
@@ -98,7 +111,7 @@ Deno.test("Reviewed agent profiles persist history and restrict a selected gatew
       ws.addEventListener("open", () => resolve(), { once: true });
       ws.addEventListener("error", reject, { once: true });
     });
-    const turn = async (content: string) => {
+    const turn = async (content: string, cancel = false) => {
       result = "";
       const done = Promise.withResolvers<void>();
       const timeout = setTimeout(
@@ -106,7 +119,11 @@ Deno.test("Reviewed agent profiles persist history and restrict a selected gatew
         5000,
       );
       const receive = ({ data }: MessageEvent) => {
-        if (JSON.parse(String(data)).type === "turn_end") done.resolve();
+        const type = JSON.parse(String(data)).type;
+        if (cancel && type === "llm_start") {
+          ws.send(JSON.stringify({ type: "cancel" }));
+        }
+        if (type === "turn_end") done.resolve();
       };
       ws.addEventListener("message", receive);
       try {
@@ -146,12 +163,28 @@ Deno.test("Reviewed agent profiles persist history and restrict a selected gatew
     assertEquals(JSON.parse(await manage(creation)).profile.version, 1);
     assertEquals(JSON.parse(await manage(creation)).profile.version, 1);
     assertEquals(confirmations, 2);
+    assertEquals(
+      JSON.parse(
+        await manage({
+          ...creation,
+          id: "sentinel-reporter",
+          requestId: crypto.randomUUID(),
+          profileSettings: {
+            ...profileSettings,
+            prompt: "Reserved reporter prompt.",
+          },
+        }),
+      ).profile.version,
+      1,
+    );
+    await turn("/agent-profile sentinel-reporter");
     const preview = await manage({
       action: "preview_agent_prompt",
       id,
       promptVariables: { topic: "alerts" },
     });
     assertEquals(JSON.parse(preview).prompt, "Use careful wording for alerts.");
+    assert(!modelPrompt.includes("Reserved reporter prompt."));
     const changed = await manage({
       ...creation,
       requestId: crypto.randomUUID(),
@@ -181,16 +214,42 @@ Deno.test("Reviewed agent profiles persist history and restrict a selected gatew
     assert(!advertised.includes("fixture_read"));
     assertEquals(invoked, 0);
     await turn("/agent-profile off");
+    assertEquals(
+      JSON.parse(
+        await manage({
+          ...creation,
+          expectedVersion: 2,
+          requestId: crypto.randomUUID(),
+          profileSettings: {
+            ...profileSettings,
+            tools: ["fixture_read"],
+            runSeconds: 1,
+          },
+        }),
+      ).profile.version,
+      3,
+    );
+    await turn("/agent-profile test-agent");
+    requested = { name: "fixture_read", args: {} };
+    await turn("Run a slow task.");
+    assertEquals(timeoutSummaries, 1);
+    assertEquals(invoked, 0);
+    await turn("Run a slow task.", true);
+    assertEquals(timeoutSummaries, 1);
+    assertEquals(invoked, 0);
+    await turn("/agent-profile off");
     const deleted = await manage({
       action: "delete_agent_profile",
       id,
-      expectedVersion: 2,
+      expectedVersion: 3,
       requestId: crypto.randomUUID(),
     });
     assertEquals(JSON.parse(deleted).profile.definition, null);
     assertEquals(
-      JSON.parse(await manage({ action: "agent_profiles" })).profiles,
-      [],
+      JSON.parse(await manage({ action: "agent_profiles" })).profiles.map((
+        entry: { id: string },
+      ) => entry.id),
+      ["sentinel-reporter"],
     );
   } finally {
     socket?.close();

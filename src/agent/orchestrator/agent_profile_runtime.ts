@@ -69,6 +69,22 @@ ${profile.prompt}`]
         ? original
         : Math.min(limit, original ?? MAX_TOOL_ITERATIONS);
     },
+    getTaskTimeoutWrapup() {
+      const original = config.getTaskTimeoutWrapup?.();
+      const settings = readProfile()?.definition;
+      if (settings?.runSeconds === undefined) return original;
+      return {
+        durationMs: Math.min(
+          settings.runSeconds * 1000,
+          original?.durationMs ?? Infinity,
+        ),
+        prompt: settings.timeoutWrapupPrompt ?? original?.prompt,
+        maxAttempts: Math.min(
+          settings.timeoutWrapupTurns ?? 1,
+          original?.maxAttempts ?? 8,
+        ),
+      };
+    },
     getIterationWrapupPrompt() {
       return readProfile()?.definition?.wrapupPrompt ??
         config.getIterationWrapupPrompt?.();

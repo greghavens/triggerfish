@@ -102,10 +102,12 @@ async function executeIteration(
   ctx: AgentLoopContext,
   iteration: number,
   pending?: AgentLoopOptions["resumedPendingToolCall"],
+  deadlineReached?: () => boolean,
+  modelSignal?: AbortSignal,
 ): Promise<
   | { done: true; result: Result<ProcessMessageResult, string> }
   | { done: false }
-  | { done: true; forceTextOnly: true }
+  | { done: true; forceTextOnly: true; deadline?: boolean }
 > {
   if (
     ctx.workerBoundary &&
@@ -128,7 +130,14 @@ async function executeIteration(
         }],
       },
     }
-    : await callLlmAndRecordUsage(ctx, iteration);
+    : await callLlmAndRecordUsage(
+      modelSignal ? { ...ctx, signal: modelSignal } : ctx,
+      iteration,
+    );
+  if (ctx.signal?.aborted) return { done: true, result: stoppedWorker };
+  if (deadlineReached?.()) {
+    return { done: true, forceTextOnly: true, deadline: true };
+  }
   if (!llmResult.ok) return { done: true, result: llmResult.result };
   if (ctx.workerBoundary) {
     const decision = await checkWorkerBoundary(ctx, "before_action");
@@ -144,6 +153,10 @@ async function executeIteration(
         }
         : { done: false };
     }
+  }
+  if (ctx.signal?.aborted) return { done: true, result: stoppedWorker };
+  if (deadlineReached?.()) {
+    return { done: true, forceTextOnly: true, deadline: true };
   }
   const outcome = await dispatchIterationOutcome(ctx, {
     completion: llmResult.completion,
@@ -171,12 +184,19 @@ function resolveMaxIterations(state: OrchestratorState): number {
  */
 async function forceTextOnlyResponse(
   ctx: AgentLoopContext,
+  deadline = false,
 ): Promise<Result<ProcessMessageResult, string>> {
-  const wrapup = ctx.state.config.getIterationWrapupPrompt?.();
+  if (ctx.signal?.aborted) return stoppedWorker;
+  const timeout = deadline
+    ? ctx.state.config.getTaskTimeoutWrapup?.()
+    : undefined;
+  const wrapup = deadline
+    ? timeout?.prompt
+    : ctx.state.config.getIterationWrapupPrompt?.();
+  const reason = deadline ? "Task deadline" : "Iteration limit";
   ctx.history.push({
     role: "user",
-    content:
-      "[SYSTEM] Iteration limit reached. Respond NOW with your findings " +
+    content: `[SYSTEM] ${reason} reached. Respond NOW with your findings ` +
       "based on the information gathered so far. Do not attempt any more tool calls." +
       (wrapup ? "\n" + wrapup : ""),
   });
@@ -184,12 +204,17 @@ async function forceTextOnlyResponse(
   const provider = ctx.state.config.providerRegistry
     .getForClassification(taint) ??
     ctx.state.config.providerRegistry.getDefault()!;
+  const finalizationDeadline = deadline
+    ? AbortSignal.timeout(15_000)
+    : undefined;
+  const signal = finalizationDeadline && ctx.signal
+    ? AbortSignal.any([ctx.signal, finalizationDeadline])
+    : finalizationDeadline ?? ctx.signal;
   async function complete() {
     const messages = buildLlmMessages(ctx.systemPrompt, ctx.history);
     return await provider.complete(messages, [], {
       sessionId: ctx.sessionKey,
-      ...((ctx.toolPersistence || ctx.workerBoundary) &&
-        { signal: ctx.signal }),
+      signal,
     });
   }
   let completion;
@@ -199,6 +224,20 @@ async function forceTextOnlyResponse(
       await checkWorkerBoundary(ctx, "before_model") === "stopped"
     ) return stoppedWorker;
     completion = await complete();
+    for (
+      let attempts = 1;
+      !signal?.aborted && !completion.content.trim() &&
+      attempts < (timeout?.maxAttempts ?? 1);
+      attempts++
+    ) {
+      if (
+        ctx.workerBoundary &&
+        await checkWorkerBoundary(ctx, "before_model") === "stopped"
+      ) return stoppedWorker;
+      ctx.tokens.inputTokens += completion.usage.inputTokens;
+      ctx.tokens.outputTokens += completion.usage.outputTokens;
+      completion = await complete();
+    }
     if (ctx.workerBoundary) {
       const decision = await checkWorkerBoundary(ctx, "before_action");
       if (decision === "stopped") return stoppedWorker;
@@ -218,11 +257,14 @@ async function forceTextOnlyResponse(
       }
     }
   } catch (error) {
+    if (signal?.aborted) {
+      return { ok: false, error: "Final response was interrupted" };
+    }
     if (!ctx.toolPersistence && !ctx.workerBoundary) throw error;
     return { ok: false, error: "The protected model call failed" };
   }
-  if (ctx.signal?.aborted) {
-    return { ok: false, error: "Operation cancelled by user" };
+  if (signal?.aborted) {
+    return { ok: false, error: "Final response was interrupted" };
   }
   const response = completion.content.trim();
   log.debug("Forced text-only response at iteration limit", {
@@ -246,7 +288,7 @@ async function forceTextOnlyResponse(
         ctx.targetClassification,
         tokenUsage,
         false,
-        ctx.signal,
+        signal,
       );
       return guarded ?? { ok: false, error: "No response generated" };
     }
@@ -258,8 +300,8 @@ async function forceTextOnlyResponse(
       true,
     );
     if (!allowed.ok) return allowed;
-    if (ctx.signal?.aborted) {
-      return { ok: false, error: "Operation cancelled by user" };
+    if (signal?.aborted) {
+      return { ok: false, error: "Final response was interrupted" };
     }
     ctx.state.emit({ type: "response", text: response });
     return {
@@ -282,16 +324,38 @@ export async function orchestrateAgentLoop(
 ): Promise<Result<ProcessMessageResult, string>> {
   const ctx = buildAgentLoopContext(opts);
   const limit = resolveMaxIterations(opts.state);
+  const duration = opts.state.config.getTaskTimeoutWrapup?.()?.durationMs;
+  const deadline = duration !== undefined
+    ? performance.now() + duration
+    : undefined;
+  const modelDeadline = duration !== undefined
+    ? AbortSignal.timeout(duration)
+    : undefined;
+  const modelSignal = modelDeadline && opts.signal
+    ? AbortSignal.any([opts.signal, modelDeadline])
+    : modelDeadline;
+  const deadlineReached = () =>
+    deadline !== undefined && performance.now() >= deadline;
   for (let i = (opts.resume?.completedIterations ?? 0) + 1; i <= limit; i++) {
     if (opts.signal?.aborted) {
       return { ok: false, error: "Operation cancelled by user" };
     }
+    if (deadlineReached()) return forceTextOnlyResponse(ctx, true);
     const pending = i === (opts.resume?.completedIterations ?? 0) + 1
       ? opts.resumedPendingToolCall
       : undefined;
-    const step = await executeIteration(ctx, i, pending);
+    const step = await executeIteration(
+      ctx,
+      i,
+      pending,
+      deadlineReached,
+      modelSignal,
+    );
     if (!step.done) continue;
     if ("forceTextOnly" in step) {
+      if (step.deadline || deadlineReached()) {
+        return forceTextOnlyResponse(ctx, true);
+      }
       log.info(
         "Nudges exhausted after tool calls — forcing text-only response",
         {
@@ -306,7 +370,7 @@ export async function orchestrateAgentLoop(
   }
   return opts.signal?.aborted
     ? { ok: false, error: "Operation cancelled by user" }
-    : forceTextOnlyResponse(ctx);
+    : forceTextOnlyResponse(ctx, deadlineReached());
 }
 
 /** @deprecated Use orchestrateAgentLoop instead */

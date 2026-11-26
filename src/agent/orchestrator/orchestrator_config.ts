@@ -165,6 +165,12 @@ export interface OrchestratorConfig {
   /** Resolve the current reviewed turn budget and final response guidance. */
   readonly getMaxIterations?: () => number | undefined;
   readonly getIterationWrapupPrompt?: () => string | undefined;
+  /** Soft turn deadline, independent of cancellation and hard lease deadlines. */
+  readonly getTaskTimeoutWrapup?: () => {
+    readonly durationMs: number;
+    readonly prompt?: string;
+    readonly maxAttempts: number;
+  } | undefined;
   /** Optional settings snapshot for a registered tool, held through dispatch. */
   readonly configureToolCall?: (
     name: string,

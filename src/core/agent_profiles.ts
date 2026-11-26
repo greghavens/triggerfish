@@ -17,6 +17,7 @@ export interface AgentProfileDefinition {
   readonly wrapupPrompt?: string;
   readonly timeoutWrapupPrompt?: string;
   readonly maxTurns?: number;
+  readonly runSeconds?: number;
   readonly timeoutWrapupTurns?: number;
   readonly tools?: readonly string[];
   readonly skills?: readonly string[];
@@ -66,6 +67,7 @@ export function parseAgentProfileDefinition(
     wrapupPrompt,
     timeoutWrapupPrompt,
     maxTurns,
+    runSeconds,
     timeoutWrapupTurns,
     tools,
     skills,
@@ -80,6 +82,7 @@ export function parseAgentProfileDefinition(
         "wrapupPrompt",
         "timeoutWrapupPrompt",
         "maxTurns",
+        "runSeconds",
         "timeoutWrapupTurns",
         "tools",
         "skills",
@@ -103,6 +106,9 @@ export function parseAgentProfileDefinition(
     (maxTurns !== undefined &&
       (typeof maxTurns !== "number" || !Number.isInteger(maxTurns) ||
         maxTurns < 1 || maxTurns > 32)) ||
+    (runSeconds !== undefined &&
+      (typeof runSeconds !== "number" || !Number.isInteger(runSeconds) ||
+        runSeconds < 1 || runSeconds > 900)) ||
     (timeoutWrapupTurns !== undefined &&
       (typeof timeoutWrapupTurns !== "number" ||
         !Number.isInteger(timeoutWrapupTurns) ||
@@ -117,6 +123,7 @@ export function parseAgentProfileDefinition(
     ...(wrapup !== undefined && { wrapupPrompt: wrapup }),
     ...(timeout !== undefined && { timeoutWrapupPrompt: timeout }),
     ...(typeof maxTurns === "number" && { maxTurns }),
+    ...(typeof runSeconds === "number" && { runSeconds }),
     ...(typeof timeoutWrapupTurns === "number" && { timeoutWrapupTurns }),
     ...(visibleTools && { tools: visibleTools }),
     ...(visibleSkills && { skills: visibleSkills }),
