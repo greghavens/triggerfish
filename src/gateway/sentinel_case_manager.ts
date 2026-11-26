@@ -39,6 +39,7 @@ export function startSentinelCaseManager(
   options: SentinelCaseManagerOptions = {},
 ): SentinelCaseHandle & {
   refresh(): void;
+  isAdmitted(caseId: string, admissionAt: number): boolean;
   coordinatorState(caseId: string): SentinelCoordinatorState | undefined;
 } {
   const interval = options.intervalMs ?? 5000;
@@ -178,6 +179,9 @@ export function startSentinelCaseManager(
 
   return {
     refresh,
+    isAdmitted(caseId, admissionAt) {
+      return coordinators.get(caseId)?.admission === admissionAt;
+    },
     coordinatorState(caseId) {
       if (coordinators.has(caseId)) return "scheduled";
       if (waiting.has(caseId)) return "waiting";

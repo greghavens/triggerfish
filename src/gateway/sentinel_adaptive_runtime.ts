@@ -164,6 +164,7 @@ import {
   readSentinelWorkerFindingHistory,
 } from "../sentinel/worker_finding_store.ts";
 import { locateSentinelCase } from "../sentinel/cases.ts";
+import { allowsSentinelAdaptiveWork } from "./sentinel_case_admission.ts";
 import { openSentinelAssetDiscoveryStore } from "../sentinel/asset_discovery_store.ts";
 import { unchangedAssignedTargetEvidence } from "../sentinel/assigned_target_proof.ts";
 import {
@@ -2229,9 +2230,10 @@ function annotateDecisionHolds(
 
 export function advanceAdaptiveSentinel(snapshotPath: string, state: State) {
   const inventory = state.result?.sharedGraph.snapshot;
-  if (!state.active || state.paused || !inventory || !state.result) {
-    return;
-  }
+  if (
+    !state.active || state.paused || !inventory || !state.result ||
+    !allowsSentinelAdaptiveWork(snapshotPath, state.plan.admissionAt)
+  ) return;
   const identity = adaptiveRevision(state);
   const store = openSentinelAdaptiveStore(storePath(snapshotPath));
   try {
@@ -2242,7 +2244,9 @@ export function advanceAdaptiveSentinel(snapshotPath: string, state: State) {
       : undefined;
     const latest = readSentinelAssessment(snapshotPath);
     if (
-      !latest?.active || latest.paused || adaptiveRevision(latest) !== identity
+      !latest?.active || latest.paused ||
+      adaptiveRevision(latest) !== identity ||
+      !allowsSentinelAdaptiveWork(snapshotPath, latest.plan.admissionAt)
     ) return;
     let tasks = store.list(revision);
     const shouldPlan = automaticReviewScope(snapshotPath, state.revision);
@@ -3088,6 +3092,7 @@ export function advanceAdaptiveSentinel(snapshotPath: string, state: State) {
       if (
         !latest?.active || latest.paused ||
         adaptiveRevision(latest) !== identity ||
+        !allowsSentinelAdaptiveWork(snapshotPath, latest.plan.admissionAt) ||
         store.activeRevision() !== previous
       ) return false;
       if (peerVerificationDeferred) {
@@ -3196,7 +3201,8 @@ export function advanceAdaptiveSentinel(snapshotPath: string, state: State) {
         (current) => {
           if (
             !current?.active || current.paused ||
-            adaptiveRevision(current) !== identity
+            adaptiveRevision(current) !== identity ||
+            !allowsSentinelAdaptiveWork(snapshotPath, current.plan.admissionAt)
           ) return null;
           const eligible = decisionAllowsClaim(snapshotPath, current.revision);
           const queue = store.list(revision);
@@ -3393,6 +3399,10 @@ export function advanceAdaptiveSentinel(snapshotPath: string, state: State) {
           const changed = !current || adaptiveRevision(current) !== identity;
           if (
             changed || !current?.active || current.paused ||
+            !allowsSentinelAdaptiveWork(
+              snapshotPath,
+              current.plan.admissionAt,
+            ) ||
             selection.constraintVersion !==
               operatingConstraints(snapshotPath, current)?.version ||
             !decisionAllowsClaim(snapshotPath, current.revision)(claim.task)
@@ -3614,6 +3624,9 @@ export function createSentinelModelPlanner(
   const futureCheckCooldown = new Map<string, number>();
 
   function authorizeFutureWorkflowGates(state: State, revision: string) {
+    if (!allowsSentinelAdaptiveWork(snapshotPath, state.plan.admissionAt)) {
+      return;
+    }
     if (activeFutureCheck) {
       futureCheckRequested = true;
       return;
@@ -3659,7 +3672,8 @@ export function createSentinelModelPlanner(
         const eligible = (current: State | null | undefined) => {
           if (
             !current?.active || current.paused || signal.aborted ||
-            adaptiveRevision(current) !== revision
+            adaptiveRevision(current) !== revision ||
+            !allowsSentinelAdaptiveWork(snapshotPath, current.plan.admissionAt)
           ) return false;
           const currentConstraints = operatingConstraints(
             snapshotPath,
@@ -3744,7 +3758,8 @@ export function createSentinelModelPlanner(
     const current = readSentinelAssessment(snapshotPath);
     if (
       !current?.active || current.paused ||
-      adaptiveRevision(current) !== identity
+      adaptiveRevision(current) !== identity ||
+      !allowsSentinelAdaptiveWork(snapshotPath, current.plan.admissionAt)
     ) {
       return "empty";
     }
@@ -4690,6 +4705,10 @@ export function createSentinelModelPlanner(
         (latest) => {
           const interrupted = controller.signal.aborted || !latest?.active ||
             latest.paused || adaptiveRevision(latest) !== identity ||
+            !allowsSentinelAdaptiveWork(
+              snapshotPath,
+              latest.plan.admissionAt,
+            ) ||
             !matchesConstraints(latest) ||
             !decisionAllowsClaim(snapshotPath, latest.revision)(task);
           const notes = openSentinelAdaptiveStore(storePath(snapshotPath));
@@ -4823,7 +4842,10 @@ export function createSentinelModelPlanner(
     advance(state: State) {
       permitPlannerWake = true;
       const snapshot = state.result?.sharedGraph.snapshot;
-      if (!state.active || state.paused || !snapshot) {
+      if (
+        !state.active || state.paused || !snapshot ||
+        !allowsSentinelAdaptiveWork(snapshotPath, state.plan.admissionAt)
+      ) {
         planningGate.clear();
         abortWorkers();
         return;
@@ -5149,7 +5171,10 @@ export function createSentinelModelPlanner(
       const openedPassingRechecks = new Map<string, string>();
       let presentedRecheckFindings: typeof recheckFindings = [];
       const matchesRound = (current: State) => {
-        if (adaptiveRevision(current) !== identity) return false;
+        if (
+          adaptiveRevision(current) !== identity ||
+          !allowsSentinelAdaptiveWork(snapshotPath, current.plan.admissionAt)
+        ) return false;
         const currentObservations = readPlannerObservations(current);
         return !!currentObservations && modelRoundIdentity(
               identity,

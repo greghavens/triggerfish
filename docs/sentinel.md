@@ -325,8 +325,10 @@ Set `sentinel.assessment_concurrency` from 1 to 12 to use FIFO admission for
 named assessment coordinators. The queue uses the saved start or resume
 order and retains that order across gateway restart. Pausing a named case
 releases its slot. Resuming it joins the end of the queue. The main case and
-per-worker limits remain independent. Without this setting, the gateway uses
-its existing 12-slot rotation for named cases.
+per-worker limits remain independent. Starting or refreshing a queued case can
+save its inputs. Adaptive planning and execution wait for its coordinator slot.
+Without this setting, the gateway uses its existing 12-slot rotation for named
+cases.
 
 Resolved and dismissed findings and incidents do not generate new automatic
 review assignments or follow-ups. Explicit operator assignments remain

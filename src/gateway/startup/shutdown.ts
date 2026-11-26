@@ -16,7 +16,7 @@ export interface ShutdownDeps {
     handle: { child: { kill(signo?: number | Deno.Signal): void } } | null;
   };
   schedulerService: { stop(): void };
-  sentinelAssessment?: { stop(): void };
+  sentinelAssessment?: { stop(): void; releaseAdmission?(): void };
   server: { stop(): Promise<void> };
   tidepoolHost: { stop(): Promise<void> };
   memoryDb: { close(): void };
@@ -45,6 +45,7 @@ export async function stopAllServices(deps: ShutdownDeps): Promise<void> {
   try {
     await deps.tidepoolHost.stop();
   } catch { /* best effort */ }
+  deps.sentinelAssessment?.releaseAdmission?.();
   try {
     deps.memoryDb.close();
   } catch { /* best effort */ }

@@ -39,6 +39,7 @@ import {
 } from "../../gateway/sentinel_goal_completion.ts";
 import {
   listSentinelCaseIds,
+  locateSentinelCase,
   resolveSentinelCasePath,
 } from "../../sentinel/cases.ts";
 import { resolveBaseDir, resolveConfigPath } from "../config/paths.ts";
@@ -48,6 +49,23 @@ export function webContainmentConfigured(): boolean | undefined {
   return config.ok
     ? config.value.web?.domains?.sentinel_containment === true
     : undefined;
+}
+
+function advanceCliSentinel(
+  path: string,
+  state: NonNullable<ReturnType<typeof readSentinelAssessment>>,
+) {
+  const location = locateSentinelCase(path);
+  if (location && location.caseId !== "main") {
+    const config = loadConfig(resolveConfigPath());
+    if (
+      config.ok && config.value.sentinel?.assessment_concurrency !== undefined
+    ) {
+      // The gateway's coordinator owns named work when FIFO is enabled.
+      return;
+    }
+  }
+  advanceAdaptiveSentinel(path, state);
 }
 
 /** Re-evaluate a running assessment after an atomic evidence publication. */
@@ -65,7 +83,7 @@ export function refreshAfterPublish(path: string) {
       webContainmentConfigured(),
     );
     if (state) {
-      advanceAdaptiveSentinel(path, state);
+      advanceCliSentinel(path, state);
     }
     return state?.active ? { assessmentRevision: state.revision } : {};
   } catch {
@@ -137,7 +155,7 @@ export function dispatchSentinelAssessmentCommand(
         evidenceNode: typeof evidence === "string" ? evidence : undefined,
         depth: typeof depth === "string" ? Number(depth) : undefined,
       }, webContainmentConfigured());
-      advanceAdaptiveSentinel(path, started);
+      advanceCliSentinel(path, started);
       state = started;
       break;
     }
@@ -149,7 +167,7 @@ export function dispatchSentinelAssessmentCommand(
       if (!continued) {
         throw new Error("No stopped Sentinel assessment to continue");
       }
-      advanceAdaptiveSentinel(path, continued);
+      advanceCliSentinel(path, continued);
       state = continued;
       break;
     }
@@ -160,7 +178,7 @@ export function dispatchSentinelAssessmentCommand(
         ? resumeSentinelAssessment(path, containment)
         : undefined;
       const refreshed = resumed ?? refreshSentinelAssessment(path, containment);
-      if (refreshed) advanceAdaptiveSentinel(path, refreshed);
+      if (refreshed) advanceCliSentinel(path, refreshed);
       state = refreshed;
       break;
     }
@@ -173,7 +191,7 @@ export function dispatchSentinelAssessmentCommand(
       }
       state = { updated: updateSentinelAssessmentGoal(path, flags.goal) };
       const active = readSentinelAssessment(path);
-      if (active) advanceAdaptiveSentinel(path, active);
+      if (active) advanceCliSentinel(path, active);
       break;
     }
     case "assess-complete": {

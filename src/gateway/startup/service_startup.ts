@@ -53,6 +53,7 @@ import {
   readSentinelModelSettings,
   recordSentinelModelUsage,
 } from "../sentinel_adaptive_runtime.ts";
+import { bindSentinelCaseAdmission } from "../sentinel_case_admission.ts";
 import { startSentinelCaseManager } from "../sentinel_case_manager.ts";
 import { startSentinelTopologySync } from "../sentinel_topology_sync.ts";
 import { startSentinelAssessmentCoordinator } from "../sentinel_assessment_service.ts";
@@ -416,6 +417,14 @@ export async function startServicesAndChannels(
   const caseManagerRef: {
     current?: ReturnType<typeof startSentinelCaseManager>;
   } = {};
+  const releaseCaseAdmission =
+    bootstrap.config.sentinel?.assessment_concurrency !== undefined
+      ? bindSentinelCaseAdmission(
+        bootstrap.baseDir,
+        (id, generation) =>
+          caseManagerRef.current?.isAdmitted(id, generation) === true,
+      )
+      : undefined;
   const { tidepoolHost, server } = await startNetworkServices(
     bootstrap,
     coreInfra,
@@ -423,7 +432,10 @@ export async function startServicesAndChannels(
     chatSession,
     isTidepoolCallRef,
     (id) => caseManagerRef.current?.coordinatorState(id),
-  );
+  ).catch((error) => {
+    releaseCaseAdmission?.();
+    throw error;
+  });
   const signalDaemonState = await wireMessageChannels(
     bootstrap.config,
     chatSession,
@@ -704,6 +716,7 @@ export async function startServicesAndChannels(
         stopMainAdaptive();
         sentinelAssessment.stop();
       },
+      releaseAdmission: releaseCaseAdmission,
     },
   };
 }

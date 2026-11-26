@@ -10,10 +10,18 @@ import {
 } from "../../src/core/types/session.ts";
 import { createChatSession } from "../../src/gateway/chat.ts";
 import { createOperatorRunToolExecutor } from "../../src/gateway/operator_run_tool.ts";
+import {
+  advanceAdaptiveSentinel,
+  readAdaptiveSentinel,
+} from "../../src/gateway/sentinel_adaptive_runtime.ts";
+import { bindSentinelCaseAdmission } from "../../src/gateway/sentinel_case_admission.ts";
 import { startSentinelAssessmentCoordinator } from "../../src/gateway/sentinel_assessment_service.ts";
 import { startSentinelCaseManager } from "../../src/gateway/sentinel_case_manager.ts";
 import { createGatewayServer } from "../../src/gateway/server/server.ts";
-import { needsSentinelAssessmentCoordinator } from "../../src/sentinel/assessment_store.ts";
+import {
+  needsSentinelAssessmentCoordinator,
+  readSentinelAssessment,
+} from "../../src/sentinel/assessment_store.ts";
 import { resolveSentinelCasePath } from "../../src/sentinel/cases.ts";
 
 Deno.test("An owner gateway's named Sentinel cases keep FIFO admission across restart", async () => {
@@ -68,8 +76,9 @@ Deno.test("An owner gateway's named Sentinel cases keep FIFO admission across re
       admissions.push(id);
       return startSentinelAssessmentCoordinator({
         snapshotPath: path,
-        advanceAdaptive: () => {
+        advanceAdaptive: (state) => {
           evaluations.add(id);
+          advanceAdaptiveSentinel(path, state);
         },
       });
     }, {
@@ -86,6 +95,10 @@ Deno.test("An owner gateway's named Sentinel cases keep FIFO admission across re
     ) => Promise<void>,
   ) {
     const caseManager = manager();
+    const releaseAdmission = bindSentinelCaseAdmission(
+      baseDir,
+      caseManager.isAdmitted,
+    );
     const token = crypto.randomUUID();
     const gateway = createGatewayServer({
       port: 0,
@@ -140,8 +153,18 @@ Deno.test("An owner gateway's named Sentinel cases keep FIFO admission across re
     } finally {
       socket.close();
       caseManager.stop();
-      await gateway.stop();
+      try {
+        await gateway.stop();
+      } finally {
+        releaseAdmission();
+      }
     }
+  }
+  function completed(id: string): number {
+    const path = resolveSentinelCasePath(baseDir, id);
+    const state = readSentinelAssessment(path);
+    return (state && readAdaptiveSentinel(path, state, "revision")?.tasks
+      .filter(({ status }) => status === "completed").length) ?? 0;
   }
   try {
     for (const id of ["a-youngest", "m-middle", "z-oldest"]) {
@@ -151,8 +174,16 @@ Deno.test("An owner gateway's named Sentinel cases keep FIFO admission across re
         path,
         JSON.stringify({
           version: 1,
-          nodes: [{ id: "asset", kind: "asset", label: id }],
-          edges: [],
+          nodes: [
+            { id: "asset", kind: "asset", label: id },
+            {
+              id: "finding",
+              kind: "finding",
+              label: "Missing control",
+              severity: "high",
+            },
+          ],
+          edges: [{ from: "finding", relation: "affects", to: "asset" }],
         }),
       );
     }
@@ -160,9 +191,15 @@ Deno.test("An owner gateway's named Sentinel cases keep FIFO admission across re
       for (const id of ["z-oldest", "m-middle", "a-youngest"]) {
         assertEquals(JSON.parse(await turn("start", id)).run.status, "running");
       }
+      for (const id of ["z-oldest", "m-middle", "a-youngest"]) {
+        assertEquals(completed(id), 0);
+      }
       caseManager.refresh();
       await Promise.resolve();
       assertEquals(admissions, ["z-oldest"]);
+      assert(completed("z-oldest") > 0);
+      assertEquals(completed("m-middle"), 0);
+      assertEquals(completed("a-youngest"), 0);
       assertEquals([...evaluations], ["z-oldest"]);
       assertEquals(caseManager.coordinatorState("m-middle"), "waiting");
       assertEquals(caseManager.coordinatorState("a-youngest"), "waiting");
@@ -188,6 +225,8 @@ Deno.test("An owner gateway's named Sentinel cases keep FIFO admission across re
       assertEquals(admissions.at(-1), "m-middle");
       assertEquals(caseManager.coordinatorState("z-oldest"), "waiting");
       assertEquals([...evaluations], ["z-oldest", "m-middle"]);
+      assert(completed("m-middle") > 0);
+      assertEquals(completed("a-youngest"), 0);
 
       assertEquals(
         JSON.parse(await turn("pause", "m-middle", 1)).run.status,
