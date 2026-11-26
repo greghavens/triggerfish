@@ -1,3 +1,4 @@
+import { isWorkerNarrativeId } from "../sentinel/worker_narratives.ts";
 import {
   readLinkedSentinelWorkerReview,
   readLocalSentinelReview,
@@ -341,6 +342,7 @@ import {
   readSentinelReviewedAssignmentSources,
   readSentinelTaskQueue,
   readSentinelWorkflowPublicationStep,
+  retainedNarrativeForProvenance,
   reviewSentinelAssignmentBatch,
   reviewSentinelGraphRetries,
   reviewSentinelOperatorHintBatch,
@@ -6315,6 +6317,8 @@ ${request}`)
                 action: "facts",
                 factId: id,
               }
+              : isWorkerNarrativeId(id)
+              ? { ...ref, action: "node", node: `observation:adaptive:${id}` }
               : {
                 ...ref,
                 action: "finding_receipt",
@@ -6335,6 +6339,31 @@ ${request}`)
               (!context.authorizeSelectedSentinelCase ||
                 context.authorizeSelectedSentinelCase());
           };
+          if (source.contextOnly) {
+            const read = () =>
+              retainedNarrativeForProvenance(
+                path,
+                source.evidenceRevision,
+                runId.toLowerCase(),
+                source.id,
+              );
+            const record = read();
+            if (
+              !record || !current() || record.targetId !== asset ||
+              !await authorize({
+                ...ref,
+                action: "node",
+                node: `evidence:${record.receipt.evidenceId}`,
+              }) ||
+              !current() || !isDeepStrictEqual(read(), record) ||
+              !await context.authorizeSavedResponse(
+                operatorRunTool.name,
+                safeProjection({ ...record }),
+                "INTERNAL",
+              ) ||
+              !current() || !isDeepStrictEqual(read(), record)
+            ) return false;
+          }
           if (
             source.executionEvidenceId &&
             !await authorizeReviewedFindingOperation(
@@ -6387,9 +6416,12 @@ ${request}`)
               taskKind !== "trace" || !Array.isArray(sourceIds) ||
               sourceIds.length < 2 || sourceIds.length > 4 ||
               new Set(sourceIds).size !== sourceIds.length ||
+              sourceIds.every(isWorkerNarrativeId) ||
               sourceIds.some((id) =>
                 typeof id !== "string" ||
-                !/^worker-(?:graph-fact|finding):[a-f0-9]{64}$/.test(id)
+                !/^worker-(?:graph-fact|finding|narrative):[a-f0-9]{64}$/.test(
+                  id,
+                )
               )
             )) ||
             Object.keys(item).some((key) =>

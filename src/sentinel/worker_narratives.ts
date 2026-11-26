@@ -4,7 +4,9 @@ import { redactCredentialText } from "../core/logger/redactor.ts";
 export const SENTINEL_WORKER_NARRATIVE_READ = "sentinel_worker_narrative";
 export const SENTINEL_WORKER_NARRATIVE_COMMIT =
   "sentinel_publish_worker_narrative";
-export const isWorkerNarrativeId = (value: unknown): value is string =>
+export const isWorkerNarrativeId = (
+  value: unknown,
+): value is `worker-narrative:${string}` =>
   typeof value === "string" && /^worker-narrative:[a-f0-9]{64}$/.test(value);
 
 export interface SentinelWorkerNarrativeReceipt {

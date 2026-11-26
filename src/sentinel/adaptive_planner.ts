@@ -1007,10 +1007,10 @@ export function validateSentinelPlanSuggestions(
         new Set(ids).size !== ids.length ||
         ids.some((id) =>
           typeof id !== "string" ||
-          !/^worker-(?:graph-fact|finding):[a-f0-9]{64}$/.test(id)
+          !/^worker-(?:graph-fact|finding|narrative):[a-f0-9]{64}$/.test(id)
         ) ||
-        !ids.some((id) => id.startsWith("worker-graph-fact:")) ||
-        !ids.some((id) => id.startsWith("worker-finding:")) ||
+        new Set(ids.map((id) => id.slice(0, id.indexOf(":")))).size < 2 ||
+        !ids.some((id) => !isWorkerNarrativeId(id)) ||
         Object.keys(item).some((key) =>
           !["kind", "nodeId", "depth", "sourceEvidenceIds", "dependsOn"]
             .includes(key)
@@ -1259,7 +1259,9 @@ export function validateSentinelPlanSuggestions(
       ...new Set([
         ...dependencies.map((dependency) => accepted.get(dependency)!),
         ...(graphFact ? [graphFact.taskId] : []),
-        ...(sourceEvidence?.flatMap(({ taskId }) => taskId ? [taskId] : []) ??
+        ...(sourceEvidence?.flatMap(({ taskId, contextOnly }) =>
+          taskId && !contextOnly ? [taskId] : []
+        ) ??
           []),
         ...(committed ? [committed.sourceTaskId] : []),
         ...(typeof source === "string" ? [source] : []),

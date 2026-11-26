@@ -6473,6 +6473,405 @@ async function verifyConnectorMixedAssignment(
   assertEquals(resultFetches, 0);
 }
 
+Deno.test("A running worker observation composes with a verified fact in reviewed and planned assignments", async () => {
+  const baseDir = await Deno.makeTempDir();
+  const caseId = "mixed-narrative";
+  const path = resolveSentinelCasePath(baseDir, caseId);
+  let source: ReturnType<typeof createSentinelModelPlanner> | undefined;
+  let planner: ReturnType<typeof createSentinelModelPlanner> | undefined;
+  let sourceTurn: Promise<void> | undefined;
+  const published = Promise.withResolvers<Record<string, unknown>>();
+  const releaseSource = Promise.withResolvers<void>();
+  const readNarrative = "sentinel_worker_narrative";
+  const readFact = "sentinel_graph_facts";
+  const evidenceNode = "evidence:check";
+  const usage = { inputTokens: 1, outputTokens: 1 };
+  const call = (name: string, args: Record<string, unknown>) => ({
+    type: "function" as const,
+    id: crypto.randomUUID(),
+    function: { name, arguments: JSON.stringify(args) },
+  });
+  const outcome = (allowed = true) =>
+    Promise.resolve({
+      allowed,
+      action: allowed ? "ALLOW" as const : "BLOCK" as const,
+      duration: 0,
+      ruleId: null,
+    });
+  const sourceCallDenied = (hook: string, input: Record<string, unknown>) =>
+    hook === "PRE_TOOL_CALL" &&
+    (input.tool_call as { args?: { node?: string } } | undefined)?.args
+        ?.node === evidenceNode;
+  try {
+    await Deno.mkdir(dirname(path), { recursive: true });
+    const edge = { from: "app", to: "dependency", relation: "depends_on" };
+    await Deno.writeTextFile(
+      path,
+      JSON.stringify({
+        version: 1,
+        nodes: [
+          { kind: "asset", id: "app", label: "Application" },
+          { kind: "asset", id: "dependency", label: "Dependency" },
+          { kind: "evidence", id: "check", label: "Retained inventory check" },
+        ],
+        edges: [edge, { from: "check", to: "app", relation: "observed_on" }],
+      }),
+    );
+    const state = startSentinelAssessment(path);
+    const runId = state.plan.runId!;
+    const revision = adaptiveRevision(state);
+    const ref = { kind: "sentinel", id: caseId, revision: state.revision };
+    const graphLease = assignedLease(path, state, "review_evidence");
+    const graph = await workerTurn(path, graphLease, [
+      [tool(assigned)],
+      [tool("sentinel_publish_graph_fact", {
+        ...edge,
+        requestId: crypto.randomUUID(),
+      })],
+    ]);
+    const fact = JSON.parse(graph.results[1][0]);
+    assertStringIncludes(fact.id, "worker-graph-fact:");
+    const seeded = openSentinelAdaptiveStore(
+      join(dirname(path), "sentinel-adaptive.db"),
+    );
+    let producerId: string;
+    try {
+      const task = seeded.sync(revision, [{
+        kind: "impact",
+        nodeId: "app",
+        depth: 7,
+        reason: MODEL_ASSIGNMENT_REASON,
+      }], revision).find(({ kind, depth }) => kind === "impact" && depth === 7);
+      assert(task);
+      producerId = task.id;
+    } finally {
+      seeded.close();
+    }
+    advanceAdaptiveSentinel(path, state);
+    const producer = createProviderRegistry();
+    producer.register({
+      name: "mixed-narrative-producer",
+      supportsStreaming: false,
+      async complete(messages) {
+        const results = messages.filter(({ role }) => role === "tool");
+        if (results.length === 2) {
+          published.resolve(JSON.parse(String(results[1].content)));
+          await releaseSource.promise;
+          return {
+            content: '{"summary":"Saved the observation.","followUps":[]}',
+            usage,
+            toolCalls: [],
+          };
+        }
+        return {
+          content: "",
+          usage,
+          toolCalls: results.length
+            ? [
+              call("sentinel_publish_worker_narrative", {
+                summary: "The checked dependency inventory may need review.",
+                confidence: "inferred",
+                evidenceId: "check",
+              }),
+            ]
+            : [call(assigned, {})],
+        };
+      },
+    });
+    producer.setDefault("mixed-narrative-producer");
+    source = createSentinelModelPlanner(path, (current, taskId, token) => {
+      if (taskId !== producerId) {
+        return { execute: () => Promise.resolve(), clear() {} };
+      }
+      const worker = createSentinelSubagent({
+        snapshotPath: path,
+        assessmentRevision: current.revision,
+        assignedTaskId: taskId,
+        assignedTaskLeaseToken: token,
+        providerRegistry: producer,
+        allowModelAccess: true,
+        hookRunner: { evaluateHook: () => outcome() },
+      });
+      return {
+        ...worker,
+        execute(...args) {
+          sourceTurn = worker.execute(...args);
+          return sourceTurn;
+        },
+      };
+    });
+    await waitForCondition(
+      () => sourceTurn !== undefined,
+      () => source!.advance(state),
+    );
+    const narrative = await Promise.race([
+      published.promise,
+      sourceTurn!.then(() => {
+        throw new Error("Producer finished too early");
+      }),
+    ]);
+    assert(typeof narrative.id === "string");
+    const sources = [fact.id, narrative.id];
+    const readCalls = [
+      call(readFact, { id: fact.id }),
+      call(readNarrative, { id: narrative.id }),
+    ];
+    const mixed = () =>
+      readAdaptiveSentinel(path, state, "revision")?.tasks
+        .filter(({ plannerRound }) =>
+          plannerRound && "sourceEvidence" in plannerRound &&
+          plannerRound.sourceEvidence?.some(({ id }) => id === narrative.id)
+        ) ?? [];
+    const root = createProviderRegistry();
+    let revoke = true;
+    let sourceAllowed = true;
+    let stopOnDenied = false;
+    let blockedSourceChecks = 0;
+    let plans = 0;
+    let plannerReads: unknown[] = [];
+    let workerReceipts: unknown[] = [];
+    root.register({
+      name: "mixed-narrative-planner",
+      supportsStreaming: false,
+      complete(messages) {
+        const receipts = messages.filter(({ role }) => role === "tool");
+        if (!receipts.length) {
+          return Promise.resolve({ content: "", usage, toolCalls: readCalls });
+        }
+        plannerReads = receipts.map(({ content }) =>
+          JSON.parse(String(content))
+        );
+        plans++;
+        if (revoke) sourceAllowed = false;
+        return Promise.resolve({
+          content: JSON.stringify({
+            prioritize: [],
+            assignments: [{
+              kind: "trace",
+              depth: 1,
+              nodeId: "app",
+              sourceEvidenceIds: sources,
+            }],
+          }),
+          usage,
+          toolCalls: [],
+        });
+      },
+    });
+    root.setDefault("mixed-narrative-planner");
+    const workerModels = createProviderRegistry();
+    workerModels.register({
+      name: "mixed-narrative-peer",
+      supportsStreaming: false,
+      complete(messages) {
+        const receipts = messages.filter(({ role }) => role === "tool");
+        if (!receipts.length) {
+          return Promise.resolve({ content: "", usage, toolCalls: readCalls });
+        }
+        workerReceipts = receipts.map(({ content }) =>
+          JSON.parse(String(content))
+        );
+        return Promise.resolve({
+          content:
+            '{"summary":"Reviewed the verified source and its related context.","followUps":[]}',
+          usage,
+          toolCalls: [],
+        });
+      },
+    });
+    workerModels.setDefault("mixed-narrative-peer");
+    let clock = Date.now();
+    const startPlanner = (leased?: string) =>
+      createSentinelModelPlanner(
+        path,
+        (current, taskId, token) =>
+          taskId && taskId !== leased
+            ? { execute: () => Promise.resolve(), clear() {} }
+            : createSentinelSubagent({
+              snapshotPath: path,
+              assessmentRevision: current.revision,
+              ...(taskId
+                ? { assignedTaskId: taskId, assignedTaskLeaseToken: token }
+                : { plannerExecutionEvidenceRunId: current.plan.runId }),
+              providerRegistry: taskId ? workerModels : root,
+              allowModelAccess: true,
+              hookRunner: {
+                evaluateHook(hook, { input }) {
+                  const allowed = sourceAllowed ||
+                    !sourceCallDenied(hook, input);
+                  if (!allowed) {
+                    blockedSourceChecks++;
+                    if (stopOnDenied) planner?.stop();
+                  }
+                  return outcome(allowed);
+                },
+              },
+            }),
+        () => leased || !mixed().length ? () => {} : undefined,
+        () => clock,
+      );
+    planner = startPlanner();
+    await waitForCondition(
+      () => plans === 1 && !planner!.hasInFlightWork(),
+      () => planner!.advance(state),
+    );
+    assertEquals(plannerReads[1], narrative);
+    assertEquals(mixed(), []);
+    revoke = false;
+    sourceAllowed = true;
+    clock += 65_000;
+    addSentinelCaseHint(path, "Review the approved same-asset source records.");
+    await waitForCondition(
+      () => mixed().length === 1,
+      () => planner!.advance(state),
+    );
+    const planned = mixed()[0];
+    assert(!planned.prerequisites.includes(producerId));
+    assert(planned.prerequisites.includes(graphLease.assignedTaskId));
+    assertEquals(
+      readAdaptiveSentinel(path, state, "revision")?.modelReviewStates
+        .find(({ taskId }) => taskId === producerId)?.status,
+      "running",
+    );
+    planner.stop();
+
+    let revokeOwner = true;
+    let denyOwnerSource = false;
+    const reviewed = {
+      ...ref,
+      action: "assign_batch",
+      runId,
+      adaptiveRevision: revision,
+      requestId: crypto.randomUUID(),
+      assignments: [{
+        taskKind: "trace",
+        node: "app",
+        sourceIds: [narrative.id, fact.id],
+      }],
+    };
+    let reviewedTaskId: string;
+    await withFindingAssignmentGateway(baseDir, () => {
+      denyOwnerSource = revokeOwner;
+      return Promise.resolve(true);
+    }, async (turn) => {
+      assertStringIncludes(await turn(reviewed), "unavailable");
+      assertEquals(mixed().length, 1);
+      revokeOwner = false;
+      denyOwnerSource = false;
+      const receipt = JSON.parse(await turn(reviewed)).receipt;
+      reviewedTaskId = receipt.receipts[0].taskId;
+      assertEquals(JSON.parse(await turn(reviewed)).receipt, receipt);
+    }, (hook, input) => !denyOwnerSource || !sourceCallDenied(hook, input));
+    const admitted = mixed().find(({ id }) => id === reviewedTaskId);
+    assert(admitted);
+    assert(!admitted.prerequisites.includes(producerId));
+    assert(admitted.plannerRound && "sourceEvidence" in admitted.plannerRound);
+    const context = admitted.plannerRound.sourceEvidence!.find(({ id }) =>
+      id === narrative.id
+    );
+    assertEquals(context, {
+      id: narrative.id,
+      taskId: producerId,
+      evidenceRevision: state.revision,
+      digest: createHash("sha256").update(JSON.stringify(narrative)).digest(
+        "hex",
+      ),
+      sourceStepIndex: 0,
+      contextOnly: true,
+    });
+
+    source.stop();
+    releaseSource.resolve();
+    await sourceTurn;
+    const archiveId = crypto.randomUUID();
+    await withFindingAssignmentGateway(
+      baseDir,
+      () => Promise.resolve(true),
+      async (turn) => {
+        assertEquals(
+          JSON.parse(await turn({ ...ref, runId, action: "cancel" })).run
+            .status,
+          "stopped",
+        );
+        assertEquals(
+          JSON.parse(
+            await turn({
+              ...ref,
+              runId,
+              action: "archive",
+              requestId: archiveId,
+            }),
+          ).receipt.status,
+          "succeeded",
+        );
+      },
+    );
+    await Deno.rename(dirname(path), join(baseDir, "prior-mixed-narrative"));
+    await withFindingAssignmentGateway(
+      baseDir,
+      () => Promise.resolve(true),
+      async (turn) => {
+        const restored = JSON.parse(
+          await turn({
+            ...ref,
+            runId,
+            action: "restore",
+            archiveId,
+            requestId: crypto.randomUUID(),
+          }),
+        );
+        assertEquals(restored.receipt.status, "succeeded");
+        const node = await turn({
+          ...ref,
+          action: "node",
+          node: `observation:adaptive:${narrative.id}`,
+        });
+        assertStringIncludes(node, `task:adaptive:${admitted.id}`);
+        assertStringIncludes(node, `task:adaptive:${producerId}`);
+        assertEquals(
+          JSON.parse(await turn({ ...ref, action: "resume" })).run.status,
+          "running",
+        );
+      },
+    );
+    const restoredState = readSentinelAssessment(path);
+    assert(restoredState);
+    planner = startPlanner(admitted.id);
+    const reviewedWorker = () =>
+      readAdaptiveSentinel(path, restoredState, "revision")?.modelReviews
+        .find(({ taskId }) => taskId === admitted.id);
+    sourceAllowed = false;
+    stopOnDenied = true;
+    const deniedBeforeLease = blockedSourceChecks;
+    await waitForCondition(
+      () =>
+        blockedSourceChecks > deniedBeforeLease && !planner!.hasInFlightWork(),
+      () => planner!.advance(restoredState),
+    );
+    assertEquals(workerReceipts, []);
+    assertEquals(reviewedWorker(), undefined);
+    sourceAllowed = true;
+    stopOnDenied = false;
+    planner = startPlanner(admitted.id);
+    await waitForCondition(
+      () => !!reviewedWorker(),
+      () => planner!.advance(restoredState),
+    );
+    assertEquals(workerReceipts[0], fact);
+    assertEquals(workerReceipts[1], narrative);
+    assertEquals(
+      reviewedWorker()?.steps.map(({ tool, target }) => [tool, target]),
+      [[readFact, fact.id], [readNarrative, narrative.id]],
+    );
+  } finally {
+    planner?.stop();
+    source?.stop();
+    releaseSource.resolve();
+    await sourceTurn;
+    await Deno.remove(baseDir, { recursive: true });
+  }
+});
+
 Deno.test("Committed worker narrative reaches peers and planning while its source lease remains running", async () => {
   const baseDir = await Deno.makeTempDir();
   const caseId = "worker-narrative";

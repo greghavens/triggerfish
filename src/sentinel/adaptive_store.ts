@@ -1020,6 +1020,7 @@ export type AdaptiveReviewedAssignmentSource =
     readonly digest: string;
     readonly sourceStepIndex?: number;
     readonly executionEvidenceId?: string;
+    readonly contextOnly?: true;
   }
   & (
     | { readonly taskId: string; readonly analyst?: never }
@@ -2553,6 +2554,9 @@ function normalizePlannerRound(round: AdaptivePlannerRound | undefined) {
       sourceEvidence.length > 4 ||
       new Set(sourceEvidence.map(({ id }) => id)).size !==
         sourceEvidence.length ||
+      !sourceEvidence.some(({ id }) =>
+        /^worker-(?:graph-fact|finding):[a-f0-9]{64}$/.test(id)
+      ) ||
       sourceEvidence.some((entry) =>
         Object.keys(entry).some((key) =>
           ![
@@ -2563,13 +2567,21 @@ function normalizePlannerRound(round: AdaptivePlannerRound | undefined) {
             "digest",
             "sourceStepIndex",
             "executionEvidenceId",
+            "contextOnly",
           ]
             .includes(key)
         ) ||
-        !/^worker-(?:graph-fact|finding):[a-f0-9]{64}$/.test(entry.id) ||
+        !/^worker-(?:graph-fact|finding|narrative):[a-f0-9]{64}$/.test(
+          entry.id,
+        ) ||
+        (isWorkerNarrativeId(entry.id)
+          ? entry.contextOnly !== true || !!entry.analyst ||
+            entry.executionEvidenceId !== undefined
+          : entry.contextOnly !== undefined) ||
         (!identity.startsWith("operator:") &&
           entry.executionEvidenceId !== undefined) ||
-        (entry.id.startsWith("worker-graph-fact:") !==
+        ((entry.id.startsWith("worker-graph-fact:") ||
+          isWorkerNarrativeId(entry.id)) !==
           (entry.sourceStepIndex !== undefined)) ||
         (entry.executionEvidenceId !== undefined &&
           (!entry.id.startsWith("worker-finding:") ||
@@ -3216,8 +3228,15 @@ export function readAdaptiveWorkerNarrative(
     | { id: string }
     | ({ taskId: string } & WorkerNarrativeRecoverySelector),
 ) {
-  const db = openPrivateDatabase(path, true);
+  let db: DatabaseSync;
   try {
+    db = openPrivateDatabase(path, true);
+  } catch (error) {
+    if (error instanceof Deno.errors.NotFound) return;
+    throw error;
+  }
+  try {
+    if (!hasAdaptiveObservationSchema(db)) return;
     const map = db.prepare(
       "SELECT revision, goalId FROM adaptive_evidence_revisions WHERE evidenceNumber = ? ORDER BY rowid DESC LIMIT 1",
     ).get(evidenceRevision);
@@ -3494,7 +3513,12 @@ export function readSentinelCompletedGoalTask(
       ...scope.revisions,
     );
     const task = row && decodeTask(row);
-    return task?.plannerRound?.workerNarrativeId ? undefined : task;
+    return task?.plannerRound?.workerNarrativeId ||
+        task?.plannerRound?.sourceEvidence?.some(({ contextOnly }) =>
+          contextOnly
+        )
+      ? undefined
+      : task;
   } finally {
     db.close();
   }

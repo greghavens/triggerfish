@@ -1335,7 +1335,21 @@ function addAdaptive(
       for (const assignment of assignments.values()) {
         if (
           assignment.nodeId === targetId &&
-          assignment.plannerRound?.workerNarrativeId === id
+          (assignment.plannerRound?.workerNarrativeId === id ||
+            assignment.plannerRound?.sourceEvidence?.some((citation) =>
+              citation.contextOnly === true &&
+              citation.id === id && citation.taskId === taskId &&
+              citation.evidenceRevision === evidenceRevision &&
+              citation.sourceStepIndex === stepIndex &&
+              citation.digest === createHash("sha256")
+                  .update(
+                    JSON.stringify({
+                      _classification: "INTERNAL",
+                      ...narrative,
+                    }),
+                  )
+                  .digest("hex")
+            ))
         ) {
           index.addEdge(
             derivedRef("task", "adaptive", assignment.id),
