@@ -18,6 +18,7 @@ import {
   createSkillScanner,
   createSkillToolExecutor,
 } from "../../src/tools/skills/mod.ts";
+import { computeSkillHash } from "../../src/tools/skills/integrity.ts";
 
 async function writeSkill(
   dir: string,
@@ -51,9 +52,10 @@ Deno.test("Owner gateway discovers live skill grants and blocks pending draft ac
   const workspace = join(dir, "workspace");
   const tools = resolveToolsForProfile("cli");
   assert(tools.some(({ name }) => name === "list_skills"));
+  assert(tools.some(({ name }) => name === "inspect_skill_document"));
   assert(
     !filterToolsForRole(tools, false).some(({ name }) =>
-      name === "list_skills"
+      name === "list_skills" || name === "inspect_skill_document"
     ),
   );
   assert(
@@ -270,6 +272,43 @@ Deno.test("Owner gateway discovers live skill grants and blocks pending draft ac
     assertEquals(second.next_after, null);
     assertEquals(tracker.getActive(), null);
 
+    const inspect = { type: "BUNDLED", skill_name: "shared" };
+    const callsBeforeInspection = discoveryCalls;
+    deny = "PRE_TOOL_CALL";
+    await turn("inspect_skill_document", inspect);
+    assertEquals(discoveryCalls, callsBeforeInspection);
+    deny = "POST_TOOL_RESPONSE";
+    assertEquals(
+      (await turn("inspect_skill_document", inspect)).result,
+      "Tool response withheld by policy.",
+    );
+    deny = "PRE_OUTPUT";
+    assert(
+      !(await turn("inspect_skill_document", inspect)).messages.includes(
+        "response",
+      ),
+    );
+    deny = undefined;
+    const document = JSON.parse(
+      (await turn("inspect_skill_document", inspect)).result,
+    );
+    assertEquals(document.file, "SKILL.md");
+    assertEquals(
+      document.digest,
+      await computeSkillHash(
+        await Deno.readTextFile(join(bundled, "shared", "SKILL.md")),
+      ),
+    );
+    assertStringIncludes(document.content, "Bundled fixture instructions");
+    assertEquals(tracker.getActive(), null);
+    assertStringIncludes(
+      (await turn("inspect_skill_document", {
+        type: "BUNDLED",
+        skill_name: "public-tool",
+      })).result,
+      "classification ceiling",
+    );
+
     for (const skill_name of ["shared", "rejected"]) {
       const denied = JSON.parse(
         (await turn("read_skill", { type: "USER_PROVIDED", skill_name }))
@@ -279,7 +318,7 @@ Deno.test("Owner gateway discovers live skill grants and blocks pending draft ac
       assertEquals(tracker.getActive(), null);
     }
     replaceAfterDiscovery = true;
-    const stale = await turn("read_skill", {
+    const stale = await turn("inspect_skill_document", {
       type: "USER_PROVIDED",
       skill_name: "local-tool",
     });

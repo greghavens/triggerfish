@@ -103,6 +103,11 @@ export function buildSkillAdministrationToolDefinitions(): readonly ToolDefiniti
       },
     },
   }, {
+    name: "inspect_skill_document",
+    description:
+      "Inspect the current SKILL.md and its exact digest without activating the skill. Requires the active owner session.",
+    parameters: buildReadSkillDef().parameters,
+  }, {
     name: "inspect_skill_draft",
     description:
       "Inspect one pending workspace skill draft by exact name. The fenced content is for owner review only. Use its SHA-256 digest when requesting approval.",
@@ -647,7 +652,12 @@ export function createSkillToolExecutor(
     if (name === "list_skills") {
       return await executeListSkills(ctx, input, context);
     }
-    if (name !== "read_skill") return null;
+    const inspecting = name === "inspect_skill_document";
+    if (name !== "read_skill" && !inspecting) return null;
+    const isCurrentOwner = context?.isCurrentInteractiveOwner;
+    if (inspecting && (!isCurrentOwner?.() || !ctx.getSessionTaint)) {
+      return "Error: Skill inspection requires the active owner session.";
+    }
 
     const type = input.type;
     const skillName = input.skill_name;
@@ -664,7 +674,13 @@ export function createSkillToolExecutor(
     }
 
     const trimmedName = skillName.trim();
+    if (inspecting && !validSkillSelector(trimmedName)) {
+      return "Error: Invalid skill name.";
+    }
     const skills = await ctx.skillLoader.discover();
+    if (inspecting && !isCurrentOwner?.()) {
+      return "Error: The owner session is no longer active.";
+    }
 
     const matchesType = (s: { source: SkillSource }) =>
       skillType(s.source) === type;
@@ -758,6 +774,24 @@ export function createSkillToolExecutor(
         current?.skill.draftApproval?.receiptId !==
           skill.draftApproval.receiptId
       ) return "Error: The skill approval changed during activation.";
+    }
+
+    if (inspecting) {
+      if (!isCurrentOwner?.() || !ctx.getSessionTaint) {
+        return "Error: The owner session is no longer active.";
+      }
+      const taint = ctx.getSessionTaint();
+      const ceilingError = enforceSkillClassificationCeiling(taint, skill);
+      if (ceilingError) return `Error: ${ceilingError}`;
+      return JSON.stringify({
+        found: true,
+        skill_name: skill.name,
+        source: skill.source,
+        file: "SKILL.md",
+        digest: currentHash,
+        content: fenceExternalMetadata(content, "skill-document"),
+        _classification: taint,
+      });
     }
 
     // 4. Track the active skill for tool filtering and domain enforcement

@@ -378,7 +378,7 @@ export async function dispatchApprovedToolCall(
     call.name === sentinelIncidentRecommendationToolName) &&
     ownerApproval?.toolApprovalRequestId !== undefined) ||
     call.name === customToolManageName ||
-    call.name === "list_skills" ||
+    call.name === "list_skills" || call.name === "inspect_skill_document" ||
     chatGoalMutation(call.name, call.args) ||
     (call.name === "managed_goal_state" &&
       (call.args.action === "cite" || call.args.action === "status")) ||
