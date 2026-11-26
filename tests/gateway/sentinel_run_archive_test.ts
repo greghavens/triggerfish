@@ -28,7 +28,10 @@ import { DatabaseSync } from "node:sqlite";
 import { createSentinelLiveWorkflowReader } from "../../src/gateway/sentinel_live_workflow.ts";
 import { createHash } from "node:crypto";
 import { reopenSentinelLinkedTrafficPayload } from "../../src/gateway/sentinel_finding_traffic_tool.ts";
-import { reopenProjectedSentinelTrafficPage } from "../../src/gateway/sentinel_traffic_tool.ts";
+import {
+  reopenProjectedSentinelTrafficBlob,
+  reopenProjectedSentinelTrafficPage,
+} from "../../src/gateway/sentinel_traffic_tool.ts";
 import {
   withVerifiedRunArchive,
   writeRunArchive,
@@ -260,6 +263,7 @@ async function withGateway(
           "sentinel_expand_evidence_digest",
           "sentinel_traffic_search",
           "sentinel_traffic_get",
+          "sentinel_traffic_blob",
           "sentinel_finding_traffic_links",
           "sentinel_worker_findings",
           "sentinel_case_execution_evidence",
@@ -2575,6 +2579,7 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
     let denyLinkedResume = false;
     let resumedPostChecks = 0;
     let workerNodeTrafficPage: string | undefined;
+    let retainedBlob: string;
     linkedRegistry.register({
       name: "linked-payload-fixture",
       supportsStreaming: false,
@@ -2771,6 +2776,36 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
         JSON.parse(linkedWorkerResult!).payload.text,
         "x".repeat(511) + "🙂",
       );
+      const blob = {
+        revision: state.revision,
+        evidenceId: traffic.evidenceId,
+        digest: traffic.digest,
+        payloadPart: "response" as const,
+        offset: 511,
+        byteLength: 4,
+      };
+      const text = reopenProjectedSentinelTrafficBlob(
+        path,
+        "restorable",
+        state.revision,
+        blob,
+        traffic.assetIds[0],
+      );
+      assert(text);
+      retainedBlob = text;
+      assert(linkedJournal.recordModelReviewProgress(
+        revision,
+        trafficTaskId,
+        trafficReviewToken,
+        [...steps, {
+          tool: "sentinel_traffic_blob",
+          outcome: "returned",
+          goalReceiptRead: {
+            args: blob,
+            sha256: createHash("sha256").update(text).digest("hex"),
+          },
+        }],
+      ));
     } finally {
       linkedJournal.close();
     }
@@ -3414,11 +3449,49 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
         JSON.stringify(JSON.parse(await turn(linkedWorkerTrace)).result),
         linkedWorkerResult,
       );
+      assertEquals(
+        JSON.parse(await turn({ ...linkedWorkerTrace, stepIndices: [3] }))
+          .result,
+        JSON.parse(retainedBlob),
+      );
+      const trafficUsage = {
+        action: "case_local_tool_usage",
+        kind: "sentinel",
+        id: exact.id,
+        revision: state.revision,
+        runId: state.plan.runId,
+        includeRetainedTrafficResults: true,
+      };
+      const trafficTotals = await turn(trafficUsage);
+      assert(trafficTotals.startsWith("{"), trafficTotals);
+      const totals = JSON.parse(trafficTotals).totals;
+      for (
+        const [tool, calls] of [
+          ["sentinel_traffic_search", 1],
+          ["sentinel_finding_traffic_links", 2],
+          ["sentinel_traffic_blob", 1],
+        ]
+      ) {
+        assertEquals(
+          totals.find((row: { tool: string; role: string }) =>
+            row.tool === tool && row.role === "worker"
+          ),
+          { role: "worker", tool, calls, failed: 0 },
+        );
+      }
+      assert(!trafficTotals.includes("🙂"));
+      assert(!trafficTotals.includes(traffic.evidenceId));
+      assert(!trafficTotals.includes(trafficLinkId));
+      assertStringIncludes(
+        await turn({ ...trafficUsage, revision: state.revision + 1 }),
+        "unavailable",
+      );
       policy.denyWorkerSourceBefore = true;
       assertStringIncludes(await turn(linkedWorkerTrace), "unavailable");
       policy.denyWorkerSourceBefore = false;
       policy.denyWorkerSourceAfter = true;
       assertStringIncludes(await turn(linkedWorkerTrace), "unavailable");
+      assertStringIncludes(await turn(trafficUsage), "unavailable");
       policy.denyWorkerSourceAfter = false;
       const workflowTrace = {
         action: "worker_trace_result",
@@ -5935,6 +6008,12 @@ async function verifyPlannerArchive(
       action: "case_local_tool_usage",
       includeRetainedTrafficMetadata: true,
     };
+    const trafficResultUsageQuery = {
+      ...run,
+      action: "case_local_tool_usage",
+      includeRetainedTrafficResults: true,
+    };
+    let originalTrafficResultUsage: unknown;
     let originalTrafficUsage: unknown;
     const archiveId = crypto.randomUUID();
     await withGateway(baseDir, async (turn) => {
@@ -5943,6 +6022,23 @@ async function verifyPlannerArchive(
         assert(text.startsWith("{"), text);
         const saved = JSON.parse(text);
         originalTrafficUsage = saved;
+        const resultText = await turn(trafficResultUsageQuery);
+        assert(resultText.startsWith("{"), resultText);
+        const resultUsage = JSON.parse(resultText);
+        originalTrafficResultUsage = resultUsage;
+        assertEquals(
+          resultUsage.totals.filter(({ tool }: { tool: string }) =>
+            tool === "sentinel_traffic_search"
+          ),
+          [{
+            role: "planner",
+            tool: "sentinel_traffic_search",
+            calls: 1,
+            failed: 0,
+          }],
+        );
+        assert(!resultText.includes(trafficSecret));
+        assert(!resultText.includes('"evidenceId"'));
         assertEquals(
           saved.totals.filter(({ tool }: { tool: string }) =>
             tool === "sentinel_traffic_get"
@@ -6225,6 +6321,10 @@ async function verifyPlannerArchive(
         assertEquals(
           JSON.parse(await turn(trafficUsageQuery)),
           originalTrafficUsage,
+        );
+        assertEquals(
+          JSON.parse(await turn(trafficResultUsageQuery)),
+          originalTrafficResultUsage,
         );
         for (const hook of ["PRE_TOOL_CALL", "POST_TOOL_RESPONSE"]) {
           policy.denyTrafficReceiptHook = hook;

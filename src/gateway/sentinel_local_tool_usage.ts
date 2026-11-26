@@ -4,6 +4,7 @@ import { canFlowTo } from "../core/types/classification.ts";
 import {
   readSentinelLocalUsageSteps,
   type SentinelLinkedUsageStep,
+  type SentinelTrafficResultUsageStep,
   type SentinelWorkflowUsageStep,
 } from "../sentinel/local_tool_usage.ts";
 import type { OperatorRunToolContext } from "./operator_run_tool.ts";
@@ -18,8 +19,8 @@ export async function readAuthorizedSentinelLocalToolUsage(
   args: Record<string, unknown>,
   context: OperatorRunToolContext | undefined,
   reopenLinked?: (step: SentinelLinkedUsageStep) => Promise<string | undefined>,
-  authorizeWorkflow?: (
-    step: SentinelWorkflowUsageStep,
+  authorizeExactResult?: (
+    step: SentinelWorkflowUsageStep | SentinelTrafficResultUsageStep,
   ) => Promise<boolean>,
 ) {
   const owner = context?.authorizeOwnerRunCall;
@@ -44,6 +45,7 @@ export async function readAuthorizedSentinelLocalToolUsage(
       args.includeRetainedTrafficMetadata === true,
       args.includeSavedWorkflowReceipts === true,
       args.includeOriginalWorkflowReceipts === true,
+      args.includeRetainedTrafficResults === true,
     );
     if (
       !rows ||
@@ -64,17 +66,15 @@ export async function readAuthorizedSentinelLocalToolUsage(
     { role: "planner" | "worker"; tool: string; calls: number; failed: number }
   >();
   for (const step of selected.rows) {
-    if (
-      step.tool === "sentinel_saved_workflow_receipt" ||
-      step.tool === "sentinel_live_workflow_status"
-    ) {
+    if ("receiptSha256" in step) {
       if (
-        !currentCase() || !await authorizeWorkflow?.(step) ||
+        !currentCase() || !await authorizeExactResult?.(step) ||
         !currentCase()
       ) return;
-      const key = "worker/" + step.tool;
+      const role = "taskId" in step ? "worker" : "planner";
+      const key = role + "/" + step.tool;
       const group = groups.get(key) ??
-        { role: "worker" as const, tool: step.tool, calls: 0, failed: 0 };
+        { role, tool: step.tool, calls: 0, failed: 0 };
       group.calls++;
       groups.set(key, group);
       continue;

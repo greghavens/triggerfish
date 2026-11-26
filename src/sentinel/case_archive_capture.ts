@@ -31,10 +31,12 @@ import { readSentinelDiscoveryPageReference } from "./worker_goal_recovery.ts";
 import { sentinelIntermediateWorkflowPageReference } from "./worker_goal_recovery.ts";
 import { readSentinelGraphFactPageReference } from "./worker_graph_facts.ts";
 import {
+  SENTINEL_TRAFFIC_BLOB,
   SENTINEL_TRAFFIC_LINKS,
   SENTINEL_TRAFFIC_READ,
   SENTINEL_TRAFFIC_SEARCH,
   sentinelLinkedTrafficPayloadReference,
+  sentinelTrafficBlobArgs,
   sentinelTrafficLinkPageReference,
   sentinelTrafficPageReference,
   sentinelTrafficReadArgs,
@@ -738,6 +740,15 @@ function retainedTraceReceiptFields(
       args && /^(?:har|dns):evidence:[a-f0-9]{64}$/.test(args.evidenceId) &&
       digest(saved?.sha256)
     ) fields.trafficRead = { ...args, sha256: saved.sha256 };
+  }
+  if (step.tool === SENTINEL_TRAFFIC_BLOB) {
+    const saved = step.goalReceiptRead as
+      | { args?: unknown; sha256?: unknown }
+      | undefined;
+    const args = saved && sentinelTrafficBlobArgs(saved.args);
+    if (args && digest(saved?.sha256)) {
+      fields.goalReceiptRead = { args, sha256: saved?.sha256 };
+    }
   }
   if (step.tool === SENTINEL_TRAFFIC_LINKS) {
     const page = sentinelTrafficLinkPageReference(step.trafficLinks);

@@ -231,10 +231,12 @@ import {
 import { executionFindingAsset } from "../sentinel/worker_finding_evidence.ts";
 import {
   SENTINEL_TRAFFIC_ATTACH,
+  SENTINEL_TRAFFIC_BLOB,
   SENTINEL_TRAFFIC_LINKS,
   SENTINEL_TRAFFIC_READ,
   SENTINEL_TRAFFIC_SEARCH,
   sentinelLinkedTrafficPayloadReference,
+  sentinelTrafficBlobArgs,
   sentinelTrafficLinkPageReference,
   sentinelTrafficLinksArgs,
   sentinelTrafficPageReference,
@@ -480,6 +482,7 @@ import {
   projectSentinelTrafficReceipt,
   readProjectedSentinelTrafficPage,
   readProjectedSentinelTrafficReceipt,
+  reopenProjectedSentinelTrafficBlob,
   reopenProjectedSentinelTrafficPage,
   sentinelTrafficBlobTool,
   sentinelTrafficGetTool,
@@ -1219,6 +1222,11 @@ export const operatorRunTool: ToolDefinition = {
       type: "string",
       description: "Cursor from the prior retained tool usage totals page.",
     },
+    includeRetainedTrafficResults: {
+      type: "boolean",
+      description:
+        "Include retained traffic search pages, payload pages, and finding traffic links after reauthorizing each exact source. Totals include no traffic payloads.",
+    },
     includeOriginalWorkflowReceipts: {
       type: "boolean",
       description:
@@ -1834,7 +1842,8 @@ export function sentinelOperatorCaseReadParameterAllowed(
     parameter === "includeRetainedFindingSources" ||
     parameter === "includeRetainedTrafficMetadata" ||
     parameter === "includeSavedWorkflowReceipts" ||
-    parameter === "includeOriginalWorkflowReceipts"
+    parameter === "includeOriginalWorkflowReceipts" ||
+    parameter === "includeRetainedTrafficResults"
   ) {
     return action === "case_local_tool_usage";
   }
@@ -9041,6 +9050,7 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
         const includeTraffic = args.includeRetainedTrafficMetadata;
         const includeWorkflows = args.includeSavedWorkflowReceipts;
         const includeOriginalWorkflows = args.includeOriginalWorkflowReceipts;
+        const includeTrafficResults = args.includeRetainedTrafficResults;
         if (
           ref.kind !== "sentinel" || ref.revision === undefined ||
           typeof args.runId !== "string" || !digestPattern.test(args.runId) ||
@@ -9054,6 +9064,8 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
             typeof includeWorkflows !== "boolean") ||
           (includeOriginalWorkflows !== undefined &&
             typeof includeOriginalWorkflows !== "boolean") ||
+          (includeTrafficResults !== undefined &&
+            typeof includeTrafficResults !== "boolean") ||
           Object.keys(args).some((key) =>
             ![
               "action",
@@ -9066,6 +9078,7 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
               "includeRetainedTrafficMetadata",
               "includeSavedWorkflowReceipts",
               "includeOriginalWorkflowReceipts",
+              "includeRetainedTrafficResults",
             ].includes(key)
           ) ||
           !await controller.inspect(ref)
@@ -9088,23 +9101,39 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
                 step.goalReceiptRead.args,
               )
             : undefined,
-          includeWorkflows === true || includeOriginalWorkflows === true
+          includeWorkflows === true || includeOriginalWorkflows === true ||
+            includeTrafficResults === true
             ? async (step) => {
+              const selection = "taskId" in step
+                ? {
+                  action: "worker_trace_result",
+                  taskId: step.taskId,
+                  stepIndices: [step.ordinal],
+                }
+                : {
+                  action: "planner_reads",
+                  plannerIdentity: step.plannerIdentity,
+                  attempt: step.attempt,
+                  ordinal: step.ordinal + 1,
+                  includeResult: true,
+                };
               const text = await execute({
-                action: "worker_trace_result",
+                ...selection,
                 kind: "sentinel",
                 id: ref.id,
                 revision,
-                taskId: step.taskId,
-                stepIndices: [step.ordinal],
               }, context);
               if (!text.startsWith("{")) return false;
               const validated = JSON.parse(text);
               if (
-                validated.runId !== args.runId ||
-                validated.taskId !== step.taskId ||
-                validated.index !== step.ordinal ||
-                validated.result === undefined
+                validated.result === undefined ||
+                ("taskId" in step
+                  ? validated.runId !== args.runId ||
+                    validated.taskId !== step.taskId ||
+                    validated.index !== step.ordinal
+                  : validated.plannerIdentity !== step.plannerIdentity ||
+                    validated.attempt !== step.attempt ||
+                    validated.ordinal !== step.ordinal + 1)
               ) return false;
               if (step.tool === "sentinel_live_workflow_status") {
                 const receipt = readSentinelGitHubWorkflowReadReceipt(
@@ -11292,6 +11321,48 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
                 result: retained,
               });
             }
+            if (step?.tool === SENTINEL_TRAFFIC_BLOB) {
+              const task = history?.tasks.find(({ id }) => id === taskId);
+              const authorize = context.authorizeSentinelTraceRead;
+              const binding = step.goalReceiptRead;
+              const call = binding && sentinelTrafficBlobArgs(binding.args);
+              if (
+                !task?.nodeId || !authorize || !call || !binding ||
+                call.revision !== ref.revision || step.outcome !== "returned"
+              ) return unavailable;
+              const scope = {
+                caseId: ref.id,
+                revision: ref.revision,
+                taskId: task.id,
+              };
+              const read = () =>
+                reopenProjectedSentinelTrafficBlob(
+                  path,
+                  ref.id,
+                  ref.revision!,
+                  call,
+                  task.nodeId,
+                );
+              if (!await authorize(scope, step.tool, call)) return unavailable;
+              const text = read();
+              if (
+                !text || createHash("sha256").update(text).digest("hex") !==
+                  binding.sha256 ||
+                !await authorize(scope, step.tool, call, text) ||
+                read() !== text ||
+                !isDeepStrictEqual(
+                  savedStep(readHistoricalAdaptiveSentinel(path, ref.revision)),
+                  step,
+                )
+              ) return unavailable;
+              return projectResult({
+                run: ref,
+                runId,
+                taskId,
+                index,
+                result: JSON.parse(text),
+              });
+            }
             if (step?.tool === SENTINEL_TRAFFIC_ATTACH) {
               const task = history?.tasks.find(({ id }) => id === taskId);
               const authorize = context.authorizeSentinelTraceRead;
@@ -11479,78 +11550,85 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
                 taskId: task.id,
               };
               if (!await authorize(scope, tool, call)) return unavailable;
-              const retained = receipt && readProjectedSentinelTrafficReceipt(
-                path,
-                ref.id,
-                ref.revision,
-                receipt,
-                task.nodeId,
-              );
-              let text: string | undefined;
-              if (payload) {
-                text = reopenSentinelLinkedTrafficPayload(
+              const revision = ref.revision;
+              const assetId = task.nodeId;
+              const reopen = () => {
+                const retained = receipt && readProjectedSentinelTrafficReceipt(
                   path,
                   ref.id,
-                  ref.revision,
-                  task.nodeId,
-                  payload.args,
+                  revision,
+                  receipt,
+                  assetId,
                 );
-              } else if (linkArgs && links) {
-                const { linkIds, nextOffset } = links;
-                if (
-                  !Array.isArray(linkIds) ||
-                  linkIds.length > (linkArgs.limit ?? 5) ||
-                  new Set(linkIds).size !== linkIds.length ||
-                  (nextOffset !== null && (linkIds.length === 0 ||
-                    nextOffset !== (linkArgs.offset ?? 0) + linkIds.length))
-                ) return unavailable;
-                const records = [];
-                for (const id of linkIds) {
-                  if (typeof id !== "string") return unavailable;
-                  const [saved] = listSentinelFindingTrafficLinks(path, {
-                    id,
-                    assetId: task.nodeId,
-                    evidenceRevision: ref.revision,
-                    findingId: linkArgs.findingId,
-                    recheckId: linkArgs.recheckId,
-                  });
-                  if (!saved) return unavailable;
-                  records.push(saved);
-                }
-                if (
-                  !allowsSentinelGraphFindingTrafficPage(
+                let text: string | undefined;
+                if (payload) {
+                  text = reopenSentinelLinkedTrafficPayload(
                     path,
                     ref.id,
-                    ref.revision,
-                    linkArgs.graphFindingId,
-                    records,
-                    task.nodeId,
-                  )
-                ) return unavailable;
-                text = JSON.stringify({
-                  _classification: "INTERNAL",
-                  caseId: ref.id,
-                  evidenceRevision: ref.revision,
-                  links: records,
-                  evidenceVersion: links.evidenceVersion,
-                  nextOffset,
-                });
-              } else if (retained) {
-                text = JSON.stringify(retained);
-              } else if (search) {
-                text = reopenProjectedSentinelTrafficPage(
-                  path,
-                  ref.id,
-                  ref.revision,
-                  call,
-                  task.nodeId,
-                );
-              }
+                    revision,
+                    assetId,
+                    payload.args,
+                  );
+                } else if (linkArgs && links) {
+                  const { linkIds, nextOffset } = links;
+                  if (
+                    !Array.isArray(linkIds) ||
+                    linkIds.length > (linkArgs.limit ?? 5) ||
+                    new Set(linkIds).size !== linkIds.length ||
+                    (nextOffset !== null && (linkIds.length === 0 ||
+                      nextOffset !== (linkArgs.offset ?? 0) + linkIds.length))
+                  ) return unavailable;
+                  const records = [];
+                  for (const id of linkIds) {
+                    if (typeof id !== "string") return unavailable;
+                    const [saved] = listSentinelFindingTrafficLinks(path, {
+                      id,
+                      assetId: assetId,
+                      evidenceRevision: revision,
+                      findingId: linkArgs.findingId,
+                      recheckId: linkArgs.recheckId,
+                    });
+                    if (!saved) return unavailable;
+                    records.push(saved);
+                  }
+                  if (
+                    !allowsSentinelGraphFindingTrafficPage(
+                      path,
+                      ref.id,
+                      revision,
+                      linkArgs.graphFindingId,
+                      records,
+                      assetId,
+                    )
+                  ) return unavailable;
+                  text = JSON.stringify({
+                    _classification: "INTERNAL",
+                    caseId: ref.id,
+                    evidenceRevision: revision,
+                    links: records,
+                    evidenceVersion: links.evidenceVersion,
+                    nextOffset,
+                  });
+                } else if (retained) {
+                  text = JSON.stringify(retained);
+                } else if (search) {
+                  text = reopenProjectedSentinelTrafficPage(
+                    path,
+                    ref.id,
+                    revision,
+                    call,
+                    assetId,
+                  );
+                }
+                return text;
+              };
+              const text = reopen();
               if (
                 !text ||
                 createHash("sha256").update(text).digest("hex") !==
                   binding.sha256 ||
-                !await authorize(scope, tool, call, text)
+                !await authorize(scope, tool, call, text) ||
+                reopen() !== text
               ) return unavailable;
               const current = readHistoricalAdaptiveSentinel(
                 path,
@@ -12434,18 +12512,21 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
               selector,
             );
           if (!await sourceStillAuthorized()) return unavailable;
+          const trafficResult = read.tool === SENTINEL_TRAFFIC_READ ||
+            read.tool === SENTINEL_TRAFFIC_SEARCH ||
+            read.tool === SENTINEL_TRAFFIC_LINKS;
+          const reopenTraffic = () =>
+            reopenSentinelPlannerTraffic(
+              path,
+              ref.id,
+              ref.revision!,
+              runId,
+              read,
+              selector,
+            );
           const text = includeResult
-            ? read.tool === SENTINEL_TRAFFIC_READ ||
-                read.tool === SENTINEL_TRAFFIC_SEARCH ||
-                read.tool === SENTINEL_TRAFFIC_LINKS
-              ? reopenSentinelPlannerTraffic(
-                path,
-                ref.id,
-                ref.revision,
-                runId,
-                read,
-                selector,
-              )
+            ? trafficResult
+              ? reopenTraffic()
               : await reopenSentinelSourceResult(
                 options.baseDir,
                 path,
@@ -12458,7 +12539,8 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
             );
           if (
             !text || !await authorize(scope, read.tool, selector, text) ||
-            !await sourceStillAuthorized()
+            !await sourceStillAuthorized() ||
+            (includeResult && trafficResult && reopenTraffic() !== text)
           ) {
             return unavailable;
           }

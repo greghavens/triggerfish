@@ -64,10 +64,45 @@ export type SentinelWorkflowUsageStep =
     }
   );
 
+type TrafficResultTool =
+  | "sentinel_traffic_search"
+  | "sentinel_traffic_blob"
+  | "sentinel_finding_traffic_links";
+
+export type SentinelTrafficResultUsageStep =
+  & Step
+  & {
+    readonly tool: TrafficResultTool;
+    readonly receiptSha256: string;
+  }
+  & (
+    | { readonly taskId: string; readonly assignedTarget: string }
+    | { readonly plannerIdentity: string; readonly attempt: number }
+  );
+
+function isTrafficResultTool(tool: unknown): tool is TrafficResultTool {
+  return tool === "sentinel_traffic_search" ||
+    tool === "sentinel_traffic_blob" ||
+    tool === "sentinel_finding_traffic_links";
+}
+
+const trafficResultSha = `COALESCE(
+  json_extract(step.value, '$.trafficSearch.sha256'),
+  json_extract(step.value, '$.trafficSearchPage.sha256'),
+  json_extract(step.value, '$.linkedTrafficPayload.sha256'),
+  json_extract(step.value, '$.trafficLinks.sha256'),
+  json_extract(step.value, '$.goalReceiptRead.sha256')
+)`;
+
+function validTrafficResultDigest(value: unknown): value is string {
+  return typeof value === "string" && /^[a-f0-9]{64}$/.test(value);
+}
+
 export type SentinelLocalUsageStep =
   | SentinelLinkedUsageStep
   | SentinelTrafficUsageStep
   | SentinelWorkflowUsageStep
+  | SentinelTrafficResultUsageStep
   | (
     & Step
     & (
@@ -93,6 +128,7 @@ export function readSentinelLocalUsageSteps(
   includeRetainedTrafficMetadata = false,
   includeSavedWorkflowReceipts = false,
   includeOriginalWorkflowReceipts = false,
+  includeRetainedTrafficResults = false,
 ): readonly SentinelLocalUsageStep[] | undefined {
   const path = join(dirname(snapshotPath), "sentinel-adaptive.db");
   try {
@@ -129,6 +165,7 @@ export function readSentinelLocalUsageSteps(
           json_extract(step.value, '$.trafficRead.evidenceId') AS trafficEvidence,
           json_extract(step.value, '$.trafficRead.digest') AS trafficDigest,
           json_extract(step.value, '$.trafficRead.sha256') AS trafficSha,
+          ${trafficResultSha} AS trafficResultSha,
           json_extract(step.value, '$.outcome') AS outcome
         FROM adaptive_model_reads trace
         JOIN adaptive_model_history history USING(identity, attempt)
@@ -136,9 +173,19 @@ export function readSentinelLocalUsageSteps(
         WHERE (trace.identity = ? OR substr(trace.identity, 1, length(?) + 1) = ? || ':')
           AND (json_extract(step.value, '$.tool') = 'sentinel_graph_overview'
             OR (? AND json_extract(step.value, '$.tool') = 'sentinel_traffic_get'
+              AND json_extract(step.value, '$.outcome') = 'returned')
+            OR (? AND json_extract(step.value, '$.tool') IN (
+                'sentinel_traffic_search', 'sentinel_finding_traffic_links')
               AND json_extract(step.value, '$.outcome') = 'returned'))
         ORDER BY trace.identity, trace.attempt, ordinal LIMIT ?
-      `).all(key, key, key, Number(includeRetainedTrafficMetadata), budget + 1);
+      `).all(
+        key,
+        key,
+        key,
+        Number(includeRetainedTrafficMetadata),
+        Number(includeRetainedTrafficResults),
+        budget + 1,
+      );
       for (const row of rows) {
         if (
           typeof row.identity !== "string" ||
@@ -148,6 +195,18 @@ export function readSentinelLocalUsageSteps(
           !Number.isSafeInteger(row.ordinal) ||
           (row.outcome !== "returned" && row.outcome !== "error")
         ) return;
+        if (isTrafficResultTool(row.tool)) {
+          if (!validTrafficResultDigest(row.trafficResultSha)) return;
+          retained.push({
+            tool: row.tool,
+            plannerIdentity: row.identity,
+            attempt: row.attempt,
+            ordinal: row.ordinal,
+            outcome: row.outcome,
+            receiptSha256: row.trafficResultSha,
+          });
+          continue;
+        }
         if (row.tool === "sentinel_traffic_get") {
           const trafficRead = trafficBinding(row, revision);
           if (!trafficRead) return;
@@ -233,7 +292,8 @@ export function readSentinelLocalUsageSteps(
         json_extract(step.value, '$.trafficRead.revision') AS trafficRevision,
         json_extract(step.value, '$.trafficRead.evidenceId') AS trafficEvidence,
         json_extract(step.value, '$.trafficRead.digest') AS trafficDigest,
-        json_extract(step.value, '$.trafficRead.sha256') AS trafficSha
+        json_extract(step.value, '$.trafficRead.sha256') AS trafficSha,
+        ${trafficResultSha} AS trafficResultSha
       FROM selected JOIN json_each(selected.steps) step
       WHERE selected.rank = 1
         AND (json_extract(step.value, '$.tool') = 'sentinel_assigned_target'
@@ -243,6 +303,9 @@ export function readSentinelLocalUsageSteps(
             OR (? AND json_extract(step.value, '$.tool') = 'sentinel_traffic_get')
             OR (? AND json_extract(step.value, '$.tool') = 'sentinel_saved_workflow_receipt')
             OR (? AND json_extract(step.value, '$.tool') = 'sentinel_live_workflow_status')
+            OR (? AND json_extract(step.value, '$.tool') IN (
+              'sentinel_traffic_search', 'sentinel_traffic_blob',
+              'sentinel_finding_traffic_links'))
           )))
       ORDER BY selected.id, ordinal LIMIT ?
     `).all(
@@ -252,6 +315,7 @@ export function readSentinelLocalUsageSteps(
       Number(includeRetainedTrafficMetadata),
       Number(includeSavedWorkflowReceipts),
       Number(includeOriginalWorkflowReceipts),
+      Number(includeRetainedTrafficResults),
       budget + 1 - retained.length,
     );
     for (const row of rows) {
@@ -261,6 +325,18 @@ export function readSentinelLocalUsageSteps(
         typeof row.ordinal !== "number" || !Number.isSafeInteger(row.ordinal) ||
         (row.outcome !== "returned" && row.outcome !== "error")
       ) return;
+      if (isTrafficResultTool(row.tool)) {
+        if (!validTrafficResultDigest(row.trafficResultSha)) return;
+        retained.push({
+          tool: row.tool,
+          taskId: row.id,
+          assignedTarget: row.nodeId,
+          ordinal: row.ordinal,
+          outcome: row.outcome,
+          receiptSha256: row.trafficResultSha,
+        });
+        continue;
+      }
       if (row.tool === "sentinel_live_workflow_status") {
         if (
           row.target !== row.nodeId || row.workflowRevision !== revision ||
