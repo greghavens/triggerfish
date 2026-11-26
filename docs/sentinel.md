@@ -346,6 +346,14 @@ finding and note. It records a read-only review of the saved graph and
 keeps the assessment completed. This review does not perform a new control
 check.
 
+Use `operator_runs finding_recheck_attempts` with the exact case, evidence
+revision, and original finding's `receiptId` to review recheck work.
+`activeOnly: true` limits the view to pending and running work in the
+current assessment. The page reports worker state and its last recorded
+settlement separately from the verdict. A failed or interrupted attempt
+does not establish a verdict. If the page becomes stale, start again
+without its cursor.
+
 In authenticated owner chat, use `operator_runs finding_groups` with
 `scopes` containing one to four exact case IDs and saved revisions. Each
 group reports its count of imported and worker findings and has an independent

@@ -121,6 +121,7 @@ import {
   readSentinelIncidentReviews,
   readSentinelLinkedStartSeed,
   readSentinelOperatingConstraints,
+  readSentinelOperatingConstraintsForRevision,
   readSentinelRunIdForRevision,
   type SentinelGitHubWorkflowReadReceipt,
   type SentinelReviewStep,
@@ -918,6 +919,165 @@ export function readSentinelTaskQueue(
     return { ...mapping, tasks, reviews, diagnostics, dependencyApproval };
   } finally {
     store.close();
+  }
+}
+
+/** Read attempt state separately from verdicts committed by finding recheck workers. */
+export function readSentinelFindingRecheckAttempts(
+  path: string,
+  scope: {
+    caseId: string;
+    revision: number;
+    findingId: string;
+    activeOnly: boolean;
+  },
+  limit: number,
+  cursor?: string,
+) {
+  const { caseId, revision, findingId, activeOnly } = scope;
+  const current = readSentinelAssessment(path);
+  const runId = readSentinelRunIdForRevision(path, revision);
+  const snapshot =
+    (current?.revision === revision
+      ? current
+      : readSentinelAssessmentRevision(path, revision))?.result?.sharedGraph
+      .snapshot;
+  if (
+    !runId || !snapshot || locateSentinelCase(path)?.caseId !== caseId ||
+    (activeOnly && (!current?.active || current.revision !== revision)) ||
+    !hasSentinelWorkerFindingJournal(path)
+  ) return;
+  const journal = openSentinelWorkerFindingStore(path);
+  try {
+    const original = journal.readFinding(findingId);
+    if (
+      !original || original.caseId !== caseId || original.runId !== runId ||
+      original.evidenceRevision > revision
+    ) return;
+    const policy = readSentinelOperatingConstraintsForRevision(path, revision);
+    const target = {
+      kind: "review_evidence",
+      nodeId: original.targetId,
+    } as const;
+    if (
+      !sentinelOperatingConstraintsAllow(
+        policy?.constraints,
+        target,
+        snapshot,
+      ) ||
+      (current?.plan.runId === runId && current.revision !== revision &&
+        !caseOperatingScope(path, current.revision)(target))
+    ) return;
+
+    const map = new Map<string, {
+      taskId: string;
+      status: string;
+      evidenceId: string;
+      attempts: number | null;
+      lastAttempt?: {
+        outcome: "completed" | "failed" | "interrupted";
+        at: string;
+      };
+      outcomeUncertain?: true;
+      resultReceiptId?: string;
+      outcome?: "pass" | "fail";
+    }>();
+    const database = storePath(path);
+    try {
+      Deno.lstatSync(database);
+      const adaptive = openSentinelAdaptiveStore(database);
+      try {
+        const mapping = adaptive.forEvidence(revision);
+        if (mapping?.goal.id === runId) {
+          const tasks = adaptive.list(mapping.revision);
+          const reviews = new Map(
+            adaptive.modelReviewStates(mapping.revision).map(
+              (review) => [review.taskId, review],
+            ),
+          );
+          const settlements = adaptive.lastModelReviewSettlements(
+            mapping.revision,
+          );
+          for (const task of tasks) {
+            if (
+              task.kind !== "review_evidence" || !task.nodeId ||
+              task.plannerRound?.recheckFindingId !== findingId ||
+              executionFindingAsset(snapshot, task.nodeId) !== original.targetId
+            ) continue;
+            const review = reviews.get(task.id);
+            const status = review?.status ??
+              (task.status === "completed" ? "queued" : task.status);
+            const lastAttempt = settlements.get(task.id);
+            map.set(task.id, {
+              taskId: task.id,
+              status,
+              evidenceId: task.nodeId,
+              attempts: review?.attempts ?? 0,
+              ...(lastAttempt && { lastAttempt }),
+              ...(review?.outcomeUncertain &&
+                { outcomeUncertain: true as const }),
+            });
+          }
+        }
+      } finally {
+        adaptive.close();
+      }
+    } catch (error) {
+      if (!(error instanceof Deno.errors.NotFound)) throw error;
+    }
+    for (const result of journal.listFindingRechecks(findingId, revision)) {
+      if (
+        result.caseId !== caseId || result.runId !== runId ||
+        result.evidenceRevision !== revision ||
+        result.targetId !== original.targetId ||
+        result.controlId !== original.controlId
+      ) continue;
+      const linked = map.get(result.taskId);
+      if (linked) {
+        if (linked.evidenceId !== result.evidenceId || linked.resultReceiptId) {
+          continue;
+        }
+        linked.resultReceiptId = result.id;
+        if (linked.status === "completed") linked.outcome = result.outcome;
+      } else {
+        map.set(result.taskId, {
+          taskId: result.taskId,
+          status: "result_recorded",
+          evidenceId: result.evidenceId,
+          attempts: null,
+          resultReceiptId: result.id,
+          outcome: result.outcome,
+        });
+      }
+    }
+    const entries = Array.from(map.values()).filter(({ status }) =>
+      !activeOnly || status === "queued" || status === "running" ||
+      status === "retry_pending"
+    ).reverse();
+    const digest = createHash("sha256").update(
+      JSON.stringify([scope, runId, entries]),
+    ).digest("hex");
+    const match = cursor &&
+      /^finding-recheck-attempts:([a-f0-9]{64}):([1-9][0-9]{0,6})$/.exec(
+        cursor,
+      );
+    const offset = match ? Number(match[2]) : 0;
+    if (
+      cursor !== undefined &&
+      (!match || match[1] !== digest || offset >= entries.length)
+    ) return;
+    const end = offset + limit;
+    return {
+      runId,
+      findingId,
+      evidenceRevision: revision,
+      entries: entries.slice(offset, end),
+      nextCursor: end < entries.length
+        ? `finding-recheck-attempts:${digest}:${end}`
+        : null,
+    };
+  } finally {
+    journal.close();
   }
 }
 

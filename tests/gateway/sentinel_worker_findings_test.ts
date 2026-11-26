@@ -3537,6 +3537,7 @@ async function verifyReceiptFamily(
     });
     planningRegistry.setDefault("receipt-candidate-planner");
     let scheduledResult: Record<string, unknown> | undefined;
+    let inspectedRunningAttempt = false;
     let scheduledRead: unknown;
     let scheduledFindingRead: unknown;
     let scheduledFindingPage: unknown;
@@ -3579,6 +3580,29 @@ async function verifyReceiptFamily(
                 workerFinding = input.recheckFindingId;
                 if (native) {
                   assert(taskId && token);
+                  await withFindingAssignmentGateway(baseDir, () => {
+                    throw new Error(
+                      "Read-only attempts must not require approval",
+                    );
+                  }, async (turn) => {
+                    const running = JSON.parse(
+                      await turn({
+                        action: "finding_recheck_attempts",
+                        kind: "sentinel",
+                        id: "main",
+                        revision: state.revision,
+                        receiptId: input.recheckFindingId,
+                        activeOnly: true,
+                      }),
+                    ).page;
+                    assertEquals(running.entries, [{
+                      taskId,
+                      status: "running",
+                      attempts: 1,
+                      evidenceId: input.target,
+                    }]);
+                    inspectedRunningAttempt = true;
+                  });
                   const check = {
                     findingId: input.recheckFindingId,
                     evidenceId: input.target,
@@ -3807,6 +3831,42 @@ async function verifyReceiptFamily(
         "completed",
       );
       assert(scheduledResult);
+      assert(inspectedRunningAttempt);
+      const attempts = {
+        action: "finding_recheck_attempts",
+        kind: "sentinel",
+        id: "main",
+        revision: updated.revision,
+        receiptId: finding.id,
+      };
+      await withFindingAssignmentGateway(baseDir, () => {
+        throw new Error("History must not require approval");
+      }, async (turn) => {
+        const page = JSON.parse(await turn(attempts)).page;
+        const [{ lastAttempt, ...entry }] = page.entries;
+        assertEquals(lastAttempt.outcome, "completed");
+        assertEquals([entry], [{
+          taskId,
+          status: "completed",
+          attempts: 1,
+          evidenceId: passingNode,
+          resultReceiptId: scheduledResult?.id,
+          outcome: "pass",
+        }]);
+        assertEquals(
+          JSON.parse(await turn({ ...attempts, activeOnly: true })).page
+            .entries,
+          [],
+        );
+        assertStringIncludes(
+          await turn({ ...attempts, id: "other" }),
+          "unavailable",
+        );
+        assertStringIncludes(
+          await turn({ ...attempts, receiptId: scheduledResult?.id }),
+          "unavailable",
+        );
+      });
       assert(scheduledRead);
       await verifyImportedFindingGrant(baseDir, finding, scheduledResult, true);
       await verifyOperatorNativeRecheck({
@@ -3928,6 +3988,50 @@ async function verifyReceiptFamily(
     assertEquals(JSON.parse(verification.results[3][2]).record, saved);
     if (family === "branch protection") {
       await verifyImportedFindingGrant(baseDir, finding, saved);
+      const attempts = {
+        action: "finding_recheck_attempts",
+        kind: "sentinel",
+        id: "main",
+        revision: updated.revision,
+        receiptId: finding.id,
+        limit: 1,
+      };
+      let cursor: string | undefined;
+      await withFindingAssignmentGateway(
+        baseDir,
+        () => Promise.resolve(false),
+        async (turn) => {
+          const page = JSON.parse(await turn(attempts)).page;
+          assertEquals(page.entries, [{
+            taskId: saved.taskId,
+            status: "result_recorded",
+            attempts: null,
+            evidenceId: passingNode,
+            resultReceiptId: saved.id,
+            outcome: "pass",
+          }]);
+          cursor = page.nextCursor;
+          assert(cursor);
+        },
+      );
+      await withFindingAssignmentGateway(
+        baseDir,
+        () => Promise.resolve(false),
+        async (turn) => {
+          const denied = await turn({ ...attempts, activeOnly: true, cursor });
+          assertStringIncludes(denied, "unavailable");
+          const next = JSON.parse(await turn({ ...attempts, cursor })).page;
+          const [{ lastAttempt, ...entry }] = next.entries;
+          assertEquals(lastAttempt.outcome, "completed");
+          assertEquals([entry], [{
+            taskId: handoff?.[0].id,
+            status: "completed",
+            attempts: 1,
+            evidenceId: passingNode,
+          }]);
+          assertEquals(next.nextCursor, null);
+        },
+      );
     }
     await withTidepool(baseDir, async (list, provenance, request) => {
       assertEquals(await list(state.revision), [finding]);

@@ -8820,6 +8820,31 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
       return { blocked, sources, totalSources: held.length };
     },
 
+    /** Read the last recorded settlement separately from a retry or active lease. */
+    lastModelReviewSettlements(revision: string) {
+      const rows = db.prepare(`
+        SELECT taskId, event, at FROM adaptive_events
+        WHERE rowid IN (
+          SELECT MAX(rowid) FROM adaptive_events
+          WHERE revision = ? AND event IN (
+            'model_review_completed', 'model_review_failed',
+            'model_review_interrupted', 'model_review_lease_expired'
+          ) GROUP BY taskId
+        )
+      `).all(revisionKey(revision));
+      return new Map(rows.map((row) => [
+        String(row.taskId),
+        {
+          outcome: row.event === "model_review_completed"
+            ? "completed" as const
+            : row.event === "model_review_failed"
+            ? "failed" as const
+            : "interrupted" as const,
+          at: new Date(Number(row.at)).toISOString(),
+        },
+      ]));
+    },
+
     modelReviewStates(revision: string) {
       const active = activeRevision() === revision;
       const time = now();

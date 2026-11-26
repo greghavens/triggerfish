@@ -274,6 +274,7 @@ import {
   readHistoricalAdaptiveSentinel,
   readSentinelAdaptiveEvidenceMapping,
   readSentinelFindingFollowup,
+  readSentinelFindingRecheckAttempts,
   readSentinelIntermediateWorkflowObservations,
   readSentinelModelSettings,
   readSentinelOperatorAssetHint,
@@ -299,6 +300,7 @@ import {
   attachOperatorNativeWorkflowControl,
   projectExecutionRecheckSource,
 } from "./operator_execution_evidence.ts";
+import { executeOperatorInventoryAffiliation } from "./operator_inventory_affiliation.ts";
 import { executeOperatorInventoryWithdrawal } from "./operator_inventory_withdrawal.ts";
 import { executeOperatorAssetWithdrawal } from "./operator_asset_withdrawal.ts";
 import { executeOperatorRunArchive } from "./operator_run_archive.ts";
@@ -407,6 +409,7 @@ export const operatorRunTool: ToolDefinition = {
         "attach_execution_evidence",
         "case_execution_evidence",
         "finding_recheck_candidates",
+        "finding_recheck_attempts",
         "finding_recheck_sources",
         "defense_coverage",
         "incident_alerts",
@@ -458,6 +461,8 @@ export const operatorRunTool: ToolDefinition = {
         "discovery_proposals",
         "propose_graph_fact_discovery",
         "preview_inventory_withdrawal",
+        "preview_inventory_affiliation",
+        "affiliate_inventory_asset",
         "withdraw_inventory_host",
         "pause_runs",
         "resume_runs",
@@ -519,6 +524,11 @@ export const operatorRunTool: ToolDefinition = {
     revision: {
       type: "integer",
       description: "Exact Sentinel evidence revision",
+    },
+    activeOnly: {
+      type: "boolean",
+      description:
+        "List only queued, running, or retry-pending attempts for the current Sentinel finding.",
     },
     receiptId: {
       type: "string",
@@ -3585,6 +3595,45 @@ ${
             : null,
         });
       }
+      if (action === "finding_recheck_attempts") {
+        const { receiptId, activeOnly = false, limit = 5, cursor } = args;
+        if (
+          ref.kind !== "sentinel" || ref.revision === undefined ||
+          typeof receiptId !== "string" ||
+          !/^worker-finding:[a-f0-9]{64}$/.test(receiptId) ||
+          typeof activeOnly !== "boolean" ||
+          typeof limit !== "number" || !Number.isSafeInteger(limit) ||
+          limit < 1 || limit > 10 ||
+          (cursor !== undefined &&
+            (typeof cursor !== "string" || cursor.length > 100)) ||
+          !canFlowTo("INTERNAL", context?.ceiling ?? "INTERNAL") ||
+          Object.keys(args).some((key) =>
+            ![
+              "action",
+              "kind",
+              "id",
+              "revision",
+              "receiptId",
+              "activeOnly",
+              "limit",
+              "cursor",
+            ].includes(key)
+          ) || !await controller.inspect(ref)
+        ) return unavailable;
+        const path = resolveSentinelCasePath(options.baseDir, ref.id);
+        const page = readSentinelFindingRecheckAttempts(
+          path,
+          {
+            caseId: ref.id,
+            revision: ref.revision,
+            findingId: receiptId,
+            activeOnly,
+          },
+          limit,
+          cursor as string | undefined,
+        );
+        return page ? safeProjection({ run: ref, page }) : unavailable;
+      }
       if (action === "finding_recheck_candidates") {
         const { receiptId, offset = 0 } = args;
         if (
@@ -4244,6 +4293,27 @@ ${
           ref,
           args,
           options.confirm,
+        );
+        return typeof result === "string" ? result : safeProjection(result);
+      }
+      if (
+        action === "preview_inventory_affiliation" ||
+        action === "affiliate_inventory_asset"
+      ) {
+        const authorize = context?.authorizeOwnerRunCall;
+        if (
+          !context?.authenticatedOwnerSessionId || !authorize ||
+          !canFlowTo("INTERNAL", context.ceiling ?? "PUBLIC") ||
+          !canFlowTo(context.inputClassification ?? "PUBLIC", "INTERNAL") ||
+          ref.kind !== "sentinel" || !await controller.inspect(ref)
+        ) return unavailable;
+        const result = await executeOperatorInventoryAffiliation(
+          options.baseDir,
+          ref,
+          args,
+          options.confirm,
+          () => authorize(args),
+          options.webContainmentConfigured,
         );
         return typeof result === "string" ? result : safeProjection(result);
       }
