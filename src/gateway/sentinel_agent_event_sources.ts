@@ -21,7 +21,9 @@ export function sentinelAgentEventSources(
     readSources(entries, publish) {
       const subscriptions = entries.map(({ subscription }) => subscription);
       const toolNames = new Set(
-        subscriptions.flatMap(({ tool }) => tool ? [tool] : []),
+        subscriptions.flatMap(({ tool, tools }) =>
+          tools ?? (tool ? [tool] : [])
+        ),
       );
       const cases = new Set(
         subscriptions.flatMap(({ caseId, kinds }) =>
@@ -103,8 +105,8 @@ export function sentinelAgentEventSources(
       }
       // Trusted execution traces already omit raw arguments and results.
       const backgroundTools = new Set(
-        subscriptions.flatMap(({ caseId, tool }) =>
-          !caseId && tool ? [tool] : []
+        subscriptions.flatMap(({ caseId, tool, tools }) =>
+          caseId ? [] : tools ?? (tool ? [tool] : [])
         ),
       );
       const tracePath = join(baseDir, "execution-traces.db");

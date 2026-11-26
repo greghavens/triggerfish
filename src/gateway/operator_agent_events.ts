@@ -53,6 +53,7 @@ export async function executeAgentEventAction(
   if (
     action !== "set_agent_event_subscription" ||
     Object.keys(args).length !== 3 ||
+    !canFlowTo(context.inputClassification ?? "INTERNAL", "INTERNAL") ||
     !subscription || profile?.definition?.role !== "event" ||
     typeof expectedVersion !== "number" ||
     !Number.isSafeInteger(expectedVersion) ||

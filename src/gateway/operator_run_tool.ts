@@ -1430,7 +1430,7 @@ export const operatorRunTool: ToolDefinition = {
     subscriptionSettings: {
       type: "object",
       description:
-        "Exact reviewed event subscription with id, agent, kinds, optional caseId/tool/intervalMs, merge, maxConcurrent and enabled.",
+        "Reviewed event subscription with id, agent, kinds, merge, maxConcurrent and enabled. Optional caseId, tool or tools for tool_completed, intervalMs for interval, and instructions keyed by selected event kind.",
     },
     displayName: {
       type: "string",

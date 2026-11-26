@@ -92,6 +92,7 @@ Deno.test("Reviewed event subscription dispatches committed case metadata only o
   });
   let socket: WebSocket | undefined;
   const messages: string[] = [];
+  const prompts: string[][] = [];
   const scheduler = createAgentEventScheduler({
     agentEvents: sentinelAgentEventSources(baseDir),
     orchestratorFactory: {
@@ -99,7 +100,7 @@ Deno.test("Reviewed event subscription dispatches committed case metadata only o
         assert(options?.eventRecipient);
         assert(options.eventRecipient.isCurrent());
         assertEquals(options.eventRecipient.tools, ["list_directory"]);
-        assertEquals(options.systemPromptSections, ["Review new assessments."]);
+        prompts.push([...(options.systemPromptSections ?? [])]);
         const session = createSession({
           userId: owner,
           channelId: channel as ChannelId,
@@ -205,7 +206,11 @@ Deno.test("Reviewed event subscription dispatches committed case metadata only o
           "tool_completed",
           "timeout",
         ],
-        tool: "sentinel_assigned_target",
+        tools: ["sentinel_assigned_target", "sentinel_worker_observation"],
+        instructions: {
+          finding: "Review current finding metadata.",
+          timeout: "Review the elapsed assessment deadline.",
+        },
         merge: "by_case",
         maxConcurrent: 1,
         enabled: true,
@@ -257,11 +262,19 @@ Deno.test("Reviewed event subscription dispatches committed case metadata only o
       taskId = claim.task.id;
       assert(queue.finishModelReview(revision, taskId, claim.token, {
         note: "Committed private review summary.",
-        steps: [{
-          tool: "sentinel_assigned_target",
-          outcome: "returned",
-          target: "local",
-        }],
+        steps: [
+          {
+            tool: "sentinel_assigned_target",
+            outcome: "returned",
+            target: "local",
+          },
+          {
+            tool: "sentinel_worker_observation",
+            outcome: "returned",
+            target: "local",
+          },
+          { tool: "sentinel_skipped", outcome: "returned", target: "local" },
+        ],
       }));
     } finally {
       queue.close();
@@ -311,6 +324,12 @@ Deno.test("Reviewed event subscription dispatches committed case metadata only o
     assertStringIncludes(messages[0], '"kind":"goal_completed"');
     assertStringIncludes(messages[0], '"kind":"tool_completed"');
     assertStringIncludes(messages[0], `${taskId}:0`);
+    assertStringIncludes(messages[0], `${taskId}:1`);
+    assert(!messages[0].includes("sentinel_skipped"));
+    assertEquals(prompts[0], [
+      "Review new assessments.",
+      "Reviewed instruction for finding: Review current finding metadata.",
+    ]);
     assert(!messages[0].includes("private case asset label"));
     assert(!messages[0].includes("Committed private"));
     scheduler.stop();
@@ -353,6 +372,10 @@ Deno.test("Reviewed event subscription dispatches committed case metadata only o
     const deliveries = await manage({ action: "agent_event_subscriptions" });
     assertEquals(JSON.parse(deliveries).deliveries.length, 2);
     assertEquals(messages.length, 2);
+    assertEquals(prompts[1], [
+      "Review new assessments.",
+      "Reviewed instruction for timeout: Review the elapsed assessment deadline.",
+    ]);
     assertStringIncludes(
       messages[1],
       JSON.stringify({

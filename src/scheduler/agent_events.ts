@@ -3,6 +3,7 @@
 
 import { DatabaseSync } from "node:sqlite";
 import { createHash } from "node:crypto";
+import { redactCredentialText } from "../core/logger/redactor.ts";
 
 export const agentEventKinds = [
   "finding",
@@ -20,6 +21,8 @@ export interface AgentEventSubscription {
   readonly kinds: readonly AgentEventKind[];
   readonly caseId?: string;
   readonly tool?: string;
+  readonly tools?: readonly string[];
+  readonly instructions?: Readonly<Partial<Record<AgentEventKind, string>>>;
   readonly intervalMs?: number;
   readonly merge: "none" | "by_case" | "all";
   readonly maxConcurrent: number;
@@ -48,6 +51,24 @@ export function parseAgentEventSubscription(
   const kinds = agentEventKinds.filter((kind) =>
     Array.isArray(raw.kinds) && raw.kinds.includes(kind)
   );
+  const tools = raw.tools;
+  const instructions: Partial<Record<AgentEventKind, string>> = {};
+  if (raw.instructions !== undefined) {
+    if (
+      !raw.instructions || typeof raw.instructions !== "object" ||
+      Array.isArray(raw.instructions)
+    ) return;
+    for (const [kind, value] of Object.entries(raw.instructions)) {
+      const selected = kinds.find((entry) => entry === kind);
+      if (
+        !selected || typeof value !== "string" || !value.trim() ||
+        value.length > 1000 ||
+        /[\p{Cc}\p{Cf}]/u.test(value.replaceAll("\n", "")) ||
+        redactCredentialText(value) !== value
+      ) return;
+      instructions[selected] = value.trim();
+    }
+  }
   if (
     Object.keys(raw).some((key) =>
       ![
@@ -56,6 +77,8 @@ export function parseAgentEventSubscription(
         "kinds",
         "caseId",
         "tool",
+        "tools",
+        "instructions",
         "intervalMs",
         "merge",
         "maxConcurrent",
@@ -69,8 +92,15 @@ export function parseAgentEventSubscription(
     (raw.caseId !== undefined &&
       (typeof raw.caseId !== "string" || !caseId.test(raw.caseId))) ||
     (kinds.includes("tool_completed")
-      ? typeof raw.tool !== "string" || !toolName.test(raw.tool)
-      : raw.tool !== undefined) ||
+      ? tools === undefined
+        ? typeof raw.tool !== "string" || !toolName.test(raw.tool)
+        : raw.tool !== undefined || !Array.isArray(tools) ||
+          tools.length < 1 || tools.length > 16 ||
+          !tools.every((name) =>
+            typeof name === "string" && toolName.test(name)
+          ) ||
+          new Set(tools).size !== tools.length
+      : raw.tool !== undefined || tools !== undefined) ||
     (kinds.includes("interval")
       ? typeof raw.intervalMs !== "number" ||
         !Number.isSafeInteger(raw.intervalMs) ||
@@ -91,6 +121,8 @@ export function parseAgentEventSubscription(
     enabled: raw.enabled,
     ...(typeof raw.caseId === "string" && { caseId: raw.caseId }),
     ...(typeof raw.tool === "string" && { tool: raw.tool }),
+    ...(Array.isArray(tools) && { tools: [...tools].sort() }),
+    ...(Object.keys(instructions).length && { instructions }),
     ...(typeof raw.intervalMs === "number" && { intervalMs: raw.intervalMs }),
   };
 }
@@ -231,7 +263,9 @@ export function openAgentEventSchedule(path: string, now = Date.now) {
         return (e.recordedAt ?? 0) >= Number(row.registered_at) &&
             s.kinds.includes(e.kind) &&
             (!s.caseId || e.caseId === s.caseId) &&
-            (e.kind !== "tool_completed" || e.tool === s.tool)
+            (e.kind !== "tool_completed" ||
+              (e.tool !== undefined &&
+                (e.tool === s.tool || s.tools?.includes(e.tool))))
           ? [e]
           : [];
       });

@@ -66,6 +66,13 @@ export function createAgentEventScheduler(config: SchedulerServiceConfig) {
           profile.version &&
         withSchedule((store) => store.current(delivery));
       if (!current()) return;
+      const kinds = new Set(delivery.events.map(({ kind }) => kind));
+      const instructions = [...kinds].flatMap((kind) => {
+        const instruction = delivery.subscription.instructions?.[kind];
+        return instruction
+          ? [`Reviewed instruction for ${kind}: ${instruction}`]
+          : [];
+      });
       const source = `agent-event:${profile.id}`;
       const execution = schedulerExecutionIdentity(
         "trigger",
@@ -82,7 +89,7 @@ export function createAgentEventScheduler(config: SchedulerServiceConfig) {
             isCurrent: current,
           },
           maxIterations: profile.definition.maxTurns ?? 4,
-          systemPromptSections: [profile.definition.prompt],
+          systemPromptSections: [profile.definition.prompt, ...instructions],
         }, execution),
         execution,
       );
