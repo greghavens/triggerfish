@@ -177,6 +177,7 @@ import {
   type SentinelReviewStep,
   withSentinelAssessmentWriteLock,
 } from "../sentinel/assessment_store.ts";
+import { executionFindingAsset } from "../sentinel/worker_finding_evidence.ts";
 import { readSavedSentinelIncident } from "../sentinel/incident_archive.ts";
 import { sentinelAlertsPath } from "../sentinel/paths.ts";
 import {
@@ -1076,10 +1077,18 @@ function sentinelTelemetryEvidenceFilter(
   const policy = readSentinelOperatingConstraints(path, runId)?.constraints;
   const resolveAsset = sentinelTelemetryAssetResolver(snapshot, policy);
   const { assignment } = scope;
+  const target = assignment?.nodeId;
+  const assignedAsset = assignment?.kind === "review_evidence" && target &&
+      sentinelOperatingConstraintsAllow(policy, {
+        kind: "review_evidence",
+        nodeId: target,
+      }, snapshot)
+    ? executionFindingAsset(snapshot, target) ?? target
+    : target;
   return (alert) => {
     const asset = resolveAsset(alert);
     return !!asset && (!assignment || assignment.kind === "review_incident" ||
-      assignment.nodeId === asset);
+      assignedAsset === asset);
   };
 }
 

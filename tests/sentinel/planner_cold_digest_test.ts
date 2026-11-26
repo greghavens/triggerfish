@@ -3843,3 +3843,184 @@ Deno.test("Scoped incident discovery and assignment require every retained membe
     await Deno.remove(directory, { recursive: true });
   }
 });
+
+Deno.test("Leased execution evidence review sees telemetry only for its uniquely proven asset", async () => {
+  const directory = await Deno.makeTempDir();
+  const caseId = "execution-evidence-telemetry";
+  const path = resolveSentinelCasePath(directory, caseId);
+  const unique = "evidence-app";
+  const ambiguous = "evidence-ambiguous";
+  const now = Date.now();
+  const observedAt = new Date(now - 1000).toISOString();
+  const validUntil = new Date(now + 3_600_000).toISOString();
+  const check = "cloudtrail_logging_stopped";
+  const exactResults = new Map<string, string>();
+  const providers = createProviderRegistry();
+  providers.register({
+    name: "execution-evidence-telemetry",
+    supportsStreaming: false,
+    complete(messages) {
+      const prompt = String(
+        messages.find(({ role }) => role === "user")?.content,
+      );
+      if (prompt.startsWith("Plan a defensive investigation")) {
+        return Promise.resolve(completion("[]"));
+      }
+      const { target } = JSON.parse(prompt.slice(prompt.lastIndexOf("\n") + 1));
+      const saved = messages.findLast(({ role }) => role === "tool");
+      if (!saved) {
+        return Promise.resolve(
+          completion("", "sentinel_defense", { upstreamCheck: check }),
+        );
+      }
+      assert(target === unique || target === ambiguous);
+      const text = String(saved.content);
+      const page = JSON.parse(text);
+      assertEquals(page.matchCount, target === unique ? 1 : 0);
+      assertEquals(
+        page.matches.map(({ asset }: { asset: string }) => asset),
+        target === unique ? ["app"] : [],
+      );
+      exactResults.set(target, text);
+      return Promise.resolve(
+        completion(
+          '{"summary":"Reviewed the scoped defensive source.","followUps":[]}',
+        ),
+      );
+    },
+  });
+  providers.setDefault("execution-evidence-telemetry");
+  const planner = createSentinelModelPlanner(
+    path,
+    (state, task, token) =>
+      createSentinelSubagent({
+        snapshotPath: path,
+        assessmentRevision: state.revision,
+        plannerExecutionEvidenceRunId: task ? undefined : state.plan.runId,
+        assignedTaskId: task,
+        assignedTaskLeaseToken: token,
+        providerRegistry: providers,
+        hookRunner: allowHooks,
+        allowModelAccess: true,
+      }),
+  );
+  try {
+    await Deno.mkdir(dirname(path), { recursive: true, mode: 0o700 });
+    await Deno.writeTextFile(
+      path,
+      JSON.stringify({
+        version: 1,
+        nodes: [
+          ...["app", "peer"].map((id) => ({ id, kind: "asset", label: id })),
+          ...[unique, ambiguous].map((id) => ({
+            id,
+            kind: "evidence",
+            label: id,
+            executionSource: {
+              role: "delegated",
+              runId: "approved-execution",
+              ordinal: 1,
+              receiptId: `execution-trace:${"b".repeat(64)}`,
+              resultSha256: "c".repeat(64),
+            },
+            controlVerification: { outcome: "fail", observedAt, validUntil },
+          })),
+        ],
+        edges: [
+          { from: unique, to: "app", relation: "observed_on" },
+          { from: ambiguous, to: "app", relation: "observed_on" },
+          { from: ambiguous, to: "peer", relation: "observed_on" },
+        ],
+      }),
+      { mode: 0o600 },
+    );
+    await Deno.writeTextFile(
+      sentinelAlertsPath(path),
+      JSON.stringify(
+        ["app", "peer"].map((asset) => ({
+          asset,
+          observedAt,
+          type: "integrity_change",
+          severity: "high",
+          triggeringAction: "cloudtrail.amazonaws.com:StopLogging",
+          subject: `Detection on ${asset}`,
+          evidenceIds: [`${asset}-source`],
+        })),
+      ),
+      { mode: 0o600 },
+    );
+    const state = startSentinelAssessment(path);
+    const runId = state.plan.runId;
+    assert(runId);
+    advanceAdaptiveSentinel(path, state);
+    const revision = adaptiveRevision(state);
+    const store = openSentinelAdaptiveStore(
+      join(dirname(path), "sentinel-adaptive.db"),
+    );
+    try {
+      store.sync(
+        revision,
+        [unique, ambiguous].map((nodeId) => ({
+          kind: "review_evidence",
+          nodeId,
+          reason: MODEL_ASSIGNMENT_REASON,
+        })),
+        store.activeRevision(),
+      );
+    } finally {
+      store.close();
+    }
+    const deadline = Date.now() + 4000;
+    let sourceTask: string | undefined;
+    while (Date.now() < deadline) {
+      advanceAdaptiveSentinel(path, state);
+      planner.advance(state);
+      const saved = readAdaptiveSentinel(path, state);
+      sourceTask = saved?.tasks.find(({ nodeId }) => nodeId === unique)?.id;
+      if (
+        exactResults.size === 2 &&
+        saved?.modelReviews.some(({ taskId }) => taskId === sourceTask)
+      ) break;
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    assert(sourceTask && exactResults.size === 2);
+    const ref = {
+      kind: "sentinel" as const,
+      id: caseId,
+      revision: state.revision,
+    };
+    const reopen = {
+      ...ref,
+      action: "worker_trace_result",
+      taskId: sourceTask,
+      stepIndices: [0],
+    };
+    await withArchivedPlannerRead(
+      directory,
+      async (read) =>
+        assertEquals(
+          JSON.parse(await read(reopen)).result,
+          JSON.parse(exactResults.get(unique)!),
+        ),
+    );
+    planner.stop();
+    await withArchivedPlannerRead(directory, async (read) => {
+      assertEquals(
+        JSON.parse(await read(reopen)).result,
+        JSON.parse(exactResults.get(unique)!),
+      );
+      assert(recordSentinelOperatingConstraints(path, {
+        runId,
+        evidenceRevision: state.revision,
+        expectedVersion: 0,
+        requestId: crypto.randomUUID(),
+        operatorScope: "execution-telemetry-fixture",
+        constraints: { deniedKinds: [], allowedAssetIds: ["peer"] },
+      }));
+      assertStringIncludes(await read(reopen), "unavailable");
+    });
+  } finally {
+    planner.stop();
+    await Deno.remove(directory, { recursive: true });
+  }
+});
