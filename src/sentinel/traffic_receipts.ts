@@ -9,7 +9,7 @@ import { redactCredentialText } from "../core/logger/redactor.ts";
 import { DatabaseSync } from "node:sqlite";
 import { readSentinelAssessmentRevision } from "./assessment_store.ts";
 import type { loadSentinelGraph } from "./graph.ts";
-import type { SentinelHarObservation } from "./har.ts";
+import { isReviewedHarRoute, type SentinelHarObservation } from "./har.ts";
 
 export const sentinelTrafficSources = [
   "har",
@@ -148,13 +148,16 @@ function safeObservation(
     if (!evidenceId.startsWith("har:") || !("origin" in observation)) {
       return undefined;
     }
-    const { assetId, origin, method, status, startedAt } = observation;
+    const { assetId, origin, method, status, startedAt, reviewedRoute } =
+      observation;
     if (
       !ASSET_ID.test(assetId) || !assetId.startsWith("har:") ||
       !httpOrigin(origin) ||
       !METHODS.has(method) || !Number.isInteger(status) ||
       (status !== 0 && (status < 100 || status > 599)) ||
-      (startedAt !== undefined && !timestamp(startedAt))
+      (startedAt !== undefined && !timestamp(startedAt)) ||
+      (reviewedRoute !== undefined &&
+        (family !== "har" || !isReviewedHarRoute(reviewedRoute)))
     ) return undefined;
     return {
       assetId,
@@ -163,6 +166,7 @@ function safeObservation(
       method,
       status,
       ...(startedAt && { startedAt }),
+      ...(reviewedRoute && { reviewedRoute }),
     };
   }
   if (!evidenceId.startsWith("dns:") || !("hostname" in observation)) {
@@ -449,6 +453,7 @@ function receiptsAtRevision(
       const assetIds = links.get(receipt.evidenceId)?.sort();
       return evidence && assetIds && proof === hash([evidence, assetIds]) &&
           digest === hash([1, payload, proof]) &&
+          safeObservation(receipt.family, receipt.observation) !== undefined &&
           (receipt.reviewedResponseBase64 === undefined ||
             (receipt.family === "har" &&
               receipt.reviewedResponseBody === undefined &&
@@ -516,6 +521,8 @@ export function projectSentinelTrafficMetadata(
         method: observation.method,
         status: observation.status,
         ...(observation.startedAt && { startedAt: observation.startedAt }),
+        ...(observation.reviewedRoute &&
+          { reviewedRoute: observation.reviewedRoute }),
       }
       : {
         hostname: observation.hostname,
@@ -606,7 +613,7 @@ export function validSentinelTrafficReceiptQuery(
     (authority !== undefined && !parseHttpAuthority(authority)) ||
     (urlContains !== undefined &&
       (typeof urlContains !== "string" || urlContains.length > 128 ||
-        !/^[a-z0-9.:[\]/_%~-]+$/i.test(urlContains) ||
+        !/^[a-z0-9.:[\]/_{}%~-]+$/i.test(urlContains) ||
         redactCredentialText(urlContains) !== urlContains)) ||
     (method !== undefined && !METHODS.has(method)) ||
     (status !== undefined &&
@@ -682,7 +689,8 @@ export function readSentinelTrafficReceiptPage(
           (http &&
             matchesHttpAuthority(observation.origin, selectedAuthority))) &&
         (urlSubstring === undefined ||
-          (http && observation.origin.toLowerCase().includes(urlSubstring))) &&
+          (http && (observation.origin + (observation.reviewedRoute ?? ""))
+            .toLowerCase().includes(urlSubstring))) &&
         (method === undefined || (http && observation.method === method)) &&
         (status === undefined || (http && observation.status === status)) &&
         (from === undefined || (at !== undefined && at >= from)) &&

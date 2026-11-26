@@ -2,6 +2,7 @@
 
 import { createHash } from "node:crypto";
 import { isIP } from "node:net";
+import { redactCredentialText } from "../core/logger/redactor.ts";
 import type { loadSentinelGraph } from "./graph.ts";
 
 type Snapshot = ReturnType<ReturnType<typeof loadSentinelGraph>["snapshot"]>;
@@ -30,6 +31,49 @@ export interface SentinelHarObservation {
   /** HAR exporters can use 0 when no HTTP status was recorded. */
   readonly status: number;
   readonly startedAt?: string;
+  readonly reviewedRoute?: string;
+}
+
+/** A reviewed route may publish literal segments or replace a whole segment. */
+export function isReviewedHarRoute(value: unknown): value is string {
+  return typeof value === "string" && value.length <= 128 &&
+    value.trim() === value &&
+    /^\/(?:[a-z0-9._~-]+|\{[a-z][a-z0-9_]{0,23}\})?(?:\/(?:[a-z0-9._~-]+|\{[a-z][a-z0-9_]{0,23}\}))*\/?$/i
+      .test(value) &&
+    !value.includes("//") &&
+    !value.split("/").some((part) => part === "." || part === "..") &&
+    redactCredentialText(value) === value;
+}
+
+export function parseReviewedHarRoute(value: unknown) {
+  if (
+    typeof value !== "string" || value.length > 640 || value.trim() !== value
+  ) return;
+  const parsed = /^(https?:\/\/[^/?#]+)(\/.*)$/.exec(value);
+  if (!parsed) return;
+  const [, origin, route] = parsed;
+  if (URL.parse(origin)?.origin !== origin || !isReviewedHarRoute(route)) {
+    return;
+  }
+  return { origin, route };
+}
+
+function matchReviewedHarRoute(
+  raw: unknown,
+  reviewed: NonNullable<ReturnType<typeof parseReviewedHarRoute>>,
+) {
+  const url = typeof raw === "string" && URL.parse(raw);
+  if (!url || url.origin !== reviewed.origin || url.username || url.password) {
+    return;
+  }
+  const path = url.pathname.split("/");
+  const template = reviewed.route.split("/");
+  if (
+    path.length === template.length &&
+    template.every((part, index) =>
+      part.startsWith("{") ? path[index].length > 0 : part === path[index]
+    )
+  ) return reviewed.route;
 }
 
 const timestampPattern =
@@ -122,6 +166,7 @@ function stableId(kind: "asset" | "evidence", value: string): string {
 export function importSentinelHar(
   raw: unknown,
   source: string,
+  reviewedRoute?: ReturnType<typeof parseReviewedHarRoute>,
 ): {
   readonly version: 1;
   readonly snapshot: Snapshot;
@@ -156,12 +201,15 @@ export function importSentinelHar(
     const status = checkedStatus(object(entry.response, "response").status);
     const startedAt = checkedTimestamp(entry.startedDateTime);
     const assetId = stableId("asset", JSON.stringify([project, origin]));
+    const route = reviewedRoute &&
+      matchReviewedHarRoute(request.url, reviewedRoute);
     const retainedFields = JSON.stringify([
       project,
       origin,
       method,
       status,
       startedAt ?? null,
+      ...(route ? [route] : []),
     ]);
     const occurrence = (occurrences.get(retainedFields) ?? 0) + 1;
     occurrences.set(retainedFields, occurrence);
@@ -187,6 +235,7 @@ export function importSentinelHar(
       method,
       status,
       ...(startedAt !== undefined && { startedAt }),
+      ...(route && { reviewedRoute: route }),
     });
   }
 

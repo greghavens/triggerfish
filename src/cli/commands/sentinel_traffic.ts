@@ -7,6 +7,7 @@ import {
   importSentinelHar,
   importSentinelSuricataHttp,
   importSentinelZeekHttp,
+  parseReviewedHarRoute,
 } from "../../sentinel/har.ts";
 import { mergeSentinelSnapshots } from "../../sentinel/merge.ts";
 import {
@@ -104,6 +105,7 @@ function decodeTrafficEntry(
   entry: unknown,
   source: string,
   format: Exclude<TrafficFormat, "suricata-dns">,
+  reviewedRoute: ReturnType<typeof parseReviewedHarRoute>,
 ) {
   switch (format) {
     case "suricata-http":
@@ -115,9 +117,13 @@ function decodeTrafficEntry(
     case "dns":
       return importSentinelDnsObservation(entry, source);
     default: {
-      const { snapshot, observations } = importSentinelHar({
-        log: { version: "1.2", entries: [entry] },
-      }, source);
+      const { snapshot, observations } = importSentinelHar(
+        {
+          log: { version: "1.2", entries: [entry] },
+        },
+        source,
+        reviewedRoute,
+      );
       return { snapshot, observation: observations[0] };
     }
   }
@@ -142,6 +148,7 @@ export async function ingestSentinelTraffic(
   retainReviewedRequestBody = false,
   retainReviewedHeaders = false,
   retainReviewedBinaryResponse = false,
+  reviewedRouteInput?: unknown,
 ): Promise<void> {
   if (
     (retainReviewedResponseBody || retainReviewedRequestBody ||
@@ -152,6 +159,15 @@ export async function ingestSentinelTraffic(
       "Reviewed payload retention requires publishing a HAR feed.",
     );
   }
+  const reviewedRoute = parseReviewedHarRoute(reviewedRouteInput);
+  if (
+    reviewedRouteInput !== undefined &&
+    (!reviewedRoute || format !== "har" || !snapshotPath)
+  ) {
+    throw new Error(
+      "Provide an exact HTTP origin and reviewed route for a published HAR feed.",
+    );
+  }
   const http = format === "har" || format === "zeek-http" ||
     format === "suricata-http";
   const output = snapshotPath
@@ -160,7 +176,7 @@ export async function ingestSentinelTraffic(
   await readJsonLines(stream, async (entry) => {
     const observations = format === "suricata-dns"
       ? importSentinelSuricataDns(entry, source)
-      : [decodeTrafficEntry(entry, source, format)];
+      : [decodeTrafficEntry(entry, source, format, reviewedRoute)];
     for (const captured of observations) {
       if (!captured?.observation) continue;
       const { snapshot, observation } = captured;

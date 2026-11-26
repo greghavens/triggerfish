@@ -32,7 +32,12 @@ import {
   startSentinelAssessment,
 } from "../../src/sentinel/assessment_store.ts";
 import { resolveSentinelCasePath } from "../../src/sentinel/cases.ts";
-import { importSentinelHar } from "../../src/sentinel/har.ts";
+import {
+  importSentinelHar,
+  parseReviewedHarRoute,
+} from "../../src/sentinel/har.ts";
+import { readSentinelChatSnapshot } from "../../src/sentinel/chat_mode.ts";
+import { sentinelTrafficPath } from "../../src/sentinel/paths.ts";
 import {
   readSentinelTrafficReceiptPage,
 } from "../../src/sentinel/traffic_receipts.ts";
@@ -1264,6 +1269,159 @@ Deno.test("Authenticated retained HTTP authority and URL searches bind cursors t
     assertEquals(projectedOrigins(JSON.parse(narrowedUrl)), [origins[2]]);
     assertStringIncludes(staleCursor, "unavailable");
     assertStringIncludes(staleUrlCursor, "unavailable");
+  } finally {
+    await Deno.remove(baseDir, { recursive: true });
+  }
+});
+
+Deno.test("Reviewed HAR routes are searchable under exact gateway scope without retaining raw segments", async () => {
+  const baseDir = await Deno.makeTempDir();
+  const path = resolveSentinelCasePath(baseDir, caseId);
+  try {
+    const approved = "https://fixture.example:8443/public/{item}/status";
+    const source = "Reviewed HAR route fixture";
+    const urls = [
+      "https://fixture.example:8443/public/opaque-private-value/status?key=discarded-secret",
+      "https://fixture.example:8443/public/another-private-value/status",
+      "http://fixture.example:8443/public/wrong-scheme/status",
+      "https://other.example:8443/public/wrong-authority/status",
+      "https://fixture.example:8443/private/not-approved/status",
+      "https://user:password@fixture.example:8443/public/credential-url/status",
+    ];
+    const entries = urls.map((url, i) => ({
+      startedDateTime: new Date(Date.now() - i * 1000).toISOString(),
+      request: { url, method: "GET" },
+      response: { status: 200 },
+    }));
+    await ingestSentinelTraffic(
+      new Blob([entries.map((entry) => JSON.stringify(entry)).join("\n")])
+        .stream(),
+      source,
+      path,
+      "har",
+      false,
+      false,
+      false,
+      false,
+      approved,
+    );
+    await ingestSentinelTraffic(
+      new Blob([JSON.stringify({
+        ...entries[0],
+        request: {
+          url: "https://other.example:8443/metrics?key=discarded-secret",
+          method: "GET",
+        },
+      })]).stream(),
+      source,
+      path,
+      "har",
+      false,
+      false,
+      false,
+      false,
+      "https://other.example:8443/metrics",
+    );
+    const snapshot = await readSentinelChatSnapshot(sentinelTrafficPath(path));
+    await Deno.writeTextFile(path, JSON.stringify(snapshot));
+    const state = startSentinelAssessment(path);
+    const query = {
+      action: "traffic_search",
+      kind: "sentinel",
+      id: caseId,
+      revision: state.revision,
+      authority: "fixture.example:8443",
+      urlContains: "/public/{item}/",
+      limit: 1,
+    };
+    const [first, needles, other] = await readTrafficThroughGateway(baseDir, [
+      query,
+      { ...query, urlContains: "opaque-private-value" },
+      { ...query, authority: "other.example:8443" },
+    ]);
+    const page = JSON.parse(first);
+    assertEquals(
+      page.receipts[0].observation.reviewedRoute,
+      "/public/{item}/status",
+    );
+    assert(page.nextCursor);
+    assertEquals(JSON.parse(needles).receipts, []);
+    assertEquals(JSON.parse(other).receipts, []);
+    const [second, stale, exact] = await readTrafficThroughGateway(baseDir, [
+      { ...query, cursor: page.nextCursor },
+      { ...query, urlContains: "/status", cursor: page.nextCursor },
+      {
+        action: "traffic_get",
+        kind: query.kind,
+        id: query.id,
+        revision: query.revision,
+        evidenceId: page.receipts[0].evidenceId,
+        digest: page.receipts[0].digest,
+      },
+    ]);
+    assertEquals(
+      JSON.parse(second).receipts[0].observation.reviewedRoute,
+      "/public/{item}/status",
+    );
+    assertEquals(JSON.parse(second).nextCursor, null);
+    assertStringIncludes(stale, "unavailable");
+    assertStringIncludes(exact, "/public/{item}/status");
+    for (const response of [first, second, exact]) {
+      for (const secret of ["private-value", "discarded-secret", "password"]) {
+        assert(!response.includes(secret));
+      }
+    }
+    const otherAsset = JSON.parse(
+      await readTrafficThroughGateway(baseDir, [
+        { ...query, authority: "other.example:8443", urlContains: "/metrics" },
+      ]).then(([response]) => response),
+    ).receipts[0];
+    assertEquals(otherAsset.observation.reviewedRoute, "/metrics");
+    const lease = createLease(path, state, page.receipts[0].assetIds[0]);
+    const worker = await runWorker(path, lease, [[
+      call(search, {
+        revision: state.revision,
+        authority: query.authority,
+        urlContains: query.urlContains,
+      }),
+      call(search, {
+        revision: state.revision,
+        authority: "other.example:8443",
+        urlContains: "/metrics",
+      }),
+    ]]);
+    assertEquals(JSON.parse(worker.responses[0][0]).receipts.length, 2);
+    assertEquals(JSON.parse(worker.responses[0][1]).receipts, []);
+    assert(worker.checks.includes(`PRE_TOOL_CALL:${search}`));
+    assert(worker.checks.includes(`POST_TOOL_RESPONSE:${search}`));
+    assert(worker.checks.includes("PRE_OUTPUT"));
+
+    assert(state.plan.runId);
+    assert(recordSentinelOperatingConstraints(path, {
+      runId: state.plan.runId,
+      evidenceRevision: state.revision,
+      expectedVersion: 0,
+      operatorScope: "owner",
+      requestId: crypto.randomUUID(),
+      constraints: {
+        deniedKinds: [],
+        allowedAssetIds: otherAsset.assetIds,
+      },
+    }));
+    const [revoked] = await readTrafficThroughGateway(baseDir, [
+      { ...query, cursor: page.nextCursor },
+    ]);
+    assertStringIncludes(revoked, "unavailable");
+
+    const rejected = [
+      "https://user:password@fixture.example/approved",
+      "https://fixture.example/approved?key=value",
+      "https://fixture.example/approved#part",
+      "https://fixture.example/approved/%41",
+    ];
+    for (const input of rejected) {
+      assertEquals(parseReviewedHarRoute(input), undefined);
+    }
   } finally {
     await Deno.remove(baseDir, { recursive: true });
   }
