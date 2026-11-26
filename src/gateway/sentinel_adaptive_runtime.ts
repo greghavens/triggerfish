@@ -6159,12 +6159,18 @@ export function createSentinelModelPlanner(
       );
       if (outcome?.recheck) {
         const receipt = outcome.recheck;
-        notifyCommittedEvidence({
+        const address = {
           case: receipt.caseId,
           run_id: receipt.runId,
           revision: receipt.evidenceRevision,
-          observation_id: receipt.id,
-        });
+        };
+        notifyCommittedEvidence({ ...address, observation_id: receipt.id });
+        if ("outcome" in receipt && receipt.outcome === "pass") {
+          notifyCommittedEvidence({
+            ...address,
+            observation_id: receipt.findingId,
+          });
+        }
       }
       if (outcome?.schedule) advanceAdaptiveSentinel(snapshotPath, state);
     }).catch(() => {

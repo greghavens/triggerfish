@@ -1,4 +1,6 @@
 import { readSentinelWorkflowGoalProof } from "./sentinel_goal_completion.ts";
+import { dirname, join } from "@std/path";
+import { readSentinelDedicatedRecheckSettlements } from "../sentinel/adaptive_store.ts";
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import {
@@ -641,15 +643,28 @@ export function createWorkflowObservationVerifier(
             ? [record.id]
             : []
         );
-      let receipt: ReturnType<typeof readVerifiedPassingFindingRecheck>;
+      const settlements = readSentinelDedicatedRecheckSettlements(
+        join(dirname(path), "sentinel-adaptive.db"),
+        runId,
+        revision,
+      );
+      let receipt;
       for (const candidateId of candidateIds) {
-        receipt = readVerifiedPassingFindingRecheck(
+        const exact = readVerifiedPassingFindingRecheck(
           path,
           snapshot,
           scope,
           candidateId,
         );
-        if (receipt) break;
+        if (!exact) continue;
+        const settlement = settlements.get(exact.taskId);
+        if (
+          settlement && (!settlement.completed ||
+            settlement.findingId !== exact.findingId ||
+            settlement.evidenceId !== exact.evidenceId)
+        ) continue;
+        receipt = exact;
+        break;
       }
       if (
         !receipt || !current() ||

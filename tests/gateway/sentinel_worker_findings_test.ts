@@ -1,3 +1,6 @@
+import { createWorkflowRunRegistry } from "../../src/workflow/registry.ts";
+import { createOperatorWorkflowRuns } from "../../src/gateway/operator_workflow_runs.ts";
+import { createWorkflowObservationVerifier } from "../../src/gateway/scheduled_observation_tool.ts";
 import { subscribeCommittedEvidence } from "../../src/core/evidence_task_progression.ts";
 import { DatabaseSync } from "node:sqlite";
 import { INCONCLUSIVE_RECHECK_TOOL } from "../../src/sentinel/recheck_inconclusive.ts";
@@ -469,6 +472,7 @@ async function withFindingAssignmentGateway(
   ) => Promise<void>,
   outputPolicy?: (hook: string, input: Record<string, unknown>) => boolean,
   onFrame?: (frame: string) => void,
+  workflows?: ReturnType<typeof createOperatorWorkflowRuns>,
 ) {
   const registry = createProviderRegistry();
   let input: Record<string, unknown> = {};
@@ -499,7 +503,11 @@ async function withFindingAssignmentGateway(
     }),
     providerRegistry: registry,
     enableStreaming: false,
-    operatorRunExecutor: createOperatorRunToolExecutor({ baseDir, confirm }),
+    operatorRunExecutor: createOperatorRunToolExecutor({
+      baseDir,
+      confirm,
+      workflows,
+    }),
     hookRunner: {
       evaluateHook(hook, { input }) {
         const allowed = outputPolicy?.(hook, input) ?? true;
@@ -2485,6 +2493,66 @@ async function verifyOperatorNativeRecheck(options: {
   const rationaleRequest = crypto.randomUUID();
   let workerRuns = 0;
   const workerStopped = Promise.withResolvers<void>();
+  let workflows: ReturnType<typeof createOperatorWorkflowRuns> | undefined;
+  const workflowRunIds: string[] = [];
+  async function startEvidenceWaits(receiptId: string) {
+    const proof = {
+      case: caseId,
+      run_id: discovered.runId,
+      revision: options.state.revision,
+    };
+    const plans = [
+      { ...proof, finding_recheck_id: receiptId },
+      { ...proof, finding_id: options.findingId },
+    ].map((satisfiedBy, index) => ({
+      id: "remediation-wait-" + index,
+      classification: "INTERNAL" as const,
+      steps: [{ id: "verify", satisfiedBy, evidenceWaitSeconds: 8 }, {
+        id: "dependent",
+      }],
+    }));
+    const checked = Promise.withResolvers<void>();
+    const probed = new Set<string>();
+    const verify = createWorkflowObservationVerifier(options.baseDir);
+    workflows = createOperatorWorkflowRuns(
+      createWorkflowRunRegistry(),
+      plans,
+      join(options.baseDir, "workflow-recheck-gate.db"),
+      async (requirement) => {
+        const result = await verify(requirement);
+        probed.add("finding_id" in requirement ? "finding" : "recheck");
+        if (probed.size === 2) checked.resolve();
+        return result;
+      },
+    );
+    await withFindingAssignmentGateway(
+      options.baseDir,
+      () => Promise.resolve(true),
+      async (turn) => {
+        for (const plan of plans) {
+          const started = JSON.parse(
+            await turn({
+              action: "start",
+              kind: "workflow",
+              id: plan.id,
+              requestId: crypto.randomUUID(),
+            }),
+          );
+          workflowRunIds.push(started.run.ref.id);
+        }
+        await checked.promise;
+        for (const id of workflowRunIds) {
+          assertEquals(
+            workflows?.inspect(id)?.steps.map(({ status }) => status),
+            ["pending", "pending"],
+          );
+        }
+      },
+      undefined,
+      undefined,
+      workflows,
+    );
+  }
   let plannerClock = Date.now();
   const plannerReceipts: string[][] = [];
   const wakes: string[] = [];
@@ -2649,6 +2717,7 @@ async function verifyOperatorNativeRecheck(options: {
           assertEquals(recheckGate()?.status, "queued");
           assertEquals(recheckGate()?.attempts, 0);
           assertEquals(recheckDependent()?.status, "queued");
+          await startEvidenceWaits(record.id);
           goalWorker = assignedLease(path, state, "impact");
           assertStringIncludes(await reportGoal(record.id), "Error:");
           assertEquals(
@@ -2756,6 +2825,9 @@ async function verifyOperatorNativeRecheck(options: {
           () => {},
         );
         assertEquals(wakes.filter((id) => id === verified!.id), [verified.id]);
+        assertEquals(wakes.filter((id) => id === options.findingId), [
+          options.findingId,
+        ]);
         assertEquals(recheckGate()?.status, "completed");
         assertEquals(recheckGate()?.attempts, 0);
         assertEquals(
@@ -2763,6 +2835,44 @@ async function verifyOperatorNativeRecheck(options: {
           verified.id,
         );
         assertEquals(recheckDependent()?.status, "completed");
+      }
+      if (options.stopAfterResult) {
+        for (const id of workflowRunIds) {
+          assertEquals(
+            workflows?.inspect(id)?.steps.map(({ status }) => status),
+            ["pending", "pending"],
+          );
+        }
+      } else {
+        await waitForCondition(
+          () =>
+            workflowRunIds.every((id) =>
+              workflows?.inspect(id)?.status === "completed"
+            ),
+          () => {},
+        );
+        await withFindingAssignmentGateway(
+          options.baseDir,
+          () => Promise.resolve(false),
+          async (turn) => {
+            for (const id of workflowRunIds) {
+              const events = JSON.parse(
+                await turn({ action: "traces", kind: "workflow", id }),
+              ).page.events;
+              assertEquals(
+                events.filter(({ event }: { event: string }) =>
+                  event === "step_satisfied"
+                ).map((
+                  { evidence }: { evidence: { findingRecheckId: string } },
+                ) => evidence.findingRecheckId),
+                [verified!.id],
+              );
+            }
+          },
+          undefined,
+          undefined,
+          workflows,
+        );
       }
       const proof = await reportGoal(verified.id);
       if (options.stopAfterResult) {
@@ -2854,6 +2964,7 @@ async function verifyOperatorNativeRecheck(options: {
       },
     );
   } finally {
+    for (const id of workflowRunIds) workflows?.cancel(id);
     coordinator?.stop();
     unsubscribe?.();
     planner.stop();
