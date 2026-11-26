@@ -958,6 +958,12 @@ export interface SentinelQueuedCancellationReceipt
   readonly at: string;
 }
 
+export interface AdaptiveRecheckBaseline {
+  readonly reportVersion: number;
+  readonly evidenceVersion: string;
+  readonly constraintsDigest: string | null;
+}
+
 export interface AdaptivePlannerRound {
   readonly cancelledTaskRequestId?: string;
   readonly stoppedRetry?: {
@@ -969,6 +975,7 @@ export interface AdaptivePlannerRound {
   readonly passingRecheckForFindingId?: string;
   readonly recheckFindingId?: string;
   readonly recheckNote?: string;
+  readonly recheckBaseline?: AdaptiveRecheckBaseline;
   readonly graphFactId?: string;
   readonly graphFactOnly?: true;
   readonly graphRelationship?: SentinelGraphFactRequirement;
@@ -2319,6 +2326,7 @@ function normalizePlannerRound(round: AdaptivePlannerRound | undefined) {
     workerSources,
     recheckFindingId,
     recheckNote,
+    recheckBaseline,
     passingRecheckId,
     passingRecheckForFindingId,
     graphFactId,
@@ -2342,6 +2350,17 @@ function normalizePlannerRound(round: AdaptivePlannerRound | undefined) {
   ) {
     throw new Error("Invalid Sentinel recheck guidance");
   }
+  if (
+    recheckBaseline !== undefined && (
+      !recheckFindingId || !identity.startsWith("operator:") ||
+      !recheckBaseline || Object.keys(recheckBaseline).length !== 3 ||
+      !Number.isSafeInteger(recheckBaseline.reportVersion) ||
+      recheckBaseline.reportVersion < 1 ||
+      !/^[a-f0-9]{64}$/.test(recheckBaseline.evidenceVersion) ||
+      (recheckBaseline.constraintsDigest !== null &&
+        !/^[a-f0-9]{64}$/.test(recheckBaseline.constraintsDigest))
+    )
+  ) throw new Error("Invalid Sentinel recheck baseline");
   if (
     stoppedRetry !== undefined && (
       !/^operator:[a-f0-9-]{36}$/.test(identity) || attempt !== 1 ||
@@ -2520,6 +2539,13 @@ function normalizePlannerRound(round: AdaptivePlannerRound | undefined) {
     ...(passingRecheckForFindingId && { passingRecheckForFindingId }),
     ...(recheckFindingId && { recheckFindingId }),
     ...(recheckNote && { recheckNote }),
+    ...(recheckBaseline && {
+      recheckBaseline: {
+        reportVersion: recheckBaseline.reportVersion,
+        evidenceVersion: recheckBaseline.evidenceVersion,
+        constraintsDigest: recheckBaseline.constraintsDigest,
+      },
+    }),
     ...(graphFactId && { graphFactId }),
     ...(graphFactOnly === true && (graphFactId || requiredRelationship) &&
       { graphFactOnly }),
@@ -3477,6 +3503,7 @@ export interface AdaptiveOperatorAssignmentIntentReceipt {
   readonly depth?: number;
   readonly recheckFindingId?: string;
   readonly recheckNote?: string;
+  readonly recheckBaseline?: AdaptiveRecheckBaseline;
   readonly passingRecheckForFindingId?: string;
   readonly findingFollowup?: AdaptiveFindingFollowup;
   readonly graphRelationship?: SentinelGraphFactRequirement;
@@ -4760,6 +4787,10 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
           prior.adaptiveRevision === adaptiveRevision &&
           prior.taskId === task.id &&
           prior.recheckNote === task.plannerRound?.recheckNote &&
+          isDeepStrictEqual(
+            prior.recheckBaseline,
+            task.plannerRound?.recheckBaseline,
+          ) &&
           prior.prioritizeNext === input.prioritize &&
           prior.priorityRank === rank
         ? prior
@@ -4776,8 +4807,12 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
     if (
       existing && (existing.revision !== adaptiveRevision ||
         (task.plannerRound?.recheckFindingId !== undefined &&
-          decodeTask(existing).plannerRound?.recheckNote !==
-            task.plannerRound.recheckNote))
+          (decodeTask(existing).plannerRound?.recheckNote !==
+              task.plannerRound.recheckNote ||
+            !isDeepStrictEqual(
+              decodeTask(existing).plannerRound?.recheckBaseline,
+              task.plannerRound.recheckBaseline,
+            ))))
     ) {
       return undefined;
     }
@@ -4853,6 +4888,8 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
         { recheckFindingId: task.plannerRound.recheckFindingId }),
       ...(task.plannerRound?.recheckNote &&
         { recheckNote: task.plannerRound.recheckNote }),
+      ...(task.plannerRound?.recheckBaseline &&
+        { recheckBaseline: task.plannerRound.recheckBaseline }),
       ...(task.plannerRound?.passingRecheckForFindingId && {
         passingRecheckForFindingId:
           task.plannerRound.passingRecheckForFindingId,

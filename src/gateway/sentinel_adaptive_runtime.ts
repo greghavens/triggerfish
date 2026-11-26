@@ -63,6 +63,7 @@ import {
 import {
   readSentinelFindingTrafficAssignmentBatch,
   readSentinelFindingTrafficWriteReceipt,
+  sentinelFindingTrafficEvidenceVersion,
 } from "../sentinel/finding_traffic_links.ts";
 import {
   readProjectedSentinelTrafficReceipt,
@@ -101,6 +102,7 @@ import {
   type AdaptivePeerFindingCitation,
   type AdaptivePeerFindingVerification,
   type AdaptivePriorAssignedTargetCitation,
+  type AdaptiveRecheckBaseline,
   type AdaptiveTask,
   type AdaptiveTaskRequest,
   type AdaptiveVerificationReviewCandidate,
@@ -1214,6 +1216,8 @@ export function readSentinelFindingRecheckAttempts(
                   ...lifecycle,
                   ...(task.plannerRound?.recheckNote &&
                     { note: task.plannerRound.recheckNote }),
+                  ...(task.plannerRound?.recheckBaseline &&
+                    { baseline: task.plannerRound.recheckBaseline }),
                 },
               }),
               ...(review?.outcomeUncertain &&
@@ -2276,6 +2280,35 @@ export function readSentinelFindingFollowup(
   }
 }
 
+/** Snapshot the exact report and policy metadata an operator can approve. */
+export function readSentinelRecheckBaseline(
+  path: string,
+  state: State,
+  findingId: string,
+): AdaptiveRecheckBaseline | undefined {
+  const runId = state.plan.runId;
+  const caseId = locateSentinelCase(path)?.caseId;
+  if (!runId || !caseId || !hasSentinelWorkerFindingJournal(path)) return;
+  const journal = openSentinelWorkerFindingStore(path);
+  try {
+    const report = journal.readFindingReport(findingId, state.revision);
+    if (
+      !report || report.finding.caseId !== caseId ||
+      report.finding.runId !== runId
+    ) return;
+    return {
+      reportVersion: report.version,
+      evidenceVersion:
+        sentinelFindingTrafficEvidenceVersion(path, state.revision, findingId)
+          .digest,
+      constraintsDigest:
+        readSentinelOperatingConstraints(path, runId)?.digest ?? null,
+    };
+  } finally {
+    journal.close();
+  }
+}
+
 export function submitSentinelAssignmentIntent(
   snapshotPath: string,
   input: {
@@ -2289,6 +2322,7 @@ export function submitSentinelAssignmentIntent(
     readonly priorityRank?: number;
     readonly recheckFindingId?: string;
     readonly recheckNote?: string;
+    readonly recheckBaseline?: AdaptiveRecheckBaseline;
     readonly passingRecheckForFindingId?: string;
     readonly graphRelationship?: SentinelGraphFactRequirement;
     readonly findingFollowup?:
@@ -2394,7 +2428,15 @@ export function submitSentinelAssignmentIntent(
       if (input.recheckFindingId) {
         if (
           input.kind !== "review_evidence" || input.graphRelationship ||
-          !authorizedReceipt ||
+          !authorizedReceipt || !input.recheckBaseline ||
+          !isDeepStrictEqual(
+            input.recheckBaseline,
+            readSentinelRecheckBaseline(
+              snapshotPath,
+              state,
+              input.recheckFindingId,
+            ),
+          ) ||
           !exactExecutionRecheckCandidate(
             snapshotPath,
             state,
@@ -2409,6 +2451,7 @@ export function submitSentinelAssignmentIntent(
             identity: `operator:${input.requestId}`,
             attempt: 1,
             recheckFindingId: input.recheckFindingId,
+            recheckBaseline: input.recheckBaseline,
             ...(input.recheckNote && { recheckNote: input.recheckNote }),
           },
         };

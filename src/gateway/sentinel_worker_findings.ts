@@ -450,6 +450,14 @@ export function executeSentinelWorkerFindingTool(
               )?.receipts.find((item) => item.controlId === finding.controlId);
             if (direct && !check) return;
             const report = store.readFindingReport(finding.id, state.revision);
+            const baseline = task?.plannerRound?.recheckBaseline;
+            const reviewedReport = baseline && report &&
+              (baseline.reportVersion === 1
+                ? report.finding
+                : report.amendments.find(({ version }) =>
+                  version === baseline.reportVersion
+                ));
+            if (baseline && !reviewedReport) return;
             return {
               _classification: "INTERNAL",
               finding,
@@ -457,7 +465,16 @@ export function executeSentinelWorkerFindingTool(
               ...(selectedFinding === finding.id &&
                 task?.plannerRound?.recheckNote &&
                 { recheckNote: task.plannerRound.recheckNote }),
-              ...(report && { reportVersion: report.version }),
+              ...(baseline && reviewedReport
+                ? {
+                  reportVersion: baseline.reportVersion,
+                  recheckBaseline: baseline,
+                  reviewedReport: {
+                    title: reviewedReport.title,
+                    summary: reviewedReport.summary,
+                  },
+                }
+                : report && { reportVersion: report.version }),
               current: check ?? null,
               rechecks: store.list().filter((item) =>
                 item.kind === "recheck" && item.findingId === finding.id

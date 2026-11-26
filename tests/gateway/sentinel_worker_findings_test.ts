@@ -2010,9 +2010,35 @@ async function verifyOperatorNativeRecheck(options: {
   trace?: { taskId: string; result: unknown; index?: number };
 }) {
   const caseId = options.caseId ?? "main";
+  const path = resolveSentinelCasePath(options.baseDir, caseId);
+  const amend = async (version: number, title: string) =>
+    await withFindingAssignmentGateway(
+      options.baseDir,
+      () => Promise.resolve(true),
+      async (turn) => {
+        const result = await turn({
+          action: "amend_finding_report",
+          kind: "sentinel",
+          id: caseId,
+          revision: options.state.revision,
+          receiptId: options.findingId,
+          reportVersion: version,
+          evidenceVersion: sentinelFindingTrafficEvidenceVersion(
+            path,
+            options.state.revision,
+            options.findingId,
+          ).digest,
+          requestId: crypto.randomUUID(),
+          title,
+          summary: "Reviewed finding evidence from the original control.",
+        });
+        assertEquals(JSON.parse(result).amendment.version, version + 1);
+      },
+    );
   let blocked = false;
   let blockOutput = false;
   let revokeOnConfirm = false;
+  let changeReportOnConfirm = false;
   let modelResult: string | undefined;
   let showRemediation = false;
   let correlation: string | undefined;
@@ -2082,10 +2108,11 @@ async function verifyOperatorNativeRecheck(options: {
     operatorRunExecutor: createOperatorRunToolExecutor({
       baseDir: options.baseDir,
       readLiveWorkflow: nativeWorkflowReader(undefined, caseId),
-      confirm(text) {
+      async confirm(text) {
         confirmations.push(text);
         if (revokeOnConfirm) blocked = true;
-        return Promise.resolve(true);
+        if (changeReportOnConfirm) await amend(1, "Reviewed report title");
+        return true;
       },
     }),
   });
@@ -2146,7 +2173,16 @@ async function verifyOperatorNativeRecheck(options: {
   assertStringIncludes(confirmations[0], recheckNote);
   blocked = false;
   revokeOnConfirm = false;
+  if (options.alternate) {
+    changeReportOnConfirm = true;
+    assertStringIncludes(await run(queue), "unavailable");
+    changeReportOnConfirm = false;
+  }
   const assigned = JSON.parse(await run(queue)).receipt;
+  assertEquals(
+    assigned.recheckBaseline.reportVersion,
+    options.alternate ? 2 : 1,
+  );
   assertEquals(assigned.recheckFindingId, options.findingId);
   assertEquals(assigned.recheckNote, recheckNote);
   assertEquals(assigned.nodeId, options.evidenceId);
@@ -2155,7 +2191,7 @@ async function verifyOperatorNativeRecheck(options: {
     await run(queue.replace(recheckNote, "Changed note.")),
     "unavailable",
   );
-  assertEquals(confirmations.length, 2);
+  assertEquals(confirmations.length, options.alternate ? 3 : 2);
 
   const alternateQueue = options.alternate &&
     `${command} queue ${options.alternate.nodeId} ${discovered.runId} ${discovered.adaptiveRevision} ${crypto.randomUUID()}`;
@@ -2298,7 +2334,10 @@ async function verifyOperatorNativeRecheck(options: {
   assertEquals(recoveredReceipt, originalReceipt);
   assertEquals(writes, 1);
 
-  const path = resolveSentinelCasePath(options.baseDir, caseId);
+  if (options.alternate) {
+    await amend(2, "Updated after recheck admission");
+    assertEquals(JSON.parse(await run(queue)).receipt, assigned);
+  }
   const readLifecycle = async () => {
     let lifecycle: {
       queuedAt: string;
@@ -2306,6 +2345,11 @@ async function verifyOperatorNativeRecheck(options: {
       startedAt?: string;
       finishedAt?: string;
       note: string;
+      baseline: {
+        reportVersion: number;
+        evidenceVersion: string;
+        constraintsDigest: string | null;
+      };
     } | undefined;
     await withFindingAssignmentGateway(
       options.baseDir,
@@ -2334,6 +2378,7 @@ async function verifyOperatorNativeRecheck(options: {
   assertEquals(queuedLifecycle, {
     queuedAt: queuedLifecycle.queuedAt,
     note: recheckNote,
+    baseline: assigned.recheckBaseline,
   });
   assert(Number.isFinite(Date.parse(queuedLifecycle.queuedAt)));
   let startedAt: string | undefined;
@@ -2452,6 +2497,21 @@ async function verifyOperatorNativeRecheck(options: {
           JSON.parse(reviewed.results[1][0]).recheckNote,
           recheckNote,
         );
+        const reviewedBaseline = JSON.parse(reviewed.results[1][0]);
+        assertEquals(
+          reviewedBaseline.recheckBaseline,
+          assigned.recheckBaseline,
+        );
+        assertEquals(
+          reviewedBaseline.reportVersion,
+          assigned.recheckBaseline.reportVersion,
+        );
+        if (options.alternate) {
+          assertEquals(
+            reviewedBaseline.reviewedReport.title,
+            "Reviewed report title",
+          );
+        }
         if (options.noResult) {
           assert(reviewed.events.some(({ type }) => type === "response"));
           assertEquals(reviewed.reportPre, 0);

@@ -315,6 +315,7 @@ import {
   readSentinelModelSettings,
   readSentinelOperatorAssetHint,
   readSentinelProvenance,
+  readSentinelRecheckBaseline,
   readSentinelTaskQueue,
   readSentinelWorkflowPublicationStep,
   reviewSentinelAssignmentBatch,
@@ -5944,6 +5945,7 @@ ${request}`)
             ? safeProjection({ run: ref, receipt: prior })
             : unavailable;
         }
+        let recheckBaseline;
         if (original && typeof recheckFindingId === "string") {
           const state = readSentinelAssessment(path);
           if (
@@ -5957,6 +5959,12 @@ ${request}`)
               original.controlReceipt,
             )
           ) return unavailable;
+          recheckBaseline = readSentinelRecheckBaseline(
+            path,
+            state,
+            recheckFindingId,
+          );
+          if (!recheckBaseline) return unavailable;
         }
         if (
           !await options.confirm(
@@ -5965,6 +5973,7 @@ ${request}`)
                 ref,
                 ...intent,
                 ...(original && { executionReceiptSha256: original.digest }),
+                ...(recheckBaseline && { recheckBaseline }),
               })
             }`,
           )
@@ -5975,7 +5984,7 @@ ${request}`)
         }
         const receipt = submitSentinelAssignmentIntent(
           path,
-          intent,
+          { ...intent, ...(recheckBaseline && { recheckBaseline }) },
           authorized?.controlReceipt,
         );
         return receipt ? safeProjection({ run: ref, receipt }) : unavailable;
