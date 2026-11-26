@@ -194,6 +194,8 @@ Deno.test("Authenticated Sentinel chat reads exact approved cross-case graph fin
   let rejectExecutorCeiling = false;
   let dispatched = 0;
   let reject: "PRE_TOOL_CALL" | "POST_TOOL_RESPONSE" | "PRE_OUTPUT" | undefined;
+  let revokeTelemetry: "POST_TOOL_RESPONSE" | "PRE_OUTPUT" | undefined;
+  let telemetryRevocations = 0;
   const hooks: string[] = [];
   const constraintLabels: Record<string, unknown>[] = [];
   registry.register({
@@ -303,7 +305,7 @@ Deno.test("Authenticated Sentinel chat reads exact approved cross-case graph fin
         id === "approved" && constraintsAllowed ? approved.path : undefined,
       allowSentinelModelAccess: true,
       hookRunner: {
-        evaluateHook(hook, { input, auditInput }) {
+        async evaluateHook(hook, { input, auditInput }) {
           const selectsTool = input.tool_name === "operator_runs";
           if (selectsTool || hook === "PRE_OUTPUT") hooks.push(hook);
           if (
@@ -329,12 +331,41 @@ Deno.test("Authenticated Sentinel chat reads exact approved cross-case graph fin
                   visibleAlert.subject,
                 ]
                   .some((label) => String(input.content).includes(label)));
-          return Promise.resolve({
+          if (hook === revokeTelemetry) {
+            const content = hook === "POST_TOOL_RESPONSE"
+              ? input.tool_response
+              : input.content;
+            if (
+              typeof content === "string" &&
+              content.includes(visibleAlert.subject)
+            ) {
+              revokeTelemetry = undefined;
+              await Promise.resolve();
+              if (hook === "POST_TOOL_RESPONSE") constraintsAllowed = false;
+              else {
+                const prior = readSentinelOperatingConstraints(approved.path);
+                assert(prior);
+                assert(recordSentinelOperatingConstraints(approved.path, {
+                  runId: prior.runId,
+                  evidenceRevision: approved.revision,
+                  expectedVersion: prior.version,
+                  operatorScope: "telemetry-race-fixture",
+                  requestId: crypto.randomUUID(),
+                  constraints: {
+                    deniedKinds: prior.constraints.deniedKinds,
+                    allowedAssetIds: ["asset-b", "asset-c"],
+                  },
+                }));
+              }
+              telemetryRevocations++;
+            }
+          }
+          return {
             allowed: !blocked,
             action: blocked ? "BLOCK" : "ALLOW",
             ruleId: null,
             duration: 0,
-          });
+          };
         },
       },
       operatorRunExecutor(args, policy) {
@@ -1122,6 +1153,30 @@ Deno.test("Authenticated Sentinel chat reads exact approved cross-case graph fin
       readSentinelOperatingConstraints(approved.path)?.membership,
       added.membership,
     );
+
+    revokeTelemetry = "POST_TOOL_RESPONSE";
+    const staleResponse = await turn(
+      "Revoke selected-case authority during response classification",
+      exactAlert,
+    );
+    assertEquals(telemetryRevocations, 1);
+    assert(!result.includes(visibleAlert.subject));
+    assert(
+      staleResponse.every((frame) => !frame.includes(visibleAlert.subject)),
+    );
+    constraintsAllowed = true;
+
+    revokeTelemetry = "PRE_OUTPUT";
+    const staleDelivery = await turn(
+      "Narrow asset authority during destination review",
+      exactAlert,
+    );
+    assertEquals(telemetryRevocations, 2);
+    assert(
+      staleDelivery.every((frame) => !frame.includes(visibleAlert.subject)),
+    );
+    await turn("Reject exact evidence after asset revocation", exactAlert);
+    assertStringIncludes(result, "unavailable");
   } finally {
     socket.close();
     await gateway.stop();

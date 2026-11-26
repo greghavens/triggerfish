@@ -78,6 +78,7 @@ import {
   sentinelOperatorCaseControlParameters,
   sentinelOperatorCaseReadActions,
   sentinelOperatorCaseReadParameters,
+  sentinelScopedTelemetryReadActions,
 } from "./operator_run_tool.ts";
 import {
   CHAT_GOAL_REPORT_TOOL,
@@ -871,7 +872,11 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
           },
         },
       },
-      async execute(args: Record<string, unknown>, signal: AbortSignal) {
+      async execute(
+        args: Record<string, unknown>,
+        signal: AbortSignal,
+        retainTelemetryFence?: (isCurrent: () => boolean) => void,
+      ) {
         const { action, kind, id, revision, runId } = args;
         const selectedControl = sentinelOperatorCaseControlActions.some((
           allowed,
@@ -899,15 +904,15 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
         ) return unavailable;
         const owner = state.sessionStates.get(state.ownerSessionId);
         if (!owner) return unavailable;
+        const resolveCase = () =>
+          id === "main" ? snapshotPath : config.resolveSentinelChatCase?.(id);
         const current = () => {
           if (
             signal.aborted ||
             state.activeSessionId !== state.ownerSessionId ||
             state.sessionStates.get(state.ownerSessionId) !== owner
           ) return false;
-          const casePath = id === "main"
-            ? snapshotPath
-            : config.resolveSentinelChatCase?.(id);
+          const casePath = resolveCase();
           if (!selectedControl) return !!casePath;
           if (casePath !== selectedPath) return false;
           const assessment = readSentinelAssessment(selectedPath);
@@ -920,6 +925,29 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
             : assessment.active && assessment.revision === revision;
         };
         if (!current()) return unavailable;
+        const scopedTelemetry = sentinelScopedTelemetryReadActions.some(
+          (allowed) => allowed === action,
+        );
+        const telemetryPath = scopedTelemetry ? resolveCase() : undefined;
+        const telemetryRun = telemetryPath &&
+          readSentinelRunIdForRevision(telemetryPath, revision);
+        const telemetryPolicy = telemetryPath && telemetryRun
+          ? readSentinelOperatingConstraints(telemetryPath, telemetryRun)
+          : undefined;
+        const telemetryIsCurrent = () => {
+          if (
+            !telemetryPath || !telemetryRun || !current() ||
+            resolveCase() !== telemetryPath ||
+            readSentinelRunIdForRevision(telemetryPath, revision) !==
+              telemetryRun
+          ) return false;
+          const latest = readSentinelOperatingConstraints(
+            telemetryPath,
+            telemetryRun,
+          );
+          return latest?.version === telemetryPolicy?.version &&
+            latest?.digest === telemetryPolicy?.digest;
+        };
         const authority = savedToolAuthorization(
           owner,
           () => "INTERNAL",
@@ -935,7 +963,12 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
           authorizeSentinelCaseRead: (caseId, evidenceRevision) =>
             caseId === id && evidenceRevision === revision && current(),
         });
-        return current() ? result : unavailable;
+        if (!current()) return unavailable;
+        if (scopedTelemetry && result.startsWith("{")) {
+          if (!telemetryIsCurrent()) return unavailable;
+          retainTelemetryFence?.(telemetryIsCurrent);
+        }
+        return result;
       },
     };
   }

@@ -311,6 +311,7 @@ export interface SentinelAgentOptions {
     readonly execute: (
       args: Record<string, unknown>,
       signal: AbortSignal,
+      retainTelemetryFence?: (isCurrent: () => boolean) => void,
     ) => Promise<string>;
   };
   readonly plannerExecutionEvidenceRunId?: string;
@@ -1250,6 +1251,8 @@ interface ActiveTurn {
   readonly controller: AbortController;
   readonly signal: AbortSignal;
   readonly readGraph: ReadGraph;
+  pendingTelemetryFence?: () => boolean;
+  readonly telemetryDeliveryFences: Set<() => boolean>;
   readonly outputLanguage: SentinelOutputLanguage;
   readonly send: ChatEventSender;
   readonly sharedFindings: Map<
@@ -4342,6 +4345,21 @@ function createAgent(
             : context,
         );
         if (
+          name === "POST_TOOL_RESPONSE" && turn?.pendingTelemetryFence &&
+          toolName === operatorRunReader?.definition.name
+        ) {
+          const fence = turn.pendingTelemetryFence;
+          turn.pendingTelemetryFence = undefined;
+          if (result.allowed) {
+            if (!fence()) return { ...result, allowed: false, action: "BLOCK" };
+            turn.telemetryDeliveryFences.add(fence);
+          }
+        }
+        if (
+          result.allowed && name === "PRE_OUTPUT" && turn &&
+          [...turn.telemetryDeliveryFences].some((fence) => !fence())
+        ) return { ...result, allowed: false, action: "BLOCK" };
+        if (
           result.allowed && name === "POST_TOOL_RESPONSE" &&
           (provenanceRead || toolName === SENTINEL_DEFENSE_READ ||
             toolName === SENTINEL_INCIDENT_ALERTS_READ) &&
@@ -4505,10 +4523,19 @@ function createAgent(
         return "Error: This turn reached the Sentinel graph read limit.";
       }
       if (operatorRunReader?.definition.name === name) {
-        const result = await operatorRunReader.execute(args, turn.signal);
-        return result.length <= MAX_TOOL_CHARS
-          ? result
-          : "Error: Reduce the requested Sentinel graph page size.";
+        turn.pendingTelemetryFence = undefined;
+        const result = await operatorRunReader.execute(
+          args,
+          turn.signal,
+          (fence) => {
+            turn.pendingTelemetryFence = fence;
+          },
+        );
+        if (result.length > MAX_TOOL_CHARS) {
+          turn.pendingTelemetryFence = undefined;
+          return "Error: Reduce the requested Sentinel graph page size.";
+        }
+        return result;
       }
       if (plannerTodoTools.some((tool) => tool.name === name)) {
         const write = name === "todo_write";
@@ -6691,6 +6718,7 @@ function createAgent(
           }),
           approvedTraffic: new Set(),
           approvedReporterTraffic: new Map(),
+          telemetryDeliveryFences: new Set(),
           stagedGraphFacts: [],
           trace,
           onBatchReadReceipt,
