@@ -1717,46 +1717,170 @@ Deno.test("Only a post-authorized exact leased graph edge can be published and r
       assertStringIncludes(blockedPeer.results[0][1], "unavailable");
       assertEquals(await Deno.readTextFile(path), raw);
       const observed = Promise.withResolvers<unknown>();
-      const planner = createSentinelModelPlanner(path, (_case, assignment) => ({
-        execute(prompt, send) {
-          if (!assignment) {
-            observed.resolve(
-              JSON.parse(String(prompt).split("\n").at(-1)!).graphFacts,
-            );
-            send({
-              type: "response",
-              text: JSON.stringify({
-                assignments: [
-                  { kind: "trace", nodeId: "other-app", graphFactId: fact.id },
-                  {
-                    kind: "trace",
-                    nodeId: "app",
-                    depth: 1,
-                    graphFactId: fact.id,
-                    graphFactOnly: true,
-                  },
-                  { kind: "impact", nodeId: "dependent-app", dependsOn: [1] },
-                ],
-                prioritize: [],
-                goalObservations: [{
-                  criterionId: "verified-relationship",
-                  evidence: [
-                    {
-                      source: "graph_fact",
-                      reference: "worker-graph-fact:" + "0".repeat(64),
-                      detail: "",
-                    },
-                    { source: "graph_fact", reference: fact.id, detail: "" },
-                  ],
-                }],
-              }),
-              taint: "INTERNAL",
+      const interruptedRead = Promise.withResolvers<string>();
+      const released = Promise.withResolvers<void>();
+      const resumedRead = Promise.withResolvers<string>();
+      const plannerHooks: string[] = [];
+      let plannerDispatched = 0;
+      let plannerNow = Date.now();
+      function plannerFactory(interrupt: boolean) {
+        return createSentinelModelPlanner(
+          path,
+          (_case, assignment) => {
+            if (assignment) {
+              return { execute: () => Promise.resolve(), clear() {} };
+            }
+            const providerRegistry = createProviderRegistry();
+            providerRegistry.register({
+              name: "durable-planner-fact",
+              supportsStreaming: false,
+              async complete(messages) {
+                const user = messages.find(({ role }) => role === "user");
+                const received = messages.find(({ role }) => role === "tool");
+                if (!received) {
+                  assert(
+                    interrupt,
+                    "The recovered planner repeated its tool request",
+                  );
+                  return {
+                    content: "",
+                    toolCalls: [{
+                      id: "exact-first-read",
+                      type: "function",
+                      function: {
+                        name: read,
+                        arguments: JSON.stringify({ id: fact.id }),
+                      },
+                    }],
+                    usage: { inputTokens: 1, outputTokens: 1 },
+                  };
+                }
+                if (interrupt) {
+                  interruptedRead.resolve(String(received.content));
+                  await released.promise;
+                  return {
+                    content: "{}",
+                    toolCalls: [],
+                    usage: { inputTokens: 1, outputTokens: 1 },
+                  };
+                }
+                resumedRead.resolve(String(received.content));
+                observed.resolve(
+                  JSON.parse(String(user?.content).split("\n").at(-1)!)
+                    .graphFacts,
+                );
+                return {
+                  content: JSON.stringify({
+                    assignments: [
+                      {
+                        kind: "trace",
+                        nodeId: "other-app",
+                        graphFactId: fact.id,
+                      },
+                      {
+                        kind: "trace",
+                        nodeId: "app",
+                        depth: 1,
+                        graphFactId: fact.id,
+                        graphFactOnly: true,
+                      },
+                      {
+                        kind: "impact",
+                        nodeId: "dependent-app",
+                        dependsOn: [1],
+                      },
+                    ],
+                    prioritize: [],
+                    goalObservations: [{
+                      criterionId: "verified-relationship",
+                      evidence: [
+                        {
+                          source: "graph_fact",
+                          reference: "worker-graph-fact:" + "0".repeat(64),
+                          detail: "",
+                        },
+                        {
+                          source: "graph_fact",
+                          reference: fact.id,
+                          detail: "",
+                        },
+                      ],
+                    }],
+                  }),
+                  toolCalls: [],
+                  usage: { inputTokens: 1, outputTokens: 1 },
+                };
+              },
             });
-          }
-          return Promise.resolve();
-        },
-        clear() {},
-      }));
+            providerRegistry.setDefault("durable-planner-fact");
+            const agent = createSentinelSubagent({
+              snapshotPath: path,
+              providerRegistry,
+              assessmentRevision: _case.revision,
+              plannerExecutionEvidenceRunId: _case.plan.runId,
+              allowModelAccess: true,
+              hookRunner: {
+                evaluateHook(hook, { input }) {
+                  const name = input.tool_name ??
+                    (input.tool_call as { name?: string } | undefined)?.name;
+                  if (name === read) {
+                    plannerHooks.push(
+                      `${interrupt ? "initial" : "resumed"}:${hook}`,
+                    );
+                  }
+                  return Promise.resolve({
+                    allowed: true,
+                    action: "ALLOW",
+                    ruleId: null,
+                    duration: 0,
+                  });
+                },
+              },
+            });
+            return {
+              ...agent,
+              execute(prompt, send, signal, onTrace, enabled, options) {
+                return agent.execute(
+                  prompt,
+                  send,
+                  signal,
+                  (step) => {
+                    if (step.tool === read) plannerDispatched++;
+                    onTrace?.(step);
+                  },
+                  enabled,
+                  options,
+                );
+              },
+            };
+          },
+          undefined,
+          () => plannerNow,
+        );
+      }
+      const firstPlanner = plannerFactory(true);
+      let firstResult: string;
+      try {
+        firstPlanner.advance(state);
+        const timeout = setTimeout(
+          () =>
+            interruptedRead.reject(
+              new Error("First planner did not commit its tool exchange"),
+            ),
+          3000,
+        );
+        try {
+          firstResult = await interruptedRead.promise;
+        } finally {
+          clearTimeout(timeout);
+        }
+        assertEquals(JSON.parse(firstResult).id, fact.id);
+      } finally {
+        firstPlanner.stop();
+        released.resolve();
+      }
+      plannerNow += 4 * 60_000;
+      const planner = plannerFactory(false);
       try {
         planner.advance(state);
         const deadline = setTimeout(
@@ -1777,6 +1901,10 @@ Deno.test("Only a post-authorized exact leased graph edge can be published and r
         } finally {
           clearTimeout(deadline);
         }
+        assertEquals(await resumedRead.promise, firstResult);
+        assertEquals(plannerDispatched, 1);
+        assert(plannerHooks.includes("resumed:PRE_TOOL_CALL"));
+        assert(plannerHooks.includes("resumed:POST_TOOL_RESPONSE"));
         assertEquals(
           store.modelPlanHistory(revision, true).at(-1)?.inputManifest
             ?.graphFactIds,

@@ -1,4 +1,8 @@
 import {
+  parsePlannerReadCheckpoint,
+  type SentinelPlannerReadCheckpoint,
+} from "./planner_read_checkpoint.ts";
+import {
   computeSoftLimit,
   injectSoftLimitWarning,
 } from "../agent/loop/loop_types.ts";
@@ -80,6 +84,7 @@ import {
   readSentinelTaskObservationPageReference,
   readSentinelWorkerTracePageReference,
   SENTINEL_CASE_INVENTORY_READ,
+  SENTINEL_GOAL_GRAPH_FACT_READ,
   SENTINEL_GOAL_PROPOSE,
   SENTINEL_GOAL_PROVE,
   SENTINEL_GOAL_RECHECK_READ,
@@ -7237,6 +7242,107 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
         `).run(identity, attempt, encoded, encoded, MAX_PLANNER_READS);
         return Number(saved.changes) === 1;
       });
+    },
+
+    recordModelPlanReadCheckpoint(
+      identity: string,
+      attempt: number,
+      evidenceRevision: number,
+      promptSha256: string,
+      projection: SentinelPlannerReadCheckpoint,
+    ): boolean {
+      const exact = parsePlannerReadCheckpoint(projection);
+      if (!exact || !/^[a-f0-9]{64}$/.test(promptSha256)) return false;
+      identity = revisionKey(identity);
+      return transaction(db, () => {
+        if (
+          !db.prepare(
+            "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'adaptive_model_reads'",
+          ).get()
+        ) return false;
+        const active = db.prepare(`
+          SELECT started, plannerReads FROM adaptive_model_leases
+          JOIN adaptive_model_history USING (identity, attempt)
+          JOIN adaptive_model_reads USING (identity, attempt)
+          WHERE identity = ? AND attempt = ? AND completed = 0 AND outcome = 0
+        `).get(identity, attempt);
+        const time = now();
+        if (
+          typeof active?.plannerReads !== "string" ||
+          time >= Number(active.started) + 30_000 ||
+          !JSON.parse(active.plannerReads).some((step: AdaptivePlannerRead) =>
+            step.tool === SENTINEL_GOAL_GRAPH_FACT_READ &&
+            step.outcome === "returned" &&
+            step.goalReceiptRead?.args.id === exact.factId &&
+            step.goalReceiptRead.sha256 === exact.resultSha256
+          )
+        ) return false;
+        db.exec(`CREATE TABLE IF NOT EXISTS adaptive_model_read_checkpoints (
+          identity TEXT PRIMARY KEY, attempt INTEGER NOT NULL, evidenceRevision INTEGER NOT NULL,
+          promptSha256 TEXT NOT NULL, projection TEXT NOT NULL
+        ) STRICT`);
+        db.prepare(
+          "DELETE FROM adaptive_model_read_checkpoints WHERE evidenceRevision < ?",
+        )
+          .run(evidenceRevision);
+        return db.prepare(`
+          INSERT OR IGNORE INTO adaptive_model_read_checkpoints VALUES (?, ?, ?, ?, ?)
+        `).run(
+          identity,
+          attempt,
+          evidenceRevision,
+          promptSha256,
+          JSON.stringify(exact),
+        )
+          .changes === 1;
+      });
+    },
+
+    clearModelPlanReadCheckpoint(identity: string, attempt: number) {
+      if (
+        db.prepare(
+          "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'adaptive_model_read_checkpoints'",
+        ).get()
+      ) {
+        db.prepare(
+          "DELETE FROM adaptive_model_read_checkpoints WHERE identity = ? AND attempt <= ?",
+        )
+          .run(revisionKey(identity), attempt);
+      }
+    },
+
+    readModelPlanReadCheckpoint(
+      identity: string,
+      attempt: number,
+      evidenceRevision: number,
+      promptSha256: string,
+    ) {
+      if (
+        attempt < 2 || !db.prepare(
+          "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'adaptive_model_read_checkpoints'",
+        ).get()
+      ) return;
+      const time = now();
+      const row = db.prepare(`
+        SELECT checkpoint.projection FROM adaptive_model_read_checkpoints AS checkpoint
+        JOIN adaptive_model_leases AS lease USING (identity)
+        JOIN adaptive_model_history AS history ON history.identity = lease.identity
+          AND history.attempt = lease.attempt
+        WHERE checkpoint.identity = ? AND checkpoint.attempt = ?
+          AND checkpoint.evidenceRevision = ? AND checkpoint.promptSha256 = ?
+          AND lease.attempt = ?
+          AND lease.completed = 0 AND history.outcome = 0 AND history.started > ?
+      `).get(
+        revisionKey(identity),
+        attempt - 1,
+        evidenceRevision,
+        promptSha256,
+        attempt,
+        time - 30_000,
+      );
+      if (typeof row?.projection === "string") {
+        return parsePlannerReadCheckpoint(JSON.parse(row.projection));
+      }
     },
 
     modelPlanHistory(

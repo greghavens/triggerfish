@@ -1,3 +1,8 @@
+import {
+  projectPlannerReadCheckpoint,
+  reopenPlannerReadCheckpoint,
+} from "../sentinel/planner_read_checkpoint.ts";
+import { readSentinelPlannerGraphFacts } from "./sentinel_graph_fact_tool.ts";
 import type { TelemetryAlert } from "../sentinel/telemetry.ts";
 import { resolveWorkerNarrativeAlert } from "../sentinel/worker_narrative_alerts.ts";
 import {
@@ -9243,6 +9248,37 @@ export function createSentinelModelPlanner(
           }
         }
         const prompt = render();
+        const plannerPromptSha256 = createHash("sha256").update(prompt).digest(
+          "hex",
+        );
+        const checkpointCurrent = () => {
+          const latest = readSentinelAssessment(snapshotPath);
+          return !signal.aborted && activePlan?.controller === controller &&
+            !!latest?.active && !latest.paused && matchesRound(latest);
+        };
+        const projectGraphFact = (id: string) => {
+          if (!location || !runId || !checkpointCurrent()) return;
+          return readSentinelPlannerGraphFacts(
+            snapshotPath,
+            location.caseId,
+            runId,
+            state.revision,
+            { id },
+            (nodeId) =>
+              sentinelOperatingConstraintsAllow(
+                constraints?.constraints,
+                { kind: "review_evidence", nodeId },
+                snapshot,
+              ),
+            undefined,
+            constraints,
+          );
+        };
+        let retainedRead: ReturnType<
+          ReturnType<
+            typeof openSentinelAdaptiveStore
+          >["readModelPlanReadCheckpoint"]
+        >;
         const presentedIncidentIds = new Set(
           inputs.incidents.map(({ id }) => id),
         );
@@ -9373,9 +9409,22 @@ export function createSentinelModelPlanner(
             failed = true;
             return;
           }
+          retainedRead = store.readModelPlanReadCheckpoint(
+            roundIdentity,
+            claim,
+            state.revision,
+            plannerPromptSha256,
+          );
         } finally {
           store.close();
         }
+        const projected = retainedRead && projectGraphFact(retainedRead.factId);
+        const resume = retainedRead && projected
+          ? reopenPlannerReadCheckpoint(retainedRead, prompt, projected)
+          : undefined;
+        if (retainedRead && !resume) return;
+        let checkpointSaved = resume !== undefined;
+        let checkpointEligible = resume === undefined;
         return worker.execute(
           prompt,
           (event) => {
@@ -9713,6 +9762,71 @@ export function createSentinelModelPlanner(
           },
           true,
           {
+            resume,
+            onResumeAccepted() {
+              if (!retainedRead || !projected || !checkpointCurrent()) {
+                throw new Error("Sentinel planner checkpoint is stale");
+              }
+              const { _classification, ...fact } = JSON.parse(projected);
+              const audit = openSentinelAdaptiveStore(
+                storePath(snapshotPath),
+                now,
+              );
+              try {
+                if (
+                  !audit.recordModelPlanRead(roundIdentity, claim, {
+                    tool: "sentinel_graph_facts",
+                    outcome: "returned",
+                    target: retainedRead.factId,
+                    goalReceiptRead: {
+                      args: { id: retainedRead.factId },
+                      sha256: retainedRead.resultSha256,
+                    },
+                    resultSha256: retainedRead.resultSha256,
+                  })
+                ) throw new Error("Sentinel planner checkpoint is stale");
+                openedGraphFacts.set(fact.id, fact);
+                rememberMixedSource(fact.id, fact.targetId);
+              } finally {
+                audit.close();
+              }
+            },
+            beforePlannerToolBatch() {
+              if (!checkpointSaved) return;
+              const audit = openSentinelAdaptiveStore(
+                storePath(snapshotPath),
+                now,
+              );
+              try {
+                audit.clearModelPlanReadCheckpoint(roundIdentity, claim);
+                checkpointEligible = false;
+              } finally {
+                audit.close();
+              }
+            },
+            onToolBatchCheckpoint(value) {
+              if (!checkpointEligible || !checkpointCurrent()) {
+                return Promise.resolve();
+              }
+              const projection = projectPlannerReadCheckpoint(value, prompt);
+              if (!projection) return Promise.resolve();
+              const audit = openSentinelAdaptiveStore(
+                storePath(snapshotPath),
+                now,
+              );
+              try {
+                checkpointSaved = audit.recordModelPlanReadCheckpoint(
+                  roundIdentity,
+                  claim,
+                  state.revision,
+                  plannerPromptSha256,
+                  projection,
+                );
+              } finally {
+                audit.close();
+              }
+              return Promise.resolve();
+            },
             plannerRound: { identity: roundIdentity, attempt: claim },
             onBatchReadReceipt(tool, _stepIndex, result) {
               if (
@@ -9772,11 +9886,7 @@ export function createSentinelModelPlanner(
                 reference: stored.reference,
               });
             },
-            plannerRoundIsCurrent: () => {
-              const state = readSentinelAssessment(snapshotPath);
-              return !signal.aborted && activePlan?.controller === controller &&
-                !!state?.active && !state.paused && matchesRound(state);
-            },
+            plannerRoundIsCurrent: checkpointCurrent,
             operatingConstraints: constraints &&
               { version: constraints.version, digest: constraints.digest },
           },
@@ -10529,6 +10639,12 @@ export function createSentinelModelPlanner(
           const store = openSentinelAdaptiveStore(storePath(snapshotPath), now);
           try {
             store.completeModelPlan(roundIdentity, claim, outcome);
+            if (
+              outcome === true || outcome === "no_new_assignments" ||
+              outcome === "proposal_rejected" || outcome === "superseded"
+            ) {
+              store.clearModelPlanReadCheckpoint(roundIdentity, claim);
+            }
             if (
               outcome === true || outcome === "no_new_assignments" ||
               outcome === "proposal_rejected"

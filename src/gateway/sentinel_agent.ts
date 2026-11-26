@@ -488,6 +488,7 @@ export interface SentinelTurnCheckpointOptions {
   };
   readonly retainedProgress?: readonly SentinelReviewStep[];
   readonly onResumeAccepted?: () => void;
+  readonly beforePlannerToolBatch?: () => void;
   readonly workerBoundary?: WorkerBoundary;
   readonly plannerRoundIsCurrent?: () => boolean;
   readonly plannerRound?: {
@@ -9768,13 +9769,17 @@ function createAgent(
         } = checkpointOptions ?? {};
         const checkpointed = resume !== undefined ||
           onToolBatchCheckpoint !== undefined || workerBoundary !== undefined;
-        if (
-          checkpointed && (canDelegate || !readAssignedModelReview(options))
-        ) {
+        const plannerCheckpointed = canReadPlannerCase &&
+          !!plannerRound && plannerRoundIsCurrent !== undefined;
+        const checkpointCurrent = () =>
+          plannerCheckpointed
+            ? plannerRoundIsCurrent()
+            : !canDelegate && !!readAssignedModelReview(options);
+        if (checkpointed && !checkpointCurrent()) {
           send({
             type: "error",
             message:
-              "Sentinel checkpointing requires an active pinned assignment.",
+              "Sentinel checkpointing requires an active pinned assignment or planner round.",
           });
           return;
         }
@@ -9826,7 +9831,7 @@ function createAgent(
         const turn = active;
         const assignmentGuard = guardAssignmentExecution(
           signal,
-          () => !!readAssignedModelReview(options),
+          checkpointCurrent,
         );
         const savedCalls = resume?.history.flatMap(({ tool_calls }) =>
           parseNativeToolCalls(tool_calls ?? [], checkpointLog, true)
@@ -9862,8 +9867,39 @@ function createAgent(
             resumeClassification: "INTERNAL",
             resumeToolCalls: savedCalls,
             async authorizeResumeSources() {
-              if (signal.aborted || !readAssignedModelReview(options)) {
-                return false;
+              if (signal.aborted || !checkpointCurrent()) return false;
+              if (plannerCheckpointed) {
+                const call = savedCalls?.[0];
+                const args = call &&
+                  sentinelGoalReceiptReadArguments(call.name, call.args);
+                const retained = resume.history.find(({ role }) =>
+                  role === "tool"
+                );
+                const location = locateSentinelCase(options.snapshotPath);
+                const revision = options.assessmentRevision;
+                const runId = options.plannerExecutionEvidenceRunId;
+                if (
+                  signal.aborted || !checkpointCurrent() ||
+                  savedCalls?.length !== 1 ||
+                  call?.name !== SENTINEL_GOAL_GRAPH_FACT_READ || !args?.id ||
+                  Object.keys(args).length !== 1 || !retained ||
+                  !location || revision === undefined || !runId ||
+                  readSentinelPlannerGraphFacts(
+                      options.snapshotPath,
+                      location.caseId,
+                      runId,
+                      revision,
+                      args,
+                      (id) => currentPlannerReceiptScope(turn, id),
+                      undefined,
+                      operatingConstraints,
+                    ) !== retained.content ||
+                  !checkpointCurrent()
+                ) return false;
+                turn.reads = 1;
+                turn.traceStepCount = 1;
+                onResumeAccepted?.();
+                return true;
               }
               const results = new Map(
                 resume.history.flatMap((entry) =>
@@ -10819,6 +10855,13 @@ function createAgent(
             }
             return Promise.resolve();
           }),
+          ...(plannerCheckpointed &&
+            checkpointOptions?.beforePlannerToolBatch && {
+            beforeToolBatch: () =>
+              assignmentGuard.checkpoint(
+                checkpointOptions.beforePlannerToolBatch!,
+              ),
+          }),
           onToolDispatchOutcome: onMutationBoundary && (({ tool, outcome }) => {
             if (pendingMutations.includes(tool) && outcome !== "failed") {
               settledMutations++;
@@ -10840,7 +10883,7 @@ function createAgent(
               })),
         });
         if (signal.aborted) return;
-        if (checkpointed && !readAssignedModelReview(options)) {
+        if (checkpointed && !checkpointCurrent()) {
           send({
             type: "error",
             message: "The Sentinel assignment is no longer active.",
@@ -10875,7 +10918,7 @@ function createAgent(
             return;
           }
         }
-        if (checkpointed && !readAssignedModelReview(options)) {
+        if (checkpointed && !checkpointCurrent()) {
           send({
             type: "error",
             message: "The Sentinel assignment is no longer active.",
