@@ -1,3 +1,6 @@
+import { dirname, join } from "@std/path";
+import { resolveSentinelCasePath } from "../../src/sentinel/cases.ts";
+import { createSentinelLiveWorkflowReader } from "../../src/gateway/sentinel_live_workflow.ts";
 import type { AdaptivePeerFindingCitation } from "../../src/sentinel/adaptive_store.ts";
 import { createHash } from "node:crypto";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
@@ -488,8 +491,9 @@ Deno.test("Live workflow status requires exact leased scope and trusted outbound
 
 Deno.test("A leased follow-up reads only its exact approved saved workflow receipt", async () => {
   const dir = await Deno.makeTempDir();
-  const path = dir + "/sentinel.json";
+  const path = resolveSentinelCasePath(dir);
   try {
+    await Deno.mkdir(dirname(path), { recursive: true });
     await Deno.writeTextFile(
       path,
       JSON.stringify({
@@ -501,7 +505,9 @@ Deno.test("A leased follow-up reads only its exact approved saved workflow recei
     const state = startSentinelAssessment(path);
     advanceAdaptiveSentinel(path, state);
     const revision = adaptiveRevision(state);
-    const store = openSentinelAdaptiveStore(dir + "/sentinel-adaptive.db");
+    const store = openSentinelAdaptiveStore(
+      join(dirname(path), "sentinel-adaptive.db"),
+    );
     try {
       store.sync(revision, [{
         kind: "impact",
@@ -579,6 +585,24 @@ Deno.test("A leased follow-up reads only its exact approved saved workflow recei
       );
       advanceAdaptiveSentinel(path, state);
       let liveAttempts = 0;
+      let hasCredential = true;
+      const readRetainedWorkflow = createSentinelLiveWorkflowReader({
+        scopes: [{
+          case: "main",
+          asset: "app",
+          owner: "example",
+          repo: "service",
+          workflow_id: 12,
+        }],
+        resolveToken: () =>
+          Promise.resolve(hasCredential ? "fixture-token" : undefined),
+        ssrfChecker: () => Promise.resolve({ ok: true, value: "192.0.2.1" }),
+        verifyAccess: () => Promise.resolve(true),
+        readRuns: () => {
+          liveAttempts++;
+          throw new Error("A retained receipt must never list runs.");
+        },
+      });
       for (const depth of [1, 2]) {
         const lease = store.claimModelReview(
           revision,
@@ -595,6 +619,7 @@ Deno.test("A leased follow-up reads only its exact approved saved workflow recei
           assignedTaskLeaseToken: lease.token,
           hookRunner: allowHooks,
           allowModelAccess: true,
+          readRetainedWorkflow,
           readLiveWorkflowStatus() {
             liveAttempts++;
             return Promise.resolve(undefined);
@@ -639,6 +664,14 @@ Deno.test("A leased follow-up reads only its exact approved saved workflow recei
         assertStringIncludes(replies[2], "trace step is unavailable");
         assert(!replies.join("").includes(otherReceipt.repository));
         assert(!replies[3].includes(receipt.repository));
+        if (depth === 1) {
+          hasCredential = false;
+          await worker.execute("Read after credential withdrawal.", () => {});
+          assertStringIncludes(
+            replies[0],
+            "No approved saved workflow receipt",
+          );
+        }
         assert(
           store.finishModelReview(
             revision,
