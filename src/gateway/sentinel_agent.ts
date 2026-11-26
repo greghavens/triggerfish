@@ -6096,17 +6096,20 @@ function createAgent(
       current.revision !== options.assessmentRevision
     ) return;
     const worker = options.assignedTaskId !== undefined;
-    const provenanceNode = worker && tool === SENTINEL_PROVENANCE_NODE_READ
+    const workerArgs = !worker
+      ? undefined
+      : tool === assignedTargetTool.name && !Object.keys(args).length
+      ? { revision: undefined }
+      : tool === SENTINEL_PROVENANCE_NODE_READ
       ? sentinelGoalReceiptReadArguments(tool, args)
+      : tool === SENTINEL_TRAFFIC_READ && !reporter
+      ? sentinelTrafficReadArgs(args)
       : undefined;
     const selector = worker
-      ? approvalIsCurrent(turn)
-        ? tool === assignedTargetTool.name && !Object.keys(args).length
-          ? { name: tool, args: {} }
-          : provenanceNode && (provenanceNode.revision === undefined ||
-              provenanceNode.revision === current.revision)
-          ? { name: tool, args: provenanceNode }
-          : undefined
+      ? workerArgs && approvalIsCurrent(turn) &&
+          (workerArgs.revision === undefined ||
+            workerArgs.revision === current.revision)
+        ? { name: tool, args: workerArgs }
         : undefined
       : currentPlannerReceiptScope(turn) && turn.plannerRound &&
           turn.plannerRoundIsCurrent?.()

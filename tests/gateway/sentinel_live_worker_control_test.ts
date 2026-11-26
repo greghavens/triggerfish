@@ -1,4 +1,5 @@
 import { ModelFailoverExhausted } from "../../src/agent/providers/retry.ts";
+import { ingestSentinelTraffic } from "../../src/cli/commands/sentinel_traffic.ts";
 import { DatabaseSync } from "node:sqlite";
 import type { ApprovalInboxRecord } from "../../src/core/approval_inbox.ts";
 import {
@@ -47,6 +48,8 @@ import {
 } from "../../src/sentinel/adaptive_planner.ts";
 import { digestSentinelSnapshot } from "../../src/sentinel/shared_inventory.ts";
 import { resolveSentinelCasePath } from "../../src/sentinel/cases.ts";
+import { importSentinelHar } from "../../src/sentinel/har.ts";
+import { readSentinelTrafficReceiptPage } from "../../src/sentinel/traffic_receipts.ts";
 import { routeHostRequest } from "../../src/tools/tidepool/host/host_server.ts";
 import type { A2UIHostState } from "../../src/tools/tidepool/host/host_types.ts";
 
@@ -4298,23 +4301,40 @@ for (
     "exhausted",
     "approved-provenance",
     "revoked-provenance",
+    "approved-traffic",
+    "missing-traffic-source",
   ] as const
 ) {
   Deno.test(`Sentinel retries an exact worker checkpoint only when eligible (${scenario})`, async () => {
     const baseDir = await Deno.makeTempDir();
     const path = resolveSentinelCasePath(baseDir);
-    const asset = "retry-asset";
     const provenance = scenario === "approved-provenance" ||
       scenario === "revoked-provenance";
-    const read = provenance
+    const traffic = scenario === "approved-traffic" ||
+      scenario === "missing-traffic-source";
+    const har = {
+      startedDateTime: new Date(Date.now() - 60_000).toISOString(),
+      request: { method: "GET", url: "https://fixture.example/retained" },
+      response: { status: 200, content: { text: "unprojected body fixture" } },
+    };
+    const asset = traffic
+      ? importSentinelHar({ log: { version: "1.2", entries: [har] } }, "retry")
+        .observations[0].assetId
+      : "retry-asset";
+    const read = traffic
+      ? "sentinel_traffic_get"
+      : provenance
       ? "sentinel_provenance_node"
       : "sentinel_assigned_target";
     const node = `asset:${asset}`;
-    const toolApprovalInbox = provenance
-      ? createToolApprovalService(join(baseDir, "provenance-approval.db"))
+    const toolApprovalInbox = provenance || traffic
+      ? createToolApprovalService(join(baseDir, "saved-read-approvals.db"))
       : undefined;
     const recover = scenario === "recovered" ||
-      scenario === "approved-provenance";
+      scenario === "approved-provenance" || scenario === "approved-traffic";
+    let exactTraffic:
+      | { revision: number; evidenceId: string; digest: string }
+      | undefined;
     let revokeProvenance = false;
     const registry = createProviderRegistry();
     const outcome = Promise.withResolvers<void>();
@@ -4341,7 +4361,9 @@ for (
               function: {
                 name: read,
                 arguments: JSON.stringify(
-                  provenance
+                  traffic
+                    ? exactTraffic
+                    : provenance
                     ? { node, revision: fixtureRevision, offset: 0, limit: 2 }
                     : {},
                 ),
@@ -4358,6 +4380,20 @@ for (
           assertEquals(parsed.node.sourceId, asset);
           assertEquals(parsed.offset, 0);
           assert(parsed.connections.length <= 2);
+        }
+        if (traffic) {
+          const text = String(saved.content);
+          const parsed = JSON.parse(text);
+          assertEquals(parsed.caseId, "main");
+          assertEquals(parsed.evidenceRevision, fixtureRevision);
+          assertEquals(parsed.receipt.evidenceId, exactTraffic?.evidenceId);
+          assertEquals(parsed.receipt.digest, exactTraffic?.digest);
+          assertEquals(parsed.receipt.assetIds, [asset]);
+          assertEquals(
+            parsed.receipt.observation.origin,
+            "https://fixture.example",
+          );
+          assert(!text.includes("unprojected body fixture"));
         }
         outcome.resolve();
         if (scenario === "handled") {
@@ -4419,17 +4455,27 @@ for (
     });
     try {
       await Deno.mkdir(dirname(path), { recursive: true });
+      if (traffic) {
+        await ingestSentinelTraffic(
+          new Blob([JSON.stringify(har)]).stream(),
+          "retry",
+          path,
+          "har",
+        );
+      }
       await Deno.writeTextFile(
         path,
         JSON.stringify({
           version: 1,
-          nodes: [{ kind: "asset", id: asset, label: "Exact retry evidence" }],
+          nodes: traffic
+            ? []
+            : [{ kind: "asset", id: asset, label: "Exact retry evidence" }],
           edges: [],
         }),
       );
       const goals: SentinelFormalGoal[] = [{
-        id: "provenance-retry",
-        title: "Review retained asset provenance",
+        id: "reviewed-read-retry",
+        title: "Review retained source evidence",
         policy: "operator",
         criteria: [{
           id: "verified-proof",
@@ -4438,10 +4484,10 @@ for (
           reference: "future-control-record",
         }],
       }];
-      const state = provenance
+      const state = provenance || traffic
         ? applySentinelFormalGoals(path, {
           mode: "start",
-          requestId: "reviewed-provenance-retry",
+          requestId: "reviewed-source-retry",
           proposalDigest: digestSentinelGoalProposal(goals),
           goals,
           plan: {
@@ -4461,6 +4507,19 @@ for (
         }).state
         : startSentinelAssessment(path);
       fixtureRevision = state.revision;
+      if (traffic) {
+        const receipt = readSentinelTrafficReceiptPage(
+          path,
+          state.revision,
+          { authority: "fixture.example" },
+        )?.receipts[0];
+        assert(receipt);
+        exactTraffic = {
+          revision: state.revision,
+          evidenceId: receipt.evidenceId,
+          digest: receipt.digest,
+        };
+      }
       advanceAdaptiveSentinel(path, state);
       const store = openSentinelAdaptiveStore(
         join(dirname(path), "sentinel-adaptive.db"),
@@ -4513,6 +4572,21 @@ for (
       await until(() => modelTurns > 0);
       await outcome.promise;
       if (scenario === "revoked-provenance") revokeProvenance = true;
+      if (scenario === "missing-traffic-source") {
+        const journal = new DatabaseSync(
+          join(dirname(path), "sentinel-traffic-receipts.db"),
+        );
+        try {
+          assertEquals(
+            journal.prepare(
+              "DELETE FROM traffic_receipts_v1 WHERE evidenceId = ?",
+            ).run(exactTraffic!.evidenceId).changes,
+            1,
+          );
+        } finally {
+          journal.close();
+        }
+      }
       assert(assignment);
       const taskId = assignment.taskId;
       if (scenario === "cancelled") {
@@ -4579,7 +4653,7 @@ for (
         );
         assert(
           savedChecks >= 3,
-          "Provenance must pass current policy before reuse",
+          "The saved read must pass current policy before reuse",
         );
       }
     } finally {
