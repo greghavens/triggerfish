@@ -909,7 +909,7 @@ async function verifyPausedGraphWorker(
   pinnedTemplate = false,
   askCheckpoint?: "approved" | "missing",
   trafficCheckpoint = false,
-  provenanceCheckpoint = false,
+  provenanceCheckpoint?: "node" | "finding",
 ) {
   const baseDir = await Deno.makeTempDir();
   const caseId = cold ? "portable-worker" : "main";
@@ -1008,8 +1008,21 @@ async function verifyPausedGraphWorker(
             const result = JSON.parse(text);
             assertEquals(result.revision, exactProvenance.revision);
             assertEquals(result.node.id, exactProvenance.node);
-            assertEquals(result.node.label, "Exact portable evidence");
-            assertEquals(result.totalConnections, 1);
+            if (provenanceCheckpoint === "finding") {
+              assertEquals(result.node.label, "Exact portable finding");
+              assertEquals(result.node.findingReviews.length, 1);
+              assertEquals(
+                result.node.findingReviews[0].note,
+                "Reviewed exact local evidence.",
+              );
+              assertEquals(
+                result.node.findingReviews[0].revision,
+                exactProvenance.revision,
+              );
+            } else {
+              assertEquals(result.node.label, "Exact portable evidence");
+              assertEquals(result.totalConnections, 1);
+            }
             assertEquals(result.connections.length, 1);
             if (heldStep) assertEquals(text, originalRead);
             else originalRead = text;
@@ -1162,14 +1175,38 @@ async function verifyPausedGraphWorker(
               label: "Exact portable evidence",
             }]
             : []),
+          ...(provenanceCheckpoint === "finding"
+            ? [{
+              kind: "finding",
+              id: "portable-finding",
+              label: "Exact portable finding",
+              severity: "high",
+            }]
+            : []),
         ],
-        edges: provenanceCheckpoint
-          ? [{
-            from: "portable-source",
-            to: heldAsset,
-            relation: "observed_on",
-          }]
-          : [],
+        edges: [
+          ...(provenanceCheckpoint
+            ? [{
+              from: "portable-source",
+              to: provenanceCheckpoint === "finding" ? "peer-graph" : heldAsset,
+              relation: "observed_on",
+            }]
+            : []),
+          ...(provenanceCheckpoint === "finding"
+            ? [
+              {
+                from: "portable-finding",
+                to: "peer-graph",
+                relation: "affects",
+              },
+              {
+                from: "portable-source",
+                to: "portable-finding",
+                relation: "supports",
+              },
+            ]
+            : []),
+        ],
       }),
     );
     const goals: SentinelFormalGoal[] = [{
@@ -1232,10 +1269,26 @@ async function verifyPausedGraphWorker(
     if (provenanceCheckpoint) {
       exactProvenance = {
         revision: initial.revision,
-        node: "evidence:portable-source",
+        node: provenanceCheckpoint === "finding"
+          ? "finding:portable-finding"
+          : "evidence:portable-source",
         offset: 0,
         limit: 1,
       };
+    }
+    if (provenanceCheckpoint === "finding") {
+      await withTidepoolSocket(baseDir, async (request) => {
+        assertEquals(
+          (await request("review_finding", {
+            caseId,
+            revision: initial.revision,
+            findingId: "portable-finding",
+            disposition: "confirmed",
+            note: "Reviewed exact local evidence.",
+          })).type,
+          "sentinel_state",
+        );
+      });
     }
     advanceAdaptiveSentinel(path, initial);
     const first = startPlanner();
@@ -1647,7 +1700,7 @@ Deno.test("Portable Sentinel worker restores an exactly approved local provenanc
     true,
     "approved",
     false,
-    true,
+    "node",
   );
   await verifyPausedGraphWorker(
     true,
@@ -1656,7 +1709,7 @@ Deno.test("Portable Sentinel worker restores an exactly approved local provenanc
     true,
     "missing",
     false,
-    true,
+    "node",
   );
   await verifyPausedGraphWorker(
     true,
@@ -1665,7 +1718,28 @@ Deno.test("Portable Sentinel worker restores an exactly approved local provenanc
     true,
     "approved",
     false,
+    "node",
+  );
+});
+
+Deno.test("Portable Sentinel worker restores an exactly approved local finding review page", async () => {
+  await verifyPausedGraphWorker(
     true,
+    false,
+    undefined,
+    true,
+    "approved",
+    false,
+    "finding",
+  );
+  await verifyPausedGraphWorker(
+    true,
+    false,
+    undefined,
+    true,
+    "missing",
+    false,
+    "finding",
   );
 });
 

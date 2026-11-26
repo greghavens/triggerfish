@@ -1,5 +1,8 @@
 import { isDeepStrictEqual } from "node:util";
-import { readSentinelAssessmentRevision } from "./assessment_store.ts";
+import {
+  readSentinelAssessmentRevision,
+  readSentinelFindingReviews,
+} from "./assessment_store.ts";
 import { buildSentinelProvenance } from "./provenance.ts";
 import type { readSentinelProvenanceNodeReference } from "./worker_goal_recovery.ts";
 
@@ -14,10 +17,18 @@ export function matchesPortableSentinelProvenanceNode(
   const state = readSentinelAssessmentRevision(path, revision);
   if (state?.plan?.runId !== runId || !state.result) return false;
   const { node, offset = 0, limit = 10 } = page.args;
-  const record = buildSentinelProvenance(state.result).inspect(node);
+  const reviews = node.startsWith("finding:")
+    ? readSentinelFindingReviews(path, revision)
+    : undefined;
+  const record = buildSentinelProvenance(
+    state.result,
+    undefined,
+    undefined,
+    undefined,
+    reviews,
+  ).inspect(node);
   if (
     record?.node.origin !== "imported" ||
-    record.node.kind === "finding" ||
     record.connections.length !== page.totalConnections
   ) return false;
   return isDeepStrictEqual(JSON.parse(text), {
