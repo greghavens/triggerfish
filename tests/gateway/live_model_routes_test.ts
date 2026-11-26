@@ -686,7 +686,6 @@ Deno.test("gateway pins approved classification routes for the entire model turn
     const afterSelectedInterrupt = readCount;
     gateway = makeGateway();
     socket = await connect();
-    await turn("/agent-profile model-pinned-agent");
     assertEquals(
       await turn(resumeCommand(selectedRecovery)),
       "Resumed on second with the exact committed receipt.",
@@ -698,7 +697,6 @@ Deno.test("gateway pins approved classification routes for the entire model turn
     approvals.INTERNAL = ["first"];
     gateway = makeGateway();
     socket = await connect();
-    await turn("/agent-profile model-pinned-agent");
     requests.length = 0;
     assertEquals(
       await turn("Do not fall back from this profile."),

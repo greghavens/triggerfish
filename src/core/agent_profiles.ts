@@ -239,7 +239,10 @@ export function openAgentProfiles(baseDir: string) {
           id TEXT NOT NULL, version INTEGER NOT NULL,
           request_id TEXT NOT NULL UNIQUE, record TEXT NOT NULL,
           PRIMARY KEY(id, version)
-        )`);
+        );
+        CREATE TABLE IF NOT EXISTS agent_profile_selections (
+          sessionId TEXT PRIMARY KEY, profileId TEXT NOT NULL
+        ) STRICT;`);
       }
       return read(db);
     } finally {
@@ -276,6 +279,44 @@ export function openAgentProfiles(baseDir: string) {
   }
 
   return {
+    selectedForSession(
+      sessionId: string,
+    ): AgentProfileRevision | null | undefined {
+      return useStore<AgentProfileRevision | null | undefined>(
+        undefined,
+        (db) => {
+          if (
+            !db.prepare(
+              "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'agent_profile_selections'",
+            ).get()
+          ) return;
+          const row = db.prepare(
+            "SELECT profileId FROM agent_profile_selections WHERE sessionId = ?",
+          ).get(sessionId);
+          if (!row) return;
+          const entry = latest(db, String(row.profileId));
+          return entry?.definition ? entry : null;
+        },
+      );
+    },
+    selectForSession(sessionId: string, profileId?: string): boolean {
+      return useStore(false, (db) => {
+        if (profileId === undefined) {
+          db.prepare("DELETE FROM agent_profile_selections WHERE sessionId = ?")
+            .run(sessionId);
+          return true;
+        }
+        if (!isAgentProfileId(profileId)) return false;
+        return db.prepare(`
+          INSERT INTO agent_profile_selections (sessionId, profileId)
+          SELECT ?, ? WHERE (
+            SELECT json_type(record, '$.definition') FROM agent_profile_revisions
+            WHERE id = ? ORDER BY version DESC LIMIT 1
+          ) = 'object'
+          ON CONFLICT(sessionId) DO UPDATE SET profileId = excluded.profileId
+        `).run(sessionId, profileId, profileId).changes === 1;
+      }, true);
+    },
     read(id: string) {
       return useStore(undefined, (db) => latest(db, id));
     },

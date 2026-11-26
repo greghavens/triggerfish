@@ -3,7 +3,7 @@ import { namedConversations } from "../core/named_records.ts";
 import { namedRecordActions } from "./operator_named_records.ts";
 import { startNamedConversationTurn } from "./named_conversation_turns.ts";
 import { inventoryConnectorTools } from "./operator_scopesentry_import.ts";
-import { readAgentProfile } from "../core/agent_profiles.ts";
+import { openAgentProfiles } from "../core/agent_profiles.ts";
 import { withAgentProfileRuntime } from "../agent/orchestrator/agent_profile_runtime.ts";
 import { withReviewedAgentModel } from "../agent/providers/reviewed_agent_model.ts";
 import { isAgentProfileAction } from "./operator_agent_profiles.ts";
@@ -996,17 +996,16 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
     "sentinel-reporter",
     "sentinel-recheck",
   ]);
-  let activeAgentProfileId: string | undefined;
+  const agentProfiles = config.customToolsBaseDir
+    ? openAgentProfiles(config.customToolsBaseDir)
+    : undefined;
   const readActiveAgentProfile = () => {
     if (
-      !config.customToolsBaseDir || !activeAgentProfileId ||
+      !agentProfiles ||
       state.activeSessionId !== state.ownerSessionId
     ) return;
     try {
-      return readAgentProfile(
-        config.customToolsBaseDir,
-        activeAgentProfileId,
-      ) ?? null;
+      return agentProfiles.selectedForSession(state.ownerSessionId);
     } catch {
       return null;
     }
@@ -1854,7 +1853,7 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
           );
           const id = command?.[1];
           if (
-            !config.customToolsBaseDir || !id ||
+            !agentProfiles || !id ||
             state.activeSessionId !== state.ownerSessionId
           ) {
             sendEvent({
@@ -1863,10 +1862,10 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
             });
             return;
           }
+          const selected = id === "off" ? undefined : id;
           if (
-            id !== "off" &&
-            (reservedAgentProfiles.has(id) ||
-              !readAgentProfile(config.customToolsBaseDir, id))
+            reservedAgentProfiles.has(id) ||
+            !agentProfiles.selectForSession(state.ownerSessionId, selected)
           ) {
             sendEvent({
               type: "error",
@@ -1874,10 +1873,9 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
             });
             return;
           }
-          activeAgentProfileId = id === "off" ? undefined : id;
           sendEvent({
             type: "response",
-            text: activeAgentProfileId
+            text: selected
               ? "Agent profile selected."
               : "Agent profile cleared.",
             taint: getSessionTaint(),
