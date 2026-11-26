@@ -1,4 +1,5 @@
 <script lang="ts">
+  import type { FindingEvidencePart } from "./finding_evidence_download.js";
   import type { SentinelGraph, SentinelNode } from "./types.js";
   import { sentinelWorkspaceText, type WorkspaceLanguage } from "./workspace_language.js";
 
@@ -7,7 +8,7 @@
     graph: SentinelGraph | null;
     onFocus: (id: string) => void;
     onDownload?: (findingId: string, trafficLinkId: string, payloadPart: PayloadPart) => void;
-    onDownloadEvidence?: (findingId: string, payloadPart: PayloadPart) => void;
+    onDownloadEvidence?: (findingId: string, payloadPart: FindingEvidencePart) => void;
     downloadDisabled?: boolean;
     language?: WorkspaceLanguage;
   } = $props();
@@ -52,8 +53,8 @@
 
   let findingId = $state("");
   let trafficLinkId = $state("");
-  let payloadPart = $state<PayloadPart>("response");
-  const canDownload = $derived(!downloadDisabled &&
+  let payloadPart = $state<FindingEvidencePart>("response");
+  const canDownload = $derived(!downloadDisabled && payloadPart !== "request-response" &&
     /^worker-finding:[a-f0-9]{64}$/.test(findingId.trim()) &&
     /^finding-traffic-link:[a-f0-9]{64}$/.test(trafficLinkId.trim()));
 
@@ -119,10 +120,11 @@
             <option value="response">{t("Response body")}</option>
             <option value="request">{t("Request body")}</option>
             <option value="headers">{t("Headers")}</option>
+            {#if onDownloadEvidence}<option value="request-response">{t("Request and response bodies")}</option>{/if}
           </select>
         </label>
         <button type="button" disabled={!canDownload}
-          onclick={() => onDownload?.(findingId.trim(), trafficLinkId.trim(), payloadPart)}>
+          onclick={() => payloadPart !== "request-response" && onDownload?.(findingId.trim(), trafficLinkId.trim(), payloadPart)}>
           {t("Download retained traffic")}
         </button>
         {#if onDownloadEvidence}

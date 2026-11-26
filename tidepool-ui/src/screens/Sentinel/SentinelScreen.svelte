@@ -46,7 +46,7 @@
 
   import { createFindingDownload, type FindingDownloadFormat } from "./finding_download.js";
 
-  import { createFindingEvidenceDownload } from "./finding_evidence_download.js";
+  import { createFindingEvidenceDownload, type FindingEvidencePart } from "./finding_evidence_download.js";
   import { createTrafficDownload, type TrafficDownloadRequest, type TrafficDownloadSelection } from "./traffic_download.js";
   type ExportFormat = FindingDownloadFormat | "provenance" | "inventory" | "alerts" | "decisions" | "incidents";
   const incidentDispositions = ["investigating", "resolved", "dismissed", "requires_review"];
@@ -1080,7 +1080,7 @@
     request("export", download.initial);
   }
 
-  function startFindingEvidenceDownload(findingId: string, payloadPart: TrafficDownloadSelection["payloadPart"]) {
+  function startFindingEvidenceDownload(findingId: string, payloadPart: FindingEvidencePart) {
     const currentRevision = assessment?.revision;
     const revision = displayedRevision;
     if (pending || !online || revision === undefined || currentRevision === undefined) return;

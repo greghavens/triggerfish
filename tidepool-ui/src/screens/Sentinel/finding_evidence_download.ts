@@ -16,9 +16,18 @@ const unavailable = {
 const maxFileBytes = 8 * 1024 * 1024;
 const maxAttachments = 8;
 
+export type FindingEvidencePart =
+  | TrafficDownloadSelection["payloadPart"]
+  | "request-response";
+
 export function createFindingEvidenceDownload(
-  scope: Omit<TrafficDownloadSelection, "trafficLinkId">,
+  scope: Omit<TrafficDownloadSelection, "trafficLinkId" | "payloadPart"> & {
+    readonly payloadPart: FindingEvidencePart;
+  },
 ) {
+  const selectedParts = scope.payloadPart === "request-response"
+    ? ["request", "response"] as const
+    : [scope.payloadPart];
   const initial = {
     revision: scope.revision,
     findingIds: [scope.findingId],
@@ -79,28 +88,30 @@ export function createFindingEvidenceDownload(
             manifest.content !== message.content
           ) return reject();
           const manifests = archive.manifests.map((manifest, index) => {
-            const selected = parts.find((part) => part.index === index);
-            return selected?.proof && selected.bytes
-              ? JSON.stringify(
-                {
-                  ...JSON.parse(manifest),
-                  retainedPayload: {
-                    part: scope.payloadPart,
-                    sha256: selected.proof.sha256,
-                    byteLength: selected.bytes.byteLength,
-                  },
-                },
-                null,
-                2,
-              ) + "\n"
-              : manifest;
+            const selected = parts.filter((part) => part.index === index)
+              .map((part) => ({
+                part: part.selection.payloadPart,
+                sha256: part.proof!.sha256,
+                byteLength: part.bytes!.byteLength,
+              }));
+            if (!selected.length) return manifest;
+            return JSON.stringify(
+              {
+                ...JSON.parse(manifest),
+                ...(selected.length === 1
+                  ? { retainedPayload: selected[0] }
+                  : { retainedPayloads: selected }),
+              },
+              null,
+              2,
+            ) + "\n";
           });
           const bytes = encodeSentinelFindingZip([{
             ...archive,
             manifests,
-            payloads: parts.map(({ index, bytes }) => ({
+            payloads: parts.map(({ index, selection, bytes }) => ({
               linkIndex: index,
-              part: scope.payloadPart,
+              part: selection.payloadPart,
               bytes: bytes!,
             })),
           }], maxFileBytes);
@@ -133,12 +144,18 @@ export function createFindingEvidenceDownload(
             ) return reject();
             ids.add(item.linkId);
             if (!item.withdrawn) {
-              parts.push({
-                index,
-                selection: { ...scope, trafficLinkId: item.linkId },
-                trafficDigest: item.trafficDigest,
-                runId: item.runId,
-              });
+              for (const payloadPart of selectedParts) {
+                parts.push({
+                  index,
+                  selection: {
+                    ...scope,
+                    trafficLinkId: item.linkId,
+                    payloadPart,
+                  },
+                  trafficDigest: item.trafficDigest,
+                  runId: item.runId,
+                });
+              }
             }
           }
           if (!parts.length) return reject();

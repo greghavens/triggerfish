@@ -6470,8 +6470,14 @@ async function verifyTidepoolTrafficDownload(
       "error" in outcome,
       "The complete body digest must reject a corrupted page",
     );
-    const archive = async (mode: "ok" | "revoke" | "manifest") => {
-      const zip = createFindingEvidenceDownload(selection);
+    const archive = async (
+      mode: "ok" | "revoke" | "manifest" | "revokeResponse",
+      paired = false,
+    ) => {
+      const zip = createFindingEvidenceDownload({
+        ...selection,
+        payloadPart: paired ? "request-response" : "response",
+      });
       let response = await zip.accept(
         await request("export", { caseId, ...zip.initial }),
       );
@@ -6482,10 +6488,15 @@ async function verifyTidepoolTrafficDownload(
         if (response.topic === "finding_traffic_download_page") {
           const selection = response.request;
           if (selection.offset === 0) {
-            if (mode === "revoke" && seenLinks.has(selection.trafficLinkId)) {
+            const key = selection.trafficLinkId + ":" + selection.payloadPart;
+            if (
+              seenLinks.has(key) && (mode === "revoke" ||
+                (mode === "revokeResponse" &&
+                  selection.payloadPart === "response"))
+            ) {
               denied = "PRE_TOOL_CALL";
             }
-            seenLinks.add(selection.trafficLinkId);
+            seenLinks.add(key);
           }
           response = await zip.accept(
             await request(response.topic, { caseId, ...selection }),
@@ -6505,41 +6516,54 @@ async function verifyTidepoolTrafficDownload(
       denied = undefined;
       return response;
     };
+    const verifyZip = (content: ArrayBuffer, paired = false) => {
+      const contents = new Uint8Array(content);
+      const view = new DataView(content);
+      const entries = new Map<string, string>();
+      const decode = new TextDecoder();
+      for (let offset = 0; view.getUint32(offset, true) === 0x04034b50;) {
+        const length = view.getUint32(offset + 18, true);
+        const nameLength = view.getUint16(offset + 26, true);
+        const start = offset + 30 + nameLength;
+        const name = decode.decode(contents.subarray(offset + 30, start));
+        assert(!entries.has(name));
+        entries.set(
+          name,
+          decode.decode(contents.subarray(start, start + length)),
+        );
+        offset = start + length;
+      }
+      const prefix = "evidence/finding-01/link-1/";
+      assert(entries.has("finding-01.md"));
+      assertEquals(
+        entries.get(prefix + "response.bin"),
+        "Boundary🙂".repeat(240),
+      );
+      const descriptor = (part: string, text: string) => ({
+        part,
+        sha256: createHash("sha256").update(text).digest("hex"),
+        byteLength: new TextEncoder().encode(text).length,
+      });
+      const manifest = JSON.parse(entries.get(prefix + "manifest.json")!);
+      const response = descriptor("response", "Boundary🙂".repeat(240));
+      if (paired) {
+        assertEquals(
+          entries.get(prefix + "request.bin"),
+          "Reviewed synthetic request.",
+        );
+        assertEquals(manifest.retainedPayloads, [
+          descriptor("request", "Reviewed synthetic request."),
+          response,
+        ]);
+      } else assertEquals(manifest.retainedPayload, response);
+    };
     const zipped = await archive("ok");
     assert("content" in zipped);
-    const contents = new Uint8Array(zipped.content);
-    const view = new DataView(zipped.content);
-    const found: string[] = [];
-    const decode = new TextDecoder();
-    for (let offset = 0; view.getUint32(offset, true) === 0x04034b50;) {
-      const length = view.getUint32(offset + 18, true);
-      const nameLength = view.getUint16(offset + 26, true);
-      const start = offset + 30 + nameLength;
-      const name = decode.decode(contents.subarray(offset + 30, start));
-      found.push(name);
-      if (name.endsWith("/response.bin")) {
-        assertEquals(
-          decode.decode(contents.subarray(start, start + length)),
-          "Boundary🙂".repeat(240),
-        );
-      }
-      if (name.endsWith("/manifest.json")) {
-        const manifest = JSON.parse(
-          decode.decode(contents.subarray(start, start + length)),
-        );
-        assertEquals(manifest.retainedPayload, {
-          part: "response",
-          sha256: createHash("sha256").update("Boundary🙂".repeat(240)).digest(
-            "hex",
-          ),
-          byteLength: new TextEncoder().encode("Boundary🙂".repeat(240)).length,
-        });
-      }
-      offset = start + length;
-    }
-    assert(found.includes("finding-01.md"));
-    assert(found.includes("evidence/finding-01/link-1/manifest.json"));
-    assert(found.includes("evidence/finding-01/link-1/response.bin"));
+    verifyZip(zipped.content);
+    const exchange = await archive("ok", true);
+    assert("content" in exchange);
+    verifyZip(exchange.content, true);
+    assert("error" in await archive("revokeResponse", true));
     assert("error" in await archive("revoke"));
     assert("error" in await archive("manifest"));
 
@@ -6569,7 +6593,12 @@ async function testScopedReporterRestart(
       index,
     ) => ({
       startedDateTime: new Date(time - 1000 - index).toISOString(),
-      request: { url: `https://${host}/review/${index}`, method: "GET" },
+      request: {
+        url: `https://${host}/review/${index}`,
+        method: "GET",
+        ...(initialPublication &&
+          { postData: { text: "Reviewed synthetic request." } }),
+      },
       response: {
         status: 403,
         content: {
@@ -6591,6 +6620,7 @@ async function testScopedReporterRestart(
       path,
       "har",
       true,
+      !!initialPublication,
     );
     await Deno.writeTextFile(
       path,
