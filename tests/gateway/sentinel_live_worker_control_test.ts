@@ -634,6 +634,30 @@ Deno.test("Owner socket steers and stops one exact leased worker with a shared T
       const activeWorker = active.find(({ taskId }) => taskId === target.id);
       assertEquals(activeWorker?.lastSteering?.requestId, steerId);
       assert(activeWorker?.lastSteering?.appliedAt);
+      let allowStop = true;
+      await withOwnerControl(
+        baseDir,
+        async (owner, approvals) => {
+          assert(
+            (await owner({ action: "stop", ...rootScope, requestId: stopId }))
+              .startsWith("Error:"),
+          );
+          assertEquals(approvals.length, 1);
+          const afterDenial = (await request("worker_status"))
+            .workers as WorkerStatus[];
+          assertEquals(
+            afterDenial.find(({ taskId }) => taskId === target.id)?.status,
+            "running",
+          );
+        },
+        undefined,
+        () => allowStop,
+        {
+          onConfirm: () => {
+            allowStop = false;
+          },
+        },
+      );
       await withOwnerControl(baseDir, async (owner, approvals) => {
         const command = { action: "stop", ...rootScope, requestId: stopId };
         assert(

@@ -6563,8 +6563,10 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
       }
       if (action === "steer" || action === "stop") {
         const selectedCase = context?.authorizeSelectedSentinelCase;
+        const authorize = context?.authorizeOwnerRunCall;
         const { runId, adaptiveRevision, taskId, requestId, note } = args;
         if (
+          !authorize || !context?.authenticatedOwnerSessionId ||
           ref.kind !== "sentinel" || ref.revision === undefined ||
           Object.keys(args).some((key) =>
             ![
@@ -6621,8 +6623,7 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
           )
         ) return "Error: The operator declined the run action.";
         if (
-          selectedCase &&
-          (!await context.authorizeOwnerRunCall?.(args) || !selectedCase())
+          !await authorize(args) || (selectedCase && !selectedCase())
         ) {
           return unavailable;
         }
