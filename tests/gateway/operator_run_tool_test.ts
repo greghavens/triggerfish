@@ -3095,6 +3095,8 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
       assertEquals(confirmations.length, confirmationCount);
       assertEquals(assignments(), beforeAssignment);
       denied = undefined;
+      await denyDuringRunReview(assignmentRequest);
+      assertEquals(assignments(), beforeAssignment);
       const assigned = JSON.parse((await turn(assignmentRequest)).result);
       assignmentReceipt = assigned.receipt;
       assertEquals(assigned.receipt.disposition, "enqueued");
@@ -3113,7 +3115,7 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
         "unavailable",
       );
       assertEquals(assignments().length, 1);
-      assertEquals(confirmations.length, confirmationCount + 1);
+      assertEquals(confirmations.length, confirmationCount + 2);
       const dependencyStore = openSentinelAdaptiveStore(
         join(dirname(path), "sentinel-adaptive.db"),
       );
@@ -5857,6 +5859,16 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
           { taskKind: "trace", node: "other-child-asset", priorityRank: 9 },
         ],
       };
+      duringConfirmation = () => {
+        denied = "PRE_TOOL_CALL";
+      };
+      try {
+        assertStringIncludes((await turn(validAtomic)).result, "unavailable");
+      } finally {
+        duringConfirmation = undefined;
+        denied = undefined;
+      }
+      assertEquals(atomicTasks().map(({ id }) => id), [priorTaskId]);
       const batchAssignmentReceipt =
         JSON.parse((await turn(validAtomic)).result).receipt;
       assertEquals(batchAssignmentReceipt.receipts.length, 2);

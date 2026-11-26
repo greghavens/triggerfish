@@ -6016,9 +6016,10 @@ ${request}`)
       }
       if (action === "assign_batch") {
         const { runId, adaptiveRevision, requestId, assignments } = args;
+        const authorize = context?.authorizeOwnerRunCall;
         if (
           ref.kind !== "sentinel" || ref.revision === undefined ||
-          !context?.authenticatedOwnerSessionId ||
+          !context?.authenticatedOwnerSessionId || !authorize ||
           !canFlowTo("INTERNAL", context.ceiling ?? "PUBLIC") ||
           typeof runId !== "string" || !digestPattern.test(runId) ||
           typeof adaptiveRevision !== "string" ||
@@ -6093,8 +6094,7 @@ ${request}`)
           )
         ) return "Error: The operator declined the run action.";
         if (
-          selectedCase &&
-          (!await context.authorizeOwnerRunCall?.(args) || !selectedCase())
+          !await authorize(args) || (selectedCase && !selectedCase())
         ) {
           return unavailable;
         }
@@ -6104,6 +6104,7 @@ ${request}`)
           : unavailable;
       }
       if (action === "assign") {
+        const authorize = context?.authorizeOwnerRunCall;
         const {
           runId,
           receiptId,
@@ -6119,6 +6120,7 @@ ${request}`)
           priorityRank,
         } = args;
         if (
+          !authorize || !context?.authenticatedOwnerSessionId ||
           ref.kind !== "sentinel" || ref.revision === undefined ||
           Object.keys(args).some((key) =>
             ![
@@ -6327,6 +6329,10 @@ ${request}`)
         if (original && !isDeepStrictEqual(authorized, original)) {
           return unavailable;
         }
+        if (
+          !await authorize(args) ||
+          context.authorizeSelectedSentinelCase?.() === false
+        ) return unavailable;
         const receipt = submitSentinelAssignmentIntent(
           path,
           { ...intent, ...(recheckBaseline && { recheckBaseline }) },
