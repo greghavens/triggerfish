@@ -104,6 +104,10 @@ export interface McpServerManager {
   addServer(config: McpServerConfig, secretStore?: SecretStore): void;
   /** Disconnect and remove a server by ID. */
   removeServer(id: string): Promise<void>;
+  /** Capture a classified connection for an owner-reviewed catalog refresh. */
+  prepareToolRefresh(id: string):
+    | ((authorize: () => Promise<boolean>) => Promise<boolean>)
+    | undefined;
   /** Disconnect and reconnect a server by ID. */
   reconnectServer(id: string, secretStore?: SecretStore): void;
 }

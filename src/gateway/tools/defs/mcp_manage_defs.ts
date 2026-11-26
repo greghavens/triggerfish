@@ -15,7 +15,7 @@ function buildMcpManageDef(): ToolDefinition {
     name: "mcp_manage",
     description:
       "MCP server configuration management. Changes to running connectors apply after daemon restart.\n" +
-      "Actions: list, creation_status, add, replace, update, remove, enable, disable, status, lifecycle_status, tools.\n" +
+      "Actions: list, creation_status, add, replace, update, remove, enable, disable, status, lifecycle_status, tools, refresh_tools.\n" +
       "- list: list all configured MCP servers from config file\n" +
       "- creation_status: review redacted metadata for the operator-provided proposal with this server_id\n" +
       "- add: request owner inbox approval to save that exact proposal as a disabled connector. Params: server_id and lifecycle_revision from creation_status\n" +
@@ -26,12 +26,13 @@ function buildMcpManageDef(): ToolDefinition {
       "- disable: request owner inbox approval to disable a configured MCP server. Params: server_id and lifecycle_revision from lifecycle_status\n" +
       "- status: show config details for one server. Params: server_id (required)\n" +
       "- lifecycle_status: read enabled state and an exact owner revision without revealing transport or credentials. Params: server_id (required)\n" +
-      "- tools: list currently registered tools for one connected server in the owner session. Params: server_id (required)",
+      "- tools: list currently registered tools for one connected server in the owner session. Params: server_id (required)\n" +
+      "- refresh_tools: review and refresh availability of previously registered tools on one connected, classified server. Params: server_id (required)",
     parameters: {
       action: {
         type: "string",
         description:
-          "The operation: list, creation_status, add, replace, update, remove, enable, disable, status, lifecycle_status, tools",
+          "The operation: list, creation_status, add, replace, update, remove, enable, disable, status, lifecycle_status, tools, refresh_tools",
         required: true,
       },
       server_id: {
@@ -88,6 +89,8 @@ Use \`update\` to request owner-confirmed timeout or retry changes. When a
 successful write returns \`restart_needed: true\`, use \`daemon_manage(action: "restart")\` to apply it.
 
 Use \`list\` or \`status\` for saved settings and \`tools\` for registered
-tool names. Do not pass connector commands, destinations, or credentials
+tool names. Use \`refresh_tools\` to check current availability of previously
+registered tools on an already connected, classified server.
+Do not pass connector commands, destinations, or credentials
 as model tool arguments. The protected daemon configuration and
 operator proposal files are managed by the operator and scoped MCP actions.`;

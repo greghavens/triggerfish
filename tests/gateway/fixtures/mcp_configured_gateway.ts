@@ -59,6 +59,55 @@ const hookRunner: typeof baseHooks = {
         if (!(error instanceof Deno.errors.NotFound)) throw error;
       }
     }
+    if (
+      (hook === "POST_TOOL_RESPONSE" &&
+        context.input.tool_name === "mcp_manage") ||
+      hook === "PRE_OUTPUT"
+    ) {
+      try {
+        const block = hook === "PRE_OUTPUT"
+          ? "deny-catalog-output"
+          : "deny-catalog-response";
+        if (Deno.lstatSync(join(dir, block)).isFile) {
+          if (
+            hook === "POST_TOOL_RESPONSE" &&
+            context.session.taint !== "CONFIDENTIAL"
+          ) {
+            throw new Error(
+              "Connector catalog was not classified before response policy.",
+            );
+          }
+          return Promise.resolve({
+            allowed: false,
+            action: "BLOCK",
+            ruleId: "fixture.refresh.output",
+            duration: 0,
+          });
+        }
+      } catch (error) {
+        if (!(error instanceof Deno.errors.NotFound)) throw error;
+      }
+    }
+    const tool = context.input.tool_call as
+      | { name: string; args: Record<string, unknown> }
+      | undefined;
+    if (
+      hook === "PRE_TOOL_CALL" && tool?.name === "mcp_manage" &&
+      tool.args.action === "refresh_tools"
+    ) {
+      try {
+        if (Deno.lstatSync(join(dir, "deny-catalog")).isFile) {
+          return Promise.resolve({
+            allowed: false,
+            action: "BLOCK",
+            ruleId: "fixture.refresh.revoked",
+            duration: 0,
+          });
+        }
+      } catch (error) {
+        if (!(error instanceof Deno.errors.NotFound)) throw error;
+      }
+    }
     return baseHooks.evaluateHook(hook, context);
   },
 };
@@ -80,9 +129,10 @@ while (
     !wiring.getToolDefinitions().some(({ name }) =>
       name === "mcp_inventory_check"
     )) ||
-  !wiring.manager.getStatus().some(({ id, state }) =>
-    id === "retry_probe" && state === "failed"
-  )
+  (servers.retry_probe &&
+    !wiring.manager.getStatus().some(({ id, state }) =>
+      id === "retry_probe" && state === "failed"
+    ))
 ) {
   if (performance.now() > deadline) {
     throw new Error("MCP fixture did not settle.");
@@ -116,7 +166,10 @@ registry.register({
         .exec(
           request,
         );
-    const manage = request === "Update inventory timeout" ||
+    const forceUnavailable = request === "Call omitted tool" ||
+      request === "Call unreviewed tool";
+    const refresh = request === "Refresh inventory tools";
+    const manage = refresh || request === "Update inventory timeout" ||
       request === "Update retry limit" || toolsServer !== undefined ||
       request === "Review inventory lifecycle" ||
       request === "Review inventory creation" ||
@@ -134,14 +187,19 @@ registry.register({
       ? "config_manage"
       : manage
       ? "mcp_manage"
+      : request === "Call unreviewed tool"
+      ? "mcp_inventory_unreviewed"
       : "mcp_inventory_check";
-    if (
-      !definitions?.some((definition) =>
-        (definition as { function?: { name: string } }).function?.name === name
-      )
-    ) throw new Error("Expected MCP tool was not registered.");
+    const advertised = definitions?.some((definition) =>
+      (definition as { function?: { name: string } }).function?.name === name
+    );
+    if (forceUnavailable ? advertised : !advertised) {
+      throw new Error("Unexpected MCP tool registration.");
+    }
     const args = configKey
       ? { action: "set", key: configKey, value: "fixture" }
+      : refresh
+      ? { action: "refresh_tools", server_id: "inventory" }
       : request === "Update inventory timeout"
       ? {
         action: "update",
@@ -183,8 +241,20 @@ registry.setDefault("configured-mcp-fixture");
 const manage = createMcpManageExecutor({
   configPath,
   listCredentialNames: () => secretStore.listSecrets(),
-  getConfirmPrompt: () => () => Promise.resolve(true),
+  getConfirmPrompt: () => async (message) => {
+    if (message.startsWith("Refresh tool availability")) {
+      try {
+        if (Deno.lstatSync(join(dir, "revoke-catalog-on-review")).isFile) {
+          await Deno.writeTextFile(join(dir, "deny-catalog"), "");
+        }
+      } catch (error) {
+        if (!(error instanceof Deno.errors.NotFound)) throw error;
+      }
+    }
+    return true;
+  },
   getConnectorTools: wiring.getConnectorTools,
+  prepareToolRefresh: wiring.prepareToolRefresh,
 });
 const manageConfig = createConfigManageExecutor({ configPath });
 const gateway = createGatewayServer({

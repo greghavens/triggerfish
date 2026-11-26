@@ -372,6 +372,7 @@ export async function dispatchApprovedToolCall(
     call.name === "stage_skill_revision" ||
     (call.name === "mcp_manage" &&
       (call.args.action === "update" || call.args.action === "tools" ||
+        call.args.action === "refresh_tools" ||
         call.args.action === "lifecycle_status" ||
         call.args.action === "creation_status" ||
         parseMcpLifecycleIntent(call.name, call.args)));
@@ -572,6 +573,8 @@ export async function dispatchSecurityEnforcedToolCall(
       (call.name === "approve_skill" || call.name === "withdraw_skill" ||
           call.name === "stage_skill_revision" ||
           call.name === "create_skill" ||
+          (call.name === "mcp_manage" &&
+            call.args.action === "refresh_tools") ||
           (approval && chatGoalMutation(call.name, call.args) === "confirm"))
         ? {
           ownerSessionId: session.id,

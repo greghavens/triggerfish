@@ -33,6 +33,12 @@ export interface McpManageContext {
   readonly configPath: string;
   readonly listCredentialNames?: SecretStore["listSecrets"];
   readonly getConfirmPrompt?: () => (message: string) => Promise<boolean>;
+  readonly prepareToolRefresh?: (
+    id: string,
+    saved: Record<string, unknown>,
+  ) => Promise<
+    ((authorize: () => Promise<boolean>) => Promise<boolean>) | undefined
+  >;
   readonly getConnectorTools?: (id: string) => {
     readonly classification?: ClassificationLevel;
     readonly tools: readonly string[];
@@ -459,6 +465,54 @@ function executeTools(
   });
 }
 
+async function executeToolRefresh(
+  ctx: McpManageContext,
+  input: Record<string, unknown>,
+  revisionFor: LifecycleRevision,
+  dispatch?: ToolExecutionContext,
+): Promise<string> {
+  const owner = dispatch?.isCurrentInteractiveOwner;
+  const reauthorize = dispatch?.reauthorizeOwnerApproval;
+  const { server_id: id } = input;
+  if (
+    !owner?.() || !reauthorize || !ctx.getConfirmPrompt ||
+    typeof id !== "string" || !serverIdPattern.test(id) ||
+    Object.keys(input).some((key) => key !== "action" && key !== "server_id")
+  ) {
+    return "Error: Catalog refresh requires one exact connector and active owner review.";
+  }
+  const readSelection = () => {
+    const saved = readConfigYaml(ctx.configPath);
+    if (!saved.ok) return;
+    const servers = configServers(saved.value);
+    const connector = Object.hasOwn(servers, id) ? servers[id] : undefined;
+    if (
+      !connector || typeof connector !== "object" || Array.isArray(connector) ||
+      connector.enabled === false
+    ) return;
+    return { connector, revision: revisionFor(saved.value, id) };
+  };
+  const before = readSelection();
+  const refresh = before &&
+    await ctx.prepareToolRefresh?.(id, before.connector);
+  if (!before || !refresh) {
+    return "Error: The selected classified connector is unavailable.";
+  }
+  if (
+    !await ctx.getConfirmPrompt()(
+      `Refresh tool availability for configured connector '${id}'? This checks its tool catalog and keeps existing grants.`,
+    )
+  ) return "The owner declined the connector catalog refresh.";
+  const isCurrent = () =>
+    owner() && readSelection()?.revision === before.revision;
+  const authorize = async () =>
+    isCurrent() && await reauthorize() && isCurrent();
+  if (!await refresh(authorize)) {
+    return "Error: The connector catalog could not refresh under current authorization.";
+  }
+  return executeTools(ctx, { action: "tools", server_id: id }, owner);
+}
+
 /**
  * Create a SubsystemExecutor for mcp_manage.
  *
@@ -486,7 +540,7 @@ export function createMcpManageExecutor(
 
     const action = input.action as string | undefined;
     if (!action) {
-      return "Error: mcp_manage requires an 'action' parameter (list, add, replace, update, remove, enable, disable, status, creation_status, lifecycle_status, tools).";
+      return "Error: mcp_manage requires an 'action' parameter (list, add, replace, update, remove, enable, disable, status, creation_status, lifecycle_status, tools, refresh_tools).";
     }
 
     const serverId = input.server_id as string | undefined;
@@ -516,6 +570,8 @@ export function createMcpManageExecutor(
         return executeStatus(ctx, serverId!);
       case "lifecycle_status":
         return executeLifecycleStatus(ctx, input, revisionFor, context);
+      case "refresh_tools":
+        return await executeToolRefresh(ctx, input, revisionFor, context);
       case "tools":
         return executeTools(
           ctx,
@@ -523,7 +579,7 @@ export function createMcpManageExecutor(
           context?.isCurrentInteractiveOwner,
         );
       default:
-        return `Error: Unknown action "${action}". Valid actions: list, add, replace, update, remove, enable, disable, status, creation_status, lifecycle_status, tools.`;
+        return `Error: Unknown action "${action}". Valid actions: list, add, replace, update, remove, enable, disable, status, creation_status, lifecycle_status, tools, refresh_tools.`;
     }
   };
 }

@@ -215,6 +215,7 @@ export function buildCompositeToolExecutor(
       listCredentialNames: () => integrations.mainKeychain.listSecrets(),
       getConfirmPrompt: () => baseDeps.state.activeConfirmPrompt,
       getConnectorTools: integrations.mcpWiring?.getConnectorTools,
+      prepareToolRefresh: integrations.mcpWiring?.prepareToolRefresh,
     }),
     daemonManageExecutor: createDaemonManageExecutor({
       getDaemonStatus: fetchDaemonStatus,

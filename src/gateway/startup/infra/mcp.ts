@@ -8,6 +8,8 @@
  * @module
  */
 
+import { isDeepStrictEqual } from "node:util";
+import { resolveConfigSecrets } from "../../../core/secrets/resolver.ts";
 import type { ConfiguredMcpServer } from "../../../core/config_types.ts";
 import type { ClassificationLevel } from "../../../core/types/classification.ts";
 import type { HookRunner } from "../../../core/policy/hooks/hooks.ts";
@@ -54,6 +56,10 @@ export interface McpWiringResult {
     readonly classification?: ClassificationLevel;
     readonly tools: readonly string[];
   } | undefined;
+  readonly prepareToolRefresh: (
+    id: string,
+    saved: Record<string, unknown>,
+  ) => Promise<ReturnType<McpServerManager["prepareToolRefresh"]>>;
   /** Live getter for MCP system prompt section (for getExtraSystemPromptSections). */
   readonly getSystemPrompt: () => string | null;
 }
@@ -207,6 +213,19 @@ export function wireMcpServers(
         classification: connector.classification,
         tools: getMcpToolDefinitions(servers, id).map(({ name }) => name),
       };
+    },
+    async prepareToolRefresh(id, saved) {
+      if (!Object.hasOwn(mcpServersConfig, id)) return;
+      const matchesRuntime = async () => {
+        const current = await resolveConfigSecrets(saved, keychain);
+        return current.ok &&
+          isDeepStrictEqual(current.value, mcpServersConfig[id]);
+      };
+      if (!await matchesRuntime()) return;
+      const refresh = mcpManager.prepareToolRefresh(id);
+      if (!refresh) return;
+      return (authorize) =>
+        refresh(async () => await matchesRuntime() && await authorize());
     },
     getSystemPrompt: () => buildMcpSystemPrompt(visibleServers()),
   };

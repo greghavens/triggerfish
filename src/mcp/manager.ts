@@ -15,6 +15,7 @@
 
 import { createLogger } from "../core/logger/mod.ts";
 import type { McpServerManager } from "./manager_types.ts";
+import type { McpClient, McpToolDefinition } from "./client/protocol.ts";
 import {
   buildMcpManagerState,
   connectAllMcpServers,
@@ -54,6 +55,7 @@ export type {
 export function createMcpServerManager(): McpServerManager {
   const mcpLog = createLogger("mcp");
   const state = buildMcpManagerState();
+  const admittedTools = new WeakMap<McpClient, readonly McpToolDefinition[]>();
 
   return {
     async connectAll(configs, secretStore?) {
@@ -123,6 +125,33 @@ export function createMcpServerManager(): McpServerManager {
         operation: "removeServer",
         serverId: id,
       });
+    },
+    prepareToolRefresh(id) {
+      const reviewed = state.statusMap.get(id);
+      const server = reviewed?.server;
+      if (reviewed?.state !== "connected" || !server?.classification) return;
+      const baseline = admittedTools.get(server.client) ?? server.tools;
+      admittedTools.set(server.client, baseline);
+      const current = () => state.statusMap.get(id) === reviewed;
+      return async (authorize) => {
+        if (!current() || !await authorize() || !current()) return false;
+        let names: Set<string>;
+        try {
+          const discovered = await server.client.listTools();
+          if (
+            !Array.isArray(discovered) ||
+            discovered.some((tool) => !tool || typeof tool.name !== "string")
+          ) return false;
+          names = new Set(discovered.map(({ name }) => name));
+        } catch {
+          return false;
+        }
+        if (!current() || !await authorize() || !current()) return false;
+        const tools = baseline.filter(({ name }) => names.has(name));
+        state.statusMap.set(id, { ...reviewed, server: { ...server, tools } });
+        notifyMcpStatusListeners(state);
+        return true;
+      };
     },
     reconnectServer(id, secretStore?) {
       const status = state.statusMap.get(id);

@@ -1,4 +1,9 @@
-import { assert, assertEquals, assertStringIncludes } from "@std/assert";
+import {
+  assert,
+  assertEquals,
+  assertRejects,
+  assertStringIncludes,
+} from "@std/assert";
 import { fromFileUrl, join } from "@std/path";
 import type { ApprovalInboxRecord } from "../../../src/core/approval_inbox.ts";
 import { readConfigYaml } from "../../../src/core/config_io.ts";
@@ -764,6 +769,110 @@ mcp_servers:
           await turn("Read fast inventory"),
           "Replacement inventory is available.",
         );
+      });
+    } finally {
+      await Deno.remove(dir, { recursive: true });
+    }
+  },
+});
+
+Deno.test({
+  name:
+    "Reviewed MCP catalog refresh updates the live previously granted tool names",
+  ignore: Deno.build.os === "windows",
+  async fn() {
+    const dir = await Deno.makeTempDir();
+    try {
+      const configPath = join(dir, "triggerfish.yaml");
+      const config = `models:
+  primary: fixture
+mcp_servers:
+  inventory:
+    command: ${JSON.stringify(Deno.execPath())}
+    args: ${
+        JSON.stringify([
+          "run",
+          "--no-check",
+          `--allow-read=${dir}`,
+          `--allow-write=${dir}`,
+          "--allow-env=MCP_FIXTURE_CREDENTIAL",
+          connectorFixture,
+          "refresh",
+          dir,
+        ])
+      }
+    env:
+      MCP_FIXTURE_CREDENTIAL: secret:fixture-mcp-key
+    classification: CONFIDENTIAL
+`;
+      await Deno.writeTextFile(configPath, config);
+      await Deno.writeTextFile(join(dir, "catalog-mode"), "baseline");
+      await withConfiguredGateway(dir, async (turn) => {
+        const calls = join(dir, "connector-calls");
+        const reads = join(dir, "catalog-reads");
+        const deny = join(dir, "deny-catalog");
+        const revoke = join(dir, "revoke-catalog-on-review");
+        const list = async () => JSON.parse(await turn("List inventory tools"));
+        const refresh = () => turn("Refresh inventory tools");
+        const startupReads = await Deno.readTextFile(reads);
+        assertEquals((await list()).tools, ["mcp_inventory_check"]);
+        assertEquals(await Deno.readTextFile(reads), startupReads);
+
+        await Deno.writeTextFile(join(dir, "catalog-mode"), "narrowed");
+        await Deno.writeTextFile(deny, "");
+        assertStringIncludes(await refresh(), "blocked");
+        await Deno.remove(deny);
+        await Deno.writeTextFile(revoke, "");
+        assertStringIncludes(await refresh(), "current authorization");
+        await Deno.remove(revoke);
+        await Deno.remove(deny);
+        assertEquals(await Deno.readTextFile(reads), startupReads);
+        assertEquals((await list()).tools, ["mcp_inventory_check"]);
+
+        const narrowed = JSON.parse(await refresh());
+        assertEquals(narrowed, {
+          server_id: "inventory",
+          role: "owner",
+          connected: true,
+          tools: [],
+          _classification: "CONFIDENTIAL",
+        });
+        assertEquals(await Deno.readTextFile(reads), startupReads + "list\n");
+        assertEquals((await list()).tools, []);
+        assertStringIncludes(await turn("Call omitted tool"), "not registered");
+        assertStringIncludes(
+          await turn("Call unreviewed tool"),
+          "not registered",
+        );
+        let transmitted = "";
+        try {
+          transmitted = await Deno.readTextFile(calls);
+        } catch (error) {
+          if (!(error instanceof Deno.errors.NotFound)) throw error;
+        }
+        assertEquals(transmitted, "");
+
+        await Deno.writeTextFile(join(dir, "catalog-mode"), "baseline");
+        assertEquals(JSON.parse(await refresh()).tools, [
+          "mcp_inventory_check",
+        ]);
+        assertEquals(
+          await turn("Read fast inventory"),
+          "Configured inventory is available.",
+        );
+        assertEquals(await Deno.readTextFile(calls), "check\n");
+        const responseDenied = join(dir, "deny-catalog-response");
+        await Deno.writeTextFile(responseDenied, "");
+        assertEquals(await refresh(), "Tool response withheld by policy.");
+        await Deno.remove(responseDenied);
+        const outputDenied = join(dir, "deny-catalog-output");
+        await Deno.writeTextFile(outputDenied, "");
+        await assertRejects(refresh, Error, "produced no fixture result");
+        await Deno.remove(outputDenied);
+        assertEquals(await Deno.readTextFile(calls), "check\n");
+        assertEquals(await Deno.readTextFile(configPath), config);
+        await Deno.writeTextFile(configPath, config + "    enabled: false\n");
+        assertStringIncludes(await refresh(), "unavailable");
       });
     } finally {
       await Deno.remove(dir, { recursive: true });
