@@ -1,3 +1,4 @@
+import { withReviewedToolRules } from "../../../core/policy/reviewed_tool_rules.ts";
 import { enableLiveProviderRoutes } from "../../../agent/providers/live_routes.ts";
 /**
  * Orchestrator factory infrastructure — shared setup utilities.
@@ -114,7 +115,7 @@ export function initializeFactoryInfra(
   return {
     registry,
     hookRunner: {
-      ...createHookRunner(engine),
+      ...withReviewedToolRules(createHookRunner(engine), baseDir),
       toolApprovalInbox: createToolApprovalService(
         join(baseDir, "tool-approvals.db"),
       ),

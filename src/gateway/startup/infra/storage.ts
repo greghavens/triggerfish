@@ -1,3 +1,4 @@
+import { withReviewedToolRules } from "../../../core/policy/reviewed_tool_rules.ts";
 import { enableLiveProviderRoutes } from "../../../agent/providers/live_routes.ts";
 /**
  * Persistent storage, session infrastructure, and LLM provider initialization.
@@ -100,7 +101,7 @@ export function initializeLlmProviders(
     engine.addRule(rule);
   }
   const hookRunner = {
-    ...createHookRunner(engine),
+    ...withReviewedToolRules(createHookRunner(engine), baseDir),
     toolApprovalInbox: createToolApprovalService(
       join(baseDir, "tool-approvals.db"),
     ),

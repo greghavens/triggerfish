@@ -6486,7 +6486,8 @@ function createAgent(
             JSON.parse(context.input.tool_response).evidenceRevision,
           );
         }
-        const policyInput = scoped || selectedCaseCall
+        const policyInput = scoped || selectedCaseCall ||
+            (typeof toolName === "string" && !!options.assignedTaskLeaseToken)
           ? {
             tool_name: toolName,
             case_id: selectedCaseGraph
@@ -6494,6 +6495,12 @@ function createAgent(
                 ? call.args.id
                 : pendingTelemetry?.graphCaseId) ?? null
               : locateSentinelCase(options.snapshotPath)?.caseId ?? null,
+            run_id: selectedCaseGraph
+              ? null
+              : readSentinelAssessment(options.snapshotPath)?.plan.runId ?? null,
+            asset_id: options.assignedTaskLeaseToken
+              ? readAssignedModelReview(options)?.nodeId ?? null
+              : null,
             evidence_revision: evidenceRevision ?? null,
             assignment_id: options.assignedTaskId ??
               (plannerControl && typeof call?.args?.taskId === "string" &&

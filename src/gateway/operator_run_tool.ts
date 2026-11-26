@@ -1,3 +1,4 @@
+import { executeReviewedRuleAction, reviewedRuleActions } from "./operator_reviewed_rules.ts";
 import { sentinelRoleModelSelection } from "./sentinel_model_routing.ts";
 import {
   executeNamedRecordAction,
@@ -510,6 +511,10 @@ export const operatorRunTool: ToolDefinition = {
   description:
     "List and inspect approved runs. With operator confirmation, control an exact run or narrow which defensive tasks and assets Sentinel may schedule. Constraints do not grant capabilities.",
   parameters: {
+    reviewedRule: {
+      type: "object",
+      description: "Exact restrictive rule with effect (ask or block), enabled, and optional tool, caseId, runId, and assetId selectors.",
+    },
     action: {
       type: "string",
       description:
@@ -584,6 +589,7 @@ export const operatorRunTool: ToolDefinition = {
         "agent_event_subscriptions",
         "set_agent_event_subscription",
         ...namedRecordActions,
+        ...reviewedRuleActions,
         "agent_profiles",
         "agent_profile",
         "agent_profile_history",
@@ -3224,6 +3230,9 @@ export function createOperatorRunToolExecutor(options: {
           canFlowTo(classification, context?.ceiling ?? "PUBLIC"));
     }
     const action = args.action;
+    if (reviewedRuleActions.some((name) => name === action)) {
+      return await executeReviewedRuleAction(options.baseDir, args, context, options.confirm);
+    }
     if (namedRecordActions.some((name) => name === action)) {
       return await executeNamedRecordAction(
         options.baseDir,

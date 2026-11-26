@@ -1,3 +1,4 @@
+import { reviewedRuleActions } from "./operator_reviewed_rules.ts";
 import { namedConversations } from "../core/named_records.ts";
 import { namedRecordActions } from "./operator_named_records.ts";
 import { readAgentProfile } from "../core/agent_profiles.ts";
@@ -427,6 +428,7 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
                       "linked_finding",
                       "linked_findings",
                       "linked_worker_review",
+                      "reviewed_tool_rules",
                       "finding_traffic",
                       "finding_traffic_set_receipt",
                       "finding_traffic_candidates",
@@ -469,6 +471,7 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
                 input: { ...context.input, ...meta },
                 auditInput: action === "set_agent_event_subscription" ||
                     namedRecordActions.some((name) => name === action) ||
+                    reviewedRuleActions.some((name) => name === action) ||
                     isAgentProfileAction(action) ||
                     action === "set_sentinel_tool_configuration" ||
                     action === "reset_sentinel_tool_configuration" ||
