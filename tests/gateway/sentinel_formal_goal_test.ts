@@ -286,7 +286,7 @@ Deno.test("authenticated Sentinel chat drafts, approves and extends independentl
           }
           assertMatch(
             message,
-            /^Approve these exact Sentinel formal goal definitions/,
+            /^Approve (these exact Sentinel formal goal definitions|this replacement for an exact completed Sentinel goal)/,
           );
           reviewedModelGoalRequests.push(message);
           if (revokeModelGoalOnConfirmation) denyModelGoal = true;
@@ -660,10 +660,19 @@ Deno.test("authenticated Sentinel chat drafts, approves and extends independentl
         revision: finalRevision,
         runId,
         requestId: crypto.randomUUID(),
+        supersedes: { goalId: "inventory", evidenceRevision: initialRevision },
         goals: [{ ...additional, id: "model-followup" }],
       };
       assertMatch(
         await operator({ ...modelAppend, id: "main" }),
+        /unavailable/,
+      );
+      assertEquals(reviewedModelGoalRequests.length, 0);
+      assertMatch(
+        await operator({
+          ...modelAppend,
+          supersedes: { goalId: "inventory", evidenceRevision: finalRevision },
+        }),
         /unavailable/,
       );
       assertEquals(reviewedModelGoalRequests.length, 0);
@@ -676,7 +685,20 @@ Deno.test("authenticated Sentinel chat drafts, approves and extends independentl
       assertEquals(readSentinelAssessment(path)?.revision, finalRevision);
       denyModelGoal = false;
       revokeModelGoalOnConfirmation = false;
+      const wakes: { observation_id: string }[] = [];
+      const unsubscribe = subscribeCommittedEvidence(
+        "local-service",
+        (address) => {
+          if (
+            address.observation_id.startsWith("formal-goal-supersession:")
+          ) wakes.push(address);
+        },
+      );
       const applied = JSON.parse(await operator(modelAppend));
+      unsubscribe();
+      assertEquals(wakes.map(({ observation_id }) => observation_id), [
+        `formal-goal-supersession:${modelAppend.requestId}`,
+      ]);
       assert(applied.receipt, JSON.stringify(applied));
       assertEquals(applied.receipt.duplicate, false);
       assertEquals(reviewedModelGoalRequests.length, 2);
@@ -686,6 +708,20 @@ Deno.test("authenticated Sentinel chat drafts, approves and extends independentl
       const reopened = JSON.parse(await turn(status));
       assertEquals(reopened.active, true);
       assertEquals(reopened.activeFormalGoalIds, ["model-followup"]);
+      const [lineage] = reopened.goalSupersessions;
+      assertEquals(lineage.goalId, "inventory");
+      assertEquals(lineage.replacementGoalId, "model-followup");
+      assertEquals(lineage.evidenceRevision, initialRevision);
+      assertEquals(lineage.requestId, modelAppend.requestId);
+      assertMatch(lineage.completionSha256, /^[a-f0-9]{64}$/);
+      assertEquals(
+        reopened.formalGoals.find(({ id }: { id: string }) =>
+          id === "inventory"
+        ),
+        approved[0],
+      );
+      assertEquals(readSentinelGoalCompletion(path)?.observations, []);
+
       assertEquals(
         reopened.completedFormalGoalIds,
         restored.completedFormalGoalIds,
@@ -707,6 +743,9 @@ Deno.test("authenticated Sentinel chat drafts, approves and extends independentl
       const replay = JSON.parse(await operator(modelAppend));
       assertEquals(replay.receipt.appliedRevision, modelRevision);
       assertEquals(reviewedModelGoalRequests.length, 2);
+      const [supersession] = JSON.parse(await turn(status)).goalSupersessions;
+      assertEquals(supersession.goalId, "inventory");
+      assertEquals(supersession.evidenceRevision, initialRevision);
       assertMatch(
         await operator({
           ...modelAppend,

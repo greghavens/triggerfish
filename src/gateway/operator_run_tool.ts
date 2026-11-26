@@ -197,12 +197,14 @@ import {
   applySentinelFormalGoals,
   changeSentinelRunDisplay,
   MAX_SENTINEL_RUN_TIMEOUT_SECONDS,
+  parseSentinelGoalSupersession,
   readSentinelAssessment,
   readSentinelAssessmentAlerts,
   readSentinelAssessmentRevision,
   readSentinelDecisionHistory,
   readSentinelFormalGoalApproval,
   readSentinelGitHubWorkflowReadReceipt,
+  readSentinelGoalSupersessionSource,
   readSentinelIncidentReviews,
   readSentinelModelRoute,
   readSentinelOperatingConstraintHistory,
@@ -881,6 +883,11 @@ export const operatorRunTool: ToolDefinition = {
         "Create a linked Sentinel case with an empty local graph. Omit to use an existing published graph.",
       enum: ["empty"],
     },
+    supersedes: {
+      type: "object",
+      description:
+        "For appending a replacement goal, the completed goalId and exact evidenceRevision.",
+    },
     goalProposal: {
       type: "object",
       description:
@@ -1368,6 +1375,7 @@ export const sentinelOperatorCaseControlParameters = [
   "assignments",
   "hints",
   "goals",
+  "supersedes",
   "goalId",
   "version",
   "expectedVersion",
@@ -10533,6 +10541,16 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
         const read = action === "goals" || action === "goal_proposals";
         const proposalAction = action === "approve_goal_proposal";
         const withdrawal = action === "withdraw_goal";
+        const supersedes = parseSentinelGoalSupersession(args.supersedes);
+        if (
+          args.supersedes !== undefined && (
+            !supersedes || action !== "append_goals" ||
+            !context?.authenticatedOwnerSessionId ||
+            !canFlowTo("INTERNAL", context.ceiling ?? "PUBLIC") ||
+            !canFlowTo(context.inputClassification ?? "PUBLIC", "INTERNAL") ||
+            !await context.authorizeOwnerRunCall?.(args)
+          )
+        ) return unavailable;
         if (
           (withdrawal && (!context?.authenticatedOwnerSessionId ||
             !canFlowTo("INTERNAL", context.ceiling ?? "PUBLIC"))) ||
@@ -10550,6 +10568,7 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
                 : [
                   "runId",
                   "requestId",
+                  ...(supersedes ? ["supersedes"] : []),
                   proposalAction
                     ? "proposalId"
                     : withdrawal
@@ -10599,22 +10618,29 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
             activeFormalGoalIds = [],
             completedFormalGoalIds = [],
             withdrawnFormalGoalIds = [],
+            goalSupersessions = [],
           } = plan ?? {};
           const describe = (
             { id, title, policy, criteria }: typeof formalGoals[number],
-          ) => ({
-            id,
-            title,
-            policy,
-            criteriaCount: criteria.length,
-            status: completedFormalGoalIds.includes(id)
-              ? "completed"
-              : withdrawnFormalGoalIds.includes(id)
-              ? "withdrawn"
-              : activeFormalGoalIds.includes(id)
-              ? "active"
-              : "inactive",
-          });
+          ) => {
+            const supersedes = goalSupersessions.find(({ replacementGoalId }) =>
+              replacementGoalId === id
+            );
+            return {
+              id,
+              title,
+              policy,
+              criteriaCount: criteria.length,
+              ...(supersedes && { supersedes }),
+              status: completedFormalGoalIds.includes(id)
+                ? "completed"
+                : withdrawnFormalGoalIds.includes(id)
+                ? "withdrawn"
+                : activeFormalGoalIds.includes(id)
+                ? "active"
+                : "inactive",
+            };
+          };
           const goal = goalId === undefined
             ? undefined
             : formalGoals.find(({ id }) => id === goalId);
@@ -10683,6 +10709,7 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
           goals,
           proposalDigest: digestSentinelGoalProposal(goals),
           ...(proposal && { sourceProposalId: proposal.id }),
+          ...(supersedes && { supersedes }),
           expectedRevision: ref.revision,
           expectedRunId: runId.toLowerCase(),
         };
@@ -10712,17 +10739,37 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
               !current.plan.activeFormalGoalIds?.includes(withdrawn.id) ||
               current.plan.completedFormalGoalIds?.includes(withdrawn.id)))
         ) return unavailable;
+        const superseded = supersedes &&
+          readSentinelGoalSupersessionSource(
+            path,
+            supersedes,
+            approval.expectedRunId,
+          );
+        if (
+          supersedes && (!superseded ||
+            current.plan.goalSupersessions?.some(({ goalId }) =>
+              goalId === supersedes.goalId
+            ))
+        ) return unavailable;
         if (
           !await options.confirm(
             `${
               withdrawal
                 ? "Withdraw this exact Sentinel formal goal?"
+                : supersedes
+                ? "Approve this replacement for an exact completed Sentinel goal?"
                 : "Approve these exact Sentinel formal goal definitions?"
-            }\n${JSON.stringify({ run: ref, ...approval })}`,
+            }\n${
+              JSON.stringify({
+                run: ref,
+                ...approval,
+                ...(superseded && { superseded }),
+              })
+            }`,
           )
         ) return "Error: The operator declined the run action.";
         if (
-          (withdrawal || selectedCase) &&
+          (withdrawal || selectedCase || supersedes) &&
           (!await context?.authorizeOwnerRunCall?.(args) ||
             (selectedCase && !selectedCase()))
         ) {
@@ -10736,12 +10783,17 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
         if (!receipt.duplicate) {
           ensureSentinelFormalGoalContract(path, state);
           advanceAdaptiveSentinel(path, state);
-          if (withdrawn && state.active && !state.paused && state.plan.runId) {
+          if (
+            (withdrawn || supersedes) && state.active && !state.paused &&
+            state.plan.runId
+          ) {
             notifyCommittedEvidence({
               case: ref.id,
               run_id: state.plan.runId,
               revision: state.revision,
-              observation_id: `formal-goal-withdrawal:${approval.requestId}`,
+              observation_id: `formal-goal-${
+                supersedes ? "supersession" : "withdrawal"
+              }:${approval.requestId}`,
             });
           }
         }

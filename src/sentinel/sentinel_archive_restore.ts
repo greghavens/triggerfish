@@ -60,6 +60,7 @@ import { openSentinelAdaptiveStore } from "./adaptive_store.ts";
 import {
   MAX_SENTINEL_RUN_TIMEOUT_SECONDS,
   parseSentinelAssessmentTemplateBinding,
+  parseSentinelGoalSupersession,
   readSentinelAssessmentRevision,
   SENTINEL_ASSESSMENT_TIMED_OUT,
   validSentinelChildDescription,
@@ -360,6 +361,7 @@ function restoreAssessment(
       childDescription,
       assessmentTemplate,
       admissionCategory,
+      goalSupersessions,
       timeoutSeconds,
       deadlineAt,
       modelProfile,
@@ -386,6 +388,30 @@ function restoreAssessment(
     ) {
       throw new Error("Invalid archived Sentinel admission category");
     }
+    if (
+      goalSupersessions !== undefined &&
+      (!Array.isArray(goalSupersessions) || goalSupersessions.length > 64 ||
+        goalSupersessions.some((raw) => {
+          const {
+            goalId,
+            evidenceRevision,
+            replacementGoalId,
+            completionSha256,
+            requestId,
+          } = object(raw);
+          return Object.keys(raw).length !== 5 ||
+            !parseSentinelGoalSupersession({ goalId, evidenceRevision }) ||
+            !parseSentinelGoalSupersession({
+              goalId: replacementGoalId,
+              evidenceRevision,
+            }) ||
+            replacementGoalId === goalId ||
+            typeof completionSha256 !== "string" ||
+            !/^[a-f0-9]{64}$/.test(completionSha256) ||
+            typeof requestId !== "string" ||
+            !/^[A-Za-z0-9_.:-]{1,128}$/.test(requestId);
+        }))
+    ) throw new Error("Invalid archived Sentinel goal supersessions");
     const {
       linkedCaseSources,
       modelFallbackProfiles,

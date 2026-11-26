@@ -145,6 +145,7 @@ export type AssessmentPlan =
     readonly activeFormalGoalIds?: readonly string[];
     readonly completedFormalGoalIds?: readonly string[];
     readonly withdrawnFormalGoalIds?: readonly string[];
+    readonly goalSupersessions?: readonly SentinelGoalSupersession[];
   };
 
 interface SentinelAssessmentTemplateBinding {
@@ -183,6 +184,34 @@ type FormalGoalPlan = Pick<
   | "assessmentTemplate"
 >;
 
+export interface SentinelGoalSupersessionSelection {
+  readonly goalId: string;
+  readonly evidenceRevision: number;
+}
+
+export interface SentinelGoalSupersession
+  extends SentinelGoalSupersessionSelection {
+  readonly replacementGoalId: string;
+  readonly completionSha256: string;
+  readonly requestId: string;
+}
+
+export function parseSentinelGoalSupersession(
+  raw: unknown,
+): SentinelGoalSupersessionSelection | undefined {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return;
+  const { goalId, evidenceRevision } = raw as Partial<
+    SentinelGoalSupersessionSelection
+  >;
+  if (
+    typeof goalId !== "string" || !/^[A-Za-z0-9_.:-]{1,64}$/.test(goalId) ||
+    typeof evidenceRevision !== "number" ||
+    !Number.isSafeInteger(evidenceRevision) ||
+    evidenceRevision < 1 || Object.keys(raw).length !== 2
+  ) return;
+  return { goalId, evidenceRevision };
+}
+
 export interface SentinelFormalGoalApproval {
   readonly mode: "start" | "append" | "revise" | "withdraw";
   readonly requestId: string;
@@ -194,6 +223,7 @@ export interface SentinelFormalGoalApproval {
   readonly plan?: FormalGoalPlan;
   readonly initialConstraints?: SentinelOperatingConstraints;
   readonly category?: OperatorRunCategorySelection;
+  readonly supersedes?: SentinelGoalSupersessionSelection;
 }
 
 export interface SentinelSavedWorkerTrace {
@@ -775,6 +805,8 @@ function saveFormalGoalHistory(
         formalGoals: plan.formalGoals,
         activeFormalGoalIds: plan.activeFormalGoalIds,
         completedFormalGoalIds: plan.completedFormalGoalIds,
+        ...(plan.goalSupersessions?.length &&
+          { goalSupersessions: plan.goalSupersessions }),
         withdrawnFormalGoalIds: plan.withdrawnFormalGoalIds,
       }),
       closedIds ? JSON.stringify(closedIds) : null,
@@ -2066,6 +2098,41 @@ export function recordSentinelWorkerGoalProposal(
   }
 }
 
+function readCompletedGoalSupersessionSource(
+  db: DatabaseSync,
+  selection: SentinelGoalSupersessionSelection,
+  runId: string,
+) {
+  const plan = readFormalGoalHistory(db, selection.evidenceRevision);
+  const completion = readGoalCompletion(db, selection.evidenceRevision);
+  const goal = plan?.plan.formalGoals?.find(({ id }) =>
+    id === selection.goalId
+  );
+  if (
+    plan?.plan.runId !== runId || !goal ||
+    !completion?.formalGoalIds?.includes(selection.goalId)
+  ) return;
+  return {
+    goal,
+    completionSha256: createHash("sha256").update(JSON.stringify(completion))
+      .digest("hex"),
+  };
+}
+
+export function readSentinelGoalSupersessionSource(
+  path: string,
+  selection: SentinelGoalSupersessionSelection,
+  runId: string,
+) {
+  const db = openStore(path, false);
+  if (!db) return;
+  try {
+    return readCompletedGoalSupersessionSource(db, selection, runId);
+  } finally {
+    db.close();
+  }
+}
+
 function formalGoalApprovalBinding(approval: SentinelFormalGoalApproval) {
   const { mode, requestId, proposalDigest, expectedRevision, expectedRunId } =
     approval;
@@ -2120,6 +2187,20 @@ function formalGoalApprovalBinding(approval: SentinelFormalGoalApproval) {
       "Select an exact category version for a new Sentinel assessment",
     );
   }
+  const supersedes = parseSentinelGoalSupersession(approval.supersedes);
+  if (
+    approval.supersedes !== undefined && (
+      !supersedes || mode !== "append" || goals.length !== 1 ||
+      supersedes.goalId === goals[0].id ||
+      expectedRevision === undefined ||
+      supersedes.evidenceRevision > expectedRevision ||
+      !expectedRunId || approval.sourceProposalId !== undefined
+    )
+  ) {
+    throw new Error(
+      "Select one completed Sentinel goal and its exact evidence revision",
+    );
+  }
   const binding = createHash("sha256").update(JSON.stringify([
     mode,
     proposalDigest,
@@ -2129,8 +2210,9 @@ function formalGoalApprovalBinding(approval: SentinelFormalGoalApproval) {
     ...(approval.sourceProposalId ? [approval.sourceProposalId] : []),
     ...(constraints === undefined ? [] : [constraints]),
     ...(category === undefined ? [] : [category]),
+    ...(supersedes === undefined ? [] : [supersedes]),
   ])).digest("hex");
-  return { binding, goals, planChanges, constraints, category };
+  return { binding, goals, planChanges, constraints, category, supersedes };
 }
 
 function validateActiveSentinelCriteria(goals: readonly SentinelFormalGoal[]) {
@@ -2306,7 +2388,7 @@ export function applySentinelFormalGoals(
 } {
   const { mode, requestId, proposalDigest, expectedRevision, expectedRunId } =
     approval;
-  const { binding, goals, planChanges, constraints, category } =
+  const { binding, goals, planChanges, constraints, category, supersedes } =
     formalGoalApprovalBinding(approval);
   const location = category && locateSentinelCase(path);
   if (category && !location) {
@@ -2395,6 +2477,21 @@ export function applySentinelFormalGoals(
       const current = mode === "start" ? {} : previousPlan;
       const existingGoals = current.formalGoals ?? [];
       const completedFormalGoalIds = current.completedFormalGoalIds ?? [];
+      const source = supersedes && expectedRunId &&
+        readCompletedGoalSupersessionSource(db, supersedes, expectedRunId);
+      if (
+        supersedes && (
+          !source || !completedFormalGoalIds.includes(supersedes.goalId) ||
+          current.goalSupersessions?.some(({ goalId }) =>
+            goalId === supersedes.goalId
+          ) ||
+          isDeepStrictEqual({ ...source.goal, id: goals[0].id }, goals[0])
+        )
+      ) {
+        throw new Error(
+          "The completed Sentinel goal supersession is stale or unchanged",
+        );
+      }
       const pending = mode !== "start" && row?.active !== 3
         ? current.activeFormalGoalIds ?? existingGoals.map(({ id }) => id)
         : [];
@@ -2459,6 +2556,17 @@ export function applySentinelFormalGoals(
         ...current,
         ...planChanges,
         ...(admissionCategory && { admissionCategory }),
+        ...(supersedes && source && {
+          goalSupersessions: [
+            ...current.goalSupersessions ?? [],
+            {
+              ...supersedes,
+              replacementGoalId: goals[0].id,
+              completionSha256: source.completionSha256,
+              requestId,
+            },
+          ],
+        }),
         goal: planChanges.goal ?? current.goal ?? goals[0].title,
         runId: current.runId ?? crypto.randomUUID(),
         ...(mode === "start" && { runStartedAt: Date.now() }),

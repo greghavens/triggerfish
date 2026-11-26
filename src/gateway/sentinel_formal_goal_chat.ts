@@ -1,3 +1,4 @@
+import { notifyCommittedEvidence } from "../core/evidence_task_progression.ts";
 import { parseOperatorRunCategorySelection } from "../core/operator_run_categories.ts";
 /** Operator-reviewed goal decomposition and formal amendments in Sentinel chat. */
 import { createHash } from "node:crypto";
@@ -11,6 +12,7 @@ import { readSentinelChatSnapshot } from "../sentinel/chat_mode.ts";
 import { loadSentinelGraph } from "../sentinel/graph.ts";
 import {
   applySentinelFormalGoals,
+  parseSentinelGoalSupersession,
   readSentinelAssessment,
   readSentinelAssessmentHistory,
   readSentinelAssessmentRevision,
@@ -163,6 +165,8 @@ export async function handleSentinelFormalGoalChat(
       activeFormalGoalIds: state?.plan.activeFormalGoalIds ?? [],
       completedFormalGoalIds: state?.plan.completedFormalGoalIds ?? [],
       withdrawnFormalGoalIds: state?.plan.withdrawnFormalGoalIds ?? [],
+      ...(state?.plan.goalSupersessions?.length &&
+        { goalSupersessions: state.plan.goalSupersessions }),
       revision: state?.revision,
       runId: state?.plan.runId,
       active: state?.active ?? false,
@@ -238,6 +242,12 @@ export async function handleSentinelFormalGoalChat(
     : parsed[1] === "revise"
     ? "revise"
     : "append";
+  const supersedes = parseSentinelGoalSupersession(input.supersedes);
+  if (input.supersedes !== undefined && (mode !== "append" || !supersedes)) {
+    throw new Error(
+      "Select one completed Sentinel goal and its exact evidence revision",
+    );
+  }
   const goals = normalizeSentinelFormalGoals(
     mode !== "start" && input.goal !== undefined ? [input.goal] : input.goals,
   );
@@ -300,6 +310,7 @@ export async function handleSentinelFormalGoalChat(
     ...(plan && { plan }),
     ...(initialConstraints && { initialConstraints }),
     ...(category && { category }),
+    ...(supersedes && { supersedes }),
     expectedRevision: input.expectedRevision,
     expectedRunId: input.expectedRunId,
   } as const;
@@ -319,6 +330,19 @@ export async function handleSentinelFormalGoalChat(
   if (!applied.duplicate) {
     ensureSentinelFormalGoalContract(path, applied.state);
     advanceAdaptiveSentinel(path, applied.state);
+    const location = supersedes && locateSentinelCase(path);
+    const runId = applied.state.plan.runId;
+    if (
+      supersedes && location && runId && applied.state.active &&
+      !applied.state.paused
+    ) {
+      notifyCommittedEvidence({
+        case: location.caseId,
+        run_id: runId,
+        revision: applied.appliedRevision,
+        observation_id: `formal-goal-supersession:${requestId}`,
+      });
+    }
   }
   return JSON.stringify({
     duplicate: applied.duplicate,
