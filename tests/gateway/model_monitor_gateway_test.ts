@@ -38,6 +38,7 @@ Deno.test("gateway reviews model retry edits and keeps monitoring metadata class
   let exerciseFailure = () => Promise.resolve();
   const inputClassification = "INTERNAL";
   let attempts = 0;
+  let failingAttempts = 0;
   let socket: WebSocket | undefined;
   const policy = createHookRunner(createPolicyEngine());
   function makeGateway(targetClassification: "INTERNAL" | "RESTRICTED") {
@@ -75,7 +76,12 @@ Deno.test("gateway reviews model retry edits and keeps monitoring metadata class
       name: "failing",
       model: "fault-test",
       supportsStreaming: false,
-      complete: () => Promise.reject(new Error("synthetic-only")),
+      complete() {
+        failingAttempts++;
+        return Promise.reject(
+          Object.assign(new Error("synthetic-only"), { status: 401 }),
+        );
+      },
     });
     exerciseFailure = () =>
       assertRejects(() =>
@@ -213,18 +219,11 @@ Deno.test("gateway reviews model retry edits and keeps monitoring metadata class
       modelRouteClassification: "RESTRICTED",
     };
     const health = { action: "model_health", ...failing };
-    assertEquals(JSON.parse(await turn(health)).health.failures, 1);
-    assertEquals(
-      JSON.parse(
-        await turn({
-          action: "reset_model_health",
-          ...failing,
-          expectedVersion: 1,
-        }),
-      ).version,
-      2,
-    );
-    assertEquals(JSON.parse(await turn(health)).health.failures, 0);
+    const cooling = JSON.parse(await turn(health)).health;
+    assertEquals(cooling.failures, 1);
+    assert(cooling.openUntil > Date.now());
+    await exerciseFailure();
+    assertEquals(failingAttempts, 1);
     const { days } = JSON.parse(
       await turn({ action: "model_usage", ...profile }),
     );
@@ -260,6 +259,26 @@ Deno.test("gateway reviews model retry edits and keeps monitoring metadata class
     await gateway.stop();
     gateway = makeGateway("RESTRICTED");
     await connect();
+    assertEquals(JSON.parse(await turn(health)).health, cooling);
+    await exerciseFailure();
+    assertEquals(failingAttempts, 1);
+    assertEquals(
+      JSON.parse(
+        await turn({
+          action: "reset_model_health",
+          ...failing,
+          expectedVersion: cooling.version,
+        }),
+      ).version,
+      2,
+    );
+    assertEquals(JSON.parse(await turn(health)).health, {
+      failures: 0,
+      version: 2,
+      openUntil: 0,
+    });
+    await exerciseFailure();
+    assertEquals(failingAttempts, 2);
     assertEquals(
       JSON.parse(await turn({ action: "model_retry_policy" })),
       edit,

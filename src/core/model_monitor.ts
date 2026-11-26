@@ -6,6 +6,7 @@ import type { ClassificationLevel } from "./types/classification.ts";
 import type { LlmUsage } from "./types/llm.ts";
 
 const retainRecords = 10_000;
+const cooldowns = [60_000, 300_000, 1_800_000];
 
 function count(value: unknown): number {
   return typeof value === "number" && Number.isSafeInteger(value) &&
@@ -69,6 +70,11 @@ export function modelMonitor(baseDir: string) {
         CREATE TABLE IF NOT EXISTS model_health(
           classification TEXT NOT NULL, provider TEXT NOT NULL, model TEXT NOT NULL, failures INTEGER NOT NULL,
           version INTEGER NOT NULL, PRIMARY KEY(classification, provider, model)
+        );
+        CREATE TABLE IF NOT EXISTS model_cooldowns(
+          classification TEXT NOT NULL, provider TEXT NOT NULL, model TEXT NOT NULL,
+          failures INTEGER NOT NULL, trips INTEGER NOT NULL, openUntil INTEGER NOT NULL,
+          PRIMARY KEY(classification, provider, model)
         );
         CREATE TABLE IF NOT EXISTS model_daily_usage(
           classification TEXT NOT NULL, provider TEXT NOT NULL, model TEXT NOT NULL, day TEXT NOT NULL,
@@ -136,6 +142,7 @@ export function modelMonitor(baseDir: string) {
       outcome: "success" | "failed" | "cancelled",
       elapsed: number,
       usage?: LlmUsage,
+      availability?: "transient" | "hard",
     ) {
       const time = Date.now();
       const input = count(usage?.inputTokens);
@@ -178,6 +185,34 @@ export function modelMonitor(baseDir: string) {
           output,
         );
         if (outcome === "cancelled") return;
+        if (outcome === "success") {
+          db.prepare(`DELETE FROM model_cooldowns
+            WHERE classification=? AND provider=? AND model=?`)
+            .run(classification, provider, model);
+        } else if (availability) {
+          const prior = db.prepare(`SELECT failures,trips,openUntil
+            FROM model_cooldowns WHERE classification=? AND provider=? AND model=?`)
+            .get(classification, provider, model);
+          if (Number(prior?.openUntil ?? 0) <= time) {
+            const failures = Number(prior?.failures ?? 0) + 1;
+            const trip = availability === "hard" || failures >= 3;
+            const trips = Number(prior?.trips ?? 0) + Number(trip);
+            const openUntil = trip
+              ? time + cooldowns[Math.min(trips, cooldowns.length) - 1]
+              : 0;
+            db.prepare(`INSERT INTO model_cooldowns VALUES (?,?,?,?,?,?)
+              ON CONFLICT(classification,provider,model) DO UPDATE SET
+              failures=excluded.failures, trips=excluded.trips, openUntil=excluded.openUntil`)
+              .run(
+                classification,
+                provider,
+                model,
+                trip ? 0 : failures,
+                trips,
+                openUntil,
+              );
+          }
+        }
         db.prepare(`
           INSERT INTO model_health VALUES (?,?,?,?,1)
           ON CONFLICT(classification,provider,model) DO UPDATE SET
@@ -193,10 +228,12 @@ export function modelMonitor(baseDir: string) {
       model: string,
     ) {
       return access((db) =>
-        db.prepare(
-          "SELECT failures,version FROM model_health WHERE classification=? AND provider=? AND model=?",
-        )
-          .get(classification, provider, model) ?? { failures: 0, version: 0 }
+        db.prepare(`
+        SELECT h.failures,h.version,coalesce(c.openUntil,0) AS openUntil
+        FROM model_health h LEFT JOIN model_cooldowns c USING(classification,provider,model)
+        WHERE h.classification=? AND h.provider=? AND h.model=?
+      `).get(classification, provider, model) ??
+          { failures: 0, version: 0, openUntil: 0 }
       );
     },
     reset(
@@ -205,12 +242,18 @@ export function modelMonitor(baseDir: string) {
       model: string,
       version: number,
     ) {
-      return access((db) =>
-        db.prepare(`
+      return transaction((db) => {
+        const updated = db.prepare(`
         UPDATE model_health SET failures=0, version=version+1
         WHERE classification=? AND provider=? AND model=? AND version=?
-      `).run(classification, provider, model, version).changes === 1
-      );
+      `).run(classification, provider, model, version).changes === 1;
+        if (updated) {
+          db.prepare(`DELETE FROM model_cooldowns
+            WHERE classification=? AND provider=? AND model=?`)
+            .run(classification, provider, model);
+        }
+        return updated;
+      });
     },
     page(
       classification: ClassificationLevel,
