@@ -265,6 +265,7 @@ import {
   readSharedSentinelFindingSource,
   readSharedSentinelTopologySource,
 } from "../sentinel/shared_inventory.ts";
+import { indexSharedSentinelTopologyEvidence } from "../sentinel/shared_topology_work.ts";
 import { readSentinelChatSnapshot } from "../sentinel/chat_mode.ts";
 import {
   readSentinelGoalCompletionAtRevision,
@@ -4063,6 +4064,35 @@ function readSharedTopologyScope(
   };
 }
 
+/** Resolve an exact retained topology source only while both local endpoints are authorized. */
+export async function readScopedSentinelTopologySource(
+  baseDir: string,
+  path: string,
+  revision: number,
+  evidenceId: string,
+  sourceCase: string,
+) {
+  const snapshot = readSentinelAssessmentRevision(path, revision)?.result
+    .sharedGraph.snapshot;
+  if (!snapshot) return;
+  const scope = readSharedTopologyScope(path, revision, snapshot);
+  const relationship = indexSharedSentinelTopologyEvidence(snapshot).get(
+    evidenceId,
+  );
+  if (
+    !scope || !relationship ||
+    !scope.allowsAsset(relationship.from) || !scope.allowsAsset(relationship.to)
+  ) return;
+  const source = await readSharedSentinelTopologySource(
+    baseDir,
+    snapshot,
+    evidenceId,
+    sourceCase,
+    path,
+  );
+  return scope.isCurrent() ? source : undefined;
+}
+
 /** Reauthorize an immutable topology page without restoring hidden counts. */
 export function allowsRetainedSentinelSharedTopology(
   path: string,
@@ -4781,6 +4811,7 @@ function createAgent(
             toolName === sentinelInventoryTool.name || provenanceRead ||
             inventoryGraphRead || toolName === "sentinel_worker_observation" ||
             toolName === SENTINEL_SHARED_ASSET_LINKS_READ ||
+            toolName === SENTINEL_PINNED_TOPOLOGY_READ ||
             isSentinelWorkerFindingTool(toolName) ||
             isSentinelGraphFactTool(toolName) ||
             toolName === proposeWorkerGoalTool.name ||
@@ -4934,6 +4965,7 @@ function createAgent(
           result.allowed && name === "POST_TOOL_RESPONSE" &&
           (provenanceRead || digestRead || inventoryGraphRead ||
             toolName === SENTINEL_SHARED_ASSET_LINKS_READ ||
+            toolName === SENTINEL_PINNED_TOPOLOGY_READ ||
             toolName === SENTINEL_DEFENSE_READ ||
             toolName === SENTINEL_INCIDENT_ALERTS_READ) &&
           canReadPlannerCase && (!turn || !currentPlannerReceiptScope(turn))
@@ -4942,6 +4974,7 @@ function createAgent(
           result.allowed && name === "POST_TOOL_RESPONSE" &&
           (provenanceRead || inventoryGraphRead ||
             toolName === SENTINEL_SHARED_ASSET_LINKS_READ ||
+            toolName === SENTINEL_PINNED_TOPOLOGY_READ ||
             toolName === SENTINEL_DEFENSE_READ ||
             toolName === SENTINEL_INCIDENT_ALERTS_READ) &&
           options.assignedTaskLeaseToken !== undefined
@@ -5947,17 +5980,19 @@ function createAgent(
           return "Error: Provide an exact topology evidence ID and its reporting case.";
         }
         try {
-          const local = (await turn.readGraph()).snapshot();
           turn.signal.throwIfAborted();
-          const verified = await readSharedSentinelTopologySource(
+          const verified = await readScopedSentinelTopologySource(
             options.sharedInventoryBaseDir,
-            local,
+            options.snapshotPath,
+            options.assessmentRevision,
             evidenceId,
             sourceCase,
-            options.snapshotPath,
           );
           turn.signal.throwIfAborted();
-          if (!verified) {
+          if (
+            !verified ||
+            (canReadPlannerCase && !currentPlannerReceiptScope(turn))
+          ) {
             return "Error: That source does not verify the relationship cited by this assigned graph.";
           }
           return projectSentinelSharedTopologySource(

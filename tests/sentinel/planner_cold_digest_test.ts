@@ -13,9 +13,12 @@ import {
   type SentinelWorkerGraphFact,
 } from "../../src/sentinel/worker_graph_facts.ts";
 import {
+  applySharedSentinelTopology,
+  collectSharedSentinelTopology,
   digestSentinelSnapshot,
   retainSentinelSourceSnapshot,
 } from "../../src/sentinel/shared_inventory.ts";
+import { sharedSentinelTopologyEvidenceId } from "../../src/sentinel/shared_topology_work.ts";
 import { loadSentinelGraph } from "../../src/sentinel/graph.ts";
 import { createHash } from "node:crypto";
 import { createProviderRegistry } from "../../src/agent/llm.ts";
@@ -4538,9 +4541,15 @@ Deno.test("Planner and leased worker reauthorize paginated shared topology throu
   const excluded = "restricted-endpoint";
   const query = { asset, sourceCase, limit: 1 };
   const tool = "sentinel_shared_asset_links";
+  const sourceTool = "sentinel_shared_topology_source";
+  const allowedEndpoint = "allowed-remote-b";
+  const sourceRequests = [excluded, allowedEndpoint].map((to) => ({
+    evidenceId: sharedSentinelTopologyEvidenceId(asset, "depends_on", to),
+    sourceCase,
+  }));
   let now = Date.now();
-  const leasedReads = new Map<string, string>();
-  const plannerReads: string[] = [];
+  const leasedReads = new Map<string, string[]>();
+  const plannerReads: string[][] = [];
   const providers = createProviderRegistry();
   providers.register({
     name: "scoped-retained-topology",
@@ -4564,10 +4573,13 @@ Deno.test("Planner and leased worker reauthorize paginated shared topology throu
           ),
         );
       }
-      const result = messages.findLast(({ role }) => role === "tool");
-      if (!result) return Promise.resolve(completion("", tool, query));
-      if (planner) plannerReads.push(String(result.content));
-      else leasedReads.set(workerId, String(result.content));
+      const results = messages.filter(({ role }) => role === "tool");
+      if (!results.length) return Promise.resolve(completion("", tool, query));
+      const source = sourceRequests[results.length - 1];
+      if (source) return Promise.resolve(completion("", sourceTool, source));
+      const reads = results.map(({ content }) => String(content));
+      if (planner) plannerReads.push(reads);
+      else leasedReads.set(workerId, reads);
       return Promise.resolve(
         completion(
           planner
@@ -4601,15 +4613,12 @@ Deno.test("Planner and leased worker reauthorize paginated shared topology throu
     for (const file of [path, sourcePath]) {
       await Deno.mkdir(dirname(file), { recursive: true, mode: 0o700 });
     }
-    await Deno.writeTextFile(
-      path,
-      JSON.stringify({
-        version: 1,
-        nodes: assets([asset, excluded]),
-        edges: [],
-      }),
-      { mode: 0o600 },
-    );
+    const local = {
+      version: 1,
+      nodes: assets([asset, excluded, allowedEndpoint]),
+      edges: [],
+    };
+    await Deno.writeTextFile(path, JSON.stringify(local), { mode: 0o600 });
     await Deno.writeTextFile(
       sourcePath,
       JSON.stringify({
@@ -4618,15 +4627,26 @@ Deno.test("Planner and leased worker reauthorize paginated shared topology throu
           asset,
           excluded,
           "allowed-remote-a",
-          "allowed-remote-b",
+          allowedEndpoint,
         ]),
-        edges: [excluded, "allowed-remote-a", "allowed-remote-b"].map((to) => ({
+        edges: [excluded, "allowed-remote-a", allowedEndpoint].map((to) => ({
           from: asset,
           to,
           relation: "depends_on",
         })),
       }),
       { mode: 0o600 },
+    );
+    const shared = await collectSharedSentinelTopology(
+      directory,
+      caseId,
+      path,
+      undefined,
+      true,
+    );
+    await Deno.writeTextFile(
+      path,
+      JSON.stringify(applySharedSentinelTopology(local, shared)),
     );
     const state = startSentinelAssessment(path);
     const runId = state.plan.runId;
@@ -4647,13 +4667,14 @@ Deno.test("Planner and leased worker reauthorize paginated shared topology throu
       assert(condition());
     };
     advanceAdaptiveSentinel(path, state);
-    const planSelector = (index: number) => {
-      const sha256 = createHash("sha256").update(plannerReads[index]).digest(
-        "hex",
-      );
+    const planSelector = (index: number, which = 0) => {
+      const sha256 = createHash("sha256").update(plannerReads[index][which])
+        .digest("hex");
       const matches = (
         step: { tool: string; goalReceiptRead?: { sha256: string } },
-      ) => step.tool === tool && step.goalReceiptRead?.sha256 === sha256;
+      ) =>
+        step.tool === (which ? sourceTool : tool) &&
+        step.goalReceiptRead?.sha256 === sha256;
       const settled = view()?.modelPlannerHistory.find(({ reads }) =>
         reads?.some(matches)
       );
@@ -4695,35 +4716,88 @@ Deno.test("Planner and leased worker reauthorize paginated shared topology throu
         ) === true
       );
       const review = view()!.modelReviews.find(({ taskId }) => taskId === id)!;
-      return {
+      return (which = 0) => ({
         ...ref,
         action: "worker_trace_result",
         taskId: id,
-        stepIndices: [review.steps.findIndex((step) => step.tool === tool)],
-      };
+        stepIndices: [
+          review.steps.findIndex((step) =>
+            which
+              ? step.tool === sourceTool &&
+                step.target === sourceRequests[which - 1].evidenceId
+              : step.tool === tool
+          ),
+        ],
+      });
     };
     await assertEventually(() =>
+      !!plannerReads[0] && !planner.hasInFlightWork() &&
       view()?.modelPlannerHistory.some(({ reads }) =>
-        reads?.some((step) => step.tool === tool)
-      ) === true
+          reads?.some((step) => step.tool === tool)
+        ) === true
     );
     const originalPlanner = planSelector(0);
     const originalWorker = await assign(9);
-    const initial = [plannerReads[0], leasedReads.get(originalWorker.taskId)!];
+    const initial = [
+      plannerReads[0],
+      leasedReads.get(originalWorker().taskId)!,
+    ];
+    const withdrawnPlannerSource = planSelector(0, 1);
+    const withdrawnWorkerSource = originalWorker(1);
+    const allowedPlannerSource = planSelector(0, 2);
+    const allowedWorkerSource = originalWorker(2);
+    const archivedEndpoint = {
+      sourceCase,
+      assetId: excluded,
+      snapshotDigest: JSON.parse(initial[0][1]).archivedSource.snapshotDigest,
+    };
     for (const response of initial) {
-      const page = JSON.parse(response);
+      const page = JSON.parse(response[0]);
       assertEquals(page.totalLinks, 3);
       assertEquals(page.links[0].to, "allowed-remote-a");
-      assert(!response.includes(excluded));
+      assert(!response[0].includes(excluded));
+      assertEquals(JSON.parse(response[1]).localRelationship.to, excluded);
+      assertEquals(
+        JSON.parse(response[2]).localRelationship.to,
+        allowedEndpoint,
+      );
     }
     await withArchivedPlannerRead(directory, async (read) => {
       assertEquals(
         JSON.parse(await read(originalPlanner)).result,
-        JSON.parse(initial[0]),
+        JSON.parse(initial[0][0]),
       );
       assertEquals(
-        JSON.parse(await read(originalWorker)).result,
-        JSON.parse(initial[1]),
+        JSON.parse(await read(originalWorker())).result,
+        JSON.parse(initial[1][0]),
+      );
+      assertEquals(
+        JSON.parse(await read(withdrawnPlannerSource)).result,
+        JSON.parse(initial[0][1]),
+      );
+      assertEquals(
+        JSON.parse(await read(withdrawnWorkerSource)).result,
+        JSON.parse(initial[1][1]),
+      );
+      assertEquals(
+        JSON.parse(
+          await read({
+            ...withdrawnPlannerSource,
+            includeResult: undefined,
+            ...archivedEndpoint,
+          }),
+        ).source.asset.id,
+        excluded,
+      );
+      assertEquals(
+        JSON.parse(
+          await read({
+            ...withdrawnWorkerSource,
+            action: "worker_trace_source",
+            ...archivedEndpoint,
+          }),
+        ).source.asset.id,
+        excluded,
       );
       const scoped = JSON.parse(
         await read({
@@ -4733,29 +4807,39 @@ Deno.test("Planner and leased worker reauthorize paginated shared topology throu
           expectedVersion: 0,
           requestId: crypto.randomUUID(),
           deniedKinds: [],
-          allowedAssetIds: [asset],
+          allowedAssetIds: [asset, allowedEndpoint],
         }),
       );
-      assertEquals(scoped.record.constraints.allowedAssetIds, [asset]);
+      assertEquals(
+        scoped.record.constraints.allowedAssetIds,
+        [asset, allowedEndpoint].sort(),
+      );
     });
     now += 61_000;
     await assertEventually(() =>
+      !!plannerReads[1] && !planner.hasInFlightWork() &&
       (view()?.modelPlannerHistory.filter(({ reads }) =>
-        reads?.some((step) => step.tool === tool)
-      ).length ?? 0) > 1
+          reads?.some((step) => step.tool === tool)
+        ).length ?? 0) > 1
     );
     const restrictedPlanner = planSelector(1);
     const restrictedWorker = await assign(10);
     const limited = [
       plannerReads[1],
-      leasedReads.get(restrictedWorker.taskId)!,
+      leasedReads.get(restrictedWorker().taskId)!,
     ];
     for (const response of limited) {
-      const page = JSON.parse(response);
+      const page = JSON.parse(response[0]);
       assertEquals(page.totalLinks, 2);
       assertEquals(page.nextOffset, 1);
       assertEquals(page.links[0].to, "allowed-remote-a");
       assertMatch(page.operatingConstraintsDigest, /^[a-f0-9]{64}$/);
+      assertStringIncludes(response[1], "Error:");
+      assert(!response[1].includes(excluded));
+      assertEquals(
+        JSON.parse(response[2]).localRelationship.to,
+        allowedEndpoint,
+      );
     }
     for (const archived of [false, true]) {
       if (archived) {
@@ -4763,17 +4847,84 @@ Deno.test("Planner and leased worker reauthorize paginated shared topology throu
       }
       await withArchivedPlannerRead(directory, async (read) => {
         assertStringIncludes(await read(originalPlanner), "unavailable");
-        assertStringIncludes(await read(originalWorker), "unavailable");
-        assertEquals(
-          JSON.parse(await read(restrictedPlanner)).result,
-          JSON.parse(limited[0]),
+        assertStringIncludes(await read(originalWorker()), "unavailable");
+        assertStringIncludes(await read(withdrawnPlannerSource), "unavailable");
+        assertStringIncludes(await read(withdrawnWorkerSource), "unavailable");
+        assertStringIncludes(
+          await read({
+            ...withdrawnPlannerSource,
+            includeResult: undefined,
+            ...archivedEndpoint,
+          }),
+          "unavailable",
+        );
+        assertStringIncludes(
+          await read({
+            ...withdrawnWorkerSource,
+            action: "worker_trace_source",
+            ...archivedEndpoint,
+          }),
+          "unavailable",
         );
         assertEquals(
-          JSON.parse(await read(restrictedWorker)).result,
-          JSON.parse(limited[1]),
+          JSON.parse(await read(allowedPlannerSource)).result,
+          JSON.parse(initial[0][2]),
+        );
+        assertEquals(
+          JSON.parse(await read(allowedWorkerSource)).result,
+          JSON.parse(initial[1][2]),
+        );
+        assertEquals(
+          JSON.parse(await read(restrictedPlanner)).result,
+          JSON.parse(limited[0][0]),
+        );
+        assertEquals(
+          JSON.parse(await read(restrictedWorker())).result,
+          JSON.parse(limited[1][0]),
+        );
+        assertEquals(
+          JSON.parse(
+            await read({
+              ...ref,
+              action: "topology_source",
+              ...sourceRequests[0],
+            }),
+          ).evidence.localRelationship.to,
+          excluded,
         );
       });
     }
+    let revokedDuringSource = false;
+    await withArchivedPlannerRead(
+      directory,
+      async (read) => {
+        assertStringIncludes(await read(allowedPlannerSource), "unavailable");
+        assert(revokedDuringSource);
+        assertStringIncludes(await read(allowedWorkerSource), "unavailable");
+      },
+      undefined,
+      undefined,
+      undefined,
+      false,
+      async (hook, input) => {
+        if (
+          !revokedDuringSource && hook === "POST_TOOL_RESPONSE" &&
+          input.tool_name === sourceTool &&
+          String(input.tool_response).includes(allowedEndpoint)
+        ) {
+          await Promise.resolve();
+          assert(recordSentinelOperatingConstraints(path, {
+            runId,
+            evidenceRevision: ref.revision,
+            expectedVersion: 1,
+            requestId: crypto.randomUUID(),
+            operatorScope: "retained-topology-policy-fixture",
+            constraints: { deniedKinds: [], allowedAssetIds: [asset] },
+          }));
+          revokedDuringSource = true;
+        }
+      },
+    );
   } finally {
     planner.stop();
     await Deno.remove(directory, { recursive: true });
