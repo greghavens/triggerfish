@@ -1323,17 +1323,6 @@ Deno.test("planner expands older committed workflow observations and graph facts
         if (filteredFactPages.length === 1) {
           const cursor = JSON.parse(String(reply.content)).nextCursor;
           assert(typeof cursor === "string");
-          assert(oldestFact);
-          const journal = openSentinelWorkerGraphFacts(path);
-          try {
-            newestFact = journal.record({
-              ...oldestFact,
-              requestId: crypto.randomUUID(),
-            }, () => true);
-            assert(newestFact);
-          } finally {
-            journal.close();
-          }
           return Promise.resolve(completion("", "sentinel_graph_facts", {
             query: "depends_on",
             cursor,
@@ -1566,8 +1555,7 @@ Deno.test("planner expands older committed workflow observations and graph facts
       JSON.parse(filteredFactPages[1]).facts.at(-1).id,
       oldestFact.id,
     );
-    assert(newestFact && ownerCursor);
-    assert(filteredFactPages.every((page) => !page.includes(newestFact!.id)));
+    assert(ownerCursor);
     const memberId = `observation:adaptive:${oldest}`;
     const deadline = Date.now() + 2000;
     while (planner.hasInFlightWork() && Date.now() < deadline) {
@@ -1578,6 +1566,18 @@ Deno.test("planner expands older committed workflow observations and graph facts
       { reads },
     ) => reads?.some(({ tool }) => tool === "sentinel_expand_evidence_digest"));
     assert(round);
+    assert(oldestFact);
+    const journal = openSentinelWorkerGraphFacts(path);
+    try {
+      newestFact = journal.record({
+        ...oldestFact,
+        requestId: crypto.randomUUID(),
+      }, () => true);
+      assert(newestFact);
+    } finally {
+      journal.close();
+    }
+    assert(filteredFactPages.every((page) => !page.includes(newestFact!.id)));
     const plannerIdentity = round.identity;
     const ref = {
       kind: "sentinel" as const,

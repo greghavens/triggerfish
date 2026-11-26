@@ -1,4 +1,7 @@
-import { plannerCheckpointReadSelector } from "../sentinel/planner_read_checkpoint.ts";
+import {
+  MAX_PLANNER_CHECKPOINT_READS,
+  plannerCheckpointReadSelector,
+} from "../sentinel/planner_read_checkpoint.ts";
 import {
   parseSentinelIncidentRecommendation,
   sentinelIncidentDispositions,
@@ -6432,7 +6435,13 @@ function createAgent(
           ? sentinelInventoryToolForScope(options)
           : tool
       ),
-    maxIterations: canDelegate ? 8 : reporter ? 6 : 4,
+    maxIterations: canDelegate
+      ? 8
+      : reporter
+      ? 6
+      : canReadPlannerCase
+      ? MAX_PLANNER_CHECKPOINT_READS + 1
+      : 4,
     maxToolResponseChars: MAX_TOOL_CHARS,
     enableStreaming: false,
     systemPromptSections: instructions,
