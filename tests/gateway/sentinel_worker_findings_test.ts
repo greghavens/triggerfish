@@ -12875,6 +12875,7 @@ async function testScopedReporterRestart(
   denyMember = false,
   initialPublication?: "resume" | "revoked" | "stale",
   hinted: boolean | "set" = false,
+  verifyReporterTrace = false,
 ) {
   const baseDir = await Deno.makeTempDir();
   const path = resolveSentinelCasePath(
@@ -12999,11 +13000,44 @@ async function testScopedReporterRestart(
       );
       return;
     }
-    const published = await workerTurn(path, source, [
-      [tool(assigned)],
-      [tool(report, input), tool(report, input)],
-    ]);
+    const publicationSteps: Parameters<
+      NonNullable<
+        Parameters<ReturnType<typeof createSentinelSubagent>["execute"]>[3]
+      >
+    >[0][] = [];
+    const published = await workerTurn(
+      path,
+      source,
+      [
+        [tool(assigned)],
+        [tool(report, input), tool(report, input)],
+      ],
+      undefined,
+      undefined,
+      undefined,
+      verifyReporterTrace
+        ? {
+          prompt: "Publish the exact assigned finding.",
+          options: [undefined, (step) => publicationSteps.push(step)],
+        }
+        : undefined,
+    );
     const finding = JSON.parse(published.results[1][0]).record;
+    if (verifyReporterTrace) {
+      const adaptive = openSentinelAdaptiveStore(
+        join(dirname(path), "sentinel-adaptive.db"),
+      );
+      try {
+        assert(adaptive.recordModelReviewProgress(
+          adaptiveRevision(state),
+          source.assignedTaskId,
+          source.assignedTaskLeaseToken,
+          publicationSteps,
+        ));
+      } finally {
+        adaptive.close();
+      }
+    }
     assertEquals(JSON.parse(published.results[1][1]).record, finding);
     if (!useBatch) {
       await withFindingAssignmentGateway(
@@ -13034,6 +13068,183 @@ async function testScopedReporterRestart(
     assertEquals(tasks().length, 1);
     const reporter = tasks()[0];
     assertEquals(reporter.evidenceIds, [finding.id]);
+    if (verifyReporterTrace) {
+      const adaptive = openSentinelAdaptiveStore(
+        join(dirname(path), "sentinel-adaptive.db"),
+      );
+      try {
+        const claim = adaptive.claimModelReview(
+          adaptiveRevision(state),
+          MODEL_ASSIGNMENT_REASON,
+          (task) => task.id === reporter.id,
+        );
+        assert(claim);
+        const worker = {
+          assessmentRevision: state.revision,
+          assignedTaskId: reporter.id,
+          assignedTaskLeaseToken: claim.token,
+        };
+        const neighbor = assignedLease(
+          path,
+          state,
+          "impact",
+          neighborReceipt.assetIds[0],
+        );
+        const read = "sentinel_worker_trace_search";
+        const exact = { task: source.assignedTaskId, stepIndices: [1] };
+        const hooks: string[] = [];
+        const trace = await workerTurn(
+          path,
+          worker,
+          [
+            [tool(read, {})],
+            [
+              tool(read, exact),
+              tool(read, {
+                task: neighbor.assignedTaskId,
+                stepIndices: [1],
+              }),
+              tool(read, { ...exact, stepIndices: [0] }),
+            ],
+          ],
+          undefined,
+          undefined,
+          undefined,
+          {
+            prompt: "Read only the approved original publication.",
+            options: [],
+            beforeHook(hook, name) {
+              if (name === read) hooks.push(hook);
+            },
+          },
+        );
+        const matched = JSON.parse(trace.results[1][0]);
+        assertEquals(matched.steps, [{
+          reviewId: `publication:${source.assignedTaskId}`,
+          taskId: source.assignedTaskId,
+          index: 1,
+          tool: report,
+          target: finding.id,
+          outcome: "returned",
+        }]);
+        assert(
+          JSON.parse(trace.results[0][0]).steps.every((
+            { target }: { target: string },
+          ) => target === finding.id),
+        );
+        assertStringIncludes(trace.results[1][1], "unavailable");
+        assertStringIncludes(trace.results[1][2], "unavailable");
+        assert(hooks.includes("PRE_TOOL_CALL"));
+        assert(hooks.includes("POST_TOOL_RESPONSE"));
+        type Checkpoint = NonNullable<
+          NonNullable<
+            Parameters<
+              ReturnType<typeof createSentinelSubagent>["execute"]
+            >[5]
+          >["resume"]
+        >;
+        let checkpoint: Checkpoint | undefined;
+        let offers = 0;
+        let resumedHistory = "";
+        const abort = new AbortController();
+        const prompt = "Read the original publication, then summarize it.";
+        const createWorker = (resuming: boolean) => {
+          const providers = createProviderRegistry();
+          providers.register({
+            name: "reporter-trace-checkpoint",
+            supportsStreaming: false,
+            complete(messages) {
+              if (resuming) resumedHistory = JSON.stringify(messages);
+              else offers++;
+              return Promise.resolve({
+                content: resuming
+                  ? '{"summary":"Reviewed.","followUps":[]}'
+                  : "",
+                usage: { inputTokens: 1, outputTokens: 1 },
+                toolCalls: resuming ? [] : [{
+                  id: "reporter-publication",
+                  type: "function",
+                  function: { name: read, arguments: JSON.stringify(exact) },
+                }],
+              });
+            },
+          });
+          providers.setDefault("reporter-trace-checkpoint");
+          return createSentinelSubagent({
+            snapshotPath: path,
+            providerRegistry: providers,
+            hookRunner: {
+              evaluateHook(hook, { input }) {
+                if (input.tool_name === read) hooks.push(hook);
+                return Promise.resolve({
+                  allowed: true,
+                  action: "ALLOW",
+                  ruleId: null,
+                  duration: 0,
+                });
+              },
+            },
+            allowModelAccess: true,
+            ...worker,
+          });
+        };
+        await createWorker(false).execute(
+          prompt,
+          () => {},
+          abort.signal,
+          undefined,
+          undefined,
+          {
+            onToolBatchCheckpoint(saved) {
+              checkpoint = saved;
+              abort.abort();
+              return Promise.resolve();
+            },
+          },
+        );
+        assert(checkpoint);
+        assertEquals(offers, 1);
+        const policy = (expectedVersion: number, deny: boolean) =>
+          recordSentinelOperatingConstraints(path, {
+            runId: state.plan.runId!,
+            evidenceRevision: state.revision,
+            expectedVersion,
+            requestId: crypto.randomUUID(),
+            operatorScope: "owner",
+            constraints: { deniedKinds: deny ? ["review_finding"] : [] },
+          });
+        assert(policy(0, true));
+        await createWorker(true).execute(
+          prompt,
+          () => {},
+          undefined,
+          undefined,
+          undefined,
+          {
+            resume: checkpoint,
+          },
+        );
+        assertEquals(resumedHistory, "");
+        assert(policy(1, false));
+        const replayed: string[] = [];
+        await createWorker(true).execute(
+          prompt,
+          () => {},
+          undefined,
+          (step) => replayed.push(step.tool),
+          undefined,
+          {
+            resume: checkpoint,
+          },
+        );
+        assertStringIncludes(resumedHistory, finding.id);
+        assertEquals(replayed, []);
+        assertEquals(offers, 1);
+        return;
+      } finally {
+        adaptive.close();
+      }
+    }
 
     const registry = createProviderRegistry();
     let executions = 0;
@@ -14320,3 +14531,6 @@ Deno.test("Reviewed analyst publications retain exact actor provenance through g
     await Deno.remove(baseDir, { recursive: true });
   }
 });
+
+Deno.test("A leased reporter opens only its original finding publication step", () =>
+  testScopedReporterRestart(false, false, undefined, false, true));

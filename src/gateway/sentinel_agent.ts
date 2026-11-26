@@ -55,6 +55,8 @@ import {
   sentinelPlannerSteerToolName,
 } from "../core/approval_inbox.ts";
 import { readLinkedFindingProof } from "./sentinel_linked_findings.ts";
+import { digestSentinelSnapshot } from "../sentinel/shared_inventory.ts";
+import { readSentinelCaseFindingReceipts } from "../sentinel/worker_finding_store.ts";
 import { notifyCommittedEvidence } from "../core/evidence_task_progression.ts";
 import { guardAssignmentExecution } from "../core/durable_assignment.ts";
 import { readSentinelPlannerInventoryResult } from "../sentinel/inventory_queries.ts";
@@ -365,6 +367,7 @@ import {
   currentSentinelFindingReceipts,
   executeSentinelWorkerFindingTool,
   isSentinelWorkerFindingTool,
+  readSentinelFindingReceiptScope,
   readSentinelPlannerFindingDraft,
   recordOperatorSentinelFinding,
   sentinelFindingReadTools,
@@ -1610,6 +1613,7 @@ function rememberIncidentRecommendationPage(
 }
 
 interface ActiveTurn {
+  readonly reporterTraceCalls: Map<string, SentinelWorkerTraceSearchArgs>;
   readonly incidentRecommendationPages: Map<number, IncidentRecommendationPage>;
   readonly controller: AbortController;
   readonly signal: AbortSignal;
@@ -3740,6 +3744,73 @@ function validateSavedGoalState(
   return expected === result;
 }
 
+/** A report assignment may see only the publication step for its original finding. */
+function reporterFindingTrace(
+  options: ProvenanceScope,
+  revision: number,
+  args: SentinelWorkerTraceSearchArgs,
+) {
+  if (!options.assignedTaskId) return;
+  const { snapshotPath: path } = options;
+  const history = readHistoricalAdaptiveSentinel(path, revision);
+  const reporter = history?.tasks.find(({ id }) =>
+    id === options.assignedTaskId
+  );
+  if (reporter?.kind !== "report_finding") return;
+  const findingId = reporter.evidenceIds?.[0];
+  const policy = readSentinelFindingReceiptScope(path, revision);
+  const finding = findingId &&
+    readSentinelCaseFindingReceipts(path, [findingId]).get(findingId);
+  if (
+    !history || !policy || !finding || finding.kind !== "finding" ||
+    !finding.taskId ||
+    finding.caseId !== locateSentinelCase(path)?.caseId ||
+    finding.runId !== history.goal.id || finding.runId !== policy.runId ||
+    finding.evidenceRevision !== revision ||
+    finding.targetId !== reporter.nodeId ||
+    !policy.allowsRecord(finding) || !policy.allows(finding.evidenceId) ||
+    !policy.allows(finding.graphFindingId, "review_finding") ||
+    (options.assignedTaskLeaseToken &&
+      !liveProgressConsumer(options, revision)) ||
+    args.liveProgress ||
+    (args.task !== undefined && args.task !== finding.taskId)
+  ) return [];
+
+  const snapshot = readSentinelAssessmentRevision(path, revision)?.result
+    .sharedGraph.snapshot;
+  const evidence = snapshot?.nodes.find(({ id }) => id === finding.evidenceId);
+  if (
+    !snapshot || evidence?.kind !== "evidence" || evidence.executionSource ||
+    evidence.nativeWorkflowSource || evidence.relationshipSources?.length ||
+    finding.snapshotDigest !== digestSentinelSnapshot(snapshot)
+  ) return [];
+  const source = history.tasks.find(({ id }) => id === finding.taskId);
+  if (source?.nodeId !== finding.targetId) return [];
+  const complete = history.modelReviews.find(({ taskId }) =>
+    taskId === source.id
+  );
+  const progress = history.modelReviewStates.find(({ taskId }) =>
+    taskId === source.id
+  );
+  const steps = complete?.steps ?? progress?.progressSteps ?? [];
+  const query = args.query?.trim().toLowerCase() ?? "";
+  return steps.flatMap(({ tool, target, outcome }, index) =>
+    tool === "sentinel_report_finding" && target === finding.id &&
+      outcome === "returned" &&
+      (!args.stepIndices || args.stepIndices.includes(index)) &&
+      (!query || tool.includes(query) || finding.id.includes(query))
+      ? [{
+        reviewId: `publication:${source.id}`,
+        taskId: source.id,
+        index,
+        tool,
+        target,
+        outcome,
+      }]
+      : []
+  );
+}
+
 function workerTraceMatches(
   options: ProvenanceScope,
   revision: number,
@@ -3747,6 +3818,8 @@ function workerTraceMatches(
   args: SentinelWorkerTraceSearchArgs,
   workerRead = options.assignedTaskLeaseToken !== undefined,
 ) {
+  const reporter = reporterFindingTrace(options, revision, args);
+  if (reporter) return reporter;
   let eligibleTasks: ReadonlySet<string> | undefined;
   if (workerRead) {
     if (
@@ -5382,6 +5455,7 @@ function createAgent(
     ? availableTools.filter(({ name }) =>
       [
         "sentinel_worker_findings",
+        SENTINEL_WORKER_TRACE_SEARCH,
         "sentinel_finding_recheck_context",
         "sentinel_finding_traffic_links",
         "sentinel_traffic_search",
@@ -6193,6 +6267,29 @@ function createAgent(
               toolName === "sentinel_record_finding_recheck") &&
               call?.args?.findingId !== findingFollowup.findingId))
         ) return { ...result, allowed: false, action: "BLOCK" };
+        if (reporter && toolName === SENTINEL_WORKER_TRACE_SEARCH) {
+          const revision = options.assessmentRevision;
+          const args = call?.args && sentinelWorkerTraceSearchArgs(call.args);
+          const live = revision !== undefined &&
+            liveProgressConsumer(options, revision);
+          if (name === "PRE_TOOL_CALL") {
+            if (!args || args.liveProgress || !live || !turn) {
+              return { ...result, allowed: false, action: "BLOCK" };
+            }
+            turn.reporterTraceCalls.set(JSON.stringify(args), args);
+          }
+          const response = context.input.tool_response;
+          if (
+            name === "POST_TOOL_RESPONSE" && typeof response === "string" &&
+            response.startsWith("{") &&
+            (!live || !turn ||
+              ![...turn.reporterTraceCalls.values()].some((args) =>
+                searchSentinelWorkerTraces(options, args) === response
+              ))
+          ) {
+            return { ...result, allowed: false, action: "BLOCK" };
+          }
+        }
         if (
           name === "PRE_TOOL_CALL" && reporter &&
           toolName === sentinelFindingTrafficAttachTool.name &&
@@ -10058,6 +10155,7 @@ function createAgent(
           plannerFindingEvidence: new Map(),
           plannerFindingDrafts: new Map(),
           incidentRecommendationPages: new Map(),
+          reporterTraceCalls: new Map(),
           operatingConstraints,
           reads: 0,
           workers: 0,
