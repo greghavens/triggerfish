@@ -3252,9 +3252,11 @@ export function createOperatorRunToolExecutor(options: {
       const admission = options.sentinelAdmission;
       const reading = action === "assessment_concurrency";
       const setting = action === "set_assessment_concurrency";
+      const authorize = context?.authorizeOwnerRunCall;
       const { limit, requestId, expectedVersion } = args;
       if (
         !admission || !context?.authenticatedOwnerSessionId ||
+        (!reading && !authorize) ||
         !canFlowTo("INTERNAL", context.ceiling ?? "PUBLIC") ||
         (setting ? !validSentinelAdmissionLimit(limit) : limit !== undefined) ||
         Object.keys(args).some((key) =>
@@ -3303,6 +3305,7 @@ ${
             }`,
           )
         ) return "Error: The operator declined the run action.";
+        if (!await authorize?.(args)) return unavailable;
         const edit = write();
         if (!edit) return unavailable;
         admission.onChanged?.();

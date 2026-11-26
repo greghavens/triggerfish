@@ -60,6 +60,7 @@ Deno.test("An owner gateway's named Sentinel cases keep FIFO admission across re
   registry.setDefault("case-admission-fixture");
   const calls: string[] = [];
   let allowControl = true;
+  let revokeOnReview = false;
   const hookRunner: HookRunner = {
     evaluateHook(hook, { input }) {
       calls.push(hook);
@@ -131,7 +132,10 @@ Deno.test("An owner gateway's named Sentinel cases keep FIFO admission across re
             configuredLimit: 1,
             onChanged: caseManager.refresh,
           },
-          confirm: () => Promise.resolve(true),
+          confirm() {
+            if (revokeOnReview) allowControl = false;
+            return Promise.resolve(true);
+          },
         }),
       }),
     });
@@ -277,6 +281,17 @@ Deno.test("An owner gateway's named Sentinel cases keep FIFO admission across re
       const initial = await turn({ action: "assessment_concurrency" });
       assert(!initial.startsWith("Error:"), initial);
       assertEquals(JSON.parse(initial).version, 0);
+      const admissionHistory = [...admissions];
+      revokeOnReview = true;
+      try {
+        assertStringIncludes(await turn(raise), "unavailable");
+      } finally {
+        revokeOnReview = false;
+        allowControl = true;
+      }
+      assertEquals(await turn({ action: "assessment_concurrency" }), initial);
+      assertEquals(admissions, admissionHistory);
+      assertEquals(caseManager.coordinatorState("z-oldest"), "waiting");
       const increased = JSON.parse(await turn(raise));
       assertEquals(increased.edit.override, 2);
       assertEquals(caseManager.coordinatorState("z-oldest"), "scheduled");
@@ -309,6 +324,20 @@ Deno.test("An owner gateway's named Sentinel cases keep FIFO admission across re
         requestId: crypto.randomUUID(),
         expectedVersion: 2,
       };
+      const beforeReset = await turn({ action: "assessment_concurrency" });
+      const admissionHistory = [...admissions];
+      revokeOnReview = true;
+      try {
+        assertStringIncludes(await turn(reset), "unavailable");
+      } finally {
+        revokeOnReview = false;
+        allowControl = true;
+      }
+      assertEquals(
+        await turn({ action: "assessment_concurrency" }),
+        beforeReset,
+      );
+      assertEquals(admissions, admissionHistory);
       const cleared = JSON.parse(await turn(reset));
       assertEquals(cleared.edit.override, null);
       assertEquals(JSON.parse(await turn(reset)), cleared);
