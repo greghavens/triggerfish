@@ -103,6 +103,7 @@ import { readSentinelPlannerInventoryResult } from "../sentinel/inventory_querie
 import { readSentinelPlannerDigestResult } from "../sentinel/evidence_digests.ts";
 import {
   amendOperatorSentinelFindingReport,
+  readSentinelFindingReportAttachmentReview,
   reopenSentinelPlannerFindings,
 } from "./sentinel_worker_findings.ts";
 import { sentinelOperatingConstraintsAllow } from "../sentinel/operating_constraints.ts";
@@ -735,6 +736,11 @@ export const operatorRunTool: ToolDefinition = {
     digest: {
       type: "string",
       description: "SHA-256 of the retained traffic receipt",
+    },
+    includeReportEvidence: {
+      type: "boolean",
+      description:
+        "Compare the saved report's reviewed attachment digest to the exact selected evidence revision.",
     },
     evidenceVersion: {
       type: "string",
@@ -10388,10 +10394,17 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
           payloadPart,
           byteLength,
           includeWithdrawn,
+          includeReportEvidence,
         } = args;
         if (
           ref.kind !== "sentinel" || ref.revision === undefined ||
           !canFlowTo("INTERNAL", context?.ceiling ?? "INTERNAL") ||
+          (includeReportEvidence !== undefined && (
+            includeReportEvidence !== true || trafficLinkId !== undefined ||
+            recheckId !== undefined ||
+            !context?.authenticatedOwnerSessionId ||
+            context.authorizeSentinelCaseRead?.(ref.id, ref.revision) === false
+          )) ||
           (payloadPart !== undefined && trafficLinkId === undefined) ||
           (byteLength !== undefined && payloadPart === undefined) ||
           (includeWithdrawn !== undefined &&
@@ -10420,6 +10433,7 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
               "payloadPart",
               "byteLength",
               "includeWithdrawn",
+              "includeReportEvidence",
               "limit",
               "offset",
             ].includes(key)
@@ -10534,16 +10548,38 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
           snapshotPath,
           page.links.map(({ id }: { id: string }) => id),
         );
+        const reportEvidence = includeReportEvidence === true
+          ? readSentinelFindingReportAttachmentReview(
+            snapshotPath,
+            ref.id,
+            ref.revision,
+            receiptId,
+          )
+          : undefined;
+        if (
+          includeReportEvidence && (!reportEvidence ||
+            reportEvidence.current.digest !== page.evidenceVersion)
+        ) return unavailable;
         return safeProjection({
           run: ref,
-          page: { ...page, ...(annotations.length && { annotations }) },
+          page: {
+            ...page,
+            ...(annotations.length && { annotations }),
+            ...(reportEvidence && { reportEvidence }),
+          },
         });
       }
       if (
         action === "finding_receipt" || action === "finding_receipts" ||
         action === "finding_report" || action === "finding_report_history"
       ) {
-        const { receiptId, cursor, limit = 5, reportVersion } = args;
+        const {
+          receiptId,
+          cursor,
+          limit = 5,
+          reportVersion,
+          includeReportEvidence,
+        } = args;
         const listing = action === "finding_receipts";
         const readingReport = action === "finding_report";
         const listingReport = action === "finding_report_history";
@@ -10558,6 +10594,12 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
               (!receiptPattern.test(receiptId) &&
                 !(action === "finding_receipt" &&
                   INCONCLUSIVE_RECHECK_ID.test(receiptId)))) ||
+          (includeReportEvidence !== undefined && (
+            includeReportEvidence !== true || !readingReport ||
+            !context?.authenticatedOwnerSessionId ||
+            !canFlowTo("INTERNAL", context.ceiling ?? "PUBLIC") ||
+            context.authorizeSentinelCaseRead?.(ref.id, ref.revision) === false
+          )) ||
           reportVersion !== undefined &&
             (typeof reportVersion !== "number" ||
               !Number.isSafeInteger(reportVersion) || reportVersion < 1) ||
@@ -10573,7 +10615,9 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
               "id",
               "revision",
               ...(listing ? ["cursor", "limit"] : ["receiptId"]),
-              ...(readingReport ? ["reportVersion"] : []),
+              ...(readingReport
+                ? ["reportVersion", "includeReportEvidence"]
+                : []),
               ...(listingReport ? ["cursor", "limit"] : []),
             ].includes(key)
           ) ||
@@ -10694,6 +10738,16 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
                 remediation = { status: "unknown", asOfRevision: ref.revision };
               }
             }
+            const reportEvidence = includeReportEvidence === true
+              ? readSentinelFindingReportAttachmentReview(
+                path,
+                ref.id,
+                ref.revision,
+                report.finding.id,
+                version,
+              )
+              : undefined;
+            if (includeReportEvidence && !reportEvidence) return unavailable;
             return safeProjection({
               run: ref,
               report: {
@@ -10708,6 +10762,7 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
                 }),
                 ...findingReportMetadata(report.amendments, version),
                 remediation,
+                ...(reportEvidence && { reportEvidence }),
                 title: selected.title,
                 summary: selected.summary,
               },

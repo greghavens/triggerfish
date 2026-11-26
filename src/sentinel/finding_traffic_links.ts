@@ -300,6 +300,20 @@ function trafficEvidenceVersion(
   ])).digest("hex");
 }
 
+/** Reconstruct the immutable attachment digest of an initially published set. */
+export function initialSentinelFindingTrafficEvidenceVersion(
+  revision: number,
+  findingId: string,
+  links: readonly SentinelFindingTrafficLink[],
+): string {
+  return trafficEvidenceVersion(
+    revision,
+    findingId,
+    links.map(({ id }) => id).toSorted(),
+    [],
+  );
+}
+
 function initialize(db: DatabaseSync, readOnly: boolean) {
   const validate = () => {
     const app = db.prepare("PRAGMA application_id").get()?.application_id;

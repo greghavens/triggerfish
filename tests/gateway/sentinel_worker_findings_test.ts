@@ -6213,6 +6213,78 @@ async function verifyInitialTrafficPublication(
     });
     return links;
   };
+  const reportRef = {
+    kind: ref.kind,
+    id: ref.id,
+    revision: ref.revision,
+    receiptId: recovered.record.id,
+  };
+  let baseline: unknown;
+  if (hinted && !batch) {
+    await withFindingAssignmentGateway(
+      baseDir,
+      () => Promise.resolve(true),
+      async (turn) => {
+        const report = {
+          ...reportRef,
+          action: "finding_report",
+          includeReportEvidence: true,
+        };
+        const links = {
+          ...reportRef,
+          action: "finding_traffic",
+          includeReportEvidence: true,
+          limit: 1,
+        };
+        const first = JSON.parse(await turn(report)).report.reportEvidence;
+        assertEquals(first.status, "current");
+        assertEquals(first.current, first.reviewed);
+        assertEquals(JSON.parse(await turn(links)).page.reportEvidence, first);
+        const annotated = JSON.parse(
+          await turn({
+            ...reportRef,
+            action: "annotate_finding_traffic",
+            trafficLinkId: attached[0].id,
+            reportVersion: 1,
+            evidenceVersion: first.current.digest,
+            requestId: crypto.randomUUID(),
+            evidenceRole: "verification",
+            evidenceNote: "Reviewed retained response.",
+          }),
+        ).amendment;
+        assert(annotated);
+        const stale = JSON.parse(await turn(report)).report.reportEvidence;
+        assertEquals(stale.status, "changed");
+        assertEquals(stale.reviewed, first.reviewed);
+        assert(stale.current.digest !== stale.reviewed.digest);
+        assertEquals(JSON.parse(await turn(links)).page.reportEvidence, stale);
+        const amended = JSON.parse(
+          await turn({
+            ...reportRef,
+            action: "amend_finding_report",
+            reportVersion: 1,
+            evidenceVersion: stale.current.digest,
+            requestId: crypto.randomUUID(),
+            title: "Reviewed control failure",
+            summary: "The saved response supports the report.",
+          }),
+        ).amendment;
+        assertEquals(amended.version, 2);
+        baseline = JSON.parse(await turn(report)).report.reportEvidence;
+        assertEquals(baseline, {
+          reportVersion: 2,
+          status: "current",
+          reviewed: stale.current,
+          current: stale.current,
+        });
+        assertEquals(
+          JSON.parse(await turn({ ...report, reportVersion: 1 })).report
+            .reportEvidence,
+          stale,
+        );
+      },
+    );
+  }
   const liveTidepoolLinks = await readTidepoolLinks();
   assertEquals(liveTidepoolLinks.toSorted(byId), attached.toSorted(byId));
   await restoreArchive();
@@ -6230,6 +6302,16 @@ async function verifyInitialTrafficPublication(
     async (turn) => {
       const reopened = JSON.parse(await turn(traceQuery));
       assertEquals(reopened.result, recovered);
+      if (baseline) {
+        const result = JSON.parse(
+          await turn({
+            ...reportRef,
+            action: "finding_report",
+            includeReportEvidence: true,
+          }),
+        );
+        assertEquals(result.report.reportEvidence, baseline);
+      }
     },
   );
   await withFindingAssignmentGateway(
@@ -6522,6 +6604,26 @@ async function testScopedReporterRestart(
     ]);
     const finding = JSON.parse(published.results[1][0]).record;
     assertEquals(JSON.parse(published.results[1][1]).record, finding);
+    if (!useBatch) {
+      await withFindingAssignmentGateway(
+        baseDir,
+        () => Promise.resolve(false),
+        async (turn) => {
+          const report = JSON.parse(
+            await turn({
+              action: "finding_report",
+              kind: "sentinel",
+              id: "main",
+              revision: state.revision,
+              receiptId: finding.id,
+              includeReportEvidence: true,
+            }),
+          ).report;
+          assertEquals(report.reportEvidence.status, "unbound");
+          assertEquals(report.reportEvidence.reviewed, null);
+        },
+      );
+    }
     advanceAdaptiveSentinel(path, state);
     advanceAdaptiveSentinel(path, state);
     const tasks = () =>

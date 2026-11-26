@@ -1,4 +1,5 @@
 import {
+  initialSentinelFindingTrafficEvidenceVersion,
   openSentinelFindingTrafficLinks,
   type SentinelFindingTrafficLinkInput,
   sentinelTrafficBatchMemberRequestId,
@@ -27,6 +28,7 @@ import {
 import type { ToolDefinition } from "../core/types/tool.ts";
 import {
   readSentinelAssessment,
+  readSentinelAssessmentRevision,
   readSentinelOperatingConstraints,
   readSentinelRunIdForRevision,
   withSentinelAssessmentWriteLock,
@@ -46,13 +48,90 @@ import {
   normalizeFindingReportCategory,
   openSentinelWorkerFindingStore,
   readSentinelCaseFindingReceipts,
+  readSentinelStagedTrafficFinding,
   readSentinelWorkerFindingWriteReceipt,
+  readStagedTrafficLinks,
 } from "../sentinel/worker_finding_store.ts";
 import {
   readAssignedSentinelModelReview,
   readSentinelOperatorTrafficHint,
 } from "./sentinel_adaptive_runtime.ts";
 import type { SentinelAgentOptions } from "./sentinel_agent.ts";
+
+import { sentinelOperatingConstraintsAllow } from "../sentinel/operating_constraints.ts";
+
+/** Compare one authorized saved report with the selected revision's attachments. */
+export function readSentinelFindingReportAttachmentReview(
+  path: string,
+  caseId: string,
+  revision: number,
+  findingId: string,
+  requestedVersion?: number,
+) {
+  const runId = readSentinelRunIdForRevision(path, revision);
+  const snapshot = readSentinelAssessmentRevision(path, revision)?.result
+    .sharedGraph.snapshot;
+  if (!runId || !snapshot || !hasSentinelWorkerFindingJournal(path)) return;
+  const journal = openSentinelWorkerFindingStore(path);
+  try {
+    const report = journal.readFindingReport(findingId, revision);
+    const finding = report?.finding;
+    if (
+      !finding || finding.caseId !== caseId || finding.runId !== runId ||
+      !sentinelOperatingConstraintsAllow(
+        readSentinelOperatingConstraints(path, runId)?.constraints,
+        { kind: "review_evidence", nodeId: finding.targetId },
+        snapshot,
+      )
+    ) return;
+    const reportVersion = requestedVersion ?? report.version;
+    const amendment = report.amendments.find(({ version }) =>
+      version === reportVersion
+    );
+    if (reportVersion !== 1 && !amendment) return;
+    const currentDigest = sentinelFindingTrafficEvidenceVersion(
+      path,
+      revision,
+      findingId,
+      finding.targetId,
+    ).digest;
+    const reviewedRevision = amendment?.evidenceRevision ??
+      finding.evidenceRevision;
+    let reviewedDigest = amendment?.evidenceVersion;
+    if (!amendment) {
+      const staged = readSentinelStagedTrafficFinding(
+        path,
+        finding,
+        finding.requestId,
+      );
+      const attachments = staged?.findingId === finding.id &&
+        readStagedTrafficLinks(path, staged);
+      if (attachments) {
+        reviewedDigest = initialSentinelFindingTrafficEvidenceVersion(
+          reviewedRevision,
+          findingId,
+          attachments.links ?? [attachments.link],
+        );
+      }
+    }
+    return {
+      reportVersion,
+      current: { evidenceRevision: revision, digest: currentDigest },
+      reviewed: reviewedDigest
+        ? { evidenceRevision: reviewedRevision, digest: reviewedDigest }
+        : null,
+      status: !reviewedDigest
+        ? "unbound"
+        : reviewedRevision !== revision
+        ? "different_revision"
+        : reviewedDigest === currentDigest
+        ? "current"
+        : "changed",
+    };
+  } finally {
+    journal.close();
+  }
+}
 
 type Scope = Pick<
   SentinelAgentOptions,
