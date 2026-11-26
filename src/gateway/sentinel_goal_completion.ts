@@ -37,7 +37,10 @@ import {
   withSentinelAssessmentWriteLock,
 } from "../sentinel/assessment_store.ts";
 
-import { readExactSentinelNativeRepositoryVerdict } from "./sentinel_native_repository_recheck.ts";
+import {
+  readExactSentinelNativeRepositoryVerdict,
+  readRetainedSentinelNativeRepositoryVerdict,
+} from "./sentinel_native_repository_recheck.ts";
 
 type State = NonNullable<ReturnType<typeof readSentinelAssessment>>;
 type GoalRecord = NonNullable<ReturnType<GoalCompletionStore["read"]>>;
@@ -373,6 +376,7 @@ export function readSentinelWorkerGoalProofTraceReceipt(
     taskId,
     targetId,
     requestId,
+    "historical_candidate",
   );
 }
 
@@ -495,6 +499,7 @@ function goalEvidenceVerifier(
   record: GoalRecord,
   deadlineAt?: number,
   protectedProofs?: ProtectedGoalProofs,
+  historicalProtected = false,
 ) {
   const rules = new Map(
     record.criteria.map(({ id, requirement }) => [id, requirement]),
@@ -598,7 +603,10 @@ function goalEvidenceVerifier(
           Date.parse(recheck.validUntil) <= deadlineAt)
       ) return false;
       if (recheck.nativeRepositoryVisibility) {
-        const proof = readExactSentinelNativeRepositoryVerdict(
+        const read = historicalProtected
+          ? readRetainedSentinelNativeRepositoryVerdict
+          : readExactSentinelNativeRepositoryVerdict;
+        const proof = read(
           snapshotPath,
           runId,
           state.revision,
@@ -829,7 +837,10 @@ export function readSentinelWorkerGoalProofReceipt(
   assignmentId: string,
   targetId: string,
   requestId: string,
-  protectedProofs?: ProtectedGoalProofs | "recovery_candidate",
+  protectedProofs?:
+    | ProtectedGoalProofs
+    | "recovery_candidate"
+    | "historical_candidate",
 ) {
   const scope = goalScope(snapshotPath, state);
   const path = goalDatabasePath(snapshotPath);
@@ -849,7 +860,9 @@ export function readSentinelWorkerGoalProofReceipt(
       source: proof.source,
       requestId,
     });
-    const grants = protectedProofs === "recovery_candidate"
+    const historical = protectedProofs === "historical_candidate";
+    const candidate = historical || protectedProofs === "recovery_candidate";
+    const grants = candidate
       ? new Map(
         protectedGoalReceipts(snapshotPath, [{
           criterionId,
@@ -861,6 +874,8 @@ export function readSentinelWorkerGoalProofReceipt(
             createHash("sha256").update(JSON.stringify(receipt)).digest("hex"),
           ]),
       )
+      : typeof protectedProofs === "string"
+      ? undefined
       : protectedProofs;
     if (
       !args ||
@@ -874,14 +889,32 @@ export function readSentinelWorkerGoalProofReceipt(
             evidence.detail === proof.detail,
         )
       ) ||
-      !goalEvidenceVerifier(snapshotPath, state, registered, undefined, grants)(
+      !goalEvidenceVerifier(
+        snapshotPath,
+        state,
+        registered,
+        undefined,
+        grants,
+        historical,
+      )(
         criterionId,
         proof,
         { target: targetId },
       )
     ) return;
+    const protectedVerdict = historical && grants?.has(proof.reference)
+      ? readRetainedSentinelNativeRepositoryVerdict(
+        snapshotPath,
+        state.plan.runId,
+        state.revision,
+        targetId,
+        proof.reference,
+      )
+      : undefined;
+    if (historical && grants?.has(proof.reference) && !protectedVerdict) return;
     return {
       args,
+      ...(protectedVerdict && { protectedVerdict }),
       receipt: {
         runId: state.plan.runId,
         evidenceRevision: state.revision,

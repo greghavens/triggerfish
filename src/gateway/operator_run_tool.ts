@@ -9875,20 +9875,22 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
               const task = history?.tasks.find(({ id }) => id === taskId);
               const authorize = context.authorizeSentinelTraceRead;
               const requestId = step.goalProofRequestId;
+              const revision = ref.revision;
               if (
-                !task?.nodeId || !authorize || step.outcome !== "returned" ||
+                revision === undefined || !task?.nodeId || !authorize ||
+                step.outcome !== "returned" ||
                 (!step.target && !worker?.archivedProgress) || !requestId
               ) return unavailable;
               const scope = {
                 caseId: ref.id,
-                revision: ref.revision,
+                revision,
                 taskId: task.id,
               };
-              const call = { revision: ref.revision, requestId };
+              const call = { revision, requestId };
               if (!await authorize(scope, step.tool, call)) return unavailable;
               const opened = readSentinelWorkerGoalProofTraceReceipt(
                 path,
-                ref.revision,
+                revision,
                 runId,
                 task.id,
                 task.nodeId,
@@ -9899,6 +9901,71 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
                 (step.target !== undefined &&
                   opened.receipt.proof.reference !== step.target)
               ) return unavailable;
+              const proof = opened.protectedVerdict;
+              const exact = () => {
+                const current = readHistoricalAdaptiveSentinel(
+                  path,
+                  revision,
+                );
+                const saved = savedStep(current);
+                return current?.goal.id === runId &&
+                  saved?.tool === step.tool &&
+                  saved.outcome === "returned" &&
+                  saved.target === step.target &&
+                  saved.goalProofRequestId === requestId &&
+                  context.authorizeSentinelCaseRead?.(ref.id, revision) !==
+                    false &&
+                  isDeepStrictEqual(
+                    opened,
+                    readSentinelWorkerGoalProofTraceReceipt(
+                      path,
+                      revision,
+                      runId,
+                      task.id,
+                      task.nodeId!,
+                      requestId,
+                    ),
+                  );
+              };
+              const authorizeProtected = async () => {
+                if (!proof) return true;
+                if (
+                  !isDeepStrictEqual(
+                    task.plannerRound?.repositoryVisibility,
+                    proof.reference,
+                  ) ||
+                  !exact()
+                ) return false;
+                const original = await readAuthorizedCaseEvidence(
+                  ref.id,
+                  path,
+                  proof.original.evidenceRevision,
+                  proof.original.evidenceId,
+                  context,
+                  exact,
+                );
+                if (!original || !exact()) return false;
+                const fresh = await reopenOwnedSentinelRepositoryVisibility(
+                  options.readRepositoryVisibility,
+                  context,
+                  {
+                    caseId: ref.id,
+                    path,
+                    runId,
+                    revision,
+                    taskId: proof.reference.taskId,
+                    assetId: proof.verdict.targetId,
+                    sourceStepIndex: proof.reference.sourceStepIndex,
+                    resultSha256: proof.reference.resultSha256,
+                  },
+                  exact,
+                );
+                return !!fresh &&
+                  matchesRepositoryControlSource(original.payload, fresh) &&
+                  repositoryControlOutcome(fresh) === proof.verdict.outcome &&
+                  exact();
+              };
+              if (!await authorizeProtected()) return unavailable;
               const retained = {
                 _classification: "INTERNAL",
                 ...opened.receipt,
@@ -9908,18 +9975,10 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
                 (step.resultSha256 !== undefined &&
                   createHash("sha256").update(text).digest("hex") !==
                     step.resultSha256) ||
-                !await authorize(scope, step.tool, call, text)
+                !await authorize(scope, step.tool, call, text) ||
+                !await authorizeProtected()
               ) return unavailable;
-              const current = readHistoricalAdaptiveSentinel(
-                path,
-                ref.revision,
-              );
-              const saved = savedStep(current);
-              if (
-                current?.goal.id !== runId || saved?.tool !== step.tool ||
-                saved.outcome !== "returned" || saved.target !== step.target ||
-                saved.goalProofRequestId !== requestId
-              ) return unavailable;
+              if (!exact()) return unavailable;
               return projectResult({
                 run: ref,
                 runId,

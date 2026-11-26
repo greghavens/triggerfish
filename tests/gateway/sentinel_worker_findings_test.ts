@@ -65,6 +65,7 @@ import {
   digestSentinelGoalProof,
   ensureSentinelFormalGoalContract,
   readSentinelGoalCompletionAtRevision,
+  readSentinelWorkerGoalProofTraceReceipt,
   registerSentinelGoalCompletion,
   reportSentinelGoalCompletion,
 } from "../../src/gateway/sentinel_goal_completion.ts";
@@ -9749,7 +9750,6 @@ for (
               ?.observations[0]?.evidence[0]?.reference,
             receipt.id,
           );
-          return;
         } finally {
           releaseGoal.resolve();
         }
@@ -9759,6 +9759,7 @@ for (
           !!peerRead && !!readAdaptiveSentinel(path, state, "revision")
             ?.modelReviews.some(({ taskId }) => taskId === followupId),
         () => coordinator?.advance(state),
+        10_000,
       );
       assertEquals(JSON.parse(peerRead!), expected);
       assertEquals(fetches, 1);
@@ -9852,7 +9853,89 @@ for (
         )?.plannerRound?.repositoryVisibility,
         expected.reference,
       );
-      if (!branchMode) {
+      if (goalPolicy === "worker") {
+        const step = readAdaptiveSentinel(path, restored, "revision")
+          ?.modelReviews.find(({ taskId }) => taskId === followupId)?.steps[1];
+        assertEquals(step?.goalProofRequestId, workerGoalRequestId);
+        const candidate = readSentinelWorkerGoalProofTraceReceipt(
+          path,
+          restored.revision,
+          runId,
+          followupId,
+          "app",
+          workerGoalRequestId,
+        );
+        assertEquals(
+          candidate?.protectedVerdict?.reference,
+          expected.reference,
+        );
+        let denySource = false;
+        let denyProofResponse = false;
+        let revokeAtProofResponse = false;
+        let sourcePre = 0;
+        const proofStep = {
+          kind: "sentinel",
+          id: caseId,
+          revision: restored.revision,
+          action: "worker_trace_result",
+          taskId: followupId,
+          stepIndices: [1],
+        };
+        await withFindingAssignmentGateway(
+          baseDir,
+          () => Promise.resolve(true),
+          async (turn) => {
+            const wrong = await turn({ ...proofStep, stepIndices: [2] });
+            assertStringIncludes(wrong, "unavailable");
+            const opened = JSON.parse(await turn(proofStep));
+            assertEquals(opened.result, JSON.parse(workerProof!));
+            assert(sourcePre > 0);
+            denySource = true;
+            assertStringIncludes(await turn(proofStep), "unavailable");
+            denySource = false;
+            denyProofResponse = true;
+            assertStringIncludes(await turn(proofStep), "unavailable");
+            denyProofResponse = false;
+            revokeAtProofResponse = true;
+            assertStringIncludes(await turn(proofStep), "unavailable");
+            revokeAtProofResponse = false;
+            availableCredential = false;
+            assertStringIncludes(await turn(proofStep), "unavailable");
+            availableCredential = true;
+            assertEquals(JSON.parse(await turn(proofStep)), opened);
+          },
+          (hook, input) => {
+            if (
+              hook === "PRE_TOOL_CALL" && input.tool_name === liveTool &&
+              typeof input.url === "string"
+            ) {
+              sourcePre++;
+              return !denySource;
+            }
+            if (
+              hook === "POST_TOOL_RESPONSE" &&
+              input.tool_name === "sentinel_prove_goal"
+            ) {
+              if (revokeAtProofResponse) availableCredential = false;
+              return !denyProofResponse;
+            }
+            return true;
+          },
+          undefined,
+          undefined,
+          undefined,
+          false,
+          undefined,
+          (payload) =>
+            Promise.resolve(
+              payload.kind === original.kind &&
+                payload.repo === original.repo &&
+                payload.repositoryId === original.repositoryId,
+            ),
+          reader,
+        );
+      }
+      if (!branchMode && goalPolicy !== "worker") {
         const gate = pendingProtectedGate();
         assert(gate?.factSatisfaction?.protectedRepositoryVerdict);
         await withTidepool(baseDir, async (_list, _provenance, request) => {

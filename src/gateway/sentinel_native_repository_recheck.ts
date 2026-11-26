@@ -9,7 +9,9 @@ import {
 } from "../sentinel/adaptive_store.ts";
 import {
   readSentinelAssessment,
+  readSentinelAssessmentRevision,
   readSentinelOperatingConstraints,
+  readSentinelRunIdForRevision,
 } from "../sentinel/assessment_store.ts";
 import { locateSentinelCase } from "../sentinel/cases.ts";
 import { createSentinelFindingRemediationReader } from "../sentinel/finding_remediation.ts";
@@ -69,7 +71,7 @@ export function listSentinelNativeRepositoryVerdictSelectors(
   ).slice(0, 6);
 }
 
-/** Resolve typed provenance locally; callers must still authorize both sources. */
+/** Resolve an active typed verdict; callers must still authorize both sources. */
 export function readExactSentinelNativeRepositoryVerdict(
   path: string,
   runId: string,
@@ -79,11 +81,56 @@ export function readExactSentinelNativeRepositoryVerdict(
 ) {
   const state = readSentinelAssessment(path);
   const snapshot = state?.result?.sharedGraph.snapshot;
-  const caseId = locateSentinelCase(path)?.caseId;
   if (
-    !state?.active || state.paused || !snapshot || !caseId ||
+    !state?.active || state.paused || !snapshot ||
     state.plan.runId !== runId || state.revision !== revision
   ) return;
+  return readSentinelNativeRepositoryVerdict(
+    path,
+    runId,
+    revision,
+    assetId,
+    verdictId,
+    snapshot,
+    false,
+  );
+}
+
+/** Historical inspection addresses one retained revision and uses saved/current scope. */
+export function readRetainedSentinelNativeRepositoryVerdict(
+  path: string,
+  runId: string,
+  revision: number,
+  assetId: string,
+  verdictId: string,
+) {
+  if (readSentinelRunIdForRevision(path, revision) !== runId) return;
+  const snapshot = readSentinelAssessmentRevision(path, revision)?.result
+    .sharedGraph.snapshot;
+  return snapshot && readSentinelNativeRepositoryVerdict(
+    path,
+    runId,
+    revision,
+    assetId,
+    verdictId,
+    snapshot,
+    true,
+  );
+}
+
+function readSentinelNativeRepositoryVerdict(
+  path: string,
+  runId: string,
+  revision: number,
+  assetId: string,
+  verdictId: string,
+  snapshot: NonNullable<
+    NonNullable<ReturnType<typeof readSentinelAssessment>>["result"]
+  >["sharedGraph"]["snapshot"],
+  historical: boolean,
+) {
+  const caseId = locateSentinelCase(path)?.caseId;
+  if (!caseId) return;
   const record = readSentinelCaseFindingReceipts(path, [verdictId]).get(
     verdictId,
   );
@@ -93,7 +140,7 @@ export function readExactSentinelNativeRepositoryVerdict(
     record.targetId !== assetId ||
     record.runId !== runId || record.caseId !== caseId ||
     record.evidenceRevision !== revision ||
-    Date.parse(record.validUntil) <= Date.now()
+    (!historical && Date.parse(record.validUntil) <= Date.now())
   ) return;
   const assignment = readSentinelDedicatedRecheckSettlements(
     join(dirname(path), "sentinel-adaptive.db"),
@@ -107,20 +154,25 @@ export function readExactSentinelNativeRepositoryVerdict(
   const original = readSentinelCaseFindingReceipts(path, [record.findingId])
     .get(record.findingId);
   if (original?.kind !== "finding") return;
-  const policy = readSentinelOperatingConstraints(path, runId)?.constraints;
+  const current = readSentinelOperatingConstraints(path, runId)?.constraints;
+  const saved = historical &&
+    readSentinelOperatingConstraints(path, runId, revision)?.constraints;
+  const policies = saved ? [current, saved] : [current];
   if (
-    !sentinelOperatingConstraintsAllow(policy, {
-      kind: "review_evidence",
-      nodeId: assetId,
-    }, snapshot) ||
-    !sentinelOperatingConstraintsAllow(policy, {
-      kind: "review_evidence",
-      nodeId: original.evidenceId,
-    }, snapshot) ||
-    !sentinelOperatingConstraintsAllow(policy, {
-      kind: "review_finding",
-      nodeId: original.graphFindingId,
-    }, snapshot)
+    !policies.every((policy) =>
+      sentinelOperatingConstraintsAllow(policy, {
+        kind: "review_evidence",
+        nodeId: assetId,
+      }, snapshot) &&
+      sentinelOperatingConstraintsAllow(policy, {
+        kind: "review_evidence",
+        nodeId: original.evidenceId,
+      }, snapshot) &&
+      sentinelOperatingConstraintsAllow(policy, {
+        kind: "review_finding",
+        nodeId: original.graphFindingId,
+      }, snapshot)
+    )
   ) return;
   const checked = createSentinelFindingRemediationReader(
     path,
