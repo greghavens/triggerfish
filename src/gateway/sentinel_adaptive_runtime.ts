@@ -5228,6 +5228,11 @@ export function createSentinelModelPlanner(
             ]
             : []),
           "For a follow-up supported by githubWorkflowReads, use sourceTaskId, sourceKind model_review and sourceWorkflowResultSha256. Keep the exact target.",
+          ...(state.plan.linkedCaseSources
+            ? [
+              "Use sentinel_shared_asset_discoveries to inspect approved discoveries from the selected source case revisions. A source link grants no graph access.",
+            ]
+            : []),
           "For an impact or trace on the listed local asset, you may cite a peer finding you opened with sentinel_shared_finding_source in this turn. Set peerFinding to {localAssetId,sourceCaseId,sourceAssetId,sourceFindingId,snapshotDigest} from that exact result. Treat it as corroboration reported by another case.",
         ].join("\n");
         const observedCriteria = new Set(
@@ -5235,6 +5240,11 @@ export function createSentinelModelPlanner(
         );
         const inputs = {
           ...(heartbeat && { wakeReason: "idle_planner_check" }),
+          ...(state.plan.linkedCaseSources && {
+            approvedDiscoverySources: state.plan.linkedCaseSources.map(
+              ({ caseId, revision }) => ({ caseId, revision }),
+            ),
+          }),
           goal: state.plan.goal ??
             "Investigate high-priority evidence gaps",
           goalCompletion: goalCompletion && {

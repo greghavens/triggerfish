@@ -73,6 +73,13 @@ requesting a linked Sentinel run. Omit it to inherit the exact parent
 selection, or use the standard classification route when the parent had
 no explicit selection. Sentinel planner and worker turns use the approved
 selection while its provider, model, and current grant still match.
+To direct the child's shared discovery reads, pass up to four
+`sourceCases` entries with an existing `caseId` and exact saved `revision`.
+The approval includes the resolved source run identities. The planner
+and leased workers can reuse approved asset, alias, and relationship
+discoveries from those revisions when they still match the local asset
+and the source approval is current. Parent links and source selections
+carry no authority to read another case's full graph.
 Sentinel workers use an allowlist of read-only evidence tools. This registry
 excludes HTTP clients, shells, target connections, and credential tools.
 Background workers read their assigned case and evidence revision. Shared

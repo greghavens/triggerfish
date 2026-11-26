@@ -9,7 +9,9 @@ import {
 import {
   readSentinelAssessment,
   readSentinelAssessmentRevision,
+  readSentinelLinkedSourcesForRevision,
   readSentinelOperatingConstraints,
+  readSentinelRunIdForRevision,
   withSentinelAssessmentWriteLock,
 } from "../sentinel/assessment_store.ts";
 import {
@@ -369,6 +371,20 @@ export async function readScopedSentinelSharedAssetDiscoveries(
   const pinned = readSentinelAssessmentRevision(snapshotPath, revision)
     ?.result.sharedGraph.snapshot;
   if (!location || !pinned || signal?.aborted || !isCurrent()) return [];
+  const linkedCaseSources = readSentinelLinkedSourcesForRevision(
+    snapshotPath,
+    revision,
+  );
+  const allowsRecord = (record: SentinelAssetDiscoveryRecord) => {
+    if (linkedCaseSources === undefined) return true;
+    const binding = linkedCaseSources.find(({ caseId, revision }) =>
+      caseId === record.sourceCaseId && revision === record.evidenceRevision
+    );
+    return !!binding && readSentinelRunIdForRevision(
+          resolveSentinelCasePath(location.baseDir, binding.caseId),
+          binding.revision,
+        ) === binding.runId;
+  };
   const destination = loadSentinelGraph(pinned);
   const records = discoveryStore(location.baseDir, (store) => {
     if (!exactId) return store.listPeerApprovals(location.caseId, after);
@@ -381,7 +397,9 @@ export async function readScopedSentinelSharedAssetDiscoveries(
   })[] = [];
   for (const record of records) {
     if (signal?.aborted) return [];
-    if (record.sourceCaseId === location.caseId) continue;
+    if (record.sourceCaseId === location.caseId || !allowsRecord(record)) {
+      continue;
+    }
     try {
       const source = archivedDiscovery(location.baseDir, record);
       if (!source) continue;
@@ -428,7 +446,7 @@ export async function readScopedSentinelSharedAssetDiscoveries(
       results.filter(({ id, version, mappedAssetId, mappedTo }) => {
         const current = store.get(id);
         return current?.status === "approved" && current.version === version &&
-          allowsAsset(mappedAssetId, mappedTo);
+          allowsAsset(mappedAssetId, mappedTo) && allowsRecord(current);
       }),
   );
 }

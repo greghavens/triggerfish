@@ -1,3 +1,4 @@
+import type { SentinelLinkedCaseSource } from "../sentinel/linked_case_sources.ts";
 /** Exact Sentinel case adapter for authenticated operator run control. */
 import type { SelectedModelProfile } from "../core/model_profile_selection.ts";
 import type {
@@ -11,12 +12,13 @@ import {
   resolveSentinelCasePath,
 } from "../sentinel/cases.ts";
 import {
+  matchesSentinelLinkedStartGoal,
   pauseSentinelAssessment,
   publishedSentinelGraphDigest,
   readSentinelAssessment,
   readSentinelAssessmentRevision,
-  matchesSentinelLinkedStartGoal,
   readSentinelCaseStatus,
+  readSentinelLinkedSourcesForRevision,
   readSentinelModelProfileForRevision,
   readSentinelPlannerHeartbeatForRevision,
   readSentinelRunTimeoutForRevision,
@@ -44,6 +46,9 @@ export function createOperatorSentinelRuns(
   publishedStartDigest(ref: OperatorRunRef): string | undefined;
   modelProfile(ref: OperatorRunRef): SelectedModelProfile | undefined;
   plannerHeartbeat(ref: OperatorRunRef): number | undefined;
+  linkedCaseSources(
+    ref: OperatorRunRef,
+  ): readonly SentinelLinkedCaseSource[] | undefined;
   matchesStartGoal(ref: OperatorRunRef, goal?: string): boolean;
   matchesStartTimeout(ref: OperatorRunRef, timeoutSeconds?: number): boolean;
   startLinked(
@@ -56,6 +61,7 @@ export function createOperatorSentinelRuns(
       timeoutSeconds?: number;
       modelProfile?: SelectedModelProfile;
       plannerHeartbeatSeconds?: number;
+      linkedCaseSources?: readonly SentinelLinkedCaseSource[];
     },
   ): OperatorRunSummary | undefined;
   workerControl(
@@ -133,6 +139,10 @@ export function createOperatorSentinelRuns(
       path,
       publicRef.revision,
     );
+    const linkedCaseSources = readSentinelLinkedSourcesForRevision(
+      path,
+      publicRef.revision,
+    );
     const plannerHeartbeatSeconds = readSentinelPlannerHeartbeatForRevision(
       path,
       publicRef.revision,
@@ -143,6 +153,7 @@ export function createOperatorSentinelRuns(
         ...(plannerHeartbeatSeconds !== undefined &&
           { plannerHeartbeatSeconds }),
         runId: state.plan?.runId ?? null,
+        ...(linkedCaseSources && { linkedCaseSources }),
         adaptiveRevision: adaptive?.revision ?? null,
         ...(modelProfile && { modelProfile }),
         ...(publicRef.revision === current.revision &&
@@ -222,6 +233,12 @@ export function createOperatorSentinelRuns(
         readSentinelCaseStatus(path)
       ) return;
       return publishedSentinelGraphDigest(path);
+    },
+    linkedCaseSources(ref) {
+      const path = pathFor(ref);
+      return path && ref.revision !== undefined
+        ? readSentinelLinkedSourcesForRevision(path, ref.revision)
+        : undefined;
     },
     plannerHeartbeat(ref) {
       const path = pathFor(ref);

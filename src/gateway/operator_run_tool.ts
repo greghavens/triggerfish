@@ -1,3 +1,7 @@
+import {
+  parseSentinelLinkedCaseSources,
+  type SentinelLinkedCaseSource,
+} from "../sentinel/linked_case_sources.ts";
 import { validPlannerHeartbeatSeconds } from "../core/evidence_task_progression.ts";
 import {
   readSentinelArchivedToolDecisions,
@@ -646,6 +650,11 @@ export const operatorRunTool: ToolDefinition = {
     timeoutSeconds: {
       type: "integer",
       description: "Optional wall-clock limit for a new linked Sentinel run",
+    },
+    sourceCases: {
+      type: "array",
+      description:
+        "Up to four distinct {caseId, revision} source cases for the linked Sentinel child. Sources select only already-approved shared discoveries.",
     },
     plannerHeartbeatSeconds: {
       type: "integer",
@@ -7870,6 +7879,7 @@ export function createOperatorRunToolExecutor(options: {
           timeoutSeconds,
           modelProfile: namedProfile,
           plannerHeartbeatSeconds,
+          sourceCases,
         } = args;
         const workflows = options.workflows;
         const ceiling = context?.ceiling ?? "INTERNAL";
@@ -7891,8 +7901,12 @@ export function createOperatorRunToolExecutor(options: {
               "timeoutSeconds",
               "modelProfile",
               "plannerHeartbeatSeconds",
+              "sourceCases",
             ].includes(key)
           ) ||
+          (sourceCases !== undefined &&
+            (targetKind !== "sentinel" || !Array.isArray(sourceCases) ||
+              !sourceCases.length || sourceCases.length > 4)) ||
           (childGoal !== undefined &&
             (targetKind !== "sentinel" || typeof childGoal !== "string" ||
               !childGoal.trim() || childGoal.length > 500)) ||
@@ -7912,6 +7926,42 @@ export function createOperatorRunToolExecutor(options: {
         ) return unavailable;
         const parent = (await controller.inspect(ref))?.ref;
         if (!parent) return unavailable;
+        const readSourceCases = async () => {
+          if (!Array.isArray(sourceCases)) return;
+          const sources: SentinelLinkedCaseSource[] = [];
+          for (const selected of sourceCases) {
+            if (
+              !selected || typeof selected !== "object" ||
+              Array.isArray(selected) || Object.keys(selected).length !== 2
+            ) return;
+            const source = reference(
+              "sentinel",
+              selected.caseId,
+              selected.revision,
+            );
+            if (
+              !source || source.revision === undefined ||
+              source.id === targetId || !await controller.inspect(source)
+            ) return;
+            const sourcePath = resolveSentinelCasePath(
+              options.baseDir,
+              source.id,
+            );
+            const runId = readSentinelRunIdForRevision(
+              sourcePath,
+              source.revision,
+            );
+            if (!runId) return;
+            sources.push({
+              caseId: source.id,
+              revision: source.revision,
+              runId,
+            });
+          }
+          return parseSentinelLinkedCaseSources(sources);
+        };
+        const linkedCaseSources = await readSourceCases();
+        if (sourceCases !== undefined && !linkedCaseSources) return unavailable;
         const inheritedProfile =
           targetKind === "sentinel" && namedProfile === undefined &&
             parent.kind === "sentinel"
@@ -7957,6 +8007,10 @@ export function createOperatorRunToolExecutor(options: {
               other.id !== targetId || other.revision === undefined ||
               !providers.sentinel.matchesStartGoal(other, childGoal) ||
               !providers.sentinel.matchesStartTimeout(other, timeoutSeconds) ||
+              !isDeepStrictEqual(
+                providers.sentinel.linkedCaseSources(other),
+                linkedCaseSources,
+              ) ||
               providers.sentinel.plannerHeartbeat(other) !==
                 plannerHeartbeatSeconds ||
               !isDeepStrictEqual(
@@ -7993,6 +8047,7 @@ export function createOperatorRunToolExecutor(options: {
                 ...(childGoal !== undefined && { childGoal }),
                 ...(timeoutSeconds !== undefined && { timeoutSeconds }),
                 ...(modelProfile && { modelProfile }),
+                ...(linkedCaseSources && { linkedCaseSources }),
                 ...(plannerHeartbeatSeconds !== undefined &&
                   { plannerHeartbeatSeconds }),
               })
@@ -8002,6 +8057,7 @@ export function createOperatorRunToolExecutor(options: {
         if (
           !await controller.inspect(parent) ||
           !isDeepStrictEqual(selectableProfile(), modelProfile) ||
+          !isDeepStrictEqual(await readSourceCases(), linkedCaseSources) ||
           (backgroundRole &&
             !isDeepStrictEqual(
               readBackgroundTrace(backgroundRole, parent.id)?.scope,
@@ -8026,6 +8082,7 @@ export function createOperatorRunToolExecutor(options: {
               timeoutSeconds,
               modelProfile,
               plannerHeartbeatSeconds,
+              linkedCaseSources,
             });
           } else {
             workflows?.start(target.id, ceiling, childRequest, link);

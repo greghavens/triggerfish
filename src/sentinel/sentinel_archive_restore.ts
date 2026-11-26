@@ -1,3 +1,4 @@
+import { parseSentinelLinkedCaseSources } from "./linked_case_sources.ts";
 import { validPlannerHeartbeatSeconds } from "../core/evidence_task_progression.ts";
 import { isSelectedModelProfile } from "../core/model_profile_selection.ts";
 import {
@@ -337,6 +338,13 @@ function restoreAssessment(
     } = object(
       JSON.parse(row.plan),
     );
+    const linkedCaseSources = object(JSON.parse(row.plan)).linkedCaseSources;
+    if (
+      linkedCaseSources !== undefined &&
+      !parseSentinelLinkedCaseSources(linkedCaseSources)
+    ) {
+      throw new Error("Invalid archived linked Sentinel case sources");
+    }
     if (
       plannerHeartbeatSeconds !== undefined &&
       !validPlannerHeartbeatSeconds(plannerHeartbeatSeconds)

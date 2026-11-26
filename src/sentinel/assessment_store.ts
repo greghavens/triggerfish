@@ -1,3 +1,7 @@
+import {
+  parseSentinelLinkedCaseSources,
+  type SentinelLinkedCaseSource,
+} from "./linked_case_sources.ts";
 import { validPlannerHeartbeatSeconds } from "../core/evidence_task_progression.ts";
 import {
   isSelectedModelProfile,
@@ -90,6 +94,7 @@ export type AssessmentPlan =
     readonly deadlineAt?: number;
     readonly modelProfile?: SelectedModelProfile;
     readonly plannerHeartbeatSeconds?: number;
+    readonly linkedCaseSources?: readonly SentinelLinkedCaseSource[];
     readonly formalGoals?: readonly SentinelFormalGoal[];
     readonly activeFormalGoalIds?: readonly string[];
     readonly completedFormalGoalIds?: readonly string[];
@@ -701,15 +706,25 @@ function readFormalGoalHistory(db: DatabaseSync, revision: number) {
 function saveAssessmentRunRevision(
   db: DatabaseSync,
   revision: number,
-  { runId, timeoutSeconds, modelProfile, plannerHeartbeatSeconds }: Pick<
+  {
+    runId,
+    timeoutSeconds,
+    modelProfile,
+    plannerHeartbeatSeconds,
+    linkedCaseSources,
+  }: Pick<
     AssessmentPlan,
-    "runId" | "timeoutSeconds" | "modelProfile" | "plannerHeartbeatSeconds"
+    | "runId"
+    | "timeoutSeconds"
+    | "modelProfile"
+    | "plannerHeartbeatSeconds"
+    | "linkedCaseSources"
   >,
 ) {
   if (!runId) return;
   db.exec(`CREATE TABLE IF NOT EXISTS assessment_run_revisions (
     revision INTEGER PRIMARY KEY, runId TEXT NOT NULL, timeoutSeconds INTEGER,
-    modelProfile TEXT, plannerHeartbeatSeconds INTEGER
+    modelProfile TEXT, plannerHeartbeatSeconds INTEGER, linkedCaseSources TEXT
   )`);
   const columns = db.prepare("PRAGMA table_info(assessment_run_revisions)")
     .all().map(({ name }) => name);
@@ -728,16 +743,22 @@ function saveAssessmentRunRevision(
       "ALTER TABLE assessment_run_revisions ADD COLUMN plannerHeartbeatSeconds INTEGER",
     );
   }
+  if (!columns.includes("linkedCaseSources")) {
+    db.exec(
+      "ALTER TABLE assessment_run_revisions ADD COLUMN linkedCaseSources TEXT",
+    );
+  }
   db.prepare(
     `INSERT OR IGNORE INTO assessment_run_revisions
-      (revision, runId, timeoutSeconds, modelProfile, plannerHeartbeatSeconds)
-      VALUES (?, ?, ?, ?, ?)`,
+      (revision, runId, timeoutSeconds, modelProfile, plannerHeartbeatSeconds, linkedCaseSources)
+      VALUES (?, ?, ?, ?, ?, ?)`,
   ).run(
     revision,
     runId,
     timeoutSeconds ?? null,
     modelProfile ? JSON.stringify(modelProfile) : null,
     plannerHeartbeatSeconds ?? null,
+    linkedCaseSources ? JSON.stringify(linkedCaseSources) : null,
   );
 }
 
@@ -1273,12 +1294,24 @@ export function startSentinelAssessment(
     timeoutSeconds?: number;
     modelProfile?: SelectedModelProfile;
     plannerHeartbeatSeconds?: number;
+    linkedCaseSources?: readonly SentinelLinkedCaseSource[];
   },
 ): StoredAssessment {
   if (
     plan.formalGoals !== undefined || plan.activeFormalGoalIds !== undefined ||
     plan.completedFormalGoalIds !== undefined
   ) throw new Error("Formal Sentinel goals require an approved goal proposal");
+  const linkedCaseSources = parseSentinelLinkedCaseSources(
+    linkedStart?.linkedCaseSources,
+  );
+  if (
+    plan.linkedCaseSources !== undefined ||
+    (linkedStart?.linkedCaseSources !== undefined &&
+      (!linkedCaseSources ||
+        linkedCaseSources.some(({ caseId }) => caseId === linkedStart.caseId)))
+  ) {
+    throw new Error("Invalid linked Sentinel case sources");
+  }
   const { timeoutSeconds, modelProfile, plannerHeartbeatSeconds } =
     linkedStart ?? {};
   if (
@@ -1331,6 +1364,7 @@ export function startSentinelAssessment(
             ...settings,
             runId: crypto.randomUUID(),
             ...(modelProfile && { modelProfile }),
+            ...(linkedCaseSources && { linkedCaseSources }),
             ...(plannerHeartbeatSeconds !== undefined &&
               { plannerHeartbeatSeconds }),
             ...(timeoutSeconds !== undefined && {
@@ -2250,6 +2284,35 @@ export function readSentinelRunIdForRevision(
     return typeof runId === "string" && constraintUuid.test(runId)
       ? runId
       : undefined;
+  } finally {
+    db.close();
+  }
+}
+
+/** Reopen the reviewed read-only source cases for the exact child revision. */
+export function readSentinelLinkedSourcesForRevision(
+  path: string,
+  revision: number,
+): readonly SentinelLinkedCaseSource[] | undefined {
+  const db = openStore(path, false);
+  if (!db) return;
+  try {
+    const current = getRow(db);
+    let raw: unknown;
+    if (current?.revision === revision) {
+      raw = (JSON.parse(current.plan) as AssessmentPlan).linkedCaseSources;
+    } else if (hasTable(db, "assessment_run_revisions")) {
+      const encoded = db.prepare(
+        "SELECT * FROM assessment_run_revisions WHERE revision = ?",
+      ).get(revision)?.linkedCaseSources;
+      raw = typeof encoded === "string"
+        ? JSON.parse(encoded)
+        : encoded ?? undefined;
+    }
+    if (raw === undefined) return;
+    const sources = parseSentinelLinkedCaseSources(raw);
+    if (!sources) throw new Error("Invalid saved linked Sentinel case sources");
+    return sources;
   } finally {
     db.close();
   }
