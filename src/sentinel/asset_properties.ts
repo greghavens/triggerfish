@@ -180,25 +180,56 @@ export function parseSentinelAssetQuery(
 
 type QueryAsset = {
   readonly id: string;
+  readonly label?: string;
   readonly aliases?: readonly string[];
   readonly properties?: SentinelAssetProperties;
 };
+
+function retainedAssetUrls(asset: QueryAsset): URL[] {
+  const addresses = [
+    asset.id,
+    ...(asset.aliases ?? []),
+    ...(asset.properties?.url ?? []),
+  ];
+  const label = assetText(asset.label);
+  const origin = label && canonicalAssetUrl(label);
+  // Capture-created assets retain their canonical HTTP origin as the label.
+  if (origin && new URL(origin).origin === label) addresses.push(label);
+  return addresses.flatMap((value) => {
+    const text = assetText(value);
+    const href = text && canonicalAssetUrl(text);
+    return href ? [new URL(href)] : [];
+  });
+}
 
 export function sentinelAssetPropertyValues(
   asset: QueryAsset,
   field: TextField,
 ): readonly string[] {
   const exact = asset.properties?.[field] ?? [];
-  if (field !== "url" && field !== "domain" && field !== "ip") return exact;
-  const inferred = [asset.id, ...(asset.aliases ?? [])].flatMap((name) => {
-    const url = canonicalAssetUrl(name);
-    const candidate = field === "url" ? url : textProperty(
-      field,
-      url ? new URL(url).hostname.replace(/^\[|\]$/g, "") : name,
-    );
-    return candidate ? [candidate] : [];
-  });
-  return [...exact, ...inferred];
+  if (
+    field !== "url" && field !== "domain" && field !== "ip" &&
+    field !== "service"
+  ) {
+    return exact;
+  }
+  const urls = retainedAssetUrls(asset);
+  if (field === "url") return [...exact, ...urls.map((url) => url.href)];
+  if (field === "service") {
+    return [...exact, ...urls.map((url) => url.protocol.slice(0, -1))];
+  }
+  const names = [
+    asset.id,
+    ...(asset.aliases ?? []),
+    ...urls.map(({ hostname }) => hostname.replace(/^\[|\]$/g, "")),
+  ];
+  return [
+    ...exact,
+    ...names.flatMap((name) => {
+      const candidate = textProperty(field, name);
+      return candidate ? [candidate] : [];
+    }),
+  ];
 }
 
 export function matchesSentinelAssetQuery(
@@ -214,7 +245,15 @@ export function matchesSentinelAssetQuery(
   if ("not" in expr) return !matchesSentinelAssetQuery(asset, expr.not);
   if (expr.field === "port" || expr.field === "status") {
     const { field, op, value } = expr;
-    const values = asset.properties?.[field] ?? [];
+    const explicit = asset.properties?.[field] ?? [];
+    const values = field === "port"
+      ? [
+        ...explicit,
+        ...retainedAssetUrls(asset).map((url) =>
+          url.port ? Number(url.port) : url.protocol === "https:" ? 443 : 80
+        ),
+      ]
+      : explicit;
     switch (op) {
       case "eq":
         return values.includes(value);

@@ -1688,8 +1688,8 @@ for (
       assert(called >= 2);
       await write([{
         id: "new",
-        label: "Newly observed",
-        aliases: ["new.example.test"],
+        label: "https://new.example.test",
+        aliases: [],
       }]);
       const updated = refreshSentinelAssessment(path);
       assert(updated && updated.revision > state.revision);
