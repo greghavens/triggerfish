@@ -317,8 +317,10 @@ import {
 import { indexSharedSentinelTopologyEvidence } from "../sentinel/shared_topology_work.ts";
 import { readSentinelChatSnapshot } from "../sentinel/chat_mode.ts";
 import {
+  authorizeSentinelProtectedGoalProofs,
   readSentinelGoalCompletionAtRevision,
   readSentinelGoalCompletionForState,
+  readSentinelWorkerGoalProofReceipt,
   reportSentinelWorkerGoalProof,
 } from "./sentinel_goal_completion.ts";
 import {
@@ -6675,6 +6677,24 @@ function createAgent(
           return "Error: Goal proof requires exact evidence read on this assignment.";
         }
         try {
+          const protectedReference = source === "finding_recheck" &&
+              task.plannerRound?.repositoryVisibility?.verdictId === evidenceId
+            ? task.plannerRound.repositoryVisibility
+            : undefined;
+          const authorized = !protectedReference
+            ? undefined
+            : typeof requestId === "string"
+            ? await authorizeWorkerGoalRecheck(
+              task,
+              goalId,
+              criterionId,
+              evidenceId,
+              turn.signal,
+            )
+            : undefined;
+          if (protectedReference && !authorized?.has(evidenceId)) {
+            return "Error: Current authorization for the exact protected goal evidence is unavailable.";
+          }
           const proof = reportSentinelWorkerGoalProof(
             options.snapshotPath,
             {
@@ -6694,6 +6714,7 @@ function createAgent(
               !turn.signal.aborted &&
               readAssignedModelReview(options)?.nodeId === task.nodeId,
             options.webContainmentConfigured,
+            authorized,
           );
           return proof
             ? JSON.stringify({ _classification: "INTERNAL", ...proof })
@@ -7964,6 +7985,12 @@ function createAgent(
         }
       }
       if (
+        turn && !failed && name === SENTINEL_SAVED_REPOSITORY_VISIBILITY &&
+        typeof args.recheckId === "string"
+      ) {
+        rememberWorkerGoalRecheck(turn, args.recheckId, result);
+      }
+      if (
         turn && !failed && name === "sentinel_worker_findings" &&
         typeof args.receiptId === "string"
       ) {
@@ -8993,6 +9020,66 @@ function createAgent(
       isDeepStrictEqual(saved, lookup());
   }
 
+  function rememberWorkerGoalRecheck(
+    turn: ActiveTurn,
+    id: string,
+    result: string,
+  ) {
+    const task = readAssignedModelReview(options);
+    const { reference, verdict } = JSON.parse(result);
+    if (
+      task?.nodeId === verdict?.targetId &&
+      id === verdict?.id && verdict?.outcome === "pass" &&
+      verdict.evidenceRevision === options.assessmentRevision &&
+      task?.plannerRound?.repositoryVisibility?.verdictId === id &&
+      isDeepStrictEqual(task.plannerRound.repositoryVisibility, reference)
+    ) turn.readGoalScopedReceipts.add(id);
+  }
+
+  async function authorizeWorkerGoalRecheck(
+    task: AdaptiveTask,
+    goalId: string,
+    criterionId: string,
+    evidenceId: string,
+    signal: AbortSignal,
+  ) {
+    const state = readSentinelAssessment(options.snapshotPath);
+    const runId = state?.plan.runId;
+    if (!state || !runId || state.revision !== options.assessmentRevision) {
+      return;
+    }
+    const record = readSentinelGoalCompletionForState(
+      options.snapshotPath,
+      state,
+    );
+    if (!record) return;
+    return await authorizeSentinelProtectedGoalProofs(
+      options.snapshotPath,
+      state,
+      [...record.observations, {
+        criterionId: `${goalId}/${criterionId}`,
+        evidence: [{
+          source: "finding_recheck",
+          reference: evidenceId,
+          detail: "Exact protected remediation evidence.",
+        }],
+      }],
+      async ({ reference, verdict }, current) =>
+        isDeepStrictEqual(task.plannerRound?.repositoryVisibility, reference) &&
+        task.nodeId === verdict.targetId &&
+        !!await reopenRepositoryVisibilityVerdict(
+          runId,
+          state.revision,
+          reference.taskId,
+          verdict.targetId,
+          verdict.id,
+          signal,
+          current,
+        ),
+      () => !signal.aborted && readAssignedModelReview(options)?.id === task.id,
+    );
+  }
+
   async function reopenRepositoryVisibilityVerdict(
     runId: string,
     revision: number,
@@ -9944,6 +10031,13 @@ function createAgent(
                       signal.aborted ||
                       !readAssignedModelReview(options)
                     ) return false;
+                    if (typeof call.args.recheckId === "string") {
+                      rememberWorkerGoalRecheck(
+                        turn,
+                        call.args.recheckId,
+                        reopened,
+                      );
+                    }
                     continue;
                   }
                   if (
@@ -10467,6 +10561,57 @@ function createAgent(
                     });
                   }
                   continue;
+                }
+                if (call.name === SENTINEL_GOAL_PROVE) {
+                  const args = sentinelGoalProofArguments(call.args);
+                  if (
+                    args?.source === "finding_recheck" &&
+                    task.plannerRound?.repositoryVisibility?.verdictId ===
+                      args.evidenceId
+                  ) {
+                    const saved = call.id && results.get(call.id);
+                    if (
+                      !saved ||
+                      !turn.readGoalScopedReceipts.has(args.evidenceId)
+                    ) return false;
+                    const protectedProofs = await authorizeWorkerGoalRecheck(
+                      task,
+                      args.goalId,
+                      args.criterionId,
+                      args.evidenceId,
+                      signal,
+                    );
+                    const state = readSentinelAssessment(options.snapshotPath);
+                    const receipt = state?.revision === revision && state &&
+                      task.nodeId &&
+                      readSentinelWorkerGoalProofReceipt(
+                        options.snapshotPath,
+                        state,
+                        task.id,
+                        task.nodeId,
+                        args.requestId,
+                        protectedProofs,
+                      );
+                    if (
+                      !receipt ||
+                      saved !==
+                        JSON.stringify({
+                          _classification: "INTERNAL",
+                          ...receipt.receipt,
+                        })
+                    ) return false;
+                    const classified = await enforcePostToolResponse(
+                      call.name,
+                      config,
+                      session,
+                      { resultText: saved, blocked: false },
+                    );
+                    if (
+                      classified.blocked || signal.aborted ||
+                      !readAssignedModelReview(options)
+                    ) return false;
+                    continue;
+                  }
                 }
                 if (
                   call.name !== assignedTargetTool.name &&

@@ -8178,6 +8178,12 @@ for (
       outcome: "pass",
       goalPolicy: "operator",
     },
+    {
+      visibility: "private",
+      repositoryId: 42,
+      outcome: "pass",
+      goalPolicy: "worker",
+    },
     { visibility: "internal", repositoryId: 42, outcome: "fail" },
     {
       visibility: "private",
@@ -8332,8 +8338,9 @@ for (
         path,
         snapshot.replaceAll(placeholder, originalId),
       );
-      const state = refreshSentinelAssessment(path);
-      assert(state);
+      const initialState = refreshSentinelAssessment(path);
+      assert(initialState);
+      let state = initialState;
       const initial = await workerTurn(
         path,
         assignedLease(path, state, "review_evidence", originalId),
@@ -8357,6 +8364,41 @@ for (
       );
       const finding = JSON.parse(initial.results[1][0]).record;
       assert(finding);
+      if (goalPolicy === "worker") {
+        await withFindingAssignmentGateway(
+          baseDir,
+          () => Promise.resolve(true),
+          async (turn) => {
+            const approval = JSON.parse(
+              await turn({
+                action: "append_goals",
+                kind: "sentinel",
+                id: caseId,
+                revision: state!.revision,
+                runId,
+                requestId: crypto.randomUUID(),
+                goals: [{
+                  id: "controls",
+                  title: "Validate the protected remediation",
+                  policy: "operator",
+                  criteria: [{
+                    id: "remediated",
+                    description: "Verify the original remediation criterion.",
+                    source: "finding_recheck",
+                    reference: `pass:${finding.id}`,
+                  }],
+                }],
+              }),
+            );
+            assert(approval);
+          },
+        );
+        const committed = readSentinelAssessment(path);
+        assert(
+          committed && committed.plan.activeFormalGoalIds?.includes("controls"),
+        );
+        state = committed;
+      }
       const ref = {
         kind: "sentinel",
         id: caseId,
@@ -8840,7 +8882,13 @@ for (
           assertEquals(revoked.report.remediation.status, "unknown");
           assertEquals(revoked.report.sourceReceiptId, finding.id);
           assertEquals(
-            JSON.parse(await turn({ ...verdict, receiptId: finding.id }))
+            JSON.parse(
+              await turn({
+                ...verdict,
+                receiptId: finding.id,
+                revision: finding.evidenceRevision,
+              }),
+            )
               .record,
             finding,
           );
@@ -9292,7 +9340,7 @@ for (
           return Promise.resolve({
             usage,
             content: JSON.stringify(
-              goalPolicy
+              goalPolicy && goalPolicy !== "worker"
                 ? {
                   assignments: [],
                   prioritize: [],
@@ -9389,7 +9437,7 @@ for (
         coordinator.stop();
         return plannerResult!;
       };
-      if (goalPolicy) {
+      if (goalPolicy === "automatic" || goalPolicy === "operator") {
         const registered = registerSentinelGoalCompletion(path, [{
           id: "remediated",
           description: "Verify the original remediation criterion.",
@@ -9515,13 +9563,27 @@ for (
       const followupId = followup()?.id;
       assert(followupId);
       let peerRead: string | undefined;
+      let peerCalls = 0;
+      let verdictCalls = 0;
+      let proofCalls = 0;
+      let proofDispatches = 0;
+      let workerProof: string | undefined;
+      let resumedProof: string | undefined;
+      const releaseGoal = Promise.withResolvers<void>();
+      const workerGoalRequestId = crypto.randomUUID();
+      if (goalPolicy === "worker") {
+        ensureSentinelFormalGoalContract(path, state);
+      }
+
       const workerRegistry = createProviderRegistry();
       workerRegistry.register({
         name: "native-repository-verdict-followup",
         supportsStreaming: false,
-        complete(messages) {
+        async complete(messages) {
+          peerCalls++;
           const saved = messages.findLast(({ role }) => role === "tool");
           if (!saved) {
+            verdictCalls++;
             return Promise.resolve({
               usage,
               content: "",
@@ -9539,7 +9601,34 @@ for (
               }],
             });
           }
-          peerRead = String(saved.content);
+          if (goalPolicy === "worker") {
+            if (messages.filter(({ role }) => role === "tool").length === 1) {
+              peerRead = String(saved.content);
+              proofCalls++;
+              return {
+                usage,
+                content: "",
+                toolCalls: [{
+                  type: "function",
+                  id: "prove-protected-remediation-goal",
+                  function: {
+                    name: "sentinel_prove_goal",
+                    arguments: JSON.stringify({
+                      goalId: "controls",
+                      criterionId: "remediated",
+                      source: "finding_recheck",
+                      evidenceId: receipt.id,
+                      requestId: workerGoalRequestId,
+                    }),
+                  },
+                }],
+              };
+            }
+            if (!workerProof) {
+              workerProof = String(saved.content);
+              await releaseGoal.promise;
+            } else resumedProof = String(saved.content);
+          } else peerRead = String(saved.content);
           return Promise.resolve({
             usage,
             content:
@@ -9549,12 +9638,14 @@ for (
         },
       });
       workerRegistry.setDefault("native-repository-verdict-followup");
-      coordinator = createSentinelModelPlanner(
-        path,
-        (current, taskId, lease) =>
-          taskId !== followupId
-            ? { execute: () => Promise.resolve(), clear() {} }
-            : createSentinelSubagent({
+      const startPeer = () =>
+        createSentinelModelPlanner(
+          path,
+          (current, taskId, lease) => {
+            if (taskId !== followupId) {
+              return { execute: () => Promise.resolve(), clear() {} };
+            }
+            const agent = createSentinelSubagent({
               snapshotPath: path,
               sharedInventoryBaseDir: baseDir,
               assessmentRevision: current.revision,
@@ -9578,9 +9669,91 @@ for (
                     duration: 0,
                   }),
               },
-            }),
-        () => () => {},
-      );
+            });
+            if (goalPolicy !== "worker") return agent;
+            return {
+              ...agent,
+              execute(content, send, signal, trace, digests, checkpoint) {
+                return agent.execute(
+                  content,
+                  send,
+                  signal,
+                  (step) => {
+                    if (
+                      step.tool === "sentinel_prove_goal"
+                    ) proofDispatches++;
+                    trace?.(step);
+                  },
+                  digests,
+                  checkpoint,
+                );
+              },
+            };
+          },
+          () => () => {},
+        );
+      coordinator = startPeer();
+      if (goalPolicy === "worker") {
+        const progress = () =>
+          readAdaptiveSentinel(path, state, "revision")?.modelReviewStates
+            .find(({ taskId }) => taskId === followupId)?.progressSteps;
+        try {
+          await waitForCondition(
+            () =>
+              !!workerProof &&
+              !!progress()?.some(({ goalProofRequestId }) =>
+                goalProofRequestId === workerGoalRequestId
+              ),
+            () => coordinator?.advance(state),
+            10_000,
+          );
+          const authorizedProof = JSON.parse(workerProof!);
+          assertEquals(authorizedProof.proof.reference, receipt.id);
+          assertEquals(authorizedProof.status, "awaiting_confirmation");
+          const before = peerCalls;
+          const interrupted = coordinator;
+          interrupted.stop();
+          releaseGoal.resolve();
+          await waitForCondition(
+            () => !interrupted.hasInFlightWork(),
+            () => {},
+          );
+          const savedProgress = progress();
+          availableCredential = false;
+          coordinator = startPeer();
+          const isDenied = () =>
+            !!readAdaptiveSentinel(path, state, "revision")?.history.some(
+              ({ taskId, event }) =>
+                taskId === followupId && event === "model_review_failed",
+            );
+          await waitForCondition(
+            isDenied,
+            () => coordinator?.advance(state),
+            10_000,
+          );
+          assertEquals(peerCalls, before);
+          assertEquals(progress(), savedProgress);
+          availableCredential = true;
+          await waitForCondition(
+            () => !!resumedProof,
+            () => coordinator?.advance(state),
+            20_000,
+          );
+          assertEquals(resumedProof, workerProof);
+          assertEquals(verdictCalls, 1);
+          assertEquals(proofCalls, 1);
+          assertEquals(proofDispatches, 1);
+          assertEquals(fetches, 1);
+          assertEquals(
+            readSentinelGoalCompletionAtRevision(path, state.revision)
+              ?.observations[0]?.evidence[0]?.reference,
+            receipt.id,
+          );
+          return;
+        } finally {
+          releaseGoal.resolve();
+        }
+      }
       await waitForCondition(
         () =>
           !!peerRead && !!readAdaptiveSentinel(path, state, "revision")

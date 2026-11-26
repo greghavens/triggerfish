@@ -6608,6 +6608,7 @@ export function createSentinelModelPlanner(
           taskId,
           targetId,
           requestId,
+          "recovery_candidate",
         );
         return saved &&
           {

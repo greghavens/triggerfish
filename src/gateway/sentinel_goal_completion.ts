@@ -736,20 +736,12 @@ function savedGoalCriteriaVerify(
   );
 }
 
-function recordGoalEvidence(
-  snapshotPath: string,
-  state: State,
-  record: GoalRecord,
+function requireProtectedGoalProofs(
+  path: string,
   observations: readonly Observation[],
-  operatorConfirmed: boolean,
   protectedProofs?: ProtectedGoalProofs,
 ) {
-  for (
-    const receipt of protectedGoalReceipts(
-      snapshotPath,
-      [...record.observations, ...observations],
-    )
-  ) {
+  for (const receipt of protectedGoalReceipts(path, observations)) {
     if (
       protectedProofs?.get(receipt.id) !==
         createHash("sha256").update(JSON.stringify(receipt)).digest("hex")
@@ -759,6 +751,21 @@ function recordGoalEvidence(
       );
     }
   }
+}
+
+function recordGoalEvidence(
+  snapshotPath: string,
+  state: State,
+  record: GoalRecord,
+  observations: readonly Observation[],
+  operatorConfirmed: boolean,
+  protectedProofs?: ProtectedGoalProofs,
+) {
+  requireProtectedGoalProofs(
+    snapshotPath,
+    [...record.observations, ...observations],
+    protectedProofs,
+  );
   const verify = goalEvidenceVerifier(
     snapshotPath,
     state,
@@ -822,6 +829,7 @@ export function readSentinelWorkerGoalProofReceipt(
   assignmentId: string,
   targetId: string,
   requestId: string,
+  protectedProofs?: ProtectedGoalProofs | "recovery_candidate",
 ) {
   const scope = goalScope(snapshotPath, state);
   const path = goalDatabasePath(snapshotPath);
@@ -841,6 +849,19 @@ export function readSentinelWorkerGoalProofReceipt(
       source: proof.source,
       requestId,
     });
+    const grants = protectedProofs === "recovery_candidate"
+      ? new Map(
+        protectedGoalReceipts(snapshotPath, [{
+          criterionId,
+          evidence: [proof],
+        }])
+          .filter((receipt) => receipt.targetId === targetId)
+          .map((receipt) => [
+            receipt.id,
+            createHash("sha256").update(JSON.stringify(receipt)).digest("hex"),
+          ]),
+      )
+      : protectedProofs;
     if (
       !args ||
       saved.binding !==
@@ -853,7 +874,11 @@ export function readSentinelWorkerGoalProofReceipt(
             evidence.detail === proof.detail,
         )
       ) ||
-      !goalEvidenceVerifier(snapshotPath, state, registered)(criterionId, proof)
+      !goalEvidenceVerifier(snapshotPath, state, registered, undefined, grants)(
+        criterionId,
+        proof,
+        { target: targetId },
+      )
     ) return;
     return {
       args,
@@ -885,6 +910,7 @@ export function reportSentinelWorkerGoalProof(
   },
   authorize: () => boolean,
   webContainmentConfigured?: boolean,
+  protectedProofs?: ProtectedGoalProofs,
 ) {
   const current = readSentinelAssessment(snapshotPath);
   if (current?.revision !== input.revision) return;
@@ -924,14 +950,26 @@ export function reportSentinelWorkerGoalProof(
             ? `, result SHA-256 ${input.taskProof.digest}.`
             : "."),
       };
+      const verify = goalEvidenceVerifier(
+        snapshotPath,
+        state,
+        registered,
+        undefined,
+        protectedProofs,
+      );
       if (
-        !goalEvidenceVerifier(snapshotPath, state, registered)(
+        !verify(
           criterionId,
           evidence,
           input.taskProof ?? input.scopedProof,
         )
       ) return false;
       const observations = [{ criterionId, evidence: [evidence] }];
+      requireProtectedGoalProofs(
+        snapshotPath,
+        [...registered.observations, ...observations],
+        protectedProofs,
+      );
       let proof: Evidence | undefined;
       let status: GoalRecord["status"];
       if (input.requestId !== undefined) {
@@ -948,7 +986,7 @@ export function reportSentinelWorkerGoalProof(
           const saved = store.reportEvidenceSubmission(
             registered.scope,
             withoutDuplicateWorkerProofs(registered, observations),
-            goalEvidenceVerifier(snapshotPath, state, registered),
+            verify,
             {
               requestId: args.requestId,
               binding: workerProofRequestBinding(
@@ -972,6 +1010,7 @@ export function reportSentinelWorkerGoalProof(
           registered,
           observations,
           false,
+          protectedProofs,
         );
         proof = saved.observations.find((observation) =>
           observation.criterionId === criterionId
