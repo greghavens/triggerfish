@@ -6017,7 +6017,9 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
     id: string,
     token: string,
     evidenceRevision: number,
-  ): { readonly controlClaimSha256?: string } | undefined {
+  ):
+    | { readonly attempt: number; readonly controlClaimSha256?: string }
+    | undefined {
     if (!validWorkflowResultLease(revision, id, token, evidenceRevision)) {
       return;
     }
@@ -6028,10 +6030,14 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
       !row ||
       !modelClaimControlsCurrent(revision, id, Number(row.attempts), now())
     ) return;
-    const note = modelClaimProof.get(revision, id, Number(row.attempts))?.note;
-    return typeof note === "string"
-      ? { controlClaimSha256: createHash("sha256").update(note).digest("hex") }
-      : {};
+    const attempt = Number(row.attempts);
+    const note = modelClaimProof.get(revision, id, attempt)?.note;
+    return {
+      attempt,
+      ...(typeof note === "string" && {
+        controlClaimSha256: createHash("sha256").update(note).digest("hex"),
+      }),
+    };
   }
 
   function progressForAuthority(
@@ -8554,6 +8560,30 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
           ON CONFLICT(taskId) DO UPDATE SET steps = excluded.steps,
             controlClaimSha256 = excluded.controlClaimSha256
         `).run(id, revision, encoded, authority.controlClaimSha256 ?? null);
+        for (
+          const [offset, { tool, outcome }] of retained.slice(saved.length)
+            .entries()
+        ) {
+          if (outcome !== "returned" && outcome !== "error") continue;
+          const identity = JSON.stringify([
+            revision,
+            id,
+            authority.attempt,
+            authority.controlClaimSha256,
+            saved.length + offset,
+          ]);
+          const receipt = `worker-step:${
+            createHash("sha256").update(identity).digest("hex")
+          }`;
+          event.run(
+            revision,
+            id,
+            "model_tool_response_committed",
+            authority.attempt,
+            now(),
+            JSON.stringify({ tool, outcome, receipt }),
+          );
+        }
         const publicationIndex = retained.findIndex((step) =>
           step.tool === "sentinel_publish_workflow_observation" &&
           step.outcome === "returned" && typeof step.target === "string"
@@ -10888,6 +10918,29 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
         }
       }
       return matched;
+    },
+
+    committedModelToolResponses() {
+      return db.prepare(`
+        SELECT taskId, at, note FROM adaptive_events
+        WHERE event = 'model_tool_response_committed' ORDER BY rowid
+      `).all().flatMap((row) => {
+        if (typeof row.note !== "string") return [];
+        const { tool, outcome, receipt } = JSON.parse(row.note);
+        if (
+          typeof tool !== "string" ||
+          (outcome !== "returned" && outcome !== "error") ||
+          typeof receipt !== "string" ||
+          typeof row.taskId !== "string" || typeof row.at !== "number"
+        ) return [];
+        return [{
+          taskId: row.taskId,
+          recordedAt: row.at,
+          tool,
+          outcome,
+          receipt,
+        }];
+      });
     },
 
     modelReviewNotes(revision?: string) {

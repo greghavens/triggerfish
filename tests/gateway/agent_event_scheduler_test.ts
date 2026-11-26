@@ -1,4 +1,5 @@
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
+import { createSentinelSubagent } from "../../src/gateway/sentinel_agent.ts";
 import { createProviderRegistry } from "../../src/agent/llm.ts";
 import { openExecutionTraces } from "../../src/core/execution_traces.ts";
 import { createChatSession } from "../../src/gateway/chat.ts";
@@ -751,6 +752,165 @@ Deno.test("Reviewed event subscription dispatches committed case metadata only o
     scheduler.start();
     await manage({ action: "agent_event_subscriptions" });
     assertEquals(messages.length, 8);
+
+    scheduler.stop();
+    const liveSubscription = await manage({
+      action: "set_agent_event_subscription",
+      expectedVersion: 0,
+      subscriptionSettings: {
+        id: "live-worker-steps",
+        agent: "review-agent",
+        caseId: fifoCaseId,
+        kinds: ["tool_completed"],
+        tool: "sentinel_assigned_target",
+        merge: "by_case",
+        maxConcurrent: 1,
+        enabled: true,
+      },
+    });
+    assertEquals(JSON.parse(liveSubscription).saved.version, 1);
+    advanceAdaptiveSentinel(fifoPath, newest);
+    const liveQueue = openSentinelAdaptiveStore(
+      join(dirname(fifoPath), "sentinel-adaptive.db"),
+    );
+    const liveRevision = adaptiveRevision(newest);
+    const ready = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const workerRegistry = createProviderRegistry();
+    const steps: Parameters<
+      typeof liveQueue.recordModelReviewProgress
+    >[3][number][] = [];
+    let calls = 0;
+    workerRegistry.register({
+      name: "live-step-fixture",
+      supportsStreaming: false,
+      async complete() {
+        if (++calls <= 3) {
+          return {
+            content: "",
+            usage: { inputTokens: 1, outputTokens: 1 },
+            toolCalls: [{
+              id: `assigned-target-${calls}`,
+              type: "function" as const,
+              function: { name: "sentinel_assigned_target", arguments: "{}" },
+            }],
+          };
+        }
+        ready.resolve();
+        await release.promise;
+        return {
+          content: "Review done.",
+          toolCalls: [],
+          usage: { inputTokens: 1, outputTokens: 1 },
+        };
+      },
+    });
+    workerRegistry.setDefault("live-step-fixture");
+    try {
+      liveQueue.sync(liveRevision, [{
+        kind: "trace",
+        nodeId: "local",
+        depth: 9,
+        reason: MODEL_ASSIGNMENT_REASON,
+      }], liveRevision);
+      advanceAdaptiveSentinel(fifoPath, newest);
+      const claim = liveQueue.claimModelReview(
+        liveRevision,
+        MODEL_ASSIGNMENT_REASON,
+        (task) => task.nodeId === "local",
+      );
+      assert(claim);
+      let checked = 0;
+      const worker = createSentinelSubagent({
+        snapshotPath: fifoPath,
+        assessmentRevision: newest.revision,
+        assignedTaskId: claim.task.id,
+        assignedTaskLeaseToken: claim.token,
+        providerRegistry: workerRegistry,
+        allowModelAccess: true,
+        hookRunner: {
+          evaluateHook(hook, context) {
+            const blocked = hook === "PRE_TOOL_CALL" &&
+              context.input.tool_name === "sentinel_assigned_target" &&
+              ++checked === 1;
+            return Promise.resolve({
+              allowed: !blocked,
+              action: blocked ? "BLOCK" : "ALLOW",
+              ruleId: null,
+              duration: 0,
+            });
+          },
+        },
+      });
+      const execute = worker.execute(
+        "Read the assigned asset.",
+        () => {},
+        undefined,
+        (step) => {
+          steps.push(step);
+          assert(liveQueue.recordModelReviewProgress(
+            liveRevision,
+            claim.task.id,
+            claim.token,
+            steps,
+          ));
+        },
+      );
+      try {
+        await Promise.race([
+          ready.promise,
+          execute.then(() => {
+            throw new Error("Worker ended before it saved a live step");
+          }),
+        ]);
+        assertEquals(checked, 3);
+        assertEquals(steps.map(({ outcome }) => outcome), [
+          "returned",
+          "returned",
+        ]);
+        assert(liveQueue.activeModelReviewTask(
+          liveRevision,
+          claim.task.id,
+          claim.token,
+        ));
+        assertEquals(liveQueue.modelReviewNotes(liveRevision), []);
+        assert(liveQueue.recordModelReviewProgress(
+          liveRevision,
+          claim.task.id,
+          claim.token,
+          steps,
+        ));
+        scheduler.start();
+        await manage({ action: "agent_event_subscriptions" });
+        assertEquals(messages.length, 9);
+        const receipts = receiptsIn(messages[8]);
+        assertEquals(receipts.length, 2);
+        assertEquals(new Set(receipts).size, 2);
+        assert(
+          receipts.every((receipt) =>
+            /^worker-step:[a-f0-9]{64}$/.test(receipt)
+          ),
+        );
+        assertStringIncludes(messages[8], '"tool":"sentinel_assigned_target"');
+        assert(!messages[8].includes('"target":"local"'));
+      } finally {
+        release.resolve();
+        await execute;
+        worker.clear();
+      }
+      assert(
+        liveQueue.finishModelReview(liveRevision, claim.task.id, claim.token, {
+          note: "Review done.",
+          steps,
+        }),
+      );
+      scheduler.stop();
+      scheduler.start();
+      await manage({ action: "agent_event_subscriptions" });
+      assertEquals(messages.length, 9);
+    } finally {
+      liveQueue.close();
+    }
   } finally {
     scheduler.stop();
     socket?.close();

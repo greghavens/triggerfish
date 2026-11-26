@@ -76,7 +76,24 @@ export function sentinelAgentEventSources(
           }
           const store = openSentinelAdaptiveStore(history);
           try {
+            const committed = store.committedModelToolResponses();
+            const modernTasks = new Set(committed.map(({ taskId }) => taskId));
+            for (const { tool, outcome, receipt, recordedAt } of committed) {
+              if (
+                !toolNames.has(tool) ||
+                (outcome === "error" && tool === "sentinel_report_finding")
+              ) continue;
+              publish({
+                kind: "tool_completed",
+                receipt,
+                caseId,
+                tool,
+                ...(outcome === "error" && { outcome: "error" }),
+                recordedAt,
+              });
+            }
             for (const review of store.modelReviewNotes()) {
+              if (modernTasks.has(review.taskId)) continue;
               for (const [index, step] of review.steps.entries()) {
                 if (
                   !toolNames.has(step.tool) ||
