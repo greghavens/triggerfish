@@ -15,7 +15,7 @@ import type { SentinelCoordinatorLookup } from "../sentinel_case_manager.ts";
 import { dirname, join } from "@std/path";
 import { openSentinelAdaptiveStore } from "../../sentinel/adaptive_store.ts";
 import {
-  isSentinelAssessmentRunning,
+  needsSentinelAssessmentCoordinator,
   type readSentinelAssessment,
 } from "../../sentinel/assessment_store.ts";
 import {
@@ -689,7 +689,7 @@ export async function startServicesAndChannels(
         },
       };
     },
-    { isActiveCase: isSentinelAssessmentRunning },
+    { isActiveCase: needsSentinelAssessmentCoordinator },
   );
   caseManagerRef.current = caseManager;
   return {

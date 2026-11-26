@@ -352,6 +352,7 @@ export async function executeOperatorRunArchive(
       );
       if (
         !current || current.active || current.paused ||
+        current.deadlineReviewPending ||
         current.plan.runId !== identity.runId ||
         current.revision !== identity.revision
       ) return unavailable;

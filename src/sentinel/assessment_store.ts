@@ -482,6 +482,7 @@ interface StoredAssessment {
   readonly plan: AssessmentPlan;
   readonly active: boolean;
   readonly paused: boolean;
+  readonly deadlineReviewPending?: true;
   readonly revision: number;
   readonly updatedAt: string;
   readonly result: Result | null;
@@ -572,6 +573,7 @@ function openStore(
 }
 
 export const SENTINEL_ASSESSMENT_TIMED_OUT = 4;
+const assessmentDeadlineReview = 5;
 export const MAX_SENTINEL_RUN_TIMEOUT_SECONDS = 7 * 24 * 60 * 60;
 
 function expireAssessmentRow<
@@ -586,13 +588,13 @@ function expireAssessmentRow<
     typeof deadlineAt !== "number" || !Number.isSafeInteger(deadlineAt) ||
     deadlineAt > now
   ) return row;
+  const active = assessmentDeadlineReview;
   const updatedAt = new Date(deadlineAt).toISOString();
   return db.prepare(`
     UPDATE assessment SET active = ?, updatedAt = ?
     WHERE id = 1 AND active IN (1, 2) AND revision = ? AND plan = ?
-  `).run(SENTINEL_ASSESSMENT_TIMED_OUT, updatedAt, row.revision, row.plan)
-      .changes
-    ? { ...row, active: SENTINEL_ASSESSMENT_TIMED_OUT, updatedAt }
+  `).run(active, updatedAt, row.revision, row.plan).changes
+    ? { ...row, active, updatedAt }
     : undefined;
 }
 
@@ -783,6 +785,8 @@ function readState(db: DatabaseSync, row: AssessmentRow): StoredAssessment {
     ...(row.active === 3 &&
       { completion: readGoalCompletion(db, row.revision) }),
     paused: row.active === 2,
+    ...(row.active === assessmentDeadlineReview &&
+      { deadlineReviewPending: true }),
     revision: row.revision,
     updatedAt: row.updatedAt,
     result: JSON.parse(row.result),
@@ -1304,7 +1308,10 @@ export function startSentinelAssessment(
           if (linkedStart && row) {
             throw new Error("Sentinel case already has a run");
           }
-          if (row?.active === 1 || row?.active === 2) {
+          if (
+            row?.active === 1 || row?.active === 2 ||
+            row?.active === assessmentDeadlineReview
+          ) {
             throw new Error("A Sentinel assessment is already active");
           }
           if (
@@ -1684,7 +1691,10 @@ export function applySentinelFormalGoals(
           "The Sentinel assessment changed after the goal proposal",
         );
       }
-      if (mode === "start" && (row?.active === 1 || row?.active === 2)) {
+      if (
+        mode === "start" && (row?.active === 1 || row?.active === 2 ||
+          row?.active === assessmentDeadlineReview)
+      ) {
         throw new Error("A Sentinel assessment is already active");
       }
       if (
@@ -2348,6 +2358,80 @@ export function readSentinelOperatingConstraintHistory(
   return operatingConstraintRecords(path, runId, limit, throughRevision);
 }
 
+function saveAssessmentGoalCompletion(
+  db: DatabaseSync,
+  row: AssessmentRow,
+  plan: AssessmentPlan,
+  reason: string,
+  at: string,
+): void {
+  db.exec(`CREATE TABLE IF NOT EXISTS assessment_goal_completion (
+    revision INTEGER PRIMARY KEY, goal TEXT, note TEXT NOT NULL, at TEXT NOT NULL
+  )`);
+  db.prepare("INSERT INTO assessment_goal_completion VALUES (?, ?, ?, ?)")
+    .run(row.revision, plan.goal ?? null, reason, at);
+  if (plan.formalGoals) {
+    const activeFormalGoalIds = plan.activeFormalGoalIds ?? [];
+    const closedPlan: AssessmentPlan = {
+      ...plan,
+      activeFormalGoalIds: [],
+      completedFormalGoalIds: [
+        ...new Set([
+          ...(plan.completedFormalGoalIds ?? []),
+          ...activeFormalGoalIds,
+        ]),
+      ],
+    };
+    saveFormalGoalHistory(db, row.revision, closedPlan, activeFormalGoalIds);
+    db.prepare(
+      "UPDATE assessment SET plan = ?, active = 3, updatedAt = ? WHERE id = 1",
+    )
+      .run(JSON.stringify(closedPlan), at);
+  } else {
+    db.prepare(
+      "UPDATE assessment SET active = 3, updatedAt = ? WHERE id = 1",
+    )
+      .run(at);
+  }
+}
+
+/** Apply the cutoff exactly once using a trusted local evidence review. */
+export function settleSentinelAssessmentDeadline(
+  path: string,
+  verifyGoal: (state: StoredAssessment, deadlineAt: number) => boolean,
+): boolean {
+  const db = openStore(path, false);
+  if (!db) return false;
+  try {
+    return transact(db, () => {
+      const row = getRow(db);
+      if (row?.active !== assessmentDeadlineReview) return false;
+      const plan = JSON.parse(row.plan) as AssessmentPlan;
+      const deadlineAt = plan.deadlineAt;
+      const state = readState(db, row);
+      if (
+        deadlineAt !== undefined && state.result &&
+        (!plan.formalGoals || !!plan.activeFormalGoalIds?.length) &&
+        verifyGoal(state, deadlineAt)
+      ) {
+        saveAssessmentGoalCompletion(
+          db,
+          row,
+          plan,
+          "Verified committed automatic goal proof at the assessment deadline.",
+          new Date(deadlineAt).toISOString(),
+        );
+      } else {
+        db.prepare("UPDATE assessment SET active = ? WHERE id = 1")
+          .run(SENTINEL_ASSESSMENT_TIMED_OUT);
+      }
+      return true;
+    });
+  } finally {
+    db.close();
+  }
+}
+
 /** Record an operator judgment against the exact evaluated revision and goal. */
 export function completeSentinelAssessmentGoal(
   path: string,
@@ -2391,34 +2475,13 @@ export function completeSentinelAssessmentGoal(
         ) return false;
       } else if (completedFormalGoalIds?.length) return false;
       if (verifyGoal && !verifyGoal(readState(db, row))) return false;
-      db.exec(`CREATE TABLE IF NOT EXISTS assessment_goal_completion (
-        revision INTEGER PRIMARY KEY, goal TEXT, note TEXT NOT NULL, at TEXT NOT NULL
-      )`);
-      const at = new Date().toISOString();
-      db.prepare("INSERT INTO assessment_goal_completion VALUES (?, ?, ?, ?)")
-        .run(revision, goal, reason, at);
-      if (plan.formalGoals) {
-        const closedPlan: AssessmentPlan = {
-          ...plan,
-          activeFormalGoalIds: [],
-          completedFormalGoalIds: [
-            ...new Set([
-              ...(plan.completedFormalGoalIds ?? []),
-              ...activeFormalGoalIds,
-            ]),
-          ],
-        };
-        saveFormalGoalHistory(db, revision, closedPlan, activeFormalGoalIds);
-        db.prepare(
-          "UPDATE assessment SET plan = ?, active = 3, updatedAt = ? WHERE id = 1",
-        )
-          .run(JSON.stringify(closedPlan), at);
-      } else {
-        db.prepare(
-          "UPDATE assessment SET active = 3, updatedAt = ? WHERE id = 1",
-        )
-          .run(at);
-      }
+      saveAssessmentGoalCompletion(
+        db,
+        row,
+        plan,
+        reason,
+        new Date().toISOString(),
+      );
       return true;
     });
   } finally {
@@ -2713,7 +2776,9 @@ export function readSentinelCaseStatus(path: string) {
     const row = saved && (expireAssessmentRow(db, saved, Date.now()) ?? read());
     if (!row) return undefined;
     return {
-      status: row.active === SENTINEL_ASSESSMENT_TIMED_OUT
+      status: row.active === assessmentDeadlineReview
+        ? "settling_timeout"
+        : row.active === SENTINEL_ASSESSMENT_TIMED_OUT
         ? "timed_out"
         : row.active === 2
         ? "paused"
@@ -2730,8 +2795,9 @@ export function readSentinelCaseStatus(path: string) {
   }
 }
 
-export function isSentinelAssessmentRunning(path: string): boolean {
-  return readSentinelCaseStatus(path)?.status === "running";
+export function needsSentinelAssessmentCoordinator(path: string): boolean {
+  const status = readSentinelCaseStatus(path)?.status;
+  return status === "running" || status === "settling_timeout";
 }
 
 /** Find saved evidence nodes citing an exact published asset snapshot. */

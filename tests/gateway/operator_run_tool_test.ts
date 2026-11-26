@@ -65,6 +65,8 @@ import {
 } from "../../src/gateway/sentinel_adaptive_runtime.ts";
 import { createOperatorRunToolExecutor } from "../../src/gateway/operator_run_tool.ts";
 import { startSentinelAssessmentCoordinator } from "../../src/gateway/sentinel_assessment_service.ts";
+import { registerSentinelGoalCompletion } from "../../src/gateway/sentinel_goal_completion.ts";
+import { GoalCompletionStore } from "../../src/core/goal_completion.ts";
 import { createOperatorWorkflowJournal } from "../../src/gateway/operator_workflow_journal.ts";
 import { createOperatorWorkflowRuns } from "../../src/gateway/operator_workflow_runs.ts";
 import { createGatewayServer } from "../../src/gateway/server/server.ts";
@@ -3270,6 +3272,109 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
         }, reopenedWorkflows);
       } finally {
         coordinator.stop();
+      }
+
+      for (
+        const scenario of ["verified", "operator", "late", "missing"] as const
+      ) {
+        const caseId = `deadline-goal-${scenario}`;
+        const casePath = resolveSentinelCasePath(baseDir, caseId);
+        await Deno.mkdir(dirname(casePath), { recursive: true, mode: 0o700 });
+        await Deno.writeTextFile(
+          casePath,
+          JSON.stringify({
+            ...childGraph,
+            nodes: [
+              ...childGraph.nodes,
+              {
+                id: "proof",
+                kind: "evidence",
+                label: "Committed defensive check",
+              },
+            ],
+          }),
+        );
+        const started = JSON.parse(
+          (await turn({
+            ...sentinelSpawn,
+            targetId: caseId,
+            requestId: crypto.randomUUID(),
+            timeoutSeconds: 30,
+          })).result,
+        ).run;
+        const cutoff = started.details.deadlineAt;
+        const policy = scenario === "operator" ? "operator" : "automatic";
+        const reference = scenario === "missing" ? "missing-proof" : "proof";
+        const registration = registerSentinelGoalCompletion(casePath, [{
+          id: "review",
+          description: "Verify the exact committed defensive record.",
+          source: "graph_evidence",
+          reference,
+        }], policy);
+        const contract = new GoalCompletionStore(
+          join(dirname(casePath), "sentinel-goal-completion.db"),
+          () => scenario === "late" ? cutoff + 1 : cutoff - 1,
+        );
+        try {
+          // Seed the interrupted boundary after the durable decision, before
+          // the assessment lifecycle write. The coordinator re-verifies it.
+          assertEquals(
+            contract.report(registration.scope, [{
+              criterionId: "review",
+              evidence: [{
+                source: "graph_evidence",
+                reference,
+                detail: "Committed defensive check",
+              }],
+            }], () => true).status,
+            policy === "operator" ? "awaiting_confirmation" : "completed",
+          );
+        } finally {
+          contract.close();
+        }
+        assert(
+          refreshSentinelAssessment(casePath, undefined, new Date(cutoff + 1))
+            ?.deadlineReviewPending,
+        );
+
+        await withGateway(async (restartTurn) => {
+          const inspect = { ...started.ref, action: "inspect" };
+          assertEquals(
+            JSON.parse((await restartTurn(inspect)).result).run.status,
+            "settling_timeout",
+          );
+          let dispatched = 0;
+          const coordinator = startSentinelAssessmentCoordinator({
+            snapshotPath: casePath,
+            advanceAdaptive: () => {
+              dispatched++;
+            },
+            createWorker: () => {
+              dispatched++;
+              throw new Error("A settled deadline cannot create a worker");
+            },
+          });
+          try {
+            const settled = JSON.parse((await restartTurn(inspect)).result).run;
+            assertEquals(
+              settled.status,
+              scenario === "verified" ? "completed" : "timed_out",
+            );
+            const state = readSentinelAssessment(casePath);
+            assertEquals(state?.deadlineReviewPending, undefined);
+            assertEquals(
+              state?.completion?.at,
+              scenario === "verified"
+                ? new Date(cutoff).toISOString()
+                : undefined,
+            );
+            const after = JSON.parse((await restartTurn(inspect)).result).run;
+            assertEquals(after, settled);
+            assertEquals(dispatched, 0);
+          } finally {
+            coordinator.stop();
+          }
+        }, reopenedWorkflows);
       }
 
       const cancelRegistry = createWorkflowRunRegistry();

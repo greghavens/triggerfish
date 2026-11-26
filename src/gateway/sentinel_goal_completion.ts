@@ -8,6 +8,7 @@ import { GoalCompletionStore } from "../core/goal_completion.ts";
 import { adaptiveRevision } from "../sentinel/adaptive_planner.ts";
 import { readSentinelCompletedGoalTask } from "../sentinel/adaptive_store.ts";
 import { locateSentinelCase } from "../sentinel/cases.ts";
+import { loadSentinelGraph } from "../sentinel/graph.ts";
 import { verifyWorkerFindingRecheck } from "../sentinel/worker_finding_evidence.ts";
 import {
   hasSentinelWorkerFindingJournal,
@@ -22,6 +23,7 @@ import {
   completeSentinelAssessmentGoal,
   readSentinelAssessment,
   readSentinelAssessmentRevision,
+  settleSentinelAssessmentDeadline,
   withSentinelAssessmentWriteLock,
 } from "../sentinel/assessment_store.ts";
 
@@ -308,6 +310,7 @@ function goalEvidenceVerifier(
   snapshotPath: string,
   state: State,
   record: GoalRecord,
+  deadlineAt?: number,
 ) {
   const rules = new Map(
     record.criteria.map(({ id, requirement }) => [id, requirement]),
@@ -334,9 +337,19 @@ function goalEvidenceVerifier(
     if (!task || task.observation === undefined || task.observation === null) {
       return;
     }
-    const pass = task.kind === "verify_control_coverage" &&
-      typeof task.observation === "object" && "coverage" in task.observation &&
-      task.observation.coverage === "pass";
+    const coverageTask = task.kind === "verify_control_coverage";
+    if (coverageTask && deadlineAt !== undefined) {
+      const snapshot = state.result?.sharedGraph.snapshot;
+      if (
+        !snapshot || !task.nodeId ||
+        loadSentinelGraph(snapshot).controlCoverage(
+            task.nodeId,
+            new Date(deadlineAt).toISOString(),
+          ).status !== "pass"
+      ) return;
+    }
+    const pass = coverageTask && typeof task.observation === "object" &&
+      "coverage" in task.observation && task.observation.coverage === "pass";
     return {
       target: task.nodeId,
       shape: pass && task.nodeId !== undefined
@@ -381,7 +394,9 @@ function goalEvidenceVerifier(
         original.targetId !== recheck.targetId ||
         original.graphFindingId !== recheck.graphFindingId ||
         original.controlId !== recheck.controlId ||
-        original.evidenceRevision > recheck.evidenceRevision
+        original.evidenceRevision > recheck.evidenceRevision ||
+        (deadlineAt !== undefined &&
+          Date.parse(recheck.validUntil) <= deadlineAt)
       ) return false;
       const receipt = verifyWorkerFindingRecheck(
         state.result.sharedGraph.snapshot,
@@ -494,6 +509,16 @@ function normalizedEvidence(observations: readonly Observation[]) {
   });
 }
 
+function savedGoalCriteriaVerify(
+  record: GoalRecord,
+  verify: ReturnType<typeof goalEvidenceVerifier>,
+): boolean {
+  return record.criteria.every(({ id }) =>
+    record.observations.find(({ criterionId }) => criterionId === id)
+      ?.evidence.some((proof) => verify(id, proof))
+  );
+}
+
 function recordGoalEvidence(
   snapshotPath: string,
   state: State,
@@ -503,12 +528,7 @@ function recordGoalEvidence(
 ) {
   const verify = goalEvidenceVerifier(snapshotPath, state, record);
   if (
-    record.status === "completed" &&
-    !record.criteria.every(({ id }) =>
-      record.observations.find(({ criterionId }) => criterionId === id)
-        ?.evidence
-        .some((evidence) => verify(id, evidence))
-    )
+    record.status === "completed" && !savedGoalCriteriaVerify(record, verify)
   ) {
     throw new Error(
       "The recorded Sentinel goal proof is no longer verifiable.",
@@ -797,12 +817,41 @@ export function reportSentinelGoalCompletion(
   };
 }
 
+/** Settle a timed assessment from its already committed automatic decision. */
+function reconcileSentinelDeadlineGoal(snapshotPath: string): boolean {
+  return settleSentinelAssessmentDeadline(
+    snapshotPath,
+    (state, deadlineAt) => {
+      const registered = readContract(
+        snapshotPath,
+        goalScope(snapshotPath, state),
+      );
+      const completedAt = Date.parse(registered?.completedAt ?? "");
+      if (
+        registered?.policy !== "automatic" ||
+        registered.status !== "completed" ||
+        !Number.isFinite(completedAt) || completedAt > deadlineAt
+      ) return false;
+      const verify = goalEvidenceVerifier(
+        snapshotPath,
+        state,
+        registered,
+        deadlineAt,
+      );
+      return savedGoalCriteriaVerify(registered, verify);
+    },
+  );
+}
+
 /** Finish a previously verified automatic decision after an interrupted case write. */
 export function reconcileSentinelAutomaticGoal(
   snapshotPath: string,
   webContainmentConfigured?: boolean,
 ): boolean {
   const state = readSentinelAssessment(snapshotPath);
+  if (state?.deadlineReviewPending) {
+    return reconcileSentinelDeadlineGoal(snapshotPath);
+  }
   if (!state?.active || state.paused || !state.result) return false;
   const record = readSentinelGoalCompletionForState(snapshotPath, state);
   if (record?.policy !== "automatic" || record.status !== "completed") {
