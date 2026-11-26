@@ -2839,6 +2839,56 @@ export function createOperatorRunToolExecutor(options: {
         journal.close();
       }
     }
+    if (action === "list" && args.kind === "owner_chat") {
+      const { limit = 15, cursor } = args;
+      const owner = context?.ownerRecoverySessionId;
+      if (
+        !owner || owner !== context?.authenticatedOwnerSessionId ||
+        !canFlowTo("INTERNAL", context.ceiling ?? "PUBLIC") ||
+        typeof limit !== "number" || !Number.isSafeInteger(limit) ||
+        limit < 1 || limit > 15 ||
+        (cursor !== undefined && typeof cursor !== "string") ||
+        Object.keys(args).some((key) =>
+          !["action", "kind", "limit", "cursor"].includes(key)
+        )
+      ) return unavailable;
+      try {
+        Deno.lstatSync(recoveryPath);
+        Deno.lstatSync(backgroundTracePath);
+        const recovery = new AgentRecoveryStore(recoveryPath);
+        try {
+          const traces = openExecutionTraces(backgroundTracePath);
+          try {
+            const page = traces.listRuns({
+              role: "owner_chat",
+              ceiling: "INTERNAL",
+              ownerSessionId: owner,
+              limit,
+              cursor,
+            });
+            if (!page) return unavailable;
+            const runs = page.runs.flatMap(({ scope }) => {
+              const id = scope.sourceId;
+              if (
+                !id || !digestPattern.test(id) || scope.sessionId !== owner ||
+                scope.runId !== assignmentRecoveryKey(owner, id)
+              ) return [];
+              const state = recovery.inspectStatus(scope.runId);
+              return state ? [{ kind: "owner_chat", id, ...state }] : [];
+            });
+            return safeProjection({ runs, nextCursor: page.nextCursor });
+          } finally {
+            traces.close();
+          }
+        } finally {
+          recovery.close();
+        }
+      } catch (error) {
+        return error instanceof Deno.errors.NotFound && cursor === undefined
+          ? safeProjection({ runs: [], nextCursor: null })
+          : unavailable;
+      }
+    }
     const listingTeam = args.kind === "team_delivery" && action === "list";
     if ((backgroundRole || listingTeam) && action === "list") {
       const { limit = 15, cursor } = args;

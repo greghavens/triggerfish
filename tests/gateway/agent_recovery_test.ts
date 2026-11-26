@@ -920,11 +920,35 @@ Deno.test("gateway resumes a saved credential-backed result and blocks revoked o
       assertEquals(JSON.parse(await turn(socket, pause)), result);
       assertEquals(approvals, count);
     });
+    const listOwnerRecovery = { action: "list", kind: "owner_chat", limit: 1 };
+    let recoveryCursor: string | undefined;
     await withGateway("exact_resume", async (socket) => {
-      const inspected = JSON.parse(
-        await turn(socket, inspectRecovery(exactReadId)),
+      const shown = JSON.parse(
+        await turn(socket, archiveRequest(listOwnerRecovery)),
       );
-      assertEquals(inspected.run.status, "paused");
+      assertEquals(shown.runs, [{
+        kind: "owner_chat",
+        id: exactReadId,
+        committedBatch: 1,
+        status: "paused",
+      }]);
+      assert(shown.nextCursor);
+      recoveryCursor = shown.nextCursor;
+      const next = JSON.parse(
+        await turn(
+          socket,
+          archiveRequest({
+            ...listOwnerRecovery,
+            cursor: recoveryCursor,
+          }),
+        ),
+      );
+      assert(next.runs.length === 1 && next.runs[0].id !== exactReadId);
+      assert(!JSON.stringify(shown).includes(secret));
+      const inspected = JSON.parse(
+        await turn(socket, inspectRecovery(shown.runs[0].id)),
+      );
+      assertEquals(inspected.run, shown.runs[0]);
       assertStringIncludes(await turn(socket, request(exactReadId)), "paused");
       assertEquals(
         await turn(socket, request(exactReadId, true)),
@@ -934,6 +958,30 @@ Deno.test("gateway resumes a saved credential-backed result and blocks revoked o
     });
     assertEquals(exactReads, 1);
     assertEquals(exactModelUses, 2);
+    await withGateway("exact_resume", async (socket) => {
+      assertEquals(
+        JSON.parse(await turn(socket, archiveRequest(listOwnerRecovery))).runs,
+        [],
+      );
+      assertStringIncludes(
+        await turn(
+          socket,
+          archiveRequest({ ...listOwnerRecovery, cursor: recoveryCursor }),
+        ),
+        "unavailable",
+      );
+    }, createSession({ userId: session.userId, channelId: session.channelId }));
+    workflowHookBlocked = "PRE_TOOL_CALL";
+    try {
+      await withGateway("exact_resume", async (socket) => {
+        assertStringIncludes(
+          await turn(socket, archiveRequest(listOwnerRecovery)),
+          "blocked by policy",
+        );
+      });
+    } finally {
+      workflowHookBlocked = undefined;
+    }
     const trace = archiveRequest({
       action: "execution_trace_payload",
       traceRole: "owner_chat",
