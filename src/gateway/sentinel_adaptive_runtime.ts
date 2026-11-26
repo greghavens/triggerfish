@@ -3415,6 +3415,19 @@ export function readSentinelWorkerSideContext(
   if (!/^adaptive:[a-f0-9]{64}$/.test(taskId)) return undefined;
   return withSentinelAssessmentWriteLock(snapshotPath, (state) => {
     if (!state?.active || state.revision !== evidenceRevision) return undefined;
+    const policy = state.plan.runId
+      ? readSentinelOperatingConstraints(snapshotPath, state.plan.runId)
+      : undefined;
+    if (policy?.constraints.deniedKinds.includes("review_evidence")) return;
+    const snapshot = state.result?.sharedGraph.snapshot;
+    if (policy?.constraints.allowedAssetIds !== undefined && !snapshot) return;
+    const graphNodeIds = new Set(snapshot?.nodes.map(({ id }) => id));
+    const allowsEvidenceId = (id: string) =>
+      !graphNodeIds.has(id) || sentinelOperatingConstraintsAllow(
+        policy?.constraints,
+        { kind: "review_evidence", nodeId: id },
+        snapshot,
+      );
     const path = storePath(snapshotPath);
     try {
       Deno.lstatSync(path);
@@ -3452,7 +3465,8 @@ export function readSentinelWorkerSideContext(
           assignedTarget: {
             targetId: step.assignedTarget.targetId,
             linkedNodeIds: step.assignedTarget.linkedNodeIds
-              .filter((id) => id.length <= 256).slice(0, 12),
+              .filter((id) => id.length <= 256 && allowsEvidenceId(id))
+              .slice(0, 12),
           },
         }),
         ...(step.githubWorkflowRead?.evidenceRevision === evidenceRevision && {
@@ -3467,13 +3481,13 @@ export function readSentinelWorkerSideContext(
       }));
       return {
         adaptiveRevision: revision,
+        ...(policy && { constraintsKey: `${policy.version}:${policy.digest}` }),
         taskId,
         kind: task.kind,
         nodeId: task.nodeId,
-        evidenceIds: task.evidenceIds.filter((id) => id.length <= 256).slice(
-          0,
-          12,
-        ),
+        evidenceIds: task.evidenceIds
+          .filter((id) => id.length <= 256 && allowsEvidenceId(id))
+          .slice(0, 12),
         modelReviewStatus: review.status,
         steps,
       };

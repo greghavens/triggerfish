@@ -34,7 +34,10 @@ import {
 import { createChatSession } from "../../src/gateway/chat.ts";
 import { createGatewayServer } from "../../src/gateway/server/server.ts";
 import { createSentinelModelPlanner } from "../../src/gateway/sentinel_adaptive_runtime.ts";
-import { startSentinelAssessment } from "../../src/sentinel/assessment_store.ts";
+import {
+  recordSentinelOperatingConstraints,
+  startSentinelAssessment,
+} from "../../src/sentinel/assessment_store.ts";
 import {
   adaptiveRevision,
   MODEL_ASSIGNMENT_REASON,
@@ -247,13 +250,21 @@ Deno.test("authenticated Sentinel /btw reads only the selected running worker's 
   const base = await Deno.makeTempDir();
   const path = resolveSentinelCasePath(base);
   await Deno.mkdir(dirname(path), { recursive: true, mode: 0o700 });
+  const revokedAsset = "private-neighbor";
+  const scopeTransitionQuestion = "Wait for the worker scope change.";
+  const scopeSideStarted = Promise.withResolvers<void>();
+  const releaseScopeSide = Promise.withResolvers<void>();
   const snapshot = {
     version: 1,
     nodes: [
       { id: "app", kind: "asset", label: "Application" },
       { id: "evidence", kind: "evidence", label: "Evidence" },
+      { id: revokedAsset, kind: "asset", label: "Neighbor" },
     ],
-    edges: [{ from: "evidence", to: "app", relation: "observed_on" }],
+    edges: [
+      { from: "evidence", to: "app", relation: "observed_on" },
+      { from: "app", to: revokedAsset, relation: "depends_on" },
+    ],
   };
   await Deno.writeTextFile(path, JSON.stringify(snapshot));
   const alternate = resolveSentinelCasePath(base, "different-case");
@@ -278,7 +289,15 @@ Deno.test("authenticated Sentinel /btw reads only the selected running worker's 
           signal.addEventListener("abort", () => resolve(), { once: true })
         );
       }
-      return textResult("The approved worker observed the scoped evidence.");
+      if (prompt.includes(scopeTransitionQuestion)) {
+        scopeSideStarted.resolve();
+        await releaseScopeSide.promise;
+      }
+      return textResult(
+        prompt.includes(revokedAsset)
+          ? `The worker observed ${revokedAsset}.`
+          : "The authorized worker observed the scoped evidence.",
+      );
     },
     { path, base },
   );
@@ -298,7 +317,10 @@ Deno.test("authenticated Sentinel /btw reads only the selected running worker's 
         tool: "sentinel_assigned_target",
         target: "app",
         outcome: "returned",
-        assignedTarget: { targetId: "app", linkedNodeIds: ["evidence"] },
+        assignedTarget: {
+          targetId: "app",
+          linkedNodeIds: ["evidence", revokedAsset],
+        },
         resultSnapshot: {
           sha256: "a".repeat(64),
           excerpt: "Private raw draft",
@@ -325,7 +347,7 @@ Deno.test("authenticated Sentinel /btw reads only the selected running worker's 
       [{
         kind: "trace",
         nodeId: "app",
-        evidenceIds: ["evidence"],
+        evidenceIds: ["evidence", revokedAsset],
         reason: MODEL_ASSIGNMENT_REASON,
       }],
       null,
@@ -364,7 +386,10 @@ Deno.test("authenticated Sentinel /btw reads only the selected running worker's 
       "side_answer",
     );
     assertStringIncludes(prompt, "sentinel_assigned_target");
-    assertStringIncludes(prompt, '"linkedNodeIds":["evidence"]');
+    assertStringIncludes(
+      prompt,
+      `"linkedNodeIds":["evidence","${revokedAsset}"]`,
+    );
     assert(!prompt.includes("Private raw draft"));
     assertEquals((await ws.send("/btw", "side_history")).entries, [
       answer.entry,
@@ -414,9 +439,38 @@ Deno.test("authenticated Sentinel /btw reads only the selected running worker's 
       "running",
     );
     assert(!workerSignal.aborted);
+    await ws.send("/sentinel case main", "turn_end");
+    const selection = `/btw --worker ${state.revision} ${task.id}`;
+    const staleSide = ws.next("side_error");
+    ws.socket.send(JSON.stringify({
+      type: "message",
+      content: `${selection} ${scopeTransitionQuestion}`,
+    }));
+    await scopeSideStarted.promise;
+    assert(recordSentinelOperatingConstraints(path, {
+      runId: state.plan.runId!,
+      evidenceRevision: state.revision,
+      expectedVersion: 0,
+      requestId: crypto.randomUUID(),
+      operatorScope: "worker-side-scope-fixture",
+      constraints: { deniedKinds: [], allowedAssetIds: ["app"] },
+    }));
+    releaseScopeSide.resolve();
+    await staleSide;
+    assertEquals((await ws.send(selection, "side_history")).entries, []);
+    const current = await ws.send(
+      `${selection} Read current evidence.`,
+      "side_answer",
+    );
+    assertStringIncludes(prompt, '"linkedNodeIds":["evidence"]');
+    assert(!prompt.includes(revokedAsset));
+    assertEquals((await ws.send(selection, "side_history")).entries, [
+      current.entry,
+    ]);
     releaseWorker.resolve();
     await workerClosed.promise;
   } finally {
+    releaseScopeSide.resolve();
     releaseWorker.resolve();
     planner.stop();
     await ws.close();

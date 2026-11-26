@@ -1278,17 +1278,20 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
           worker.revision,
           worker.taskId,
         );
-        return context && {
+        if (!context) return;
+        const { constraintsKey, ...committedContext } = context;
+        return {
           key: [
             owner,
             "sentinel",
             caseId,
             context.adaptiveRevision,
             worker.taskId,
+            ...(constraintsKey ? [constraintsKey] : []),
           ],
           taint: maxClassification(ownerTaint, "INTERNAL"),
           ceiling: ownerTargetClassification,
-          context,
+          context: committedContext,
         };
       },
       async approveInput(text, taint) {
