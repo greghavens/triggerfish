@@ -2685,7 +2685,8 @@ export function createOperatorRunToolExecutor(options: {
       return unavailable;
     }
     const controllingTeam = args.kind === "team_delivery" &&
-      (action === "pause" || action === "resume" || action === "cancel");
+      (action === "pause" || action === "resume" || action === "cancel" ||
+        action === "steer");
     const teamControl = controllingTeam && typeof args.id === "string"
       ? args.id.toLowerCase().split(":")
       : [];
@@ -6008,7 +6009,10 @@ ${request}`)
       }
       if (backgroundRole && action === "steer") {
         const { requestId, note } = args;
+        const authorize = context?.authorizeOwnerRunCall;
+        const publicRef = publicTeamControlRef ?? ref;
         if (
+          !authorize || !context?.authenticatedOwnerSessionId ||
           Object.keys(args).some((key) =>
             !["action", "kind", "id", "requestId", "note"].includes(key)
           ) || typeof requestId !== "string" ||
@@ -6020,11 +6024,11 @@ ${request}`)
         ) return unavailable;
         const journal = openExecutionTraces(backgroundTracePath);
         try {
-          const maySteer = () => {
-            const run = journal.readRun(backgroundRole, ref.id, "INTERNAL");
-            return run && canReadBackgroundTrace(run);
-          };
-          if (!maySteer()) return unavailable;
+          const initial = journal.readRun(backgroundRole, ref.id, "INTERNAL");
+          if (!initial || !canReadBackgroundTrace(initial)) return unavailable;
+          const exactAdmission = teamControlAdmission(initial);
+          const reviewedAdmission = await exactAdmission?.read();
+          if (teamControlRef && !reviewedAdmission) return unavailable;
           const request = requestId.toLowerCase();
           const prior = journal.steerRun(
             backgroundRole,
@@ -6034,18 +6038,29 @@ ${request}`)
             note,
             false,
           );
-          if (prior) return safeProjection({ run: ref, receipt: prior });
+          if (prior) return safeProjection({ run: publicRef, receipt: prior });
           if ((await controller.inspect(ref))?.status !== "running") {
             return unavailable;
           }
           if (
             !await options.confirm(
               `Steer this exact background assignment?\n${
-                JSON.stringify({ ref, note })
+                JSON.stringify({ ref: publicRef, note })
               }`,
             )
           ) return "Error: The operator declined the run action.";
-          if (!maySteer()) return unavailable;
+          if (
+            (exactAdmission && !isDeepStrictEqual(
+              await exactAdmission.read(),
+              reviewedAdmission,
+            )) || !await authorize(args)
+          ) return unavailable;
+          const current = journal.readRun(backgroundRole, ref.id, "INTERNAL");
+          if (
+            current?.status !== "running" || current.operatorCancelled ||
+            !canReadBackgroundTrace(current) ||
+            !isDeepStrictEqual(current.scope, initial.scope)
+          ) return unavailable;
           const receipt = journal.steerRun(
             backgroundRole,
             ref.id,
@@ -6054,7 +6069,9 @@ ${request}`)
             note,
             true,
           );
-          return receipt ? safeProjection({ run: ref, receipt }) : unavailable;
+          return receipt
+            ? safeProjection({ run: publicRef, receipt })
+            : unavailable;
         } finally {
           journal.close();
         }

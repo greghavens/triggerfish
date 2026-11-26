@@ -47,7 +47,7 @@ Deno.test("Owner gateway steers and stops exact admitted team deliveries", async
   const releaseCancellation = Promise.withResolvers<void>();
   let cancelledDeliveryRunId: string | undefined;
   let cancellationTurns = 0;
-  let revokeCancellationOnReview = false;
+  let revokeControlOnReview = false;
   const note = "Review the segregated local fixture before proceeding.";
   const touched: string[] = [];
   const usage = { inputTokens: 1, outputTokens: 1 };
@@ -247,7 +247,7 @@ Deno.test("Owner gateway steers and stops exact admitted team deliveries", async
           baseDir,
           confirm: () => {
             approvals++;
-            if (revokeCancellationOnReview) rejectControl = true;
+            if (revokeControlOnReview) rejectControl = true;
             return Promise.resolve(true);
           },
         }),
@@ -336,8 +336,8 @@ Deno.test("Owner gateway steers and stops exact admitted team deliveries", async
     serving.push(other);
     const steer = {
       action: "steer",
-      kind: "delegated",
-      id,
+      kind: "team_delivery",
+      id: [team.value.id, member, deliveryId].join(":"),
       requestId: crypto.randomUUID(),
       note,
     };
@@ -358,14 +358,36 @@ Deno.test("Owner gateway steers and stops exact admitted team deliveries", async
     assert(!(await control.turn(JSON.stringify(steer))).includes(note));
     assertEquals(approvals, 0);
     rejectControl = false;
-    const receipt =
-      JSON.parse(await control.turn(JSON.stringify(steer))).receipt;
+    assertStringIncludes(
+      await control.turn(JSON.stringify({
+        ...steer,
+        id: [crypto.randomUUID(), member, deliveryId].join(":"),
+      })),
+      "unavailable",
+    );
+    assertEquals(approvals, 0);
+    revokeControlOnReview = true;
+    try {
+      assertStringIncludes(
+        await control.turn(JSON.stringify(steer)),
+        "unavailable",
+      );
+    } finally {
+      revokeControlOnReview = false;
+      rejectControl = false;
+    }
+    assertEquals(approvals, 1);
+    const acceptedSteering = JSON.parse(
+      await control.turn(JSON.stringify(steer)),
+    );
+    assertEquals(acceptedSteering.run, { kind: steer.kind, id: steer.id });
+    const { receipt } = acceptedSteering;
     assertEquals(receipt.note, note);
     assertEquals(
       JSON.parse(await control.turn(JSON.stringify(steer))).receipt,
       receipt,
     );
-    assertEquals(approvals, 1);
+    assertEquals(approvals, 2);
     release.resolve();
     assertEquals(await delivery, "Team delivery completed.");
     assertEquals(touched, ["todo_read"]);
@@ -378,6 +400,7 @@ Deno.test("Owner gateway steers and stops exact admitted team deliveries", async
         id,
       })),
     );
+    assertEquals(trace.controls.steering.length, 1);
     assertEquals(trace.controls.steering[0].note, note);
     assert(trace.controls.steering[0].appliedAt);
 
@@ -433,18 +456,18 @@ Deno.test("Owner gateway steers and stops exact admitted team deliveries", async
       })),
       "unavailable",
     );
-    assertEquals(approvals, 1);
-    revokeCancellationOnReview = true;
+    assertEquals(approvals, 2);
+    revokeControlOnReview = true;
     try {
       assertStringIncludes(
         await control.turn(JSON.stringify(cancel)),
         "unavailable",
       );
     } finally {
-      revokeCancellationOnReview = false;
+      revokeControlOnReview = false;
       rejectControl = false;
     }
-    assertEquals(approvals, 2);
+    assertEquals(approvals, 3);
     const stopped = JSON.parse(await control.turn(JSON.stringify(cancel))).run;
     assertEquals(stopped.ref, { kind: cancel.kind, id: cancel.id });
     assertEquals(stopped.status, "cancelled");
@@ -452,7 +475,7 @@ Deno.test("Owner gateway steers and stops exact admitted team deliveries", async
       JSON.parse(await control.turn(JSON.stringify(cancel))).run,
       stopped,
     );
-    assertEquals(approvals, 3);
+    assertEquals(approvals, 4);
     releaseCancellation.resolve();
     assertEquals(await delivery, "Run cancelled by operator.");
     assertEquals(touched, ["todo_read", "todo_read"]);
@@ -475,7 +498,12 @@ Deno.test("Owner gateway steers and stops exact admitted team deliveries", async
       JSON.parse(await restarted.turn(JSON.stringify(cancel))).run,
       stopped,
     );
-    assertEquals(approvals, 3);
+    assertEquals(approvals, 4);
+    assertEquals(
+      JSON.parse(await restarted.turn(JSON.stringify(steer))),
+      acceptedSteering,
+    );
+    assertEquals(approvals, 4);
     assertEquals(
       retained.page.steps.map(({ tool }: { tool: string }) => tool),
       ["todo_read"],
