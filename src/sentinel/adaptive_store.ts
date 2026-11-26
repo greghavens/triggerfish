@@ -900,6 +900,26 @@ export interface AdaptiveGraphRetryReceipt extends AdaptiveGraphRetryScope {
   readonly paused: boolean;
 }
 
+export interface AdaptiveOperatorHintSelection {
+  readonly note: string;
+  readonly assetIds?: readonly string[];
+  readonly trafficReference?: SentinelHintTrafficReference;
+}
+
+export interface AdaptiveOperatorHintBatch {
+  readonly requestId: string;
+  readonly runId: string;
+  readonly revision: number;
+  readonly hints: readonly AdaptiveOperatorHintSelection[];
+}
+
+export interface AdaptiveOperatorHintBatchReceipt {
+  readonly requestId: string;
+  readonly runId: string;
+  readonly revision: number;
+  readonly hintIds: readonly number[];
+}
+
 export interface AdaptiveGraphRetryTask {
   readonly id: string;
   readonly kind: "trace" | "impact";
@@ -3295,6 +3315,46 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
         ...hintTraffic(existing),
       };
     }
+  }
+
+  function operatorHintBatchDigest(
+    { runId, revision, hints }: AdaptiveOperatorHintBatch,
+  ) {
+    return createHash("sha256").update(JSON.stringify([runId, revision, hints]))
+      .digest("hex");
+  }
+
+  function readOperatorHintBatch(
+    batch: AdaptiveOperatorHintBatch,
+  ): AdaptiveOperatorHintBatchReceipt | null | undefined {
+    if (
+      !db.prepare(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'adaptive_operator_case_hint_batches'",
+      ).get()
+    ) return;
+    const row = db.prepare(
+      "SELECT digest, hintIds FROM adaptive_operator_case_hint_batches WHERE requestId = ?",
+    ).get(batch.requestId);
+    if (!row) return;
+    if (row.digest !== operatorHintBatchDigest(batch)) return null;
+    const hintIds: unknown = JSON.parse(String(row.hintIds));
+    const { requestId, runId, revision, hints } = batch;
+    if (
+      !Array.isArray(hintIds) || hintIds.length !== hints.length ||
+      !hints.every(({ note, assetIds, trafficReference }, index) => {
+        const hint = readOperatorCaseHint(
+          note,
+          revision,
+          `${requestId}:${index}`,
+          "owner",
+          runId,
+          assetIds,
+          trafficReference,
+        );
+        return !!hint && hint.id === hintIds[index];
+      })
+    ) return null;
+    return { requestId, runId, revision, hintIds };
   }
 
   function appendCaseHint(
@@ -8334,6 +8394,74 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
           ...(anchors && { assetIds: anchors }),
           ...(trafficReference && { trafficReference }),
         };
+      });
+    },
+
+    readOperatorHintBatch,
+
+    /** Append the complete ordered group with one scoped decision in the journal. */
+    recordOperatorHintBatch(batch: AdaptiveOperatorHintBatch) {
+      if (
+        !operatorAssignmentRequestId(batch.requestId) ||
+        !batch.hints.length || batch.hints.length > 8 ||
+        !Number.isSafeInteger(batch.revision) || batch.revision < 1 ||
+        batch.hints.some(({ note, assetIds, trafficReference }) =>
+          typeof note !== "string" || !note.trim() || note.length > 1000 ||
+          note.includes("\0") || redactCredentialText(note) !== note ||
+          (assetIds !== undefined &&
+            !isDeepStrictEqual(
+              assetIds,
+              normalizeSentinelHintAssets(assetIds),
+            )) ||
+          (trafficReference !== undefined &&
+            (assetIds?.length !== 1 ||
+              !isSentinelHintTrafficReference(trafficReference)))
+        )
+      ) return;
+      return transaction(db, () => {
+        const prior = readOperatorHintBatch(batch);
+        if (prior !== undefined) return prior ?? undefined;
+        db.exec(
+          `CREATE TABLE IF NOT EXISTS adaptive_operator_case_hint_batches (
+          requestId TEXT PRIMARY KEY, digest TEXT NOT NULL, hintIds TEXT NOT NULL
+        ) STRICT`,
+        );
+        if (
+          Number(
+            db.prepare(
+              "SELECT COUNT(*) AS count FROM adaptive_operator_case_hint_batches",
+            ).get()?.count,
+          ) >= 4096
+        ) {
+          return;
+        }
+        const at = now();
+        const { requestId, runId, revision } = batch;
+        const hintIds = batch.hints.map(
+          ({ note, assetIds, trafficReference }, index) => {
+            const { lastInsertRowid } = appendCaseHint(
+              note,
+              revision,
+              at,
+              assetIds,
+              trafficReference,
+            );
+            db.prepare(
+              "INSERT INTO adaptive_operator_case_hint_requests VALUES (?, ?, ?, ?)",
+            )
+              .run(`${requestId}:${index}`, "owner", runId, lastInsertRowid);
+            return Number(lastInsertRowid);
+          },
+        );
+        db.prepare(
+          "INSERT INTO adaptive_operator_case_hint_batches VALUES (?, ?, ?)",
+        )
+          .run(
+            requestId,
+            operatorHintBatchDigest(batch),
+            JSON.stringify(hintIds),
+          );
+        return { requestId, runId, revision, hintIds };
       });
     },
 

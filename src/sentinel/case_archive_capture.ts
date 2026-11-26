@@ -139,6 +139,7 @@ const adaptiveTables = new Set([
   "adaptive_operator_assignment_batches",
   "adaptive_graph_retry_requests",
   "adaptive_operator_case_hint_requests",
+  "adaptive_operator_case_hint_batches",
   "adaptive_peer_verifications",
   "adaptive_planner_todos",
   "adaptive_revisions",

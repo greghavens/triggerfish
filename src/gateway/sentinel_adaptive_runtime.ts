@@ -85,6 +85,7 @@ import {
   type AdaptiveGraphAssignmentBatch,
   type AdaptiveGraphRetryScope,
   type AdaptiveIncidentImpactSource,
+  type AdaptiveOperatorHintBatch,
   type AdaptivePeerFindingCitation,
   type AdaptivePeerFindingVerification,
   type AdaptivePriorAssignedTargetCitation,
@@ -1305,6 +1306,52 @@ export function recordOperatorSentinelRunHint(
     });
   }
   return saved?.receipt;
+}
+
+/** Review or commit ordered hints against the same exact active case. */
+export function reviewSentinelOperatorHintBatch(
+  path: string,
+  batch: AdaptiveOperatorHintBatch,
+  approved = false,
+) {
+  const result = withSentinelAssessmentWriteLock(path, (state) => {
+    if (
+      !state?.active || state.plan.runId !== batch.runId ||
+      state.revision !== batch.revision ||
+      batch.hints.some(({ assetIds, trafficReference }) =>
+        (assetIds && !sentinelHintAssetsInScope(path, state, assetIds)) ||
+        (trafficReference && (assetIds?.length !== 1 ||
+          !readSentinelTrafficReceipt(
+            path,
+            batch.revision,
+            trafficReference,
+            assetIds[0],
+          )))
+      )
+    ) return;
+    const store = openSentinelAdaptiveStore(storePath(path));
+    try {
+      const prior = store.readOperatorHintBatch(batch);
+      if (prior !== undefined) {
+        return prior ? { receipt: prior, fresh: false } : undefined;
+      }
+      if (!approved) return { eligible: true } as const;
+      const receipt = store.recordOperatorHintBatch(batch);
+      return receipt && { receipt, fresh: true };
+    } finally {
+      store.close();
+    }
+  });
+  const caseId = locateSentinelCase(path)?.caseId;
+  if (caseId && result && "receipt" in result && result.fresh) {
+    notifyCommittedEvidence({
+      case: caseId,
+      revision: batch.revision,
+      run_id: batch.runId,
+      observation_id: `operator-hint-batch:${batch.requestId}`,
+    });
+  }
+  return result;
 }
 
 /** Reopen an exact recorded asset hint before requesting approval again. */

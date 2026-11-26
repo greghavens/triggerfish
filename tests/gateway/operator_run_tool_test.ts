@@ -100,6 +100,7 @@ import {
 } from "../../src/sentinel/assessment_store.ts";
 import { resolveSentinelCasePath } from "../../src/sentinel/cases.ts";
 import { createWorkflowRunRegistry } from "../../src/workflow/registry.ts";
+import { subscribeCommittedEvidence } from "../../src/core/evidence_task_progression.ts";
 
 const tool = "operator_runs";
 const answer = "The requested operator run check finished.";
@@ -1074,6 +1075,8 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
         trafficHint.trafficReference,
       );
       let plannerHints: unknown;
+      let planClock = 100_000;
+      let caseWidePlannerHints: unknown;
       const trafficPlanner = createSentinelModelPlanner(
         peerPath,
         (_state, taskId) => ({
@@ -1081,8 +1084,9 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
             if (!taskId) {
               assert(typeof message === "string");
               assert(!message.includes(trafficSecret));
-              plannerHints =
-                JSON.parse(message.split("\n").at(-1)!).operatorAssetHints;
+              const input = JSON.parse(message.split("\n").at(-1)!);
+              plannerHints = input.operatorAssetHints;
+              caseWidePlannerHints = input.operatorHints;
             }
             send({
               type: "response",
@@ -1093,6 +1097,8 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
           },
           clear() {},
         }),
+        undefined,
+        () => planClock,
       );
       try {
         trafficPlanner.advance(readSentinelAssessment(peerPath)!);
@@ -1103,6 +1109,99 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
           assetIds: trafficHint.assetIds,
           trafficReference: trafficHint.trafficReference,
         }]);
+        await until(() => !trafficPlanner.hasInFlightWork());
+        planClock += 61_000;
+        const runId = readSentinelAssessment(peerPath)?.plan.runId;
+        assert(runId);
+        const group = {
+          action: "hint_batch",
+          ...peer,
+          runId,
+          requestId: crypto.randomUUID(),
+          hints: [
+            { note: "Use the published review checklist." },
+            {
+              note: "Compare the selected saved transaction.",
+              assetIds: trafficHint.assetIds,
+              trafficReference: trafficHint.trafficReference,
+            },
+          ],
+        };
+        const notifications: string[] = [];
+        const unsubscribe = subscribeCommittedEvidence(peer.id, (event) => {
+          if (event.run_id !== runId || event.revision !== peer.revision) {
+            return;
+          }
+          notifications.push(event.observation_id);
+          trafficPlanner.advance(readSentinelAssessment(peerPath)!);
+        });
+        try {
+          const beforeBatch = confirmations.length;
+          denied = "PRE_TOOL_CALL";
+          await turn(group);
+          denied = undefined;
+          denyTrafficHintSource = true;
+          assertStringIncludes((await turn(group)).result, "unavailable");
+          denyTrafficHintSource = false;
+          assertStringIncludes(
+            (await turn({
+              ...group,
+              hints: [group.hints[0], {
+                note: "Outside the case",
+                assetIds: ["foreign-asset"],
+              }],
+            })).result,
+            "unavailable",
+          );
+          assertEquals(confirmations.length, beforeBatch);
+          approved = false;
+          assertStringIncludes((await turn(group)).result, "operator declined");
+          approved = true;
+          assertEquals(readSentinelCaseHints(peerPath, 10), [
+            trafficHintReceipt,
+          ]);
+          assertEquals(notifications, []);
+          const committed = JSON.parse((await turn(group)).result).receipt;
+          assertEquals(committed.requestId, group.requestId);
+          assertEquals(committed.hintIds.length, 2);
+          const [savedTraffic, savedCaseWide] = readSentinelCaseHints(
+            peerPath,
+            10,
+          );
+          assertEquals([savedCaseWide.id, savedTraffic.id], committed.hintIds);
+          assertEquals(savedCaseWide.text, group.hints[0].note);
+          assertEquals(
+            savedTraffic.trafficReference,
+            trafficHint.trafficReference,
+          );
+          await until(() =>
+            Array.isArray(caseWidePlannerHints) &&
+            caseWidePlannerHints.includes(group.hints[0].note)
+          );
+          assertEquals(
+            (plannerHints as { id: number }[])[0].id,
+            savedTraffic.id,
+          );
+          await withGateway(async (reopenTurn) => {
+            assertEquals(
+              JSON.parse((await reopenTurn(group)).result).receipt,
+              committed,
+            );
+            assertStringIncludes(
+              (await reopenTurn({
+                ...group,
+                hints: [...group.hints].reverse(),
+              })).result,
+              "unavailable",
+            );
+          });
+          assertEquals(confirmations.length, beforeBatch + 2);
+          assertEquals(notifications, [
+            `operator-hint-batch:${group.requestId}`,
+          ]);
+        } finally {
+          unsubscribe();
+        }
       } finally {
         trafficPlanner.stop();
       }

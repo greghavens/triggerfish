@@ -6,6 +6,7 @@ import type {
 import { executeCompletedSentinelGraphFollowup } from "../sentinel/completed_graph_followup.ts";
 import {
   type AdaptiveGraphAssignment,
+  type AdaptiveOperatorHintSelection,
   normalizeSentinelHintAssets,
 } from "../sentinel/adaptive_store.ts";
 import { applyOperatorRunBatch } from "./operator_run_batch_control.ts";
@@ -274,6 +275,7 @@ import {
   readSentinelWorkflowPublicationStep,
   reviewSentinelAssignmentBatch,
   reviewSentinelGraphRetries,
+  reviewSentinelOperatorHintBatch,
   sentinelHintAssetsInScope,
   submitSentinelAssignmentIntent,
   updateSentinelWorkerLimit,
@@ -451,6 +453,7 @@ export const operatorRunTool: ToolDefinition = {
         "pause_runs",
         "resume_runs",
         "assign_batch",
+        "hint_batch",
         "retry_graph_tasks",
         "enroll_goal_workflow",
         "completed_graph_followup",
@@ -864,6 +867,29 @@ export const operatorRunTool: ToolDefinition = {
         "cancelled",
       ],
       description: "Filter the Sentinel task queue by durable execution status",
+    },
+    hints: {
+      type: "array",
+      description:
+        "Up to eight ordered case-wide or asset-scoped Sentinel planner hints for one review.",
+      items: {
+        type: "object",
+        required: ["note"],
+        additionalProperties: false,
+        properties: {
+          note: { type: "string" },
+          assetIds: { type: "array", items: { type: "string" } },
+          trafficReference: {
+            type: "object",
+            required: ["evidenceId", "digest"],
+            additionalProperties: false,
+            properties: {
+              evidenceId: { type: "string" },
+              digest: { type: "string" },
+            },
+          },
+        },
+      },
     },
     assignments: {
       type: "array",
@@ -4571,6 +4597,112 @@ ${
             ? offset + tasks.length
             : null,
         });
+      }
+      if (action === "hint_batch") {
+        const { runId, requestId, hints } = args;
+        if (
+          !context?.authenticatedOwnerSessionId ||
+          !canFlowTo("INTERNAL", context.ceiling ?? "PUBLIC") ||
+          ref.kind !== "sentinel" || ref.revision === undefined ||
+          typeof runId !== "string" || !digestPattern.test(runId) ||
+          typeof requestId !== "string" || !digestPattern.test(requestId) ||
+          !Array.isArray(hints) || !hints.length || hints.length > 8 ||
+          Object.keys(args).some((key) =>
+            !["action", "kind", "id", "revision", "runId", "requestId", "hints"]
+              .includes(key)
+          ) ||
+          !await controller.inspect(ref)
+        ) return unavailable;
+        const path = resolveSentinelCasePath(options.baseDir, ref.id);
+        const revision = ref.revision;
+        const selected: AdaptiveOperatorHintSelection[] = [];
+        for (const hint of hints) {
+          if (!hint || typeof hint !== "object" || Array.isArray(hint)) {
+            return unavailable;
+          }
+          const { note, assetIds: rawAssets, trafficReference } = hint;
+          const assetIds = normalizeSentinelHintAssets(rawAssets);
+          if (
+            typeof note !== "string" || !note.trim() || note.length > 1000 ||
+            note.includes("\0") || redactCredentialText(note) !== note ||
+            (rawAssets !== undefined && !assetIds) ||
+            (trafficReference !== undefined &&
+              (assetIds?.length !== 1 ||
+                !isSentinelHintTrafficReference(trafficReference))) ||
+            Object.keys(hint).some((key) =>
+              !["note", "assetIds", "trafficReference"].includes(key)
+            )
+          ) return unavailable;
+          selected.push({
+            note: note.trim(),
+            ...(assetIds && { assetIds }),
+            ...(trafficReference && {
+              trafficReference: {
+                evidenceId: trafficReference.evidenceId,
+                digest: trafficReference.digest,
+              },
+            }),
+          });
+        }
+        const authorize = async () => {
+          for (const { assetIds, trafficReference } of selected) {
+            if (!trafficReference) continue;
+            if (
+              !readProjectedSentinelTrafficReceipt(
+                path,
+                ref.id,
+                revision,
+                trafficReference,
+                assetIds?.[0],
+              ) ||
+              !await context.authorizeOwnerRunCall?.({
+                action: "traffic_get",
+                kind: "sentinel",
+                id: ref.id,
+                revision,
+                ...trafficReference,
+              }) ||
+              !await context.authorizeSavedResponse(
+                operatorRunTool.name,
+                safeProjection({
+                  caseId: ref.id,
+                  revision,
+                  ...trafficReference,
+                }),
+                "INTERNAL",
+              )
+            ) return false;
+          }
+          return true;
+        };
+        if (!await authorize()) return unavailable;
+        const batch = {
+          requestId: requestId.toLowerCase(),
+          runId: runId.toLowerCase(),
+          revision,
+          hints: selected,
+        };
+        const before = reviewSentinelOperatorHintBatch(path, batch);
+        if (before?.receipt) {
+          return safeProjection({ run: ref, receipt: before.receipt });
+        }
+        if (!before?.eligible) return unavailable;
+        if (
+          !await options.confirm(
+            `Approve these exact Sentinel planner hints?\n${
+              JSON.stringify({ run: ref, ...batch })
+            }`,
+          )
+        ) return "Error: The operator declined the run action.";
+        if (
+          !await context.authorizeOwnerRunCall?.(args) || !await authorize()
+        ) {
+          return unavailable;
+        }
+        const committed = reviewSentinelOperatorHintBatch(path, batch, true);
+        return committed?.receipt
+          ? safeProjection({ run: ref, receipt: committed.receipt })
+          : unavailable;
       }
       if (action === "assign_batch") {
         const { runId, adaptiveRevision, requestId, assignments } = args;
