@@ -364,6 +364,14 @@ export async function readSharedSentinelAssetLinks(
     readonly includeSourceDigests?: boolean;
     readonly retainSourceSnapshots?: boolean;
     readonly sourceCase?: string;
+    readonly selectedFindings?: {
+      readonly includesSource: (caseId: string) => boolean;
+      readonly permits: (
+        caseId: string,
+        assetId: string,
+        finding: Finding,
+      ) => boolean;
+    };
   },
 ) {
   const localAssets = reference?.nodes.filter((node): node is Asset =>
@@ -397,6 +405,7 @@ export async function readSharedSentinelAssetLinks(
   const publications = new Map<string, Snapshot>();
   const globalMappings = new Set<string>();
   const excludedSnapshot = provenance?.excludedSnapshot;
+  const selectedFindings = provenance?.selectedFindings;
   for await (
     const { caseId, sourceAssets, matches, edges, snapshot }
       of resolvedAssetGraphs(
@@ -423,7 +432,9 @@ export async function readSharedSentinelAssetLinks(
       )
   ) {
     if (
-      provenance?.sourceCase !== undefined && caseId !== provenance.sourceCase
+      (provenance?.sourceCase !== undefined &&
+        caseId !== provenance.sourceCase) ||
+      (selectedFindings && !selectedFindings.includesSource(caseId))
     ) continue;
     const anchor = matches
       ? sourceAssets.find(({ id }) => matches.get(id) === asset)?.id
@@ -444,7 +455,11 @@ export async function readSharedSentinelAssetLinks(
       );
       let snapshotDigest: string | undefined;
       for (const finding of snapshot.nodes) {
-        if (finding.kind === "finding" && findingIds.has(finding.id)) {
+        if (
+          finding.kind === "finding" && findingIds.has(finding.id) &&
+          (!selectedFindings ||
+            selectedFindings.permits(caseId, anchor, finding))
+        ) {
           snapshotDigest ??= digestSentinelSnapshot(snapshot);
           if (
             provenance?.retainSourceSnapshots &&
@@ -462,6 +477,7 @@ export async function readSharedSentinelAssetLinks(
         }
       }
     }
+    if (selectedFindings) continue;
     for (const edge of edges) {
       if (edge.from !== anchor && edge.to !== anchor) continue;
       if (
@@ -536,9 +552,11 @@ export async function readSharedSentinelAssetLinks(
   return {
     asset,
     links,
-    unavailable: provenance?.sourceCase === undefined
-      ? unavailable
-      : unavailable.filter((caseId) => caseId === provenance.sourceCase),
+    unavailable: unavailable.filter((caseId) =>
+      (provenance?.sourceCase === undefined ||
+        caseId === provenance.sourceCase) &&
+      (!selectedFindings || selectedFindings.includesSource(caseId))
+    ),
     offset,
     totalLinks: keys.length,
     ...(provenance?.includeSourceDigests && {

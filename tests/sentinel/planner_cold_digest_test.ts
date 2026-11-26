@@ -41,6 +41,7 @@ import {
   readAdaptiveSentinel,
 } from "../../src/gateway/sentinel_adaptive_runtime.ts";
 import {
+  readSentinelAssessment,
   recordSentinelOperatingConstraints,
   refreshSentinelAssessment,
   startSentinelAssessment,
@@ -1843,6 +1844,9 @@ Deno.test("Sentinel plans from an exact published case finding and keeps its evi
     unpublishedDigest,
   );
   let planner: ReturnType<typeof createSentinelModelPlanner> | undefined;
+  let selectedPlanner:
+    | ReturnType<typeof createSentinelModelPlanner>
+    | undefined;
   try {
     for (
       const [file, snapshot] of [
@@ -2184,6 +2188,144 @@ Deno.test("Sentinel plans from an exact published case finding and keeps its evi
     );
     assert(round);
 
+    const selectedCase = "selected-finding-source";
+    const selectedPath = resolveSentinelCasePath(directory, selectedCase);
+    await Deno.mkdir(dirname(selectedPath), { recursive: true, mode: 0o700 });
+    await Deno.writeTextFile(selectedPath, JSON.stringify(graph), {
+      mode: 0o600,
+    });
+    await withArchivedPlannerRead(directory, async (read) => {
+      const linked = JSON.parse(
+        await read({
+          ...ref,
+          action: "spawn",
+          targetKind: "sentinel",
+          targetId: selectedCase,
+          sourceCases: [{ caseId: source, revision: sourceState.revision }],
+          requestId: crypto.randomUUID(),
+        }),
+      );
+      assertEquals(linked.run.ref.id, selectedCase);
+    });
+    const selected = readSentinelAssessment(selectedPath);
+    assert(selected?.plan.runId);
+    const selectedRef = {
+      kind: "sentinel",
+      id: selectedCase,
+      revision: selected.revision,
+    } as const;
+    const selectedReads: string[] = [];
+    const selectedDone = Promise.withResolvers<void>();
+    let readSelectedAgain = false;
+    const selectedProviders = createProviderRegistry();
+    selectedProviders.register({
+      name: "selected-source-model",
+      supportsStreaming: false,
+      complete(messages) {
+        const prior = messages.findLast(({ role }) => role === "tool");
+        if (readSelectedAgain) {
+          if (!prior) {
+            return Promise.resolve(completion("", discovery, find(source)));
+          }
+          selectedReads.push(String(prior.content));
+          return Promise.resolve(completion("[]"));
+        }
+        if (prior) selectedReads.push(String(prior.content));
+        switch (selectedReads.length) {
+          case 0:
+            return Promise.resolve(
+              completion("", discovery, find("other-publication")),
+            );
+          case 1:
+            return Promise.resolve(completion("", discovery, find(source)));
+          case 2:
+            return Promise.resolve(completion("", sourceRead, exact));
+          default:
+            selectedDone.resolve();
+            return Promise.resolve(completion(JSON.stringify({
+              assignments: [{
+                kind: "trace",
+                nodeId: "app",
+                depth: 1,
+                peerFinding: {
+                  localAssetId: "app",
+                  sourceCaseId: source,
+                  sourceAssetId: "app",
+                  sourceFindingId: exact.finding,
+                  snapshotDigest: exact.snapshotDigest,
+                },
+              }],
+              prioritize: [],
+            })));
+        }
+      },
+    });
+    selectedProviders.setDefault("selected-source-model");
+    const createSelectedAgent = () =>
+      createSentinelSubagent({
+        snapshotPath: selectedPath,
+        assessmentRevision: selected.revision,
+        plannerExecutionEvidenceRunId: selected.plan.runId,
+        sharedInventoryBaseDir: directory,
+        allowModelAccess: true,
+        providerRegistry: selectedProviders,
+        hookRunner: allowHooks,
+      });
+    selectedPlanner = createSentinelModelPlanner(
+      selectedPath,
+      createSelectedAgent,
+    );
+    selectedPlanner.advance(selected);
+    const selectedTimeout = setTimeout(
+      () =>
+        selectedDone.reject(
+          new Error("Selected source planner did not finish"),
+        ),
+      3000,
+    );
+    await selectedDone.promise.finally(() => clearTimeout(selectedTimeout));
+    const selectedDeadline = Date.now() + 2500;
+    while (selectedPlanner.hasInFlightWork() && Date.now() < selectedDeadline) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    assert(!selectedPlanner.hasInFlightWork());
+    assertStringIncludes(selectedReads[0], "unavailable");
+    assertEquals(
+      JSON.parse(selectedReads[1]).findings.map(
+        ({ finding }: { finding: { id: string } }) => finding.id,
+      ),
+      [exact.finding],
+    );
+    assertEquals(
+      JSON.parse(selectedReads[2]).finding.workerFindingSource,
+      publication.finding.workerFindingSource,
+    );
+    const selectedHistory = readAdaptiveSentinel(selectedPath, selected);
+    const selectedTask = selectedHistory?.tasks.find(({ plannerRound }) =>
+      plannerRound?.peerFindingCitations?.some(({ sourceFindingId }) =>
+        sourceFindingId === exact.finding
+      )
+    );
+    assert(selectedTask, "The linked source should lead to a cited follow-up");
+    const selectedRound = selectedHistory?.modelPlannerHistory.find((
+      { reads },
+    ) => reads?.some(({ tool }) => tool === sourceRead));
+    assert(selectedRound);
+    const selectedOriginal = JSON.parse(selectedReads[2]);
+    readSelectedAgain = true;
+    const readSelected = async () => {
+      const agent = createSelectedAgent();
+      try {
+        await agent.execute(
+          "Read current approvals for the selected source.",
+          () => {},
+        );
+        return JSON.parse(selectedReads.at(-1)!).findings;
+      } finally {
+        agent.clear();
+      }
+    };
+
     assert(state.plan.runId);
     const changePolicy = (
       expectedVersion: number,
@@ -2225,6 +2367,25 @@ Deno.test("Sentinel plans from an exact published case finding and keeps its evi
     );
     const restoredPolicy = changePolicy(1, []);
 
+    const sourcePolicy = (expectedVersion: number, denied: boolean) =>
+      recordSentinelOperatingConstraints(sourcePath, {
+        runId: sourceRunId,
+        evidenceRevision: sourceState.revision,
+        expectedVersion,
+        requestId: crypto.randomUUID(),
+        operatorScope: "shared-finding-source-fixture",
+        constraints: { deniedKinds: denied ? ["review_evidence"] : [] },
+      });
+    assert(sourcePolicy(0, true));
+    assertEquals(await readSelected(), []);
+    assert(sourcePolicy(1, false));
+    assertEquals(
+      (await readSelected()).map(
+        ({ finding }: { finding: { id: string } }) => finding.id,
+      ),
+      [exact.finding],
+    );
+
     // Withdrawal hides the promoted finding and leaves the operator's base graph intact.
     await withArchivedPlannerRead(directory, async (read) => {
       const withdraw = {
@@ -2242,6 +2403,30 @@ Deno.test("Sentinel plans from an exact published case finding and keeps its evi
       ),
       ["original-finding"],
     );
+    assertEquals(await readSelected(), []);
+    await archiveAndRestoreDigestFixture(
+      directory,
+      selectedPath,
+      selectedRef,
+      selected.plan.runId,
+    );
+    await withArchivedPlannerRead(directory, async (read) => {
+      const ordinal = (selectedRound.reads?.findLastIndex(({ tool }) =>
+        tool === sourceRead
+      ) ?? -1) + 1;
+      assert(ordinal > 0);
+      const reopened = JSON.parse(
+        await read({
+          ...selectedRef,
+          action: "planner_reads",
+          plannerIdentity: selectedRound.identity,
+          attempt: selectedRound.attempt,
+          ordinal,
+          includeResult: true,
+        }),
+      );
+      assertEquals(reopened.result, selectedOriginal);
+    });
     await archiveAndRestoreDigestFixture(
       directory,
       sourcePath,
@@ -2285,6 +2470,7 @@ Deno.test("Sentinel plans from an exact published case finding and keeps its evi
       }
     });
   } finally {
+    selectedPlanner?.stop();
     planner?.stop();
     await Deno.remove(directory, { recursive: true });
   }

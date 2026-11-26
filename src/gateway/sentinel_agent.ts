@@ -1,3 +1,4 @@
+import { permitsLinkedLocalFinding } from "./sentinel_linked_findings.ts";
 import { notifyCommittedEvidence } from "../core/evidence_task_progression.ts";
 import { guardAssignmentExecution } from "../core/durable_assignment.ts";
 import { readSentinelPlannerCoverageResult } from "../sentinel/inventory_queries.ts";
@@ -155,6 +156,7 @@ import {
   readSentinelAssessmentAlerts,
   readSentinelAssessmentRevision,
   readSentinelGitHubWorkflowReadReceipt,
+  readSentinelLinkedSourcesForRevision,
   readSentinelOperatingConstraints,
   recordSentinelWorkerGoalProposal,
   type SentinelGitHubWorkflowReadReceipt,
@@ -2020,6 +2022,13 @@ function markSharedAssetFindings(
   }
 }
 
+function linkedFindingSources(options: SentinelAgentOptions) {
+  const { snapshotPath, assessmentRevision } = options;
+  return assessmentRevision === undefined
+    ? undefined
+    : readSentinelLinkedSourcesForRevision(snapshotPath, assessmentRevision);
+}
+
 async function validateSavedSharedAssetLinks(
   options: SentinelAgentOptions,
   turn: ActiveTurn,
@@ -2032,6 +2041,14 @@ async function validateSavedSharedAssetLinks(
   const page = parseSharedAssetLinkPage(result, revision, args);
   const baseDir = options.sharedInventoryBaseDir;
   if (!page || !baseDir) return false;
+  const selected = args.includeFindings && linkedFindingSources(options);
+  if (
+    selected && (!readAssignedModelReview(options)?.nodeId ||
+      readAssignedModelReview(options)?.nodeId !== args.asset ||
+      page.findings?.some(({ caseId, assetId, finding }) =>
+        !permitsLinkedLocalFinding(baseDir, selected, caseId, assetId, finding)
+      ))
+  ) return false;
   const local = (await turn.readGraph()).snapshot();
   if (
     !local.nodes.some((node) => node.id === args.asset && node.kind === "asset")
@@ -4448,6 +4465,26 @@ function createAgent(
           ) {
             return "Error: The Sentinel finding assignment is no longer active.";
           }
+          const selected = linkedFindingSources(options);
+          if (selected) {
+            const original = sourceGraph.nodes.find((node) =>
+              node.kind === "finding" && node.id === finding
+            );
+            if (
+              original?.kind !== "finding" ||
+              (turn.requiresLiveAssignment &&
+                readAssignedModelReview(options)?.nodeId !== asset) ||
+              !permitsLinkedLocalFinding(
+                options.sharedInventoryBaseDir,
+                selected,
+                sourceCase,
+                sourceAsset,
+                original,
+              )
+            ) {
+              return "Error: The selected finding source is no longer authorized.";
+            }
+          }
           return projectSentinelSharedFindingSource(
             sourceGraph,
             options.assessmentRevision,
@@ -4503,6 +4540,7 @@ function createAgent(
         }
       }
       if (name === sharedAssetTool.name && options.sharedInventoryBaseDir) {
+        const baseDir = options.sharedInventoryBaseDir;
         const request = sentinelSharedAssetLinksArgs(args);
         if (
           !request ||
@@ -4521,6 +4559,16 @@ function createAgent(
           return "Error: The local asset is unavailable to this planner.";
         }
         try {
+          const selected = includeFindings && linkedFindingSources(options);
+          if (
+            selected &&
+            ((sourceCase &&
+              !selected.some((source) => source.caseId === sourceCase)) ||
+              (turn.requiresLiveAssignment &&
+                readAssignedModelReview(options)?.nodeId !== asset))
+          ) {
+            return "Error: The selected finding source is unavailable to this assignment.";
+          }
           const local = (await turn.readGraph()).snapshot();
           if (
             !local.nodes.some(({ id, kind }) =>
@@ -4531,7 +4579,7 @@ function createAgent(
           }
           const { unavailable, mappingSources, ...result } =
             await readSharedSentinelAssetLinks(
-              options.sharedInventoryBaseDir,
+              baseDir,
               asset,
               offset,
               limit,
@@ -4542,6 +4590,20 @@ function createAgent(
                 includeSourceDigests: true,
                 retainSourceSnapshots: options.assessmentRevision !== undefined,
                 sourceCase,
+                ...(selected && {
+                  selectedFindings: {
+                    includesSource: (caseId) =>
+                      selected.some((source) => source.caseId === caseId),
+                    permits: (caseId, assetId, finding) =>
+                      permitsLinkedLocalFinding(
+                        baseDir,
+                        selected,
+                        caseId,
+                        assetId,
+                        finding,
+                      ),
+                  },
+                }),
                 excludedSnapshot: options.assessmentRevision === undefined
                   ? undefined
                   : options.snapshotPath,
@@ -4550,6 +4612,21 @@ function createAgent(
           turn.signal.throwIfAborted();
           if (canReadPlannerCase && !currentPlannerReceiptScope(turn, asset)) {
             return "Error: The local asset is unavailable to this planner.";
+          }
+          if (
+            selected && ((turn.requiresLiveAssignment &&
+              readAssignedModelReview(options)?.nodeId !== asset) ||
+              result.findings?.some(({ caseId, assetId, finding }) =>
+                !permitsLinkedLocalFinding(
+                  baseDir,
+                  selected,
+                  caseId,
+                  assetId,
+                  finding,
+                )
+              ))
+          ) {
+            return "Error: The selected finding source is no longer authorized.";
           }
           const projection = {
             ...result,

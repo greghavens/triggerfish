@@ -84,6 +84,10 @@ and leased workers can reuse approved asset, alias, and relationship
 discoveries from those revisions when they still match the local asset
 and the source approval is current. Parent links and source selections
 carry no authority to read another case's full graph.
+When a child asks for published findings, the selection also bounds
+operator-published findings backed by local control evidence. The exact
+source report and current policy must still permit the finding. Withdrawal
+hides it from fresh reads while saved citations remain inspectable.
 Sentinel workers use an allowlist of read-only evidence tools. This registry
 excludes HTTP clients, shells, target connections, and credential tools.
 Background workers read their assigned case and evidence revision. Shared

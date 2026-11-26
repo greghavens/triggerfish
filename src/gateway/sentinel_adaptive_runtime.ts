@@ -1,3 +1,4 @@
+import { permitsLinkedLocalFinding } from "./sentinel_linked_findings.ts";
 import { reopenSentinelAssignedInventory } from "./sentinel_inventory_tool.ts";
 import { createEvidencePlanningGate } from "../core/evidence_task_progression.ts";
 import { reopenSentinelLinkedTrafficPayload } from "./sentinel_finding_traffic_tool.ts";
@@ -5941,9 +5942,21 @@ export function createSentinelModelPlanner(
                 ).map(({ id }) => id),
               );
               const shown = new Set(existing.map(({ id }) => id));
-              const invalidDirective = response?.priorities?.some((id) =>
-                !eligible.has(id)
-              ) ||
+              const selected = state.plan.linkedCaseSources;
+              const sourceBase = selected &&
+                locateSentinelCase(snapshotPath)?.baseDir;
+              const revokedSource = selected && [...peerFindings.values()].some(
+                (cited) =>
+                  !sourceBase || !permitsLinkedLocalFinding(
+                    sourceBase,
+                    selected,
+                    cited.sourceCaseId,
+                    cited.sourceAssetId,
+                    cited.sourceFindingId,
+                  ),
+              );
+              const invalidDirective = revokedSource ||
+                response?.priorities?.some((id) => !eligible.has(id)) ||
                 response?.retirements?.some(({ id }) =>
                   !eligible.has(id) || response.priorities?.includes(id)
                 ) ||

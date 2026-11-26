@@ -1,0 +1,116 @@
+/** Authorize live reuse of an explicitly published local finding in a linked case. */
+import { isDeepStrictEqual } from "node:util";
+import {
+  readSentinelAssessmentRevision,
+  readSentinelOperatingConstraintsForRevision,
+  readSentinelRunIdForRevision,
+} from "../sentinel/assessment_store.ts";
+import { resolveSentinelCasePath } from "../sentinel/cases.ts";
+import { sentinelFindingTrafficEvidenceVersion } from "../sentinel/finding_traffic_links.ts";
+import type { GraphNode } from "../sentinel/graph.ts";
+import type { SentinelLinkedCaseSource } from "../sentinel/linked_case_sources.ts";
+import { sentinelOperatingConstraintsAllow } from "../sentinel/operating_constraints.ts";
+import { verifyWorkerFindingRecheck } from "../sentinel/worker_finding_evidence.ts";
+import { readSentinelWorkerFindingPublications } from "../sentinel/worker_finding_publications.ts";
+import {
+  hasSentinelWorkerFindingJournal,
+  openSentinelWorkerFindingStore,
+} from "../sentinel/worker_finding_store.ts";
+
+export function permitsLinkedLocalFinding(
+  baseDir: string,
+  sources: readonly SentinelLinkedCaseSource[],
+  caseId: string,
+  assetId: string,
+  finding: string | Extract<GraphNode, { kind: "finding" }>,
+) {
+  const id = typeof finding === "string" ? finding : finding.id;
+  if (!sources.some((binding) => binding.caseId === caseId)) return false;
+  const path = resolveSentinelCasePath(baseDir, caseId);
+  try {
+    const publication = readSentinelWorkerFindingPublications(path, caseId)
+      .find((entry) => entry.finding.id === id);
+    if (
+      !publication || publication.withdrawal ||
+      publication.targetId !== assetId ||
+      (typeof finding !== "string" &&
+        !isDeepStrictEqual(publication.finding, finding))
+    ) {
+      return false;
+    }
+    const origin = publication.finding.workerFindingSource;
+    if (
+      !origin || !sources.some((binding) =>
+        binding.caseId === origin.caseId && binding.runId === origin.runId &&
+        binding.revision === origin.revision
+      ) ||
+      readSentinelRunIdForRevision(path, origin.revision) !== origin.runId ||
+      !hasSentinelWorkerFindingJournal(path)
+    ) {
+      return false;
+    }
+
+    const snapshot = readSentinelAssessmentRevision(path, origin.revision)
+      ?.result.sharedGraph.snapshot;
+    const evidence = snapshot?.nodes.find(({ id }) =>
+      id === origin.evidenceId
+    );
+    const policy = readSentinelOperatingConstraintsForRevision(
+      path,
+      origin.revision,
+    );
+    if (
+      !snapshot || evidence?.kind !== "evidence" || evidence.executionSource ||
+      evidence.nativeWorkflowSource || !sentinelOperatingConstraintsAllow(
+        policy?.constraints,
+        { kind: "review_evidence", nodeId: assetId },
+        snapshot,
+      )
+    ) return false;
+    const journal = openSentinelWorkerFindingStore(path);
+    try {
+      const report = journal.readFindingReport(
+        origin.receiptId,
+        origin.revision,
+      );
+      const receipt = report?.finding;
+      if (
+        !receipt || report.version !== origin.reportVersion ||
+        receipt.caseId !== caseId || receipt.runId !== origin.runId ||
+        receipt.evidenceRevision !== origin.revision ||
+        receipt.targetId !== assetId ||
+        receipt.taskId !== origin.taskId ||
+        receipt.evidenceId !== origin.evidenceId ||
+        receipt.snapshotDigest !== origin.snapshotDigest ||
+        sentinelFindingTrafficEvidenceVersion(
+            path,
+            origin.revision,
+            origin.receiptId,
+          ).digest !==
+          publication.evidenceVersion
+      ) return false;
+      const checked = verifyWorkerFindingRecheck(
+        snapshot,
+        {
+          caseId,
+          evidenceRevision: origin.revision,
+          evaluatedAt: new Date().toISOString(),
+        },
+        {
+          findingId: receipt.graphFindingId,
+          assetId,
+          controlId: receipt.controlId,
+          evidenceId: receipt.evidenceId,
+        },
+      );
+      return checked?.outcome === "fail" &&
+        checked.snapshotDigest === origin.snapshotDigest &&
+        checked.observedAt === receipt.observedAt &&
+        checked.validUntil === receipt.validUntil;
+    } finally {
+      journal.close();
+    }
+  } catch {
+    return false;
+  }
+}
