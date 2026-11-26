@@ -81,6 +81,7 @@ import {
   validateSentinelPlanSuggestions,
 } from "../sentinel/adaptive_planner.ts";
 import {
+  type AdaptiveGraphAssignmentBatch,
   type AdaptiveGraphRetryScope,
   type AdaptiveIncidentImpactSource,
   type AdaptivePeerFindingCitation,
@@ -1825,6 +1826,93 @@ export function submitSentinelAssignmentIntent(
     advanceAdaptiveSentinel(snapshotPath, committed.state);
   }
   return committed?.receipt;
+}
+
+export function reviewSentinelAssignmentBatch(
+  path: string,
+  batch: AdaptiveGraphAssignmentBatch,
+  approved = false,
+) {
+  const outcome = withSentinelAssessmentWriteLock(path, (state) => {
+    if (
+      !state?.active || state.revision !== batch.evidenceRevision ||
+      state.plan.runId !== batch.runId || !batch.assignments.length ||
+      batch.assignments.length > 8
+    ) return;
+    const store = openSentinelAdaptiveStore(storePath(path));
+    try {
+      const revision = revisionForStore(state, store);
+      if (revision !== batch.adaptiveRevision) return;
+      const prior = store.readOperatorAssignmentBatch(batch.requestId);
+      if (prior) {
+        const { receipts: _receipts, ...stored } = prior;
+        return isDeepStrictEqual(stored, batch)
+          ? { receipt: prior }
+          : undefined;
+      }
+      if (
+        store.peerFindingVerifications(revision).length ||
+        store.activeRevision() !== revision
+      ) return;
+      const assets = new Set(
+        state.result?.sharedGraph.snapshot?.nodes
+          .filter(({ kind }) => kind === "asset").map(({ id }) => id),
+      );
+      const queue = new Map(
+        store.list(revision).map((task) => [task.id, task]),
+      );
+      const eligible = decisionAllowsClaim(path, state.revision);
+      const inputs = batch.assignments.map((selection, index) => {
+        if (
+          !assets.has(selection.nodeId) ||
+          (selection.kind !== "trace" && selection.kind !== "impact")
+        ) {
+          throw new SentinelAssignmentError("Select exact local graph assets.");
+        }
+        const task = validatedOperatorTask(
+          path,
+          state,
+          selection.kind,
+          selection.nodeId,
+        );
+        const current = queue.get(sentinelAdaptiveTaskId(revision, task));
+        const token = createHash("sha256").update(JSON.stringify([
+          "sentinel-reviewed-assignment-batch",
+          batch.requestId,
+          index,
+        ])).digest("hex").slice(0, 32);
+        return {
+          requestId: token.replace(
+            /^(........)(....)(....)(....)(............)$/,
+            "$1-$2-$3-$4-$5",
+          ),
+          runId: batch.runId,
+          evidenceRevision: batch.evidenceRevision,
+          adaptiveRevision: revision,
+          task,
+          reason: OPERATOR_ASSIGNMENT_REASON,
+          prioritize: selection.prioritizeNext,
+          priorityRank: selection.priorityRank,
+          takeOverQueued: current?.status === "queued" &&
+            (selection.priorityRank !== undefined || !eligible(current)),
+        };
+      });
+      if (
+        new Set(
+          inputs.map(({ task }) => sentinelAdaptiveTaskId(revision, task)),
+        ).size !== inputs.length
+      ) return;
+      if (!approved) return { eligible: true };
+      const receipt = store.recordOperatorAssignmentBatch(batch, inputs);
+      return receipt && { receipt, state };
+    } finally {
+      store.close();
+    }
+  });
+  if (outcome && "state" in outcome && outcome.state) {
+    advanceAdaptiveSentinel(path, outcome.state);
+  }
+  return outcome;
 }
 
 export function requestSentinelWorkerControl(

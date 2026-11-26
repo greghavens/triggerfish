@@ -4,7 +4,10 @@ import type {
   OperatorRunCategoryChange,
 } from "../core/operator_run_categories.ts";
 import { executeCompletedSentinelGraphFollowup } from "../sentinel/completed_graph_followup.ts";
-import { normalizeSentinelHintAssets } from "../sentinel/adaptive_store.ts";
+import {
+  type AdaptiveGraphAssignment,
+  normalizeSentinelHintAssets,
+} from "../sentinel/adaptive_store.ts";
 import { applyOperatorRunBatch } from "./operator_run_batch_control.ts";
 import {
   isSentinelModelRole,
@@ -269,6 +272,7 @@ import {
   readSentinelOperatorAssetHint,
   readSentinelTaskQueue,
   readSentinelWorkflowPublicationStep,
+  reviewSentinelAssignmentBatch,
   reviewSentinelGraphRetries,
   sentinelHintAssetsInScope,
   submitSentinelAssignmentIntent,
@@ -439,6 +443,7 @@ export const operatorRunTool: ToolDefinition = {
         "withdraw_inventory_host",
         "pause_runs",
         "resume_runs",
+        "assign_batch",
         "retry_graph_tasks",
         "enroll_goal_workflow",
         "completed_graph_followup",
@@ -823,6 +828,22 @@ export const operatorRunTool: ToolDefinition = {
         "cancelled",
       ],
       description: "Filter the Sentinel task queue by durable execution status",
+    },
+    assignments: {
+      type: "array",
+      description:
+        "Up to eight exact local graph tasks for an atomic approved Sentinel assignment.",
+      items: {
+        type: "object",
+        required: ["taskKind", "node"],
+        additionalProperties: false,
+        properties: {
+          taskKind: { type: "string", enum: ["trace", "impact"] },
+          node: { type: "string" },
+          prioritizeNext: { type: "boolean" },
+          priorityRank: { type: "integer" },
+        },
+      },
     },
     priorityRank: {
       type: "integer",
@@ -4506,6 +4527,87 @@ ${
             ? offset + tasks.length
             : null,
         });
+      }
+      if (action === "assign_batch") {
+        const { runId, adaptiveRevision, requestId, assignments } = args;
+        if (
+          ref.kind !== "sentinel" || ref.revision === undefined ||
+          !context?.authenticatedOwnerSessionId ||
+          !canFlowTo("INTERNAL", context.ceiling ?? "PUBLIC") ||
+          typeof runId !== "string" || !digestPattern.test(runId) ||
+          typeof adaptiveRevision !== "string" ||
+          !/^[a-f0-9]{64}$/.test(adaptiveRevision) ||
+          typeof requestId !== "string" || !digestPattern.test(requestId) ||
+          !Array.isArray(assignments) || !assignments.length ||
+          assignments.length > 8 ||
+          Object.keys(args).some((key) =>
+            ![
+              "action",
+              "kind",
+              "id",
+              "revision",
+              "runId",
+              "adaptiveRevision",
+              "requestId",
+              "assignments",
+            ].includes(key)
+          ) || !await controller.inspect(ref)
+        ) return unavailable;
+        const selected: AdaptiveGraphAssignment[] = [];
+        for (const item of assignments) {
+          if (!item || typeof item !== "object" || Array.isArray(item)) {
+            return unavailable;
+          }
+          const { taskKind, node, prioritizeNext, priorityRank } = item;
+          if (
+            (taskKind !== "trace" && taskKind !== "impact") ||
+            typeof node !== "string" || !node.trim() || node.length > 100 ||
+            node.includes("\0") ||
+            (prioritizeNext !== undefined &&
+              typeof prioritizeNext !== "boolean") ||
+            (priorityRank !== undefined &&
+              (typeof priorityRank !== "number" ||
+                !Number.isSafeInteger(priorityRank) ||
+                priorityRank < 0 || priorityRank > 10 ||
+                prioritizeNext === true)) ||
+            Object.keys(item).some((key) =>
+              !["taskKind", "node", "prioritizeNext", "priorityRank"].includes(
+                key,
+              )
+            )
+          ) return unavailable;
+          selected.push({
+            kind: taskKind,
+            nodeId: node,
+            ...(prioritizeNext === true && { prioritizeNext: true }),
+            ...(typeof priorityRank === "number" &&
+              { priorityRank: priorityRank || 5 }),
+          });
+        }
+        const path = resolveSentinelCasePath(options.baseDir, ref.id);
+        const batch = {
+          requestId: requestId.toLowerCase(),
+          runId: runId.toLowerCase(),
+          evidenceRevision: ref.revision,
+          adaptiveRevision,
+          assignments: selected,
+        };
+        const before = reviewSentinelAssignmentBatch(path, batch);
+        if (before?.receipt) {
+          return safeProjection({ run: ref, receipt: before.receipt });
+        }
+        if (!before?.eligible) return unavailable;
+        if (
+          !await options.confirm(
+            `Approve these exact Sentinel graph assignments?\n${
+              JSON.stringify({ run: ref, ...batch })
+            }`,
+          )
+        ) return "Error: The operator declined the run action.";
+        const committed = reviewSentinelAssignmentBatch(path, batch, true);
+        return committed?.receipt
+          ? safeProjection({ run: ref, receipt: committed.receipt })
+          : unavailable;
       }
       if (action === "assign") {
         const {

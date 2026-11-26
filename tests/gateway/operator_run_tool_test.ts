@@ -4543,6 +4543,145 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
         completedPriority.close();
       }
 
+      const atomicCase = "atomic-assignment-case";
+      const atomicPath = resolveSentinelCasePath(baseDir, atomicCase);
+      await Deno.mkdir(dirname(atomicPath), { recursive: true });
+      await Deno.writeTextFile(atomicPath, JSON.stringify(childGraph));
+      const atomicState = startSentinelAssessment(atomicPath, {
+        goal: "Review local assets.",
+      });
+      const atomicRevision = adaptiveRevision(atomicState);
+      const atomicRef = {
+        kind: "sentinel",
+        id: atomicCase,
+        revision: atomicState.revision,
+      };
+      const atomicStorePath = join(dirname(atomicPath), "sentinel-adaptive.db");
+      const atomicStore = openSentinelAdaptiveStore(atomicStorePath);
+      const priorTask = {
+        kind: "impact" as const,
+        nodeId: "other-child-asset",
+        depth: 2,
+      };
+      const priorTaskId = sentinelAdaptiveTaskId(atomicRevision, priorTask);
+      try {
+        atomicStore.sync(atomicRevision, [priorTask], undefined, {
+          number: atomicState.revision,
+          goal: { id: atomicState.plan.runId!, label: atomicState.plan.goal! },
+        });
+        const priorClaim = atomicStore.claim(atomicRevision);
+        assert(priorClaim);
+        atomicStore.complete({
+          taskId: priorClaim.task.id,
+          leaseToken: priorClaim.leaseToken,
+          observation: { relatedNodeIds: ["other-child-asset"] },
+        });
+      } finally {
+        atomicStore.close();
+      }
+      assertEquals(
+        JSON.parse((await turn({ action: "pause", ...atomicRef })).result).run
+          .status,
+        "paused",
+      );
+      const atomicControl = {
+        action: "assign_batch",
+        ...atomicRef,
+        runId: atomicState.plan.runId,
+        adaptiveRevision: atomicRevision,
+        requestId: crypto.randomUUID(),
+        assignments: [
+          { taskKind: "trace", node: "child-asset" },
+          {
+            taskKind: "impact",
+            node: "other-child-asset",
+            prioritizeNext: true,
+          },
+        ],
+      };
+      const atomicTasks = () => {
+        const store = openSentinelAdaptiveStore(atomicStorePath);
+        try {
+          return store.list(atomicRevision);
+        } finally {
+          store.close();
+        }
+      };
+      const atomicBefore = confirmations.length;
+      denied = "PRE_TOOL_CALL";
+      await turn(atomicControl);
+      denied = undefined;
+      assertEquals(confirmations.length, atomicBefore);
+      assertStringIncludes(
+        (await turn({
+          ...atomicControl,
+          assignments: [atomicControl.assignments[0], {
+            taskKind: "trace",
+            node: "foreign-asset",
+          }],
+        })).result,
+        "unavailable",
+      );
+      assertEquals(confirmations.length, atomicBefore);
+      approved = false;
+      assertStringIncludes(
+        (await turn(atomicControl)).result,
+        "operator declined",
+      );
+      approved = true;
+      assertEquals(atomicTasks().map(({ id }) => id), [priorTaskId]);
+
+      // The journal rejects the second member's priority change on a completed task.
+      // The first write and its receipt must roll back with it.
+      assertStringIncludes((await turn(atomicControl)).result, "unavailable");
+      assertEquals(atomicTasks().map(({ id }) => id), [priorTaskId]);
+      const validAtomic = {
+        ...atomicControl,
+        assignments: [
+          atomicControl.assignments[0],
+          { taskKind: "trace", node: "other-child-asset", priorityRank: 9 },
+        ],
+      };
+      const batchAssignmentReceipt =
+        JSON.parse((await turn(validAtomic)).result).receipt;
+      assertEquals(batchAssignmentReceipt.receipts.length, 2);
+      assertEquals(
+        batchAssignmentReceipt.receipts.map((
+          { disposition }: { disposition: string },
+        ) => disposition),
+        [
+          "enqueued",
+          "enqueued",
+        ],
+      );
+      assertEquals(atomicTasks().length, 3);
+      const afterBatchReview = confirmations.length;
+      await withGateway(async (batchTurn) => {
+        assertEquals(
+          JSON.parse((await batchTurn(validAtomic)).result).receipt,
+          batchAssignmentReceipt,
+        );
+        assertStringIncludes(
+          (await batchTurn({
+            ...validAtomic,
+            assignments: [...validAtomic.assignments].reverse(),
+          })).result,
+          "unavailable",
+        );
+        assertEquals(confirmations.length, afterBatchReview);
+        assertEquals(
+          JSON.parse(
+            (await batchTurn({ action: "resume", ...atomicRef })).result,
+          ).run.status,
+          "running",
+        );
+        assertEquals(atomicTasks().map(({ status }) => status), [
+          "completed",
+          "completed",
+          "completed",
+        ]);
+      }, restarted);
+
       const batchCase = "reviewed-batch-case";
       const batchPath = resolveSentinelCasePath(baseDir, batchCase);
       await Deno.mkdir(dirname(batchPath), { recursive: true });

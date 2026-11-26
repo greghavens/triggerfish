@@ -2973,6 +2973,26 @@ export interface AdaptiveOperatorAssignmentIntentReceipt {
   readonly recordedAt: string;
 }
 
+export interface AdaptiveGraphAssignment {
+  readonly kind: "trace" | "impact";
+  readonly nodeId: string;
+  readonly prioritizeNext?: true;
+  readonly priorityRank?: number;
+}
+
+export interface AdaptiveGraphAssignmentBatch {
+  readonly requestId: string;
+  readonly runId: string;
+  readonly evidenceRevision: number;
+  readonly adaptiveRevision: string;
+  readonly assignments: readonly AdaptiveGraphAssignment[];
+}
+
+export interface AdaptiveGraphAssignmentBatchReceipt
+  extends AdaptiveGraphAssignmentBatch {
+  readonly receipts: readonly AdaptiveOperatorAssignmentIntentReceipt[];
+}
+
 function operatorAssignmentRequestId(value: unknown): string | undefined {
   return typeof value === "string" &&
       /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(value)
@@ -4131,6 +4151,154 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
       at: new Date(time).toISOString(),
       ...(retained.length && { steps: retained }),
     };
+  }
+
+  function writeOperatorAssignmentIntent(
+    input: AdaptiveOperatorAssignmentIntentInput,
+    evidenceMapping: (
+      revision: number,
+    ) => { revision: string; goal: AdaptiveEvidenceRevision["goal"] } | null,
+  ): AdaptiveOperatorAssignmentIntentReceipt | undefined {
+    const requestId = operatorAssignmentRequestId(input.requestId);
+    const rank = input.priorityRank;
+    if (
+      rank !== undefined &&
+      (!Number.isSafeInteger(rank) || rank < 1 || rank > 10 ||
+        input.prioritize)
+    ) return;
+    if (
+      !requestId || !Number.isSafeInteger(input.evidenceRevision) ||
+      input.evidenceRevision < 1
+    ) return undefined;
+    const adaptiveRevision = revisionKey(input.adaptiveRevision);
+    const runId = boundedText(input.runId, "operator assignment run", 128);
+    const reason = boundedText(input.reason, "assignment reason", 300);
+    const task = normalizeTask(adaptiveRevision, { ...input.task, reason });
+    const prior = readOperatorAssignmentIntent(requestId);
+    if (prior) {
+      return prior.runId === runId &&
+          prior.evidenceRevision === input.evidenceRevision &&
+          prior.adaptiveRevision === adaptiveRevision &&
+          prior.taskId === task.id &&
+          prior.prioritizeNext === input.prioritize &&
+          prior.priorityRank === rank
+        ? prior
+        : undefined;
+    }
+    const mapping = evidenceMapping(input.evidenceRevision);
+    if (
+      activeRevision() !== adaptiveRevision ||
+      mapping?.revision !== adaptiveRevision || mapping.goal.id !== runId
+    ) {
+      return undefined;
+    }
+    const existing = lookup.get(task.id);
+    if (existing && existing.revision !== adaptiveRevision) {
+      return undefined;
+    }
+
+    if ((input.prioritize || rank !== undefined) && existing) {
+      const queued = decodeTask(existing);
+      if (
+        queued.status !== "queued" || queued.plannerRound ||
+        queued.retirementReason || queued.dependencyRecommendation
+      ) return undefined;
+    }
+    const time = now();
+    let disposition: AdaptiveOperatorAssignmentIntentReceipt["disposition"] =
+      "existing";
+    if (input.takeOverQueued) {
+      if (
+        existing?.status !== "queued" ||
+        !adoptQueuedAssignment(adaptiveRevision, task.id, reason, time)
+      ) return undefined;
+      if (existing.reason !== reason) disposition = "adopted";
+    } else if (!existing) {
+      const count = db.prepare(
+        "SELECT COUNT(*) AS count FROM adaptive_tasks WHERE revision = ?",
+      ).get(adaptiveRevision)?.count;
+      if (Number(count) >= MAX_ADAPTIVE_TASKS) return undefined;
+      if (
+        !enqueue(adaptiveRevision, task, time, {
+          number: input.evidenceRevision,
+          goal: mapping.goal,
+        })
+      ) return undefined;
+      insertNote(
+        adaptiveRevision,
+        task.id,
+        "Operator assigned this investigation.",
+        [],
+        time,
+      );
+      disposition = "enqueued";
+    }
+    if (input.prioritize) {
+      event.run(
+        adaptiveRevision,
+        task.id,
+        "prioritized",
+        Number(existing?.attempts ?? 0),
+        time,
+        "Operator approved the next eligible investigation.",
+      );
+    }
+
+    if (rank !== undefined) {
+      db.prepare(
+        "UPDATE adaptive_tasks SET operatorPriority = ? WHERE id = ?",
+      )
+        .run(rank, task.id);
+    }
+    const receipt: AdaptiveOperatorAssignmentIntentReceipt = {
+      requestId,
+      runId,
+      evidenceRevision: input.evidenceRevision,
+      adaptiveRevision,
+      taskId: task.id,
+      kind: task.kind,
+      ...(task.nodeId !== undefined && { nodeId: task.nodeId }),
+      ...(task.depth !== undefined && { depth: task.depth }),
+      ...(task.plannerRound?.graphRelationship && {
+        graphRelationship: task.plannerRound.graphRelationship,
+      }),
+      ...(task.plannerRound?.recheckFindingId &&
+        { recheckFindingId: task.plannerRound.recheckFindingId }),
+      ...(task.plannerRound?.passingRecheckForFindingId && {
+        passingRecheckForFindingId:
+          task.plannerRound.passingRecheckForFindingId,
+      }),
+      ...(input.prioritize && { prioritizeNext: true as const }),
+      ...(rank !== undefined && { priorityRank: rank }),
+      disposition,
+      recordedAt: new Date(time).toISOString(),
+    };
+    db.exec(
+      `CREATE TABLE IF NOT EXISTS adaptive_operator_assignment_intents (
+        requestId TEXT PRIMARY KEY,
+        receipt TEXT NOT NULL
+      ) STRICT`,
+    );
+    db.prepare(
+      "INSERT INTO adaptive_operator_assignment_intents VALUES (?, ?)",
+    )
+      .run(requestId, JSON.stringify(receipt));
+    return receipt;
+  }
+
+  function readOperatorAssignmentBatch(
+    requestId: string,
+  ): AdaptiveGraphAssignmentBatchReceipt | undefined {
+    if (
+      !db.prepare(
+        "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'adaptive_operator_assignment_batches'",
+      ).get()
+    ) return;
+    const row = db.prepare(
+      "SELECT receipt FROM adaptive_operator_assignment_batches WHERE requestId = ?",
+    ).get(requestId);
+    return row &&
+      JSON.parse(String(row.receipt)) as AdaptiveGraphAssignmentBatchReceipt;
   }
 
   function adoptQueuedAssignment(
@@ -6802,133 +6970,77 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
     recordOperatorAssignmentIntent(
       input: AdaptiveOperatorAssignmentIntentInput,
     ): AdaptiveOperatorAssignmentIntentReceipt | undefined {
-      const requestId = operatorAssignmentRequestId(input.requestId);
-      const rank = input.priorityRank;
+      return transaction(
+        db,
+        () =>
+          writeOperatorAssignmentIntent(
+            input,
+            (revision) => this.forEvidence(revision),
+          ),
+      );
+    },
+
+    readOperatorAssignmentBatch,
+
+    recordOperatorAssignmentBatch(
+      batch: AdaptiveGraphAssignmentBatch,
+      inputs: readonly AdaptiveOperatorAssignmentIntentInput[],
+    ): AdaptiveGraphAssignmentBatchReceipt | undefined {
       if (
-        rank !== undefined &&
-        (!Number.isSafeInteger(rank) || rank < 1 || rank > 10 ||
-          input.prioritize)
+        !operatorAssignmentRequestId(batch.requestId) || !inputs.length ||
+        inputs.length > 8 || inputs.length !== batch.assignments.length ||
+        inputs.some((input, index) => {
+          const selection = batch.assignments[index];
+          return input.runId !== batch.runId ||
+            input.evidenceRevision !== batch.evidenceRevision ||
+            input.adaptiveRevision !== batch.adaptiveRevision ||
+            (selection.kind !== "trace" && selection.kind !== "impact") ||
+            input.task.kind !== selection.kind ||
+            input.task.nodeId !== selection.nodeId ||
+            input.prioritize !== selection.prioritizeNext ||
+            input.priorityRank !== selection.priorityRank;
+        }) ||
+        new Set(
+            inputs.map(({ task }) =>
+              sentinelAdaptiveTaskId(batch.adaptiveRevision, task)
+            ),
+          ).size !== inputs.length
       ) return;
-      if (
-        !requestId || !Number.isSafeInteger(input.evidenceRevision) ||
-        input.evidenceRevision < 1
-      ) return undefined;
-      const adaptiveRevision = revisionKey(input.adaptiveRevision);
-      const runId = boundedText(input.runId, "operator assignment run", 128);
-      const reason = boundedText(input.reason, "assignment reason", 300);
-      const task = normalizeTask(adaptiveRevision, { ...input.task, reason });
-      return transaction(db, () => {
-        const prior = readOperatorAssignmentIntent(requestId);
-        if (prior) {
-          return prior.runId === runId &&
-              prior.evidenceRevision === input.evidenceRevision &&
-              prior.adaptiveRevision === adaptiveRevision &&
-              prior.taskId === task.id &&
-              prior.prioritizeNext === input.prioritize &&
-              prior.priorityRank === rank
-            ? prior
-            : undefined;
-        }
-        const mapping = this.forEvidence(input.evidenceRevision);
-        if (
-          activeRevision() !== adaptiveRevision ||
-          mapping?.revision !== adaptiveRevision || mapping.goal.id !== runId
-        ) {
-          return undefined;
-        }
-        const existing = lookup.get(task.id);
-        if (existing && existing.revision !== adaptiveRevision) {
-          return undefined;
-        }
-
-        if ((input.prioritize || rank !== undefined) && existing) {
-          const queued = decodeTask(existing);
-          if (
-            queued.status !== "queued" || queued.plannerRound ||
-            queued.retirementReason || queued.dependencyRecommendation
-          ) return undefined;
-        }
-        const time = now();
-        let disposition:
-          AdaptiveOperatorAssignmentIntentReceipt["disposition"] = "existing";
-        if (input.takeOverQueued) {
-          if (
-            existing?.status !== "queued" ||
-            !adoptQueuedAssignment(adaptiveRevision, task.id, reason, time)
-          ) return undefined;
-          if (existing.reason !== reason) disposition = "adopted";
-        } else if (!existing) {
-          const count = db.prepare(
-            "SELECT COUNT(*) AS count FROM adaptive_tasks WHERE revision = ?",
-          ).get(adaptiveRevision)?.count;
-          if (Number(count) >= MAX_ADAPTIVE_TASKS) return undefined;
-          if (
-            !enqueue(adaptiveRevision, task, time, {
-              number: input.evidenceRevision,
-              goal: mapping.goal,
-            })
-          ) return undefined;
-          insertNote(
-            adaptiveRevision,
-            task.id,
-            "Operator assigned this investigation.",
-            [],
-            time,
+      const denied = Symbol("Ineligible Sentinel graph assignment");
+      try {
+        return transaction(db, () => {
+          if (readOperatorAssignmentBatch(batch.requestId)) throw denied;
+          db.exec(
+            `CREATE TABLE IF NOT EXISTS adaptive_operator_assignment_batches (
+            requestId TEXT PRIMARY KEY, receipt TEXT NOT NULL
+          ) STRICT`,
           );
-          disposition = "enqueued";
-        }
-        if (input.prioritize) {
-          event.run(
-            adaptiveRevision,
-            task.id,
-            "prioritized",
-            Number(existing?.attempts ?? 0),
-            time,
-            "Operator approved the next eligible investigation.",
-          );
-        }
-
-        if (rank !== undefined) {
+          if (
+            Number(
+              db.prepare(
+                "SELECT COUNT(*) AS count FROM adaptive_operator_assignment_batches",
+              ).get()?.count,
+            ) >= 4096
+          ) return;
+          const receipts = inputs.map((input) => {
+            const receipt = writeOperatorAssignmentIntent(
+              input,
+              (revision) => this.forEvidence(revision),
+            );
+            if (!receipt) throw denied;
+            return receipt;
+          });
+          const saved = { ...batch, receipts };
           db.prepare(
-            "UPDATE adaptive_tasks SET operatorPriority = ? WHERE id = ?",
+            "INSERT INTO adaptive_operator_assignment_batches VALUES (?, ?)",
           )
-            .run(rank, task.id);
-        }
-        const receipt: AdaptiveOperatorAssignmentIntentReceipt = {
-          requestId,
-          runId,
-          evidenceRevision: input.evidenceRevision,
-          adaptiveRevision,
-          taskId: task.id,
-          kind: task.kind,
-          ...(task.nodeId !== undefined && { nodeId: task.nodeId }),
-          ...(task.depth !== undefined && { depth: task.depth }),
-          ...(task.plannerRound?.graphRelationship && {
-            graphRelationship: task.plannerRound.graphRelationship,
-          }),
-          ...(task.plannerRound?.recheckFindingId &&
-            { recheckFindingId: task.plannerRound.recheckFindingId }),
-          ...(task.plannerRound?.passingRecheckForFindingId && {
-            passingRecheckForFindingId:
-              task.plannerRound.passingRecheckForFindingId,
-          }),
-          ...(input.prioritize && { prioritizeNext: true as const }),
-          ...(rank !== undefined && { priorityRank: rank }),
-          disposition,
-          recordedAt: new Date(time).toISOString(),
-        };
-        db.exec(
-          `CREATE TABLE IF NOT EXISTS adaptive_operator_assignment_intents (
-          requestId TEXT PRIMARY KEY,
-          receipt TEXT NOT NULL
-        ) STRICT`,
-        );
-        db.prepare(
-          "INSERT INTO adaptive_operator_assignment_intents VALUES (?, ?)",
-        )
-          .run(requestId, JSON.stringify(receipt));
-        return receipt;
-      });
+            .run(batch.requestId, JSON.stringify(saved));
+          return saved;
+        });
+      } catch (error) {
+        if (error === denied) return;
+        throw error;
+      }
     },
 
     assignQueuedTask(revision: string, id: string, reason: string): boolean {
