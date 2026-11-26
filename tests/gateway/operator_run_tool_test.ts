@@ -3047,6 +3047,12 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
           id: "child-asset",
           kind: "asset",
           label: "Child fixture asset",
+          organization: { id: "logging", label: "Logging team" },
+        }, {
+          id: "other-child-asset",
+          kind: "asset",
+          label: "Other asset",
+          organization: { id: "other", label: "Other team" },
         }],
         edges: [],
       };
@@ -3074,6 +3080,7 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
         childGoal,
         childDescription,
         goalProposal,
+        organizationId: "logging",
         seedTask,
         targetKind: "sentinel",
         targetId: childCase,
@@ -3085,6 +3092,8 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
           { ...spawn, childGoal },
           { ...spawn, childDescription },
           { ...spawn, goalProposal },
+          { ...spawn, organizationId: "logging" },
+          { ...sentinelSpawn, organizationId: "missing" },
           { ...spawn, seedTask },
           { ...sentinelSpawn, childDescription: " " },
           { ...sentinelSpawn, childDescription: "Review\nLogging" },
@@ -3114,6 +3123,14 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
         (await turn({
           ...sentinelSpawn,
           seedTask: { ...seedTask, nodeId: "asset-outside-child-case" },
+        })).result,
+        "unavailable",
+      );
+      assertEquals(readSentinelAssessment(childPath), undefined);
+      assertStringIncludes(
+        (await turn({
+          ...sentinelSpawn,
+          seedTask: { ...seedTask, nodeId: "other-child-asset" },
         })).result,
         "unavailable",
       );
@@ -3193,17 +3210,28 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
       assertEquals(childApproval.childGoal, childGoal);
       assertEquals(childApproval.childDescription, childDescription);
       assertEquals(childApproval.goalApproval.goals, goalProposal.goals);
+      assertEquals(childApproval.membership.selector, {
+        kind: "organization",
+        organizationId: "logging",
+      });
+      assertEquals(childApproval.membership.assetIds, ["child-asset"]);
       assertEquals(childApproval.seedTask, seedTask);
       const childState = readSentinelAssessment(childPath);
       assert(childState);
       assertEquals(childState.plan.goal, childGoal);
       assertEquals(childState.plan.childDescription, childDescription);
       assertEquals(childState.plan.formalGoals, goalProposal.goals);
+      const initialPolicy = readSentinelOperatingConstraints(
+        childPath,
+        childState.plan.runId,
+      );
       assertEquals(
-        readSentinelOperatingConstraints(childPath, childState.plan.runId)
-          ?.constraints.deniedKinds,
+        initialPolicy?.constraints.deniedKinds,
         goalProposal.initialConstraints.deniedKinds,
       );
+      assertEquals(initialPolicy?.constraints.allowedAssetIds, ["child-asset"]);
+      assertEquals(initialPolicy?.membership, childApproval.membership);
+      assertEquals(initialPolicy?.version, 1);
       assert(readSentinelAssessment(path)?.plan.goal !== childGoal);
       const readSeed = () =>
         readAdaptiveSentinel(childPath, childState)?.tasks.filter(
@@ -3218,6 +3246,7 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
       let plannerObjective: string | undefined;
       let initialInvestigations: unknown;
       let initialGoalCompletion: unknown;
+      let initialPlannerRestrictions: unknown;
       const childPlanner = createSentinelModelPlanner(
         childPath,
         (_state, taskId) => ({
@@ -3228,6 +3257,8 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
               plannerObjective = initialPlan.goal;
               initialInvestigations = initialPlan.currentInvestigations;
               initialGoalCompletion = initialPlan.goalCompletion;
+              initialPlannerRestrictions = initialPlan.operatingConstraints
+                ?.restrictions;
             }
             send({
               type: "response",
@@ -3245,6 +3276,7 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
         childPlanner.advance(childState);
         await until(() => plannerObjective !== undefined);
         assertEquals(plannerObjective, childGoal);
+        assertEquals(initialPlannerRestrictions, initialPolicy?.constraints);
         assert(
           JSON.stringify(initialGoalCompletion).includes(
             childCriterion.reference,
@@ -3276,6 +3308,8 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
             { ...sentinelSpawn, childDescription: undefined },
             { ...sentinelSpawn, childDescription: childDescription + "." },
             { ...sentinelSpawn, goalProposal: undefined },
+            { ...sentinelSpawn, organizationId: undefined },
+            { ...sentinelSpawn, organizationId: "other" },
             {
               ...sentinelSpawn,
               goalProposal: {
@@ -3297,6 +3331,10 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
         assertEquals(confirmations.length, lastApproval);
         advanceAdaptiveSentinel(childPath, childState);
         assertEquals(readSeed(), [committedSeed]);
+        assertEquals(
+          readSentinelOperatingConstraints(childPath, childState.plan.runId),
+          initialPolicy,
+        );
         assertStringIncludes(
           (await reopenTurn({
             ...sentinelSpawn,
@@ -3354,6 +3392,7 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
       const deadlineSpawn = {
         ...sentinelSpawn,
         goalProposal: undefined,
+        organizationId: undefined,
         targetId: deadlineCase,
         requestId: crypto.randomUUID(),
         timeoutSeconds: 2,
@@ -3484,6 +3523,7 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
           (await turn({
             ...sentinelSpawn,
             goalProposal: undefined,
+            organizationId: undefined,
             targetId: caseId,
             requestId: crypto.randomUUID(),
             timeoutSeconds: 30,

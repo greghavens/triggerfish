@@ -68,6 +68,7 @@ import {
   validateSentinelOperatingConstraintAssets,
 } from "./operating_constraints.ts";
 import {
+  resolveSentinelCaseMembership,
   type SentinelCaseMembershipProof,
   verifySentinelCaseMembership,
 } from "./case_membership.ts";
@@ -1151,55 +1152,33 @@ export function readSentinelNotificationReceipt(
   }
 }
 
-function refresh(
-  db: DatabaseSync,
-  row: AssessmentRow,
-  snapshotPath: string,
-  webContainmentConfigured?: boolean,
-  evaluatedAt = new Date().toISOString(),
-  forceEvidenceRevision = false,
-  expectedGraphDigest?: string,
-  expectedSeed?: SentinelLinkedSeedTask,
-): StoredAssessment {
-  if (row.active !== 1) return readState(db, row);
-  const { graph, topology, traffic, native, dns, alertData, fingerprint } =
-    readAssessmentInputs(snapshotPath, webContainmentConfigured, evaluatedAt);
-  if (
-    expectedGraphDigest !== undefined &&
-    (graph === undefined ||
-      createHash("sha256").update(graph).digest("hex") !== expectedGraphDigest)
-  ) {
-    throw new Error("Published Sentinel graph changed during approval");
-  }
-  if (!forceEvidenceRevision && fingerprint === row.fingerprint) {
-    return readState(db, row);
-  }
-
+function parseAssessmentAlerts(alertData: string | undefined) {
   const alerts: unknown = alertData === undefined
     ? undefined
     : JSON.parse(alertData);
   if (alerts !== undefined && !Array.isArray(alerts)) {
     throw new Error("Published Sentinel alerts must be a JSON array");
   }
-  const plan: AssessmentPlan = JSON.parse(row.plan);
+  return alerts;
+}
+
+function evaluateSentinelAssessment(
+  { graph, topology, traffic, native, dns }: ReturnType<
+    typeof readAssessmentInputs
+  >,
+  plan: AssessmentPlan,
+  previous: Result | null,
+  alerts: readonly unknown[] | undefined,
+  webContainmentConfigured: boolean | undefined,
+  evaluatedAt: string,
+) {
   const publishedInventory = graph === undefined
     ? undefined
     : JSON.parse(graph);
-  if (
-    expectedSeed &&
-    (!Array.isArray(publishedInventory?.nodes) ||
-      !publishedInventory.nodes.some((node: { id?: unknown; kind?: unknown }) =>
-        node?.id === expectedSeed.nodeId && node.kind === "asset"
-      ))
-  ) {
-    throw new Error(
-      "The linked seed target must be an asset in the approved graph",
-    );
-  }
   const inventory = graph === undefined || topology === undefined
     ? publishedInventory
     : applySharedSentinelTopology(publishedInventory, JSON.parse(topology));
-  const assessment = runSentinelAssessment({
+  return runSentinelAssessment({
     ...plan,
     snapshot: traffic === undefined && native === undefined && dns === undefined
       ? inventory
@@ -1215,8 +1194,91 @@ function refresh(
     alerts,
     webContainmentConfigured,
     controlEvaluationAt: evaluatedAt,
-    previous: JSON.parse(row.result),
+    previous,
   });
+}
+
+/** Preview the exact first-revision membership without creating assessment state. */
+export function previewSentinelLinkedOrganization(
+  path: string,
+  caseId: string,
+  organizationId: string,
+  webContainmentConfigured?: boolean,
+): SentinelCaseMembershipProof | undefined {
+  const evaluatedAt = new Date().toISOString();
+  const inputs = readAssessmentInputs(
+    path,
+    webContainmentConfigured,
+    evaluatedAt,
+  );
+  if (inputs.graph === undefined) return;
+  const assessment = evaluateSentinelAssessment(
+    inputs,
+    {},
+    null,
+    parseAssessmentAlerts(inputs.alertData),
+    webContainmentConfigured,
+    evaluatedAt,
+  );
+  return resolveSentinelCaseMembership(assessment.sharedGraph.snapshot, {
+    caseId,
+    evidenceRevision: 1,
+    selector: { kind: "organization", organizationId },
+  });
+}
+
+function refresh(
+  db: DatabaseSync,
+  row: AssessmentRow,
+  snapshotPath: string,
+  webContainmentConfigured?: boolean,
+  evaluatedAt = new Date().toISOString(),
+  forceEvidenceRevision = false,
+  expectedGraphDigest?: string,
+  expectedSeed?: SentinelLinkedSeedTask,
+): StoredAssessment {
+  if (row.active !== 1) return readState(db, row);
+  const inputs = readAssessmentInputs(
+    snapshotPath,
+    webContainmentConfigured,
+    evaluatedAt,
+  );
+  const { graph, alertData, fingerprint } = inputs;
+  if (
+    expectedGraphDigest !== undefined &&
+    (graph === undefined ||
+      createHash("sha256").update(graph).digest("hex") !== expectedGraphDigest)
+  ) {
+    throw new Error("Published Sentinel graph changed during approval");
+  }
+  if (!forceEvidenceRevision && fingerprint === row.fingerprint) {
+    return readState(db, row);
+  }
+
+  const publishedInventory = expectedSeed && graph !== undefined
+    ? JSON.parse(graph)
+    : undefined;
+  if (
+    expectedSeed &&
+    (!Array.isArray(publishedInventory?.nodes) ||
+      !publishedInventory.nodes.some((node: { id?: unknown; kind?: unknown }) =>
+        node?.id === expectedSeed.nodeId && node.kind === "asset"
+      ))
+  ) {
+    throw new Error(
+      "The linked seed target must be an asset in the approved graph",
+    );
+  }
+  const plan: AssessmentPlan = JSON.parse(row.plan);
+  const alerts = parseAssessmentAlerts(alertData);
+  const assessment = evaluateSentinelAssessment(
+    inputs,
+    plan,
+    JSON.parse(row.result),
+    alerts,
+    webContainmentConfigured,
+    evaluatedAt,
+  );
   const prior = JSON.parse(row.result) as Result | null;
   if (!forceEvidenceRevision && prior?.revision === assessment.revision) {
     db.prepare("UPDATE assessment SET fingerprint = ? WHERE id = 1").run(
@@ -1339,6 +1401,7 @@ export function startSentinelAssessment(
     graphDigest: string;
     seedTask?: SentinelLinkedSeedTask;
     goalApproval?: SentinelFormalGoalApproval;
+    membership?: SentinelCaseMembershipProof;
     childDescription?: string;
     timeoutSeconds?: number;
     modelProfile?: SelectedModelProfile;
@@ -1474,24 +1537,55 @@ export function startSentinelAssessment(
             linkedStart?.graphDigest,
             seedTask,
           );
-          if (approval && formal) {
+          const membership = linkedStart?.membership;
+          let constraints = formal?.constraints;
+          if (membership) {
             if (
-              seedTask && !sentinelOperatingConstraintsAllow(
-                formal.constraints,
-                seedTask,
+              membership.selector.kind !== "organization" ||
+              !verifySentinelCaseMembership(
                 started.result?.sharedGraph.snapshot,
-              )
+                membership,
+                {
+                  caseId: linkedStart!.caseId,
+                  evidenceRevision: started.revision,
+                },
+              ) ||
+              (constraints?.allowedAssetIds !== undefined &&
+                !isDeepStrictEqual(
+                  constraints.allowedAssetIds,
+                  membership.assetIds,
+                ))
             ) {
               throw new Error(
-                "The approved constraints prohibit the linked seed task",
+                "Invalid or stale approved linked Sentinel membership",
               );
             }
+            constraints = normalizeSentinelOperatingConstraints({
+              ...(constraints ?? { deniedKinds: [] }),
+              allowedAssetIds: membership.assetIds,
+            });
+          }
+          if (
+            seedTask && !sentinelOperatingConstraintsAllow(
+              constraints,
+              seedTask,
+              started.result?.sharedGraph.snapshot,
+            )
+          ) {
+            throw new Error(
+              "The approved constraints prohibit the linked seed task",
+            );
+          }
+          if (linkedStart && constraints) {
             saveInitialSentinelConstraints(
               db,
               started,
-              approval.requestId,
-              formal.constraints,
+              linkedStart.input.requestId,
+              constraints,
+              membership,
             );
+          }
+          if (approval && formal) {
             saveFormalGoalRequest(db, approval, formal.binding, started);
           }
           if (linkedStart) {
@@ -1797,6 +1891,7 @@ function saveInitialSentinelConstraints(
   state: StoredAssessment,
   requestId: string,
   constraints?: SentinelOperatingConstraints,
+  membership?: SentinelCaseMembershipProof,
 ) {
   if (constraints) {
     if (
@@ -1828,7 +1923,10 @@ function saveInitialSentinelConstraints(
       evidenceRevision: state.revision,
       expectedVersion: 0,
       requestId: constraintRequestId,
-      operatorScope: "assessment-goal-start",
+      operatorScope: membership
+        ? "linked-assessment-start"
+        : "assessment-goal-start",
+      ...(membership && { membership }),
       constraints,
       digest: digestSentinelOperatingConstraints(constraints),
       version: 1,

@@ -1,3 +1,4 @@
+import type { SentinelCaseMembershipProof } from "../sentinel/case_membership.ts";
 import { ensureSentinelFormalGoalContract } from "./sentinel_goal_completion.ts";
 import type { SentinelLinkedSeedTask } from "../sentinel/linked_seed_task.ts";
 import type { SentinelLinkedCaseSource } from "../sentinel/linked_case_sources.ts";
@@ -16,6 +17,7 @@ import {
 import {
   matchesSentinelLinkedStartGoal,
   pauseSentinelAssessment,
+  previewSentinelLinkedOrganization,
   publishedSentinelGraphDigest,
   readSentinelAssessment,
   readSentinelAssessmentRevision,
@@ -25,7 +27,9 @@ import {
   readSentinelLinkedSourcesForRevision,
   readSentinelLinkedStartSeed,
   readSentinelModelProfileForRevision,
+  readSentinelOperatingConstraintVersion,
   readSentinelPlannerHeartbeatForRevision,
+  readSentinelRunIdForRevision,
   readSentinelRunTimeoutForRevision,
   resumeSentinelAssessment,
   type SentinelFormalGoalApproval,
@@ -50,6 +54,11 @@ export function createOperatorSentinelRuns(
     runId: string,
   ): OperatorRunSummary | undefined;
   publishedStartDigest(ref: OperatorRunRef): string | undefined;
+  previewStartOrganization(
+    ref: OperatorRunRef,
+    organizationId: string,
+  ): SentinelCaseMembershipProof | undefined;
+  startOrganization(ref: OperatorRunRef): string | undefined;
   modelProfile(ref: OperatorRunRef): SelectedModelProfile | undefined;
   plannerHeartbeat(ref: OperatorRunRef): number | undefined;
   linkedCaseSources(
@@ -71,6 +80,7 @@ export function createOperatorSentinelRuns(
       graphDigest: string;
       childGoal?: string;
       goalApproval?: SentinelFormalGoalApproval;
+      membership?: SentinelCaseMembershipProof;
       childDescription?: string;
       seedTask?: SentinelLinkedSeedTask;
       timeoutSeconds?: number;
@@ -253,6 +263,29 @@ export function createOperatorSentinelRuns(
       const path = pathFor(ref);
       return path && ref.revision !== undefined
         ? readSentinelLinkedSourcesForRevision(path, ref.revision)
+        : undefined;
+    },
+    previewStartOrganization(ref, organizationId) {
+      const path = pathFor(ref);
+      return path && ref.revision === undefined
+        ? previewSentinelLinkedOrganization(
+          path,
+          ref.id,
+          organizationId,
+          webContainmentConfigured,
+        )
+        : undefined;
+    },
+    startOrganization(ref) {
+      const path = pathFor(ref);
+      if (!path || ref.revision === undefined) return;
+      const runId = readSentinelRunIdForRevision(path, ref.revision);
+      const policy = runId &&
+        readSentinelOperatingConstraintVersion(path, runId, 1);
+      return policy && policy.operatorScope === "linked-assessment-start" &&
+          policy.evidenceRevision === ref.revision &&
+          policy.membership?.selector.kind === "organization"
+        ? policy.membership.selector.organizationId
         : undefined;
     },
     plannerHeartbeat(ref) {

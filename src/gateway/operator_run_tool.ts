@@ -7868,6 +7868,7 @@ export function createOperatorRunToolExecutor(options: {
           childGoal,
           childDescription,
           goalProposal,
+          organizationId,
           seedTask: rawSeedTask,
           timeoutSeconds,
           modelProfile: namedProfile,
@@ -7894,6 +7895,7 @@ export function createOperatorRunToolExecutor(options: {
               "childGoal",
               "childDescription",
               "goalProposal",
+              "organizationId",
               "seedTask",
               "timeoutSeconds",
               "modelProfile",
@@ -7904,6 +7906,10 @@ export function createOperatorRunToolExecutor(options: {
           (sourceCases !== undefined &&
             (targetKind !== "sentinel" || !Array.isArray(sourceCases) ||
               !sourceCases.length || sourceCases.length > 4)) ||
+          (organizationId !== undefined &&
+            (targetKind !== "sentinel" || typeof organizationId !== "string" ||
+              !organizationId.trim() || organizationId.length > 256 ||
+              organizationId.includes("\0"))) ||
           (rawSeedTask !== undefined &&
             (targetKind !== "sentinel" || !seedTask)) ||
           (childDescription !== undefined &&
@@ -8038,6 +8044,7 @@ export function createOperatorRunToolExecutor(options: {
                 goalApproval,
               ) ||
               providers.sentinel.childDescription(other) !== childDescription ||
+              providers.sentinel.startOrganization(other) !== organizationId ||
               !isDeepStrictEqual(
                 providers.sentinel.startSeed(other),
                 seedTask,
@@ -8072,6 +8079,10 @@ export function createOperatorRunToolExecutor(options: {
           target.kind === "sentinel" && (!graphDigest ||
             (parent.kind === "sentinel" && parent.id === target.id))
         ) return unavailable;
+        const membership = organizationId === undefined
+          ? undefined
+          : providers.sentinel.previewStartOrganization(target, organizationId);
+        if (organizationId !== undefined && !membership) return unavailable;
         if (
           !await options.confirm(
             `Start and link this published run?\n${
@@ -8083,6 +8094,7 @@ export function createOperatorRunToolExecutor(options: {
                 ...(childGoal !== undefined && { childGoal }),
                 ...(childDescription !== undefined && { childDescription }),
                 ...(goalApproval && { goalApproval }),
+                ...(membership && { membership }),
                 ...(seedTask && { seedTask }),
                 ...(timeoutSeconds !== undefined && { timeoutSeconds }),
                 ...(modelProfile && { modelProfile }),
@@ -8120,6 +8132,7 @@ export function createOperatorRunToolExecutor(options: {
               childGoal,
               childDescription,
               goalApproval,
+              membership,
               seedTask,
               timeoutSeconds,
               modelProfile,
