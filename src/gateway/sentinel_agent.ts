@@ -1178,9 +1178,18 @@ export async function readDefenseCoverage(
     ) {
       return "Error: Incident evidence is unavailable outside the current assignment.";
     }
-    const members = incident && "members" in incident && incident.members
-      ? new Set(incident.members.map(sentinelAlertReference))
+    const incidentMembers = incident && !("error" in incident)
+      ? incident.members
       : undefined;
+    if (
+      assignment?.kind === "review_incident" &&
+      (!allowAsset || !incidentMembers?.length ||
+        !incidentMembers.every(allowAsset))
+    ) {
+      return "Error: The requested Sentinel incident evidence is unavailable.";
+    }
+    const members = incidentMembers &&
+      new Set(incidentMembers.map(sentinelAlertReference));
     const assessment = assessSentinelDefenseCoverage({
       alerts,
       ...(allowAsset && {
@@ -3603,13 +3612,23 @@ export function queryIncidentAlerts(
         ? "Error: The requested Sentinel incident evidence is unavailable."
         : `Error: ${incident.error}`;
     }
-    const allowAsset = scope &&
-      sentinelTelemetryEvidenceFilter(options.snapshotPath, selected, scope);
-    const members = allowAsset
-      ? incident.members.filter(allowAsset)
-      : incident.members;
-    if (scope && (!allowAsset || !members.length)) {
-      return "Error: The requested Sentinel incident evidence is unavailable.";
+    let { members } = incident;
+    if (scope) {
+      const allowCohort = sentinelTelemetryEvidenceFilter(
+        options.snapshotPath,
+        selected,
+        {},
+      );
+      const allowMember = scope.assignment
+        ? sentinelTelemetryEvidenceFilter(options.snapshotPath, selected, scope)
+        : allowCohort;
+      if (!allowCohort || !allowMember || !members.every(allowCohort)) {
+        return "Error: The requested Sentinel incident evidence is unavailable.";
+      }
+      members = members.filter(allowMember);
+      if (!members.length) {
+        return "Error: The requested Sentinel incident evidence is unavailable.";
+      }
     }
     return pageProvenance(
       members,

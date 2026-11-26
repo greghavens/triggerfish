@@ -3782,13 +3782,25 @@ Deno.test("Scoped incident discovery and assignment require every retained membe
       );
       if (prompt.startsWith("Plan a defensive investigation")) {
         if (reading) {
-          const saved = messages.findLast(({ role }) => role === "tool");
-          if (!saved) {
+          const reads = messages.filter(({ role }) => role === "tool");
+          if (!reads.length) {
+            return completion("", "sentinel_incident_alerts", {
+              incidentId: mixedIncident,
+            });
+          }
+          assertStringIncludes(String(reads[0].content), "unavailable");
+          if (reads.length === 1) {
+            return completion("", "sentinel_incident_alerts", {
+              incidentId: allowedIncident,
+            });
+          }
+          assertEquals(JSON.parse(String(reads[1].content)).total, 2);
+          if (reads.length === 2) {
             return completion("", "sentinel_worker_observation", {
               task: approvedReview,
             });
           }
-          const text = String(saved.content);
+          const text = String(reads[2].content);
           assertEquals(JSON.parse(text).task, approvedReview);
           observationRead.resolve(text);
           return completion("[]");
@@ -3927,6 +3939,47 @@ Deno.test("Scoped incident discovery and assignment require every retained membe
         "unavailable",
       );
     });
+    const incidentRead = {
+      kind: "sentinel",
+      id: caseId,
+      revision: state.revision,
+      action: "incident_alerts",
+    };
+    await withArchivedPlannerRead(
+      directory,
+      async (read) => {
+        const mixed = await read({
+          ...incidentRead,
+          incidentId: mixedIncident,
+        });
+        assertStringIncludes(mixed, "unavailable");
+        assert(!mixed.includes("Mixed cohort"));
+        assertEquals(
+          JSON.parse(
+            await read({
+              ...incidentRead,
+              incidentId: allowedIncident,
+            }),
+          ).evidence.total,
+          2,
+        );
+      },
+      undefined,
+      undefined,
+      undefined,
+      true,
+    );
+    await withArchivedPlannerRead(directory, async (read) => {
+      assertEquals(
+        JSON.parse(
+          await read({
+            ...incidentRead,
+            incidentId: mixedIncident,
+          }),
+        ).evidence.total,
+        2,
+      );
+    });
     const deadline = Date.now() + 4000;
     while (
       !approvedReview || !readAdaptiveSentinel(path, state)
@@ -3971,10 +4024,20 @@ Deno.test("Scoped incident discovery and assignment require every retained membe
       action: "planner_reads",
       plannerIdentity: observationRound.identity,
       attempt: observationRound.attempt,
-      ordinal: 1,
+      ordinal: observationRound.reads!.findIndex(({ tool }) =>
+        tool === "sentinel_worker_observation"
+      ) + 1,
       includeResult: true,
     };
+    const allowedReceipt = {
+      ...observation,
+      ordinal: observationRound.reads!.findIndex(({ tool, target }) =>
+        tool === "sentinel_incident_alerts" && target === allowedIncident
+      ) + 1,
+    };
+    assert(allowedReceipt.ordinal > 0);
     await withArchivedPlannerRead(directory, async (read) => {
+      assertEquals(JSON.parse(await read(allowedReceipt)).result.total, 2);
       assertEquals(
         JSON.parse(await read(observation)).result,
         JSON.parse(observed),
@@ -3985,7 +4048,8 @@ Deno.test("Scoped incident discovery and assignment require every retained membe
     clock += 61_000;
     planner.advance(readSentinelAssessment(path)!);
     const timeout = setTimeout(
-      () => plannerInput.reject(new Error("Scoped planner did not run")),
+      () =>
+        plannerInput.reject(new Error("Scoped planner did not run")),
       4000,
     );
     const prompt = await plannerInput.promise.finally(() =>
@@ -4006,11 +4070,14 @@ Deno.test("Scoped incident discovery and assignment require every retained membe
         ["spare"],
       );
       assertStringIncludes(await read(observation), "unavailable");
+      assertStringIncludes(await read(allowedReceipt), "unavailable");
     });
     held.resolve();
     const settlement = Date.now() + 3000;
     while (planner.hasInFlightWork() && Date.now() < settlement) {
-      await new Promise((resolve) => setTimeout(resolve, 5));
+      await new Promise((resolve) =>
+        setTimeout(resolve, 5)
+      );
     }
     assert(!planner.hasInFlightWork());
     assert(
