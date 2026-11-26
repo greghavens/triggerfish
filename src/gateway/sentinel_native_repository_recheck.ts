@@ -4,18 +4,143 @@ import { dirname, join } from "@std/path";
 import {
   type AdaptiveTask,
   readAdaptiveRepositoryVisibility,
+  readSentinelDedicatedRecheckSettlements,
 } from "../sentinel/adaptive_store.ts";
-import type { readSentinelAssessment } from "../sentinel/assessment_store.ts";
+import {
+  readSentinelAssessment,
+  readSentinelOperatingConstraints,
+} from "../sentinel/assessment_store.ts";
+import { locateSentinelCase } from "../sentinel/cases.ts";
+import { createSentinelFindingRemediationReader } from "../sentinel/finding_remediation.ts";
 import {
   nativeRepositoryVisibilityEvidenceId,
   type SentinelRepositoryVisibilityReference,
 } from "../sentinel/github_repository_visibility.ts";
+import { sentinelOperatingConstraintsAllow } from "../sentinel/operating_constraints.ts";
 import { digestSentinelSnapshot } from "../sentinel/shared_inventory.ts";
 import {
   verifyWorkerFindingRecheck,
   withRepositoryVisibilityVerification,
 } from "../sentinel/worker_finding_evidence.ts";
-import type { SentinelWorkerFindingRecord } from "../sentinel/worker_finding_store.ts";
+import {
+  readSentinelCaseFindingReceipts,
+  readSentinelWorkerFindingHistory,
+  type SentinelWorkerFindingRecord,
+} from "../sentinel/worker_finding_store.ts";
+
+/** Offer exact selectors only; no verdict is exposed in the planner prompt. */
+export function listSentinelNativeRepositoryVerdictSelectors(
+  path: string,
+  state: NonNullable<ReturnType<typeof readSentinelAssessment>>,
+) {
+  const runId = state.plan.runId;
+  const snapshot = state.result?.sharedGraph.snapshot;
+  const caseId = locateSentinelCase(path)?.caseId;
+  if (!state.active || state.paused || !runId || !caseId || !snapshot) {
+    return [];
+  }
+  const policy = readSentinelOperatingConstraints(path, runId)?.constraints;
+  const settled = readSentinelDedicatedRecheckSettlements(
+    join(dirname(path), "sentinel-adaptive.db"),
+    runId,
+    state.revision,
+  );
+  return readSentinelWorkerFindingHistory(path, state.revision).flatMap(
+    (record) => {
+      if (
+        record.kind !== "recheck" || !record.nativeRepositoryVisibility ||
+        record.evidenceRevision !== state.revision || record.runId !== runId ||
+        record.caseId !== caseId ||
+        Date.parse(record.validUntil) <= Date.now() ||
+        !sentinelOperatingConstraintsAllow(policy, {
+          kind: "review_evidence",
+          nodeId: record.targetId,
+        }, snapshot)
+      ) return [];
+      const assignment = settled.get(record.taskId);
+      return assignment?.completed &&
+          assignment.findingId === record.findingId &&
+          assignment.evidenceId === record.evidenceId
+        ? [{ id: record.id, taskId: record.taskId, assetId: record.targetId }]
+        : [];
+    },
+  ).slice(0, 6);
+}
+
+/** Resolve typed provenance locally; callers must still authorize both sources. */
+export function readExactSentinelNativeRepositoryVerdict(
+  path: string,
+  runId: string,
+  revision: number,
+  assetId: string,
+  verdictId: string,
+) {
+  const state = readSentinelAssessment(path);
+  const snapshot = state?.result?.sharedGraph.snapshot;
+  const caseId = locateSentinelCase(path)?.caseId;
+  if (
+    !state?.active || state.paused || !snapshot || !caseId ||
+    state.plan.runId !== runId || state.revision !== revision
+  ) return;
+  const record = readSentinelCaseFindingReceipts(path, [verdictId]).get(
+    verdictId,
+  );
+  if (
+    record?.kind !== "recheck" || !record.nativeRepositoryVisibility ||
+    record.nativeRepositoryVisibility.verdictId ||
+    record.targetId !== assetId ||
+    record.runId !== runId || record.caseId !== caseId ||
+    record.evidenceRevision !== revision ||
+    Date.parse(record.validUntil) <= Date.now()
+  ) return;
+  const assignment = readSentinelDedicatedRecheckSettlements(
+    join(dirname(path), "sentinel-adaptive.db"),
+    runId,
+    revision,
+  ).get(record.taskId);
+  if (
+    !assignment?.completed || assignment.findingId !== record.findingId ||
+    assignment.evidenceId !== record.evidenceId
+  ) return;
+  const original = readSentinelCaseFindingReceipts(path, [record.findingId])
+    .get(record.findingId);
+  if (original?.kind !== "finding") return;
+  const policy = readSentinelOperatingConstraints(path, runId)?.constraints;
+  if (
+    !sentinelOperatingConstraintsAllow(policy, {
+      kind: "review_evidence",
+      nodeId: assetId,
+    }, snapshot) ||
+    !sentinelOperatingConstraintsAllow(policy, {
+      kind: "review_evidence",
+      nodeId: original.evidenceId,
+    }, snapshot) ||
+    !sentinelOperatingConstraintsAllow(policy, {
+      kind: "review_finding",
+      nodeId: original.graphFindingId,
+    }, snapshot)
+  ) return;
+  const checked = createSentinelFindingRemediationReader(
+    path,
+    record.caseId,
+    revision,
+    runId,
+    true,
+  )(original, [record]);
+  if (checked.nativeSource?.id !== record.id) return;
+  return {
+    original,
+    source: record.nativeRepositoryVisibility,
+    reference: { ...record.nativeRepositoryVisibility, verdictId },
+    verdict: {
+      id: record.id,
+      findingId: record.findingId,
+      outcome: record.outcome,
+      evidenceRevision: record.evidenceRevision,
+      targetId: record.targetId,
+    },
+  };
+}
 
 export function verifySentinelNativeRepositoryRecheck(
   path: string,

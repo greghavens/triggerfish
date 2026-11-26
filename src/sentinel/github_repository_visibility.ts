@@ -40,25 +40,34 @@ export interface SentinelRepositoryVisibilityReference {
   readonly taskId: string;
   readonly sourceStepIndex: number;
   readonly resultSha256: string;
+  readonly verdictId?: string;
 }
 
 export function repositoryVisibilityReference(
   value: unknown,
 ): SentinelRepositoryVisibilityReference | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) return;
-  const { taskId, sourceStepIndex, resultSha256 } = value as Record<
+  const { taskId, sourceStepIndex, resultSha256, verdictId } = value as Record<
     string,
     unknown
   >;
   if (
-    Object.keys(value).length !== 3 ||
+    Object.keys(value).length !== (verdictId === undefined ? 3 : 4) ||
     typeof taskId !== "string" || !/^adaptive:[a-f0-9]{64}$/.test(taskId) ||
     typeof sourceStepIndex !== "number" ||
     !Number.isSafeInteger(sourceStepIndex) ||
     sourceStepIndex < 0 || sourceStepIndex >= 16 ||
-    typeof resultSha256 !== "string" || !/^[a-f0-9]{64}$/.test(resultSha256)
+    typeof resultSha256 !== "string" || !/^[a-f0-9]{64}$/.test(resultSha256) ||
+    (verdictId !== undefined &&
+      (typeof verdictId !== "string" ||
+        !/^worker-recheck:[a-f0-9]{64}$/.test(verdictId)))
   ) return;
-  return { taskId, sourceStepIndex, resultSha256 };
+  return {
+    taskId,
+    sourceStepIndex,
+    resultSha256,
+    ...(verdictId && { verdictId }),
+  };
 }
 
 export interface SentinelRepositoryVisibilityReceipt {

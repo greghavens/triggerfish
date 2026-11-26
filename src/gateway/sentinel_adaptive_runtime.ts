@@ -27,6 +27,10 @@ import {
   type SentinelRepositoryVisibilityReference,
 } from "../sentinel/github_repository_visibility.ts";
 import { readAdaptiveRepositoryVisibility } from "../sentinel/adaptive_store.ts";
+import {
+  listSentinelNativeRepositoryVerdictSelectors,
+  readExactSentinelNativeRepositoryVerdict,
+} from "./sentinel_native_repository_recheck.ts";
 import { readScopedSentinelSharedAssetDiscoveries } from "./sentinel_asset_discoveries.ts";
 import {
   discoverLinkedLocalFindings,
@@ -749,6 +753,7 @@ function supersedeStalePlanProposals(
         ...protectedReviewAvailability(store, snapshotPath, state, revision),
         ...plannerCommittedObservations(store, revision, snapshotPath, state),
         ...plannerRepositoryVisibility(snapshotPath, state),
+        ...listSentinelNativeRepositoryVerdictSelectors(snapshotPath, state),
         ...plannerGraphFacts(snapshotPath, state),
         ...plannerFindingRechecks(snapshotPath, state),
         ...pendingRecheckFindings(snapshotPath, state),
@@ -2558,6 +2563,10 @@ export function readAdaptiveSentinel(
               state,
             ),
             ...plannerRepositoryVisibility(snapshotPath, state),
+            ...listSentinelNativeRepositoryVerdictSelectors(
+              snapshotPath,
+              state,
+            ),
             ...plannerGraphFacts(snapshotPath, state),
             ...plannerFindingRechecks(snapshotPath, state),
             ...pendingRecheckFindings(snapshotPath, state),
@@ -4160,6 +4169,24 @@ function currentRepositoryVisibility(
     : undefined;
 }
 
+function currentRepositoryVisibilityReference(
+  path: string,
+  state: State,
+  assetId: string,
+  reference: SentinelRepositoryVisibilityReference,
+) {
+  return reference.verdictId
+    ? state.plan.runId && readExactSentinelNativeRepositoryVerdict(
+      path,
+      state.plan.runId,
+      state.revision,
+      assetId,
+      reference.verdictId,
+    )?.reference
+    : currentRepositoryVisibility(path, state, assetId, reference.taskId)
+      ?.reference;
+}
+
 function currentBoundWorkerNarrative(
   path: string,
   state: State,
@@ -4218,12 +4245,12 @@ function decisionAllowsClaim(snapshotPath: string, revision: number) {
       return !!current && current.revision === revision && !!task.nodeId &&
         isDeepStrictEqual(
           task.plannerRound.repositoryVisibility,
-          currentRepositoryVisibility(
+          currentRepositoryVisibilityReference(
             snapshotPath,
             current,
             task.nodeId,
-            task.plannerRound.repositoryVisibility.taskId,
-          )?.reference,
+            task.plannerRound.repositoryVisibility,
+          ),
         );
     })()) &&
     (!task.plannerRound?.workerNarrativeId || (() => {
@@ -5896,6 +5923,7 @@ export function createSentinelModelPlanner(
   );
   let lastExecutionEvidenceIds = new Set<string>();
   let lastProtectedReviewIds = new Set<string>();
+  let lastRepositoryVerdictIds = new Set<string>();
   let lastFormalGoalSet: string | undefined;
   let lastConstraintVersion: string | undefined;
   let reviewedSincePlan = false;
@@ -6116,6 +6144,24 @@ export function createSentinelModelPlanner(
           JSON.parse(requestId),
         );
         if (!args?.taskId || args.asset !== targetId) return;
+        if (args.recheckId) {
+          const proof = readExactSentinelNativeRepositoryVerdict(
+            snapshotPath,
+            runId,
+            current.revision,
+            targetId,
+            args.recheckId,
+          );
+          return proof?.reference.taskId === args.taskId && {
+                id: args.recheckId,
+                args,
+                result: JSON.stringify({
+                  _classification: "INTERNAL",
+                  reference: proof.reference,
+                  verdict: proof.verdict,
+                }),
+              } || undefined;
+        }
         const result = currentRepositoryVisibility(
           snapshotPath,
           current,
@@ -6834,7 +6880,7 @@ export function createSentinelModelPlanner(
             : []),
           ...(task.plannerRound?.repositoryVisibility
             ? [
-              "Use sentinel_saved_repository_visibility on the exact source assignment and asset in repositoryVisibility. Treat the observation as limited to this configured metadata read.",
+              "Use sentinel_saved_repository_visibility on the exact source assignment and asset in repositoryVisibility. If the reference includes verdictId, supply it as recheckId.",
             ]
             : []),
           ...(task.plannerRound?.committedObservation
@@ -7766,6 +7812,8 @@ export function createSentinelModelPlanner(
         snapshotPath,
         state,
       );
+      const repositoryVisibilityRechecks =
+        listSentinelNativeRepositoryVerdictSelectors(snapshotPath, state);
       const graphFacts = plannerGraphFacts(snapshotPath, state);
       const findingRechecks = plannerFindingRechecks(snapshotPath, state);
       const recheckFindings = pendingRecheckFindings(snapshotPath, state);
@@ -7779,6 +7827,7 @@ export function createSentinelModelPlanner(
           ...committedObservations,
           ...workerNarratives,
           ...repositoryVisibility,
+          ...repositoryVisibilityRechecks,
           ...graphFacts,
           ...findingRechecks,
           ...recheckFindings,
@@ -7857,6 +7906,9 @@ export function createSentinelModelPlanner(
           roundIdentity,
           state.revision,
           newFormalGoals || newConstraints || newExecutionEvidence ||
+            repositoryVisibilityRechecks.some(({ id }) =>
+              !lastRepositoryVerdictIds.has(id)
+            ) ||
             protectedReviews.some(({ taskId }) =>
               !lastProtectedReviewIds.has(taskId)
             ),
@@ -7870,7 +7922,8 @@ export function createSentinelModelPlanner(
         activeReviews.size &&
         (!reserve ||
           (!heartbeat && !committedObservations.length &&
-            !workerNarratives.length && !repositoryVisibility.length))
+            !workerNarratives.length && !repositoryVisibility.length &&
+            !repositoryVisibilityRechecks.length))
       ) {
         return;
       }
@@ -8048,6 +8101,9 @@ export function createSentinelModelPlanner(
       }
       planningGate.started(state.revision);
       lastExecutionEvidenceIds = new Set(executionEvidenceIds);
+      lastRepositoryVerdictIds = new Set(
+        repositoryVisibilityRechecks.map(({ id }) => id),
+      );
       lastProtectedReviewIds = new Set(
         protectedReviews.map(({ taskId }) => taskId),
       );
@@ -8147,6 +8203,10 @@ export function createSentinelModelPlanner(
                 ...readCommittedPlannerObservations(current),
                 ...plannerWorkerNarratives(snapshotPath, current),
                 ...plannerRepositoryVisibility(snapshotPath, current),
+                ...listSentinelNativeRepositoryVerdictSelectors(
+                  snapshotPath,
+                  current,
+                ),
                 ...plannerGraphFacts(snapshotPath, current),
                 ...plannerFindingRechecks(snapshotPath, current),
                 ...pendingRecheckFindings(snapshotPath, current),
@@ -8321,6 +8381,11 @@ export function createSentinelModelPlanner(
           ...(repositoryVisibility.length
             ? [
               "Open a repositoryVisibility source with sentinel_saved_repository_visibility before citing its taskId as repositoryVisibilityTaskId on a same-asset depth-one trace.",
+            ]
+            : []),
+          ...(repositoryVisibilityRechecks.length
+            ? [
+              "Open a repositoryVisibilityRechecks entry with sentinel_saved_repository_visibility and its exact recheckId. Cite the returned verdict ID as repositoryVisibilityRecheckId on a same-asset depth-one trace.",
             ]
             : []),
           "Use sentinel_intermediate_workflow_observation with an exact ID from committedObservations to reopen a committed observation from a running or completed worker. Set committedObservationId on a same-asset trace or impact proposal after reopening the exact receipt.",
@@ -8544,6 +8609,9 @@ export function createSentinelModelPlanner(
           }),
           ...(workerNarratives.length && { workerNarratives }),
           ...(repositoryVisibility.length && { repositoryVisibility }),
+          ...(repositoryVisibilityRechecks.length && {
+            repositoryVisibilityRechecks: [...repositoryVisibilityRechecks],
+          }),
           ...(committedObservations.length &&
             { committedObservations: [...committedObservations] }),
           ...(graphFacts.length && { graphFacts: [...graphFacts] }),
@@ -9205,7 +9273,38 @@ export function createSentinelModelPlanner(
                 tool !== SENTINEL_SAVED_REPOSITORY_VISIBILITY ||
                 !result.startsWith("{") || !matchesRound(state)
               ) return;
-              const { targetId, reference } = JSON.parse(result);
+              const { targetId, reference, verdict } = JSON.parse(result);
+              if (
+                state.plan.runId && typeof reference?.verdictId === "string"
+              ) {
+                const source = inputs.repositoryVisibilityRechecks?.find((
+                  { id, taskId, assetId },
+                ) =>
+                  id === reference.verdictId && taskId === reference.taskId &&
+                  assetId === verdict?.targetId
+                );
+                const proof = source &&
+                  readExactSentinelNativeRepositoryVerdict(
+                    snapshotPath,
+                    state.plan.runId,
+                    state.revision,
+                    source.assetId,
+                    source.id,
+                  );
+                if (
+                  proof && source && result === JSON.stringify({
+                      _classification: "INTERNAL",
+                      reference: proof.reference,
+                      verdict: proof.verdict,
+                    })
+                ) {
+                  openedVisibility.set(source.id, {
+                    assetId: source.assetId,
+                    reference: proof.reference,
+                  });
+                }
+                return;
+              }
               const source = repositoryVisibility.find(({ taskId, assetId }) =>
                 taskId === reference?.taskId && assetId === targetId
               );
@@ -9589,12 +9688,12 @@ export function createSentinelModelPlanner(
                     const approved = checkedVisibility.get(taskId);
                     return approved?.assetId === assetId && isDeepStrictEqual(
                         approved.reference,
-                        currentRepositoryVisibility(
+                        currentRepositoryVisibilityReference(
                           snapshotPath,
                           current,
                           assetId,
-                          taskId,
-                        )?.reference,
+                          approved.reference,
+                        ),
                       )
                       ? approved.reference
                       : undefined;

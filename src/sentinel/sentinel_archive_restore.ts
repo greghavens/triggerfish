@@ -15,6 +15,7 @@ import {
 import { parseOperatorRunAdmissionCategory } from "../core/operator_run_categories.ts";
 import {
   readAdaptiveOperatorTrafficHint,
+  readSentinelDedicatedRecheckSettlements,
   retainPortablePausedGraphCheckpoints,
 } from "./adaptive_store.ts";
 import { decodeInconclusiveRecheck } from "./recheck_inconclusive.ts";
@@ -1290,6 +1291,86 @@ function validateAuxiliary(
   });
 }
 
+/** Verify typed planner citations against the signed verdict and assignment journals. */
+function validateArchivedRepositoryVerdictCitations(
+  findingsPath: string | undefined,
+  adaptivePath: string | undefined,
+) {
+  if (!adaptivePath) return;
+  const adaptive = new DatabaseSync(adaptivePath, { readOnly: true });
+  try {
+    adaptive.exec("PRAGMA trusted_schema = OFF");
+    if (
+      !adaptive.prepare(
+        "SELECT name FROM pragma_table_info('adaptive_tasks') WHERE name = 'plannerRound'",
+      ).get()
+    ) return;
+    const citations = adaptive.prepare(`
+      SELECT revision, nodeId, plannerRound FROM adaptive_tasks
+      WHERE json_valid(plannerRound)
+        AND json_type(plannerRound, '$.repositoryVisibility.verdictId') IS NOT NULL
+    `).all();
+    if (!citations.length) return;
+    const invalid = () =>
+      new Error("Invalid archived Sentinel repository verdict citation");
+    if (!findingsPath) throw invalid();
+    const mappingFor = adaptive.prepare(
+      "SELECT goalId, evidenceNumber FROM adaptive_evidence_revisions WHERE revision = ?",
+    );
+    const findings = new DatabaseSync(findingsPath, { readOnly: true });
+    try {
+      findings.exec("PRAGMA trusted_schema = OFF");
+      const receiptFor = findings.prepare(
+        "SELECT * FROM receipts WHERE id = ?",
+      );
+      const settlements = new Map<
+        string,
+        ReturnType<typeof readSentinelDedicatedRecheckSettlements>
+      >();
+      for (const citation of citations) {
+        const reference = typeof citation.plannerRound === "string"
+          ? repositoryVisibilityReference(
+            JSON.parse(citation.plannerRound).repositoryVisibility,
+          )
+          : undefined;
+        if (!reference?.verdictId || typeof citation.revision !== "string") {
+          throw invalid();
+        }
+        const mapping = mappingFor.get(citation.revision);
+        const row = receiptFor.get(reference.verdictId);
+        const receipt = row && decodeExactSentinelFindingReceipt(row);
+        if (
+          receipt?.kind !== "recheck" || receipt.runId !== mapping?.goalId ||
+          receipt.evidenceRevision !== mapping?.evidenceNumber ||
+          receipt.targetId !== citation.nodeId ||
+          receipt.nativeRepositoryVisibility?.taskId !== reference.taskId ||
+          receipt.nativeRepositoryVisibility.sourceStepIndex !==
+            reference.sourceStepIndex ||
+          receipt.nativeRepositoryVisibility.resultSha256 !==
+            reference.resultSha256
+        ) throw invalid();
+        const scopedSettlements = settlements.get(citation.revision) ??
+          readSentinelDedicatedRecheckSettlements(
+            adaptivePath,
+            receipt.runId,
+            receipt.evidenceRevision,
+          );
+        settlements.set(citation.revision, scopedSettlements);
+        const settlement = scopedSettlements.get(reference.taskId);
+        if (
+          !settlement?.completed ||
+          settlement.findingId !== receipt.findingId ||
+          settlement.evidenceId !== receipt.evidenceId
+        ) throw invalid();
+      }
+    } finally {
+      findings.close();
+    }
+  } finally {
+    adaptive.close();
+  }
+}
+
 /** Bind retained native rechecks to the original finding and exact repository result. */
 function validateArchivedRepositoryRechecks(
   findingsPath: string | undefined,
@@ -1957,6 +2038,7 @@ export async function restoreVerifiedSentinelCaseArchive(
     assessment,
     caseId,
   );
+  validateArchivedRepositoryVerdictCitations(findings, adaptive);
   validateArchivedTrafficFindingPublications(
     findings,
     auxiliary.find(({ name }) => name === "sentinel-finding-traffic-links.db")

@@ -8690,6 +8690,357 @@ for (
         );
       }
       assertEquals(fetches, 1);
+      if (scenario.outcome !== "pass") return;
+      coordinator.stop();
+
+      const savedTool = "sentinel_saved_repository_visibility";
+      const wrongVerdict = `worker-recheck:${"d".repeat(64)}`;
+      let selectedVerdict = wrongVerdict;
+      let plannerResult: string | undefined;
+      let revokeBeforeProposal = false;
+      let destinationReads = 0;
+      let sourcePre = 0;
+      let sourcePost = 0;
+      const plannerRegistry = createProviderRegistry();
+      plannerRegistry.register({
+        name: "native-repository-verdict-planner",
+        supportsStreaming: false,
+        complete(messages) {
+          const saved = messages.findLast(({ role }) => role === "tool");
+          if (!saved) {
+            const prompt = String(
+              messages.findLast(({ role }) => role === "user")?.content,
+            );
+            assert(
+              JSON.parse(prompt.split("\n").at(-1)!)
+                .repositoryVisibilityRechecks
+                .some((
+                  candidate: { id: string; taskId: string; assetId: string },
+                ) =>
+                  candidate.id === receipt.id &&
+                  candidate.taskId === selectedTask &&
+                  candidate.assetId === "app"
+                ),
+            );
+            return Promise.resolve({
+              usage,
+              content: "",
+              toolCalls: [{
+                type: "function",
+                id: "open-native-repository-verdict",
+                function: {
+                  name: savedTool,
+                  arguments: JSON.stringify({
+                    taskId: selectedTask,
+                    asset: "app",
+                    recheckId: selectedVerdict,
+                  }),
+                },
+              }],
+            });
+          }
+          plannerResult = String(saved.content);
+          if (revokeBeforeProposal) availableCredential = false;
+          return Promise.resolve({
+            usage,
+            content: JSON.stringify([{
+              kind: "trace",
+              nodeId: "app",
+              depth: 1,
+              repositoryVisibilityRecheckId: selectedVerdict,
+            }]),
+            toolCalls: [],
+          });
+        },
+      });
+      plannerRegistry.setDefault("native-repository-verdict-planner");
+      let clock = Date.now() + 65_000;
+      const planFromVerdict = () =>
+        createSentinelModelPlanner(
+          path,
+          (current, taskId) =>
+            taskId
+              ? { execute: () => Promise.resolve(), clear() {} }
+              : createSentinelSubagent({
+                snapshotPath: path,
+                sharedInventoryBaseDir: baseDir,
+                assessmentRevision: current.revision,
+                plannerExecutionEvidenceRunId: runId,
+                providerRegistry: plannerRegistry,
+                readRepositoryVisibility: reader,
+                authorizeExecutionTracePayload: (payload) =>
+                  Promise.resolve(
+                    payload.kind === original.kind &&
+                      payload.repo === original.repo &&
+                      payload.repositoryId === original.repositoryId,
+                  ),
+                allowModelAccess: true,
+                hookRunner: {
+                  evaluateHook(hook, { input }) {
+                    const name = input.tool_name ??
+                      (input.tool_call as { name?: string } | undefined)?.name;
+                    if (name === savedTool && hook === "PRE_TOOL_CALL") {
+                      sourcePre++;
+                    }
+                    if (
+                      name === savedTool && hook === "POST_TOOL_RESPONSE" &&
+                      typeof input.tool_response === "string" &&
+                      input.tool_response.startsWith("{")
+                    ) {
+                      assertEquals(
+                        JSON.parse(input.tool_response)._classification,
+                        "INTERNAL",
+                      );
+                      sourcePost++;
+                    }
+                    if (
+                      name === SENTINEL_LIVE_REPOSITORY_VISIBILITY &&
+                      hook === "PRE_TOOL_CALL" && typeof input.url === "string"
+                    ) destinationReads++;
+                    return Promise.resolve({
+                      allowed: true,
+                      action: "ALLOW",
+                      ruleId: null,
+                      duration: 0,
+                    });
+                  },
+                },
+              }),
+          () => followup() ? undefined : () => {},
+          () => clock,
+        );
+      const followup = () =>
+        readAdaptiveSentinel(path, state, "revision")?.tasks.find(
+          ({ plannerRound }) =>
+            plannerRound?.repositoryVisibility?.verdictId === receipt.id,
+        );
+      const round = async (note: string) => {
+        plannerResult = undefined;
+        clock += 65_000;
+        addSentinelCaseHint(path, note);
+        coordinator = planFromVerdict();
+        await waitForCondition(
+          () => plannerResult !== undefined && !coordinator?.hasInFlightWork(),
+          () => coordinator?.advance(state),
+        );
+        coordinator.stop();
+        return plannerResult!;
+      };
+      availableCredential = true;
+      assert(
+        !(await round("Consider the exact retained remediation verdict."))
+          .startsWith("{"),
+      );
+      assertEquals(followup(), undefined);
+
+      const expected = {
+        _classification: "INTERNAL",
+        reference: {
+          ...receipt.nativeRepositoryVisibility,
+          verdictId: receipt.id,
+        },
+        verdict: {
+          id: receipt.id,
+          findingId: finding.id,
+          outcome: scenario.outcome,
+          evidenceRevision: state.revision,
+          targetId: "app",
+        },
+      };
+      selectedVerdict = receipt.id;
+      revokeBeforeProposal = true;
+      assertEquals(
+        JSON.parse(
+          await round("Review the current authority for the retained verdict."),
+        ),
+        expected,
+      );
+      assertEquals(followup(), undefined);
+
+      availableCredential = true;
+      revokeBeforeProposal = false;
+      assertEquals(
+        JSON.parse(
+          await round("Use the exact authorized verdict on this same asset."),
+        ),
+        expected,
+      );
+      assertEquals(followup()?.nodeId, "app");
+      assertEquals(
+        followup()?.plannerRound?.repositoryVisibility,
+        expected.reference,
+      );
+      assert(sourcePre >= 3);
+      assert(sourcePost >= 2);
+      assert(destinationReads > 0);
+      assertEquals(fetches, 1);
+      const followupId = followup()?.id;
+      assert(followupId);
+      let peerRead: string | undefined;
+      const workerRegistry = createProviderRegistry();
+      workerRegistry.register({
+        name: "native-repository-verdict-followup",
+        supportsStreaming: false,
+        complete(messages) {
+          const saved = messages.findLast(({ role }) => role === "tool");
+          if (!saved) {
+            return Promise.resolve({
+              usage,
+              content: "",
+              toolCalls: [{
+                type: "function",
+                id: "reopen-pinned-repository-verdict",
+                function: {
+                  name: savedTool,
+                  arguments: JSON.stringify({
+                    taskId: selectedTask,
+                    asset: "app",
+                    recheckId: receipt.id,
+                  }),
+                },
+              }],
+            });
+          }
+          peerRead = String(saved.content);
+          return Promise.resolve({
+            usage,
+            content:
+              '{"summary":"Reopened the exact repository remediation verdict.","followUps":[]}',
+            toolCalls: [],
+          });
+        },
+      });
+      workerRegistry.setDefault("native-repository-verdict-followup");
+      coordinator = createSentinelModelPlanner(
+        path,
+        (current, taskId, lease) =>
+          taskId !== followupId
+            ? { execute: () => Promise.resolve(), clear() {} }
+            : createSentinelSubagent({
+              snapshotPath: path,
+              sharedInventoryBaseDir: baseDir,
+              assessmentRevision: current.revision,
+              assignedTaskId: taskId,
+              assignedTaskLeaseToken: lease,
+              providerRegistry: workerRegistry,
+              readRepositoryVisibility: reader,
+              authorizeExecutionTracePayload: (payload) =>
+                Promise.resolve(
+                  payload.kind === original.kind &&
+                    payload.repo === original.repo &&
+                    payload.repositoryId === original.repositoryId,
+                ),
+              allowModelAccess: true,
+              hookRunner: {
+                evaluateHook: () =>
+                  Promise.resolve({
+                    allowed: true,
+                    action: "ALLOW",
+                    ruleId: null,
+                    duration: 0,
+                  }),
+              },
+            }),
+        () => () => {},
+      );
+      await waitForCondition(
+        () =>
+          !!peerRead && !!readAdaptiveSentinel(path, state, "revision")
+            ?.modelReviews.some(({ taskId }) => taskId === followupId),
+        () => coordinator?.advance(state),
+      );
+      assertEquals(JSON.parse(peerRead!), expected);
+      assertEquals(fetches, 1);
+
+      await withFindingAssignmentGateway(
+        baseDir,
+        () => Promise.resolve(true),
+        async (turn) => {
+          assertEquals(
+            JSON.parse(await turn({ ...runRef, action: "cancel" })).run.status,
+            "stopped",
+          );
+          assertEquals(
+            JSON.parse(
+              await turn({
+                ...runRef,
+                action: "archive",
+                requestId: archiveId,
+              }),
+            ).receipt.status,
+            "succeeded",
+          );
+        },
+      );
+      coordinator.stop();
+      await Deno.rename(dirname(path), join(baseDir, "before-verdict-restore"));
+      const archive = join(baseDir, "data", "run-archives", archiveId);
+      const alteredPath = join(baseDir, "wrong-verdict-citation.db");
+      await Deno.copyFile(join(archive, "sentinel-adaptive.db"), alteredPath);
+      const altered = new DatabaseSync(alteredPath);
+      try {
+        altered.prepare(
+          `UPDATE adaptive_tasks SET plannerRound =
+            json_set(plannerRound, '$.repositoryVisibility.verdictId', ?)
+            WHERE id = ?`,
+        ).run(`worker-recheck:${"f".repeat(64)}`, followupId);
+      } finally {
+        altered.close();
+      }
+      const alteredArchive = join(baseDir, "wrong-verdict-citation");
+      const manifest = JSON.parse(
+        await Deno.readTextFile(join(archive, "manifest.json")),
+      );
+      await writeRunArchive(
+        alteredArchive,
+        manifest.identity,
+        manifest.artifacts.map(({ name }: { name: string }) => ({
+          name,
+          sourcePath: name === "sentinel-adaptive.db"
+            ? alteredPath
+            : join(archive, name),
+        })),
+        permittedSentinelRestoreArtifacts,
+      );
+      await assertRejects(
+        () =>
+          withVerifiedRunArchive(
+            alteredArchive,
+            baseDir,
+            {
+              expectedKind: "sentinel",
+              permittedNames: permittedSentinelRestoreArtifacts,
+            },
+            (verified) => restoreVerifiedSentinelCaseArchive(baseDir, verified),
+          ),
+        Error,
+        "Invalid archived Sentinel repository verdict citation",
+      );
+      await withFindingAssignmentGateway(
+        baseDir,
+        () => Promise.resolve(true),
+        async (turn) => {
+          assertEquals(
+            JSON.parse(
+              await turn({
+                ...runRef,
+                action: "restore",
+                archiveId,
+                requestId: crypto.randomUUID(),
+              }),
+            ).receipt.status,
+            "succeeded",
+          );
+        },
+      );
+      const restored = readSentinelAssessment(path);
+      assert(restored?.paused);
+      assertEquals(
+        readAdaptiveSentinel(path, restored, "revision")?.tasks.find(
+          ({ id }) => id === followupId,
+        )?.plannerRound?.repositoryVisibility,
+        expected.reference,
+      );
       assertEquals(fetches, 1);
     } finally {
       coordinator?.stop();

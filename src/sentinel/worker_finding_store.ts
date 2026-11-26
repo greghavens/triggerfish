@@ -446,6 +446,7 @@ function normalizeRecheck(raw: SentinelWorkerFindingRecheckInput) {
     !sentinelWorkerRecheckOutcomes.includes(raw.outcome) ||
     (raw.nativeRepositoryVisibility !== undefined &&
       (!nativeRepositoryVisibility ||
+        nativeRepositoryVisibility.verdictId !== undefined ||
         redactCredentialText(raw.summary) !== raw.summary ||
         nativeRepositoryVisibility.taskId !== raw.taskId ||
         nativeRepositoryVisibilityEvidenceId(raw.taskId) !== raw.evidenceId))

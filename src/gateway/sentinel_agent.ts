@@ -11,6 +11,7 @@ import {
   SENTINEL_SAVED_REPOSITORY_VISIBILITY,
   type SentinelRepositoryVisibilityReference,
 } from "../sentinel/github_repository_visibility.ts";
+import { readExactSentinelNativeRepositoryVerdict } from "./sentinel_native_repository_recheck.ts";
 import {
   type createSentinelRepositoryVisibilityReader,
   repositoryVisibilityDestinationMetadata,
@@ -1192,6 +1193,11 @@ const savedRepositoryVisibilityTool: ToolDefinition = {
       type: "string",
       description: "Exact current scoped asset",
       required: true,
+    },
+    recheckId: {
+      type: "string",
+      description:
+        "Optional exact verdict ID. Returns the verdict with its source reference.",
     },
   },
 };
@@ -6888,7 +6894,8 @@ function createAgent(
         return await readLiveRepositoryVisibility(options, turn, args, session);
       }
       if (name === SENTINEL_SAVED_REPOSITORY_VISIBILITY) {
-        const { asset, taskId } = args;
+        const selected = sentinelGoalReceiptReadArguments(name, args);
+        const { asset, taskId, recheckId } = selected ?? {};
         const evidenceRevision = options.assessmentRevision;
         const runId = options.plannerExecutionEvidenceRunId ??
           (evidenceRevision &&
@@ -6898,11 +6905,7 @@ function createAgent(
             ));
         const unavailable =
           "Error: The saved repository visibility is unavailable.";
-        if (
-          Object.keys(args).length !== 2 ||
-          typeof asset !== "string" || typeof taskId !== "string" ||
-          !/^adaptive:[a-f0-9]{64}$/.test(taskId) || !evidenceRevision || !runId
-        ) {
+        if (!asset || !taskId || !evidenceRevision || !runId) {
           return unavailable;
         }
         const worker = readAssignedModelReview(options);
@@ -6912,17 +6915,28 @@ function createAgent(
             ? currentPlannerReceiptScope(turn, asset)
             : worker?.nodeId === asset &&
               readAssignedModelReview(options)?.id === worker.id &&
-              worker.plannerRound?.repositoryVisibility?.taskId === taskId);
-        const result = await reopenRepositoryVisibility(
-          options,
-          session,
-          runId,
-          evidenceRevision,
-          taskId,
-          asset,
-          turn.signal,
-          current,
-        );
+              worker.plannerRound?.repositoryVisibility?.taskId === taskId &&
+              worker.plannerRound.repositoryVisibility.verdictId === recheckId);
+        const result = recheckId
+          ? await reopenRepositoryVisibilityVerdict(
+            runId,
+            evidenceRevision,
+            taskId,
+            asset,
+            recheckId,
+            turn.signal,
+            current,
+          )
+          : await reopenRepositoryVisibility(
+            options,
+            session,
+            runId,
+            evidenceRevision,
+            taskId,
+            asset,
+            turn.signal,
+            current,
+          );
         if (
           !result || (worker &&
             !isDeepStrictEqual(
@@ -8842,6 +8856,85 @@ function createAgent(
       isDeepStrictEqual(saved, lookup());
   }
 
+  async function reopenRepositoryVisibilityVerdict(
+    runId: string,
+    revision: number,
+    taskId: string,
+    assetId: string,
+    verdictId: string,
+    signal: AbortSignal,
+    allowed: () => boolean,
+  ) {
+    const lookup = () =>
+      readExactSentinelNativeRepositoryVerdict(
+        options.snapshotPath,
+        runId,
+        revision,
+        assetId,
+        verdictId,
+      );
+    if (
+      signal.aborted || !allowed() || !options.sharedInventoryBaseDir ||
+      !options.authorizeExecutionTracePayload
+    ) return;
+    const proof = lookup();
+    if (!proof || proof.reference.taskId !== taskId) return;
+    const current = () =>
+      !signal.aborted && allowed() && isDeepStrictEqual(proof, lookup());
+    const original = await readCaseExecutionEvidence(
+      options.sharedInventoryBaseDir,
+      options.snapshotPath,
+      proof.original.evidenceRevision,
+      proof.original.evidenceId,
+      assetId,
+    );
+    if (
+      !original || original.payload.kind !== "github_repository_status" ||
+      original.payload.visibility === "private" || !current()
+    ) return;
+    const call = executionTracePayloadCall(original.payload);
+    if (
+      !await authorizeSavedToolCalls(
+        [call],
+        config,
+        session,
+        undefined,
+        signal,
+      ) ||
+      !current() ||
+      !await options.authorizeExecutionTracePayload(
+        original.payload,
+        original.classification,
+      ) ||
+      !current() ||
+      (await enforcePostToolResponse(call.name, config, session, {
+        resultText: executionTracePayloadResponse(original.payload),
+        blocked: false,
+      })).blocked ||
+      !current()
+    ) return;
+    const fresh = await reopenRepositoryVisibility(
+      options,
+      session,
+      runId,
+      revision,
+      taskId,
+      assetId,
+      signal,
+      current,
+    );
+    if (
+      !fresh || fresh.repositoryId !== original.payload.repositoryId ||
+      fresh.repository !== original.payload.repo.toLowerCase() ||
+      !isDeepStrictEqual(fresh.reference, proof.source) || !current()
+    ) return;
+    return {
+      _classification: "INTERNAL" as const,
+      reference: proof.reference,
+      verdict: proof.verdict,
+    };
+  }
+
   async function authorizeWorkerNarrative(
     runId: string,
     revision: number,
@@ -9245,16 +9338,26 @@ function createAgent(
         signal,
         current,
       ) {
-        const saved = await reopenRepositoryVisibility(
-          options,
-          session,
-          runId,
-          revision,
-          reference.taskId,
-          assetId,
-          signal,
-          current,
-        );
+        const saved = reference.verdictId
+          ? await reopenRepositoryVisibilityVerdict(
+            runId,
+            revision,
+            reference.taskId,
+            assetId,
+            reference.verdictId,
+            signal,
+            current,
+          )
+          : await reopenRepositoryVisibility(
+            options,
+            session,
+            runId,
+            revision,
+            reference.taskId,
+            assetId,
+            signal,
+            current,
+          );
         return !!saved && isDeepStrictEqual(saved.reference, reference);
       },
     }),

@@ -722,6 +722,7 @@ type GoalReceiptReadArguments =
     byteLength?: number;
     sourceCase?: string;
     taskId?: string;
+    recheckId?: string;
     asset?: string;
     includeFindings?: boolean;
     sourceAsset?: string;
@@ -866,12 +867,15 @@ export function sentinelGoalReceiptReadArguments(
     return Object.keys(args).length === 0 ? {} : undefined;
   }
   if (tool === SENTINEL_SAVED_REPOSITORY_VISIBILITY) {
-    const { taskId, asset } = args;
-    return Object.keys(args).length === 2 &&
+    const { taskId, asset, recheckId } = args;
+    return Object.keys(args).length === (recheckId === undefined ? 2 : 3) &&
         typeof taskId === "string" && /^adaptive:[a-f0-9]{64}$/.test(taskId) &&
         typeof asset === "string" && asset.length > 0 && asset.length <= 256 &&
-        redactCredentialText(asset) === asset
-      ? { taskId, asset }
+        redactCredentialText(asset) === asset &&
+        (recheckId === undefined ||
+          typeof recheckId === "string" &&
+            /^worker-recheck:[a-f0-9]{64}$/.test(recheckId))
+      ? { taskId, asset, ...(recheckId && { recheckId }) }
       : undefined;
   }
   if (tool === SENTINEL_WORKER_NARRATIVE_READ) {

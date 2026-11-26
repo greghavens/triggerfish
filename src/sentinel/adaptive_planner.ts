@@ -964,15 +964,23 @@ export function validateSentinelPlanSuggestions(
       )
     ) continue;
     const workerNarrativeId = item.workerNarrativeId;
-    const repositoryVisibility =
-      typeof item.repositoryVisibilityTaskId === "string"
-        ? resolveRepositoryVisibility?.(item.repositoryVisibilityTaskId, nodeId)
-        : undefined;
+    const visibilitySelectorKey =
+      item.repositoryVisibilityRecheckId !== undefined
+        ? "repositoryVisibilityRecheckId"
+        : "repositoryVisibilityTaskId";
+    const visibilitySelector = item[visibilitySelectorKey];
+    const repositoryVisibility = typeof visibilitySelector === "string"
+      ? resolveRepositoryVisibility?.(visibilitySelector, nodeId)
+      : undefined;
     if (
-      item.repositoryVisibilityTaskId !== undefined &&
+      visibilitySelector !== undefined &&
       (!repositoryVisibility || kind !== "trace" || item.depth !== 1 ||
+        (visibilitySelectorKey === "repositoryVisibilityRecheckId"
+          ? repositoryVisibility.verdictId !== visibilitySelector
+          : repositoryVisibility.verdictId !== undefined ||
+            repositoryVisibility.taskId !== visibilitySelector) ||
         Object.keys(item).some((key) =>
-          !["kind", "nodeId", "depth", "repositoryVisibilityTaskId"].includes(
+          !["kind", "nodeId", "depth", visibilitySelectorKey].includes(
             key,
           )
         ))
