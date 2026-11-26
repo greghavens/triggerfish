@@ -1,3 +1,5 @@
+import type { LlmProvider } from "../../src/core/types/llm.ts";
+import { enableLiveProviderRoutes } from "../../src/agent/providers/live_routes.ts";
 import { createToolApprovalService } from "../../src/core/tool_approval_service.ts";
 import { withTeamRecoveryStore } from "../../src/gateway/startup/factory/team_recovery_store.ts";
 import { AgentRecoveryStore } from "../../src/core/agent_recovery_store.ts";
@@ -69,6 +71,7 @@ const config: TriggerFishConfig = {
 function backgroundFixture(
   baseDir: string,
   kind: "delegated" | "scheduled" | "team",
+  liveRoutes = false,
 ) {
   const role = kind === "team" ? "delegated" : kind;
   const tracePath = join(baseDir, "execution-traces.db");
@@ -86,6 +89,8 @@ function backgroundFixture(
     reads: 0,
     results: [] as string[],
     hooks: [] as HookLogEntry[],
+    providerCalls: [] as string[],
+    routeNames: ["fixture", "alternate"],
   };
   const engine = createPolicyEngine();
   for (const rule of createDefaultRules()) engine.addRule(rule);
@@ -93,10 +98,11 @@ function backgroundFixture(
     logger: { log: (entry) => state.hooks.push(entry) },
   });
   const inbox = createToolApprovalService(join(baseDir, "tool-approvals.db"));
-  infra.registry.register({
-    name: "fixture",
+  const providerModel = (provider: string): LlmProvider => ({
+    name: provider,
     supportsStreaming: false,
     async complete(messages) {
+      state.providerCalls.push(provider);
       const prior = messages.filter(({ role }) => role === "tool");
       if (!prior.length) await state.beforeFirstModel?.();
       state.results = prior.map(({ content }) => String(content));
@@ -129,6 +135,8 @@ function backgroundFixture(
       });
     },
   });
+  infra.registry.register(providerModel("fixture"));
+  if (liveRoutes) infra.registry.register(providerModel("alternate"));
   infra.registry.setDefault("fixture");
   const orchestratorFactory: OrchestratorFactory = {
     async create(channel, options) {
@@ -166,7 +174,12 @@ function backgroundFixture(
         return assembled(name, args, context);
       };
       const orchestrator = createOrchestrator({
-        providerRegistry: infra.registry,
+        providerRegistry: liveRoutes
+          ? enableLiveProviderRoutes(infra.registry, baseDir, {
+            PUBLIC: [...state.routeNames],
+            INTERNAL: [...state.routeNames],
+          })
+          : infra.registry,
         enableStreaming: false,
         tools: resolveToolsForProfile(
           role === "delegated" ? "subagent" : "triggerSession",
@@ -231,6 +244,21 @@ function backgroundFixture(
     },
   };
   return { tracePath, orchestratorFactory, state, inbox };
+}
+
+async function chooseBackgroundRoute(baseDir: string, provider: string) {
+  const dir = join(baseDir, "data");
+  await Deno.mkdir(dir, { recursive: true, mode: 0o700 });
+  const replacement = join(dir, "model-routes-next.json");
+  await Deno.writeTextFile(
+    replacement,
+    JSON.stringify({
+      PUBLIC: { provider },
+      INTERNAL: { provider },
+    }),
+    { mode: 0o600 },
+  );
+  await Deno.rename(replacement, join(dir, "model-routes.json"));
 }
 
 async function decideBackgroundApproval(
@@ -344,10 +372,14 @@ async function sendBackgroundCommand(
   }
 }
 
-Deno.test("Owner gateway resumes a delegated checklist under current policy without dispatching its write again", async () => {
-  const baseDir = await Deno.makeTempDir();
-  const fixture = backgroundFixture(baseDir, "delegated");
+async function checkDelegatedChecklistRecovery(liveRoutes: boolean) {
+  const baseDir = await Deno.makeTempDir({ dir: Deno.cwd() });
+  const fixture = backgroundFixture(baseDir, "delegated", liveRoutes);
   const { state } = fixture;
+  if (liveRoutes) {
+    state.interruption = "after";
+    await chooseBackgroundRoute(baseDir, "fixture");
+  }
   const configured = buildWorkflowRecoveryExecutor(
     config,
     baseDir,
@@ -384,6 +416,18 @@ Deno.test("Owner gateway resumes a delegated checklist under current policy with
     assertStringIncludes(await send(), "checkpoint");
     assertEquals(state.writes, 1);
     state.interruption = undefined;
+    if (liveRoutes) {
+      await chooseBackgroundRoute(baseDir, "alternate");
+      state.providerCalls.length = 0;
+      state.routeNames = ["alternate"];
+      assertStringIncludes(
+        await send(),
+        "original approved model route is unavailable",
+      );
+      assertEquals(state.providerCalls, []);
+      assertEquals(state.writes, 1);
+      state.routeNames = ["fixture", "alternate"];
+    }
     state.rejectSavedWrite = true;
     assertStringIncludes(await send(), "blocked by the current policy");
     assertEquals(state.reads, 0);
@@ -391,12 +435,18 @@ Deno.test("Owner gateway resumes a delegated checklist under current policy with
     assertStringIncludes(await send(), complete);
     assertEquals(state.writes, 1);
     assertEquals(state.reads, 1);
+    if (liveRoutes) assertEquals(state.providerCalls, ["fixture", "fixture"]);
     assertEquals(state.results[0], state.results[1]);
     assertEquals(JSON.parse(state.results[0]).todos, [todo]);
   } finally {
     await Deno.remove(baseDir, { recursive: true });
   }
-});
+}
+
+Deno.test("Owner gateway resumes a delegated checklist under current policy without dispatching its write again", () =>
+  checkDelegatedChecklistRecovery(false));
+Deno.test("Owner gateway resumes a delegated checkpoint on the original approved model route", () =>
+  checkDelegatedChecklistRecovery(true));
 
 async function verifyBackgroundPauseBeforeFirstAction(
   kind: "delegated" | "scheduled",
@@ -961,9 +1011,10 @@ for (const kind of ["delegated", "scheduled"] as const) {
 }
 
 Deno.test("Authenticated scheduler gateway resumes the exact classified checklist after interrupted dispatch", async () => {
-  const baseDir = await Deno.makeTempDir();
-  const fixture = backgroundFixture(baseDir, "scheduled");
+  const baseDir = await Deno.makeTempDir({ dir: Deno.cwd() });
+  const fixture = backgroundFixture(baseDir, "scheduled", true);
   const { state } = fixture;
+  await chooseBackgroundRoute(baseDir, "fixture");
   const secrets = createMemorySecretStore();
   const triggerMdPath = join(baseDir, "TRIGGER.md");
   await Deno.writeTextFile(triggerMdPath, instructions);
@@ -1037,6 +1088,9 @@ Deno.test("Authenticated scheduler gateway resumes the exact classified checklis
     assert(typeof restored !== "string");
     assertEquals((restored.receipt as { status: string }).status, "succeeded");
     state.interruption = undefined;
+    await chooseBackgroundRoute(baseDir, "alternate");
+    state.providerCalls.length = 0;
+    state.routeNames = ["alternate"];
     state.hooks = [];
     restarted = createSchedulerService({
       ...schedulerConfig,
@@ -1051,6 +1105,15 @@ Deno.test("Authenticated scheduler gateway resumes the exact classified checklis
     const { port } = await gateway.start();
     const endpoint = `http://127.0.0.1:${port}/recovery/scheduled/${id}`;
     try {
+      const denied = await fetch(endpoint, {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}` },
+      });
+      assertEquals(denied.status, 409);
+      await denied.text();
+      assertEquals(state.providerCalls, []);
+      assertEquals(state.writes, 1);
+      state.routeNames = ["fixture", "alternate"];
       for (const authenticated of [false, true]) {
         const reply = await fetch(endpoint, {
           method: "POST",
@@ -1062,6 +1125,7 @@ Deno.test("Authenticated scheduler gateway resumes the exact classified checklis
       }
       assertEquals(state.writes, 1);
       assertEquals(state.reads, 1);
+      assertEquals(state.providerCalls, ["fixture", "fixture"]);
       assertEquals(state.results[0], state.results[1]);
       assertEquals(JSON.parse(state.results[0]).todos, [todo]);
       for (const expected of ["PRE_TOOL_CALL", "POST_TOOL_RESPONSE"]) {
