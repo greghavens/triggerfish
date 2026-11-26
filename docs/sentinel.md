@@ -368,7 +368,8 @@ it cannot establish a verified result. The attempt exposes the
 The rationale stays available after archive restore. It does not produce
 a pass or fail, satisfy evidence requirements, or change the finding.
 A worker turn that ends without a verified result or an inconclusive
-record is saved as a failed attempt and follows the existing retry policy.
+record is saved as a failed attempt with reason `missing_recheck_result`
+and follows the existing retry policy.
 An assignment can commit one conclusion for its finding. Repeating the
 same verified result returns the original receipt.
 

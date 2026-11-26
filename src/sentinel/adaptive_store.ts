@@ -9412,7 +9412,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
     /** Read the last recorded settlement separately from a retry or active lease. */
     lastModelReviewSettlements(revision: string) {
       const rows = db.prepare(`
-        SELECT taskId, event, at FROM adaptive_events
+        SELECT taskId, event, at, note FROM adaptive_events
         WHERE rowid IN (
           SELECT MAX(rowid) FROM adaptive_events
           WHERE revision = ? AND event IN (
@@ -9430,6 +9430,9 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
             ? "failed" as const
             : "interrupted" as const,
           at: new Date(Number(row.at)).toISOString(),
+          ...(row.event === "model_review_failed" &&
+            row.note === "missing_recheck_result" &&
+            { reason: "missing_recheck_result" as const }),
         },
       ]));
     },
@@ -10186,6 +10189,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
         }
         | "interrupted"
         | "failed",
+      reason?: "missing_recheck_result",
     ): boolean {
       return transaction(db, () => {
         if (activeRevision() !== revision) return false;
@@ -10289,7 +10293,14 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
           : outcome === "failed"
           ? "model_review_failed"
           : "model_review_completed";
-        event.run(revision, target, status, attempts, time, null);
+        event.run(
+          revision,
+          target,
+          status,
+          attempts,
+          time,
+          outcome === "failed" ? reason ?? null : null,
+        );
         return true;
       });
     },

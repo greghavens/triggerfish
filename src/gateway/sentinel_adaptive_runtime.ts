@@ -1133,6 +1133,7 @@ export function readSentinelFindingRecheckAttempts(
       lastAttempt?: {
         outcome: "completed" | "failed" | "interrupted";
         at: string;
+        reason?: "missing_recheck_result";
       };
       outcomeUncertain?: true;
       resultReceiptId?: string;
@@ -5908,12 +5909,16 @@ export function createSentinelModelPlanner(
               task.id,
               token,
             );
-            const acceptedReview =
+            const eligibleReview =
               review && assignmentCurrent && !stopped && !interrupted &&
-                !signal.aborted &&
-                hasCommittedRecheckResult(snapshotPath, state, task)
+                !signal.aborted
                 ? review
                 : undefined;
+            const missingRecheckResult = !!eligibleReview &&
+              !hasCommittedRecheckResult(snapshotPath, state, task);
+            const acceptedReview = missingRecheckResult
+              ? undefined
+              : eligibleReview;
             const shouldPlan = acceptedReview
               ? automaticReviewScope(snapshotPath, state.revision)
               : undefined;
@@ -5936,6 +5941,7 @@ export function createSentinelModelPlanner(
                   },
                 }
                 : "failed",
+              missingRecheckResult ? "missing_recheck_result" : undefined,
             );
             return recorded && assignmentCurrent && !stopped && !interrupted &&
               !signal.aborted &&

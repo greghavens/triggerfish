@@ -2503,6 +2503,7 @@ async function verifyOperatorNativeRecheck(options: {
         );
         if (options.noResult) {
           assertEquals(settled?.lastAttempt?.outcome, "failed");
+          assertEquals(settled?.lastAttempt?.reason, "missing_recheck_result");
           assertEquals(settled?.status, "retry_pending");
         } else {
           assertEquals(settled?.status, "completed");
@@ -2582,6 +2583,7 @@ async function verifyOperatorNativeRecheck(options: {
           entry.taskId === assigned.taskId
         );
         assertEquals(attempt.lastAttempt.outcome, "failed");
+        assertEquals(attempt.lastAttempt.reason, "missing_recheck_result");
         assertEquals(attempt.outcome, undefined);
         assertEquals(attempt.resultReceiptId, undefined);
       },
