@@ -404,6 +404,8 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
                       "case_alert",
                       "incidents",
                       "decision_history",
+                      "company_scope",
+                      "company_assets",
                       "finding_receipt",
                       "finding_receipts",
                       "finding_report",
@@ -453,7 +455,8 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
               return config.hookRunner.evaluateHook(hook, {
                 ...context,
                 input: { ...context.input, ...meta },
-                auditInput: action === "preview_membership" ||
+                auditInput: action === "set_company_scope" ||
+                    action === "preview_membership" ||
                     action === "set_case_membership" ||
                     action === "add_case_membership" ||
                     action === "preview_inventory_affiliation" ||

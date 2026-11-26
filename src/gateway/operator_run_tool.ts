@@ -1,3 +1,8 @@
+import {
+  parseSentinelCompanyScopeUpdate,
+  readSentinelCompanyScopes,
+  recordSentinelCompanyScope,
+} from "../sentinel/company_scope.ts";
 import type {
   createSentinelRepositoryVisibilityReader,
   SentinelRepositoryVisibilityDestination,
@@ -285,6 +290,7 @@ import {
   readArchivedSentinelFindingSource,
   readArchivedSentinelSnapshot,
   readCitedSentinelAliasSnapshot,
+  readSharedSentinelAssetCatalog,
   readSharedSentinelTopologySource,
 } from "../sentinel/shared_inventory.ts";
 import {
@@ -506,6 +512,9 @@ export const operatorRunTool: ToolDefinition = {
         "worker_limit",
         "set_worker_limit",
         "assessment_concurrency",
+        "company_scope",
+        "set_company_scope",
+        "company_assets",
         "live_model_route",
         "set_live_model_route",
         "reset_live_model_route",
@@ -1388,6 +1397,10 @@ export const operatorRunTool: ToolDefinition = {
       type: "boolean",
       description:
         "Page the visible asset IDs declared for the exact organizationId.",
+    },
+    companyName: {
+      type: "string",
+      description: "Unique display name for the reviewed shared company scope",
     },
     organizationId: {
       type: "string",
@@ -3713,6 +3726,95 @@ export function createOperatorRunToolExecutor(options: {
         } finally {
           journal.close();
         }
+      } catch {
+        return unavailable;
+      }
+    }
+    if (
+      action === "company_scope" || action === "set_company_scope" ||
+      action === "company_assets"
+    ) {
+      const writing = action === "set_company_scope";
+      const catalog = action === "company_assets";
+      const authorize = context?.authorizeOwnerRunCall;
+      const {
+        organizationId,
+        companyName,
+        scopeRules,
+        note,
+        requestId,
+        expectedVersion,
+        cursor,
+      } = args;
+      if (
+        !context?.authenticatedOwnerSessionId ||
+        !canFlowTo("INTERNAL", context.ceiling ?? "PUBLIC") ||
+        (writing && !authorize) ||
+        typeof organizationId !== "string" || !organizationId.trim() ||
+        organizationId.length > 256 ||
+        Object.keys(args).some((key) =>
+          ![
+            "action",
+            "organizationId",
+            ...(writing
+              ? [
+                "companyName",
+                "scopeRules",
+                "note",
+                "requestId",
+                "expectedVersion",
+              ]
+              : catalog
+              ? ["cursor"]
+              : []),
+          ].includes(key)
+        ) ||
+        (cursor !== undefined && typeof cursor !== "string")
+      ) return unavailable;
+      try {
+        if (catalog) {
+          const inventory = await readSharedSentinelAssetCatalog(
+            options.baseDir,
+            {
+              organizationId,
+              cursor,
+              limit: 6,
+            },
+          );
+          return safeProjection({ inventory });
+        }
+        const before = readSentinelCompanyScopes(options.baseDir);
+        const company = before.companies.find((entry) =>
+          entry.organizationId === organizationId
+        );
+        if (!writing) {
+          return safeProjection({
+            version: before.version,
+            company: company ?? null,
+          });
+        }
+        const update = parseSentinelCompanyScopeUpdate({
+          organizationId,
+          organizationName: companyName,
+          reason: note,
+          rules: scopeRules,
+          requestId,
+          expectedVersion,
+        });
+        if (!update || update.expectedVersion > before.version) {
+          return unavailable;
+        }
+        if (update.expectedVersion === before.version) {
+          if (
+            !await options.confirm(
+              "Approve this exact shared Sentinel company attribution? This does not grant case access.\n" +
+                JSON.stringify({ existing: company ?? null, update }),
+            )
+          ) return "Error: The operator declined the run action.";
+        }
+        if (!await authorize?.(args)) return unavailable;
+        const edit = recordSentinelCompanyScope(options.baseDir, update);
+        return edit ? safeProjection({ edit }) : unavailable;
       } catch {
         return unavailable;
       }

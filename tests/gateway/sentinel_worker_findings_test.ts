@@ -15299,3 +15299,143 @@ Deno.test("An ordinary leased worker discovers and cites an exact same-asset pee
     await Deno.remove(baseDir, { recursive: true });
   }
 });
+
+Deno.test("Owner reviews shared company scope and attribution never grants case membership", async () => {
+  const baseDir = await Deno.makeTempDir();
+  const writeCase = async (
+    caseId: string,
+    assets: Record<string, unknown>[],
+  ) => {
+    const path = resolveSentinelCasePath(baseDir, caseId);
+    await Deno.mkdir(dirname(path), { recursive: true });
+    await Deno.writeTextFile(
+      path,
+      JSON.stringify({ version: 1, nodes: assets, edges: [] }),
+    );
+    return path;
+  };
+  const asset = (id: string, attributes: Record<string, unknown> = {}) => ({
+    id,
+    label: id,
+    kind: "asset",
+    ...attributes,
+  });
+  const read = { action: "company_scope", organizationId: "example" };
+  const catalog = { ...read, action: "company_assets" };
+  const update = {
+    ...read,
+    action: "set_company_scope",
+    companyName: "Example Company",
+    note: "Reviewed local ownership records.",
+    scopeRules: [
+      { kind: "domain", value: "company.example" },
+      { kind: "ip", value: "192.0.2.23" },
+      { kind: "keyword", value: "observed product" },
+    ],
+    requestId: crypto.randomUUID(),
+    expectedVersion: 0,
+  };
+  try {
+    const first = await writeCase("first", [
+      asset("first.company.example"),
+      asset("manual.company.example", {
+        organization: { id: "manual", label: "Explicit owner" },
+      }),
+      asset("keyword-only", { label: "Observed product page" }),
+    ]);
+    const initial = startSentinelAssessment(first);
+    let approved = false;
+    let permitWrite = true;
+    let reviewCount = 0;
+    await withFindingAssignmentGateway(baseDir, () => {
+      reviewCount++;
+      return Promise.resolve(approved);
+    }, async (turn) => {
+      assertEquals(JSON.parse(await turn(read)).company, null);
+      assertStringIncludes(await turn(update), "declined");
+      assertEquals(JSON.parse(await turn(read)).version, 0);
+      approved = true;
+      permitWrite = false;
+      assertStringIncludes(await turn(update), "policy");
+      assertEquals(JSON.parse(await turn(read)).version, 0);
+      permitWrite = true;
+      const saved = JSON.parse(await turn(update));
+      assertEquals(saved.edit.organizationId, "example");
+      assertEquals(saved.edit.version, 1);
+      assertEquals(JSON.parse(await turn(update)), saved);
+      assertEquals(reviewCount, 2);
+      const before = JSON.parse(await turn(catalog)).inventory;
+      assertEquals(before.assets.map(({ id }: { id: string }) => id), [
+        "first.company.example",
+      ]);
+      assertEquals(before.assets[0].sources[0].organizationRuleVersion, 1);
+      await writeCase("second", [
+        asset("second.company.example"),
+        asset("ip-evidence", { properties: { ip: ["192.0.2.23"] } }),
+      ]);
+      const after = JSON.parse(await turn(catalog)).inventory;
+      assertEquals(after.assets.map(({ id }: { id: string }) => id), [
+        "first.company.example",
+        "ip-evidence",
+        "second.company.example",
+      ]);
+      assertEquals(after.assets[2].sources[0].caseId, "second");
+      assertStringIncludes(
+        await turn({ ...update, requestId: crypto.randomUUID() }),
+        "unavailable",
+      );
+      const overlap = JSON.parse(
+        await turn({
+          ...update,
+          organizationId: "another",
+          companyName: "Another Company",
+          scopeRules: [{ kind: "domain", value: "company.example" }],
+          expectedVersion: 1,
+          requestId: crypto.randomUUID(),
+        }),
+      );
+      assertEquals(overlap.edit.version, 2);
+      assertEquals(
+        JSON.parse(await turn(catalog)).inventory.assets.map(
+          ({ id }: { id: string }) => id,
+        ),
+        ["ip-evidence"],
+      );
+      assertEquals(
+        JSON.parse(
+          await turn({
+            ...catalog,
+            organizationId: "manual",
+          }),
+        ).inventory.assets[0].id,
+        "manual.company.example",
+      );
+      assertEquals(
+        JSON.parse(
+          await turn({
+            action: "constraints",
+            kind: "sentinel",
+            id: "first",
+            revision: initial.revision,
+            runId: initial.plan.runId,
+          }),
+        ).history,
+        [],
+      );
+    }, (hook, input) =>
+      permitWrite || hook !== "PRE_TOOL_CALL" ||
+      (input.tool_call as { args?: Record<string, unknown> } | undefined)?.args
+          ?.action !==
+        "set_company_scope");
+    await withFindingAssignmentGateway(
+      baseDir,
+      () => Promise.resolve(false),
+      async (turn) => {
+        assertEquals(JSON.parse(await turn(read)).version, 2);
+        assertEquals(JSON.parse(await turn(read)).company.version, 1);
+      },
+    );
+  } finally {
+    await Deno.remove(baseDir, { recursive: true });
+  }
+});

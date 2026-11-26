@@ -16,6 +16,8 @@ import {
 } from "./cases.ts";
 import { MAX_SNAPSHOT_BYTES, readSentinelChatSnapshot } from "./chat_mode.ts";
 import { assetIdentityIndex, loadSentinelGraph } from "./graph.ts";
+import { readSentinelCompanyScopes } from "./company_scope.ts";
+import { sentinelScopeMatcher } from "./scope_rules.ts";
 import { publishSentinelInput } from "./published_input.ts";
 import {
   applySentinelWorkerFindingPublications,
@@ -221,6 +223,7 @@ export interface SharedSentinelAssetCatalogOptions {
 type CatalogSource = InventorySource & {
   assetId: string;
   organization?: Asset["organization"];
+  organizationRuleVersion?: number;
   snapshotDigest: string;
 };
 
@@ -268,6 +271,15 @@ export async function readSharedSentinelAssetCatalog(
   const records = new Map<string, CatalogSource[]>();
   const unavailable: string[] = [];
   const manifest: [string, string][] = [];
+  const companies = readSentinelCompanyScopes(baseDir);
+  const matchers = companies.companies.map((company) => ({
+    organization: {
+      id: company.organizationId,
+      label: company.organizationName,
+    },
+    version: company.version,
+    matches: sentinelScopeMatcher(company.rules, true),
+  }));
   for await (
     const { caseId, graph } of publishedCaseGraphs(baseDir, unavailable)
   ) {
@@ -276,6 +288,11 @@ export async function readSharedSentinelAssetCatalog(
     for (const node of graph.nodes) {
       if (node.kind !== "asset") continue;
       const { id, label, aliases, assetType, parentId, organization } = node;
+      const matched = organization
+        ? []
+        : matchers.filter(({ matches }) => matches(node));
+      const inferred = matched.length === 1 ? matched[0] : undefined;
+      const affiliation = organization ?? inferred?.organization;
       const sources = records.get(id) ?? [];
       sources.push({
         caseId,
@@ -285,7 +302,8 @@ export async function readSharedSentinelAssetCatalog(
         ...(aliases && { aliases }),
         ...(assetType && { assetType }),
         ...(parentId && { parentId }),
-        ...(organization && { organization }),
+        ...(affiliation && { organization: affiliation }),
+        ...(inferred && { organizationRuleVersion: inferred.version }),
       });
       records.set(id, sources);
     }
@@ -293,6 +311,7 @@ export async function readSharedSentinelAssetCatalog(
   const manifestDigest = catalogHash([
     manifest.sort(([a], [b]) => compareCatalogIds(a, b)),
     unavailable.sort(),
+    ...(companies.version ? [companies.version] : []),
   ]);
   const scope = catalogHash([
     resolve(baseDir),
@@ -329,6 +348,9 @@ export async function readSharedSentinelAssetCatalog(
       catalogHash(id) === cursor.slice(65)
     ) + 1;
     if (!start) throw new Error("Invalid Sentinel catalog cursor anchor");
+  }
+  if (readSentinelCompanyScopes(baseDir).version !== companies.version) {
+    throw new Error("Sentinel company attribution changed during catalog read");
   }
   const assets = matches.slice(start, start + limit);
   const nextCursor = start + assets.length < matches.length
