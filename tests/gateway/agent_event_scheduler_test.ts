@@ -650,6 +650,107 @@ Deno.test("Reviewed event subscription dispatches committed case metadata only o
     scheduler.start();
     await manage({ action: "agent_event_subscriptions" });
     assertEquals(messages.length, 6);
+    scheduler.stop();
+    for (
+      const [id, expectedVersion] of [
+        [subscription.subscriptionSettings.id, 2],
+        [burst.subscriptionSettings.id, 1],
+      ] as const
+    ) {
+      const removed = JSON.parse(
+        await manage({
+          action: "delete_agent_event_subscription",
+          id,
+          expectedVersion,
+        }),
+      );
+      assertEquals(removed.saved.deleted, true);
+    }
+    const fifoCaseId = "fifo-restart";
+    const fifoTool = "fixture_fifo_trace";
+    for (
+      const setting of [
+        {
+          id: "aaa-newer-case",
+          kinds: ["task_created"],
+          caseId: fifoCaseId,
+          merge: "none",
+        },
+        {
+          id: "zzz-older-trace",
+          kinds: ["tool_completed"],
+          tool: fifoTool,
+          merge: "all",
+        },
+      ]
+    ) {
+      const configured = await manage({
+        action: "set_agent_event_subscription",
+        expectedVersion: 0,
+        subscriptionSettings: {
+          ...setting,
+          agent: "review-agent",
+          maxConcurrent: 1,
+          enabled: true,
+        },
+      });
+      assertEquals(JSON.parse(configured).saved.version, 1);
+    }
+    let committedAt = Date.now();
+    const fifoTraces = openExecutionTraces(
+      join(baseDir, "execution-traces.db"),
+      () => committedAt,
+    );
+    const orderedReceipts: string[] = [];
+    try {
+      for (let i = 0; i < 2; i++) {
+        const receipt = fifoTraces.appendNext(backgroundScope, {
+          tool: fifoTool,
+          outcome: "returned",
+          classification: "INTERNAL",
+        });
+        assert(receipt);
+        orderedReceipts.push(receipt.id);
+        committedAt++;
+      }
+    } finally {
+      fifoTraces.close();
+    }
+    const fifoPath = resolveSentinelCasePath(baseDir, fifoCaseId);
+    await Deno.mkdir(dirname(fifoPath), { recursive: true });
+    await Deno.copyFile(path, fifoPath);
+    while (Date.now() <= committedAt) {
+      await new Promise((resolve) => setTimeout(resolve, 1));
+    }
+    const newest = startSentinelAssessment(fifoPath);
+    assert(newest.plan.runStartedAt! > committedAt);
+    scheduler.start();
+    await manage({ action: "agent_event_subscriptions" });
+    assertEquals(messages.length, 7);
+    const receiptsIn = (message: string) =>
+      (JSON.parse(message.split("\n").at(-1)!) as { receipt: string }[])
+        .map(({ receipt }) => receipt);
+    assertEquals(receiptsIn(messages[6]), orderedReceipts);
+
+    scheduler.stop();
+    scheduler.start();
+    const fifoHistory = JSON.parse(
+      await manage({ action: "agent_event_subscriptions" }),
+    );
+    assertEquals(messages.length, 8);
+    assertEquals(receiptsIn(messages[7]), [newest.plan.runId]);
+    assertEquals(
+      fifoHistory.deliveries.slice(0, 2).map(
+        (
+          { subscription, state }: { subscription: string; state: string },
+        ) => [subscription, state],
+      ),
+      [["aaa-newer-case", "completed"], ["zzz-older-trace", "completed"]],
+    );
+    scheduler.stop();
+    scheduler.start();
+    await manage({ action: "agent_event_subscriptions" });
+    assertEquals(messages.length, 8);
   } finally {
     scheduler.stop();
     socket?.close();

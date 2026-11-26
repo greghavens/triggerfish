@@ -5,6 +5,7 @@ import { join } from "@std/path";
 import {
   type AgentEvent,
   type AgentEventDelivery,
+  compareAgentEvents,
   openAgentEventSchedule,
 } from "./agent_events.ts";
 import {
@@ -136,11 +137,18 @@ export function createAgentEventScheduler(config: SchedulerServiceConfig) {
           subscription.enabled
         );
         if (subscriptions.length) {
-          options!.readSources(
-            subscriptions,
-            store.publish,
-            store.earliestSubscriptionRegistration(),
-          );
+          const discovered: AgentEvent[] = [];
+          try {
+            options!.readSources(
+              subscriptions,
+              (event) => discovered.push(event),
+              store.earliestSubscriptionRegistration(),
+            );
+          } finally {
+            for (const event of discovered.sort(compareAgentEvents)) {
+              store.publish(event);
+            }
+          }
         }
         while (active.size < 16) {
           const delivery = store.claim();

@@ -41,6 +41,22 @@ export interface AgentEvent {
   readonly recordedAt?: number;
 }
 
+function eventTime(event: AgentEvent) {
+  return event.recordedAt ??
+    (event.kind === "interval"
+      ? Number(event.receipt)
+      : Number.MAX_SAFE_INTEGER);
+}
+
+/** Oldest retained record first, with a stable identity order for equal clocks. */
+export function compareAgentEvents(a: AgentEvent, b: AgentEvent): number {
+  return eventTime(a) - eventTime(b) ||
+    a.kind.localeCompare(b.kind) ||
+    (a.caseId ?? "").localeCompare(b.caseId ?? "") ||
+    (a.tool ?? "").localeCompare(b.tool ?? "") ||
+    a.receipt.localeCompare(b.receipt);
+}
+
 const id = /^[a-z][a-z0-9_-]{0,63}$/;
 const receipt = /^[a-zA-Z0-9:_.-]{1,200}$/;
 const caseId = /^[a-z0-9](?:[a-z0-9-]{0,46}[a-z0-9])?$/;
@@ -263,55 +279,87 @@ export function openAgentEventSchedule(path: string, now = Date.now) {
     ).run(occurrence, s.id, version, s.agent, JSON.stringify(events));
   }
 
-  function admit() {
+  function admit(): boolean {
     const subscriptions = db.prepare("SELECT * FROM agent_event_subscriptions")
-      .all();
-    for (const row of subscriptions) {
-      if (row.spec === "null") continue;
-      const { subscription: s, version } = decode(row);
-      if (!s.enabled) continue;
-      const events = db.prepare(
-        "SELECT sequence,event FROM agent_event_receipts WHERE sequence > ? ORDER BY sequence LIMIT 64",
-      ).all(Number(row.cursor));
-      const seen = events.flatMap(({ event }) => {
-        const e = JSON.parse(String(event)) as AgentEvent;
-        return (e.recordedAt ?? 0) >= Number(row.registered_at) &&
-            s.kinds.includes(e.kind) &&
-            (!s.caseId || e.caseId === s.caseId) &&
-            (e.kind !== "tool_completed" ||
-              (e.tool !== undefined && (!e.outcome || s.includeToolErrors) &&
-                (e.tool === s.tool || s.tools?.includes(e.tool))))
-          ? [e]
-          : [];
+      .all().flatMap((row) => {
+        if (row.spec === "null") return [];
+        const entry = decode(row);
+        return entry.subscription.enabled ? [{ row, ...entry }] : [];
       });
+    if (!subscriptions.length) return false;
+    // Advance all current subscriptions through the same receipt window. A
+    // newer registration cannot enqueue from beyond this window while an
+    // older subscription has yet to inspect it.
+    const earliest = subscriptions.reduce(
+      (cursor, { row }) => Math.min(cursor, Number(row.cursor)),
+      Number.MAX_SAFE_INTEGER,
+    );
+    const receipts = db.prepare(
+      "SELECT sequence,event FROM agent_event_receipts WHERE sequence > ? ORDER BY sequence LIMIT 65",
+    ).all(earliest);
+    const page = receipts.slice(0, 64).map(({ sequence, event }) => ({
+      sequence: Number(sequence),
+      event: JSON.parse(String(event)) as AgentEvent,
+    }));
+    const frontier = page.at(-1)?.sequence;
+    const planned: {
+      subscription: AgentEventSubscription;
+      version: number;
+      events: AgentEvent[];
+    }[] = [];
+    for (const { row, subscription: s, version } of subscriptions) {
+      const cursor = Number(row.cursor);
+      const registeredAt = Number(row.registered_at);
+      const seen = page.flatMap(({ sequence, event: e }) =>
+        sequence > cursor &&
+          (e.recordedAt ?? 0) >= registeredAt &&
+          s.kinds.includes(e.kind) &&
+          (!s.caseId || e.caseId === s.caseId) &&
+          (e.kind !== "tool_completed" ||
+            (e.tool !== undefined && (!e.outcome || s.includeToolErrors) &&
+              (e.tool === s.tool || s.tools?.includes(e.tool))))
+          ? [e]
+          : []
+      );
       const due = Number(row.next_interval);
       if (s.intervalMs && due <= now()) {
         seen.push({ kind: "interval", receipt: String(due), caseId: s.caseId });
         db.prepare(
           "UPDATE agent_event_subscriptions SET next_interval=? WHERE id=?",
-        )
-          .run(now() + s.intervalMs, s.id);
+        ).run(now() + s.intervalMs, s.id);
       }
-      if (events.length) {
+      if (frontier !== undefined && frontier > cursor) {
         db.prepare(
           "UPDATE agent_event_subscriptions SET cursor=? WHERE id=?",
-        ).run(Number(events.at(-1)?.sequence), s.id);
+        ).run(frontier, s.id);
       }
-      if (s.merge === "all" && seen.length) enqueue(s, version, seen);
-      else if (s.merge === "by_case") {
+      seen.sort(compareAgentEvents);
+      if (s.merge === "all" && seen.length) {
+        planned.push({ subscription: s, version, events: seen });
+      } else {
         const cases = new Map<string, AgentEvent[]>();
         for (const event of seen) {
-          if (!event.caseId) {
-            enqueue(s, version, [event]);
+          if (s.merge !== "by_case" || !event.caseId) {
+            planned.push({ subscription: s, version, events: [event] });
             continue;
           }
-          const group = cases.get(event.caseId) ?? [];
-          group.push(event);
-          cases.set(event.caseId, group);
+          const grouped = cases.get(event.caseId) ?? [];
+          grouped.push(event);
+          cases.set(event.caseId, grouped);
         }
-        for (const group of cases.values()) enqueue(s, version, group);
-      } else for (const event of seen) enqueue(s, version, [event]);
+        for (const events of cases.values()) {
+          planned.push({ subscription: s, version, events });
+        }
+      }
     }
+    planned.sort((a, b) =>
+      compareAgentEvents(a.events[0], b.events[0]) ||
+      a.subscription.id.localeCompare(b.subscription.id)
+    );
+    for (const item of planned) {
+      enqueue(item.subscription, item.version, item.events);
+    }
+    return receipts.length > page.length;
   }
 
   return {
@@ -394,11 +442,10 @@ export function openAgentEventSchedule(path: string, now = Date.now) {
     },
     claim(): AgentEventDelivery | undefined {
       return transact(() => {
-        admit();
         // A crashed dispatch may have had side effects. Leave its receipt for review.
         db.prepare(`UPDATE agent_event_deliveries SET state='interrupted'
           WHERE state='running' AND lease_until <= ?`).run(now());
-        const row = db.prepare(`
+        const next = db.prepare(`
           SELECT job.*, selected.spec FROM agent_event_deliveries AS job
           JOIN agent_event_subscriptions AS selected ON selected.id=job.subscription
             AND selected.version=job.version
@@ -410,7 +457,13 @@ export function openAgentEventSchedule(path: string, now = Date.now) {
                 WHERE json_extract(other.spec,'$.agent')=job.agent
                   AND json_extract(other.spec,'$.enabled')=1)
           ORDER BY job.rowid LIMIT 1
-        `).get();
+        `);
+        let row: ReturnType<typeof next.get>;
+        let more: boolean;
+        do {
+          more = admit();
+          row = next.get();
+        } while (!row && more);
         if (row) {
           const entry = decode(row);
           const token = crypto.randomUUID();
