@@ -3384,6 +3384,7 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
           taskId: recheck.taskId,
           title: amendment.title,
           summary: amendment.summary,
+          remediation: { status: "unknown", asOfRevision: nextPeer.revision },
         });
         const prior = JSON.parse(
           (await turn({
