@@ -31,6 +31,7 @@ import {
   SENTINEL_GOAL_PROPOSE,
   SENTINEL_GOAL_PROVE,
   SENTINEL_GOAL_RECHECK_READ,
+  SENTINEL_GOAL_STATE_READ,
   sentinelGoalProposalArguments,
 } from "../sentinel/worker_goal_recovery.ts";
 import {
@@ -5604,7 +5605,7 @@ export function createSentinelModelPlanner(
           "Only use exact graph IDs.",
           ...(goalCompletion
             ? [
-              "To report verified goal progress, optionally include goalObservations in the response object with assignments and prioritize. Each observation has criterionId and evidence entries {source,reference,detail}. Use only exact registered criteria. For an adaptive_task requirement of the form task:trace:DEPTH:NODE or task:impact:DEPTH:NODE, plan the specified kind, depth, and exact node as needed and cite the actual completed task ID in goalObservations. For task:verify_control_coverage:pass:FINDING_ID, request verify_control_coverage on the exact finding and cite its actual completed task only if coverage is pass. For a finding_recheck requirement, use findingRechecks or sentinel_worker_findings with receiptId and revision to reopen an exact receipt and cite the exact passing worker-recheck ID for the required original finding. For graph_fact criteria, cite the exact committed graph fact ID. If the requirement names a directed [from, relation, to] tuple, use only a receipt for that edge. An uncertain or missing proof must not be reported.",
+              "Report verified criteria in goalObservations as {criterionId,evidence:[{source,reference,detail}]}. Read other criteria with sentinel_goal_state (offset, limit). For an adaptive_task, match the required kind, depth and node and cite the completed ID (coverage must pass if required). For finding_recheck, cite the exact passing receipt for the original finding. For graph_fact, cite the exact receipt, matching any specified directed edge. Omit missing or uncertain proof.",
             ]
             : []),
           "A trafficReference in operatorAssetHints identifies one retained source. Reopen it only with the case-scoped traffic reader and use it only for the anchored asset.",
@@ -6158,6 +6159,18 @@ export function createSentinelModelPlanner(
                   }
                 }
                 if (recorded && outcome === "returned") {
+                  if (
+                    tool === SENTINEL_GOAL_STATE_READ && goalStateProjection &&
+                    goalReceiptRead && goalCompletion
+                  ) {
+                    const offset = goalReceiptRead.args.offset ?? 0;
+                    for (
+                      const { id } of goalCompletion.criteria.slice(
+                        offset,
+                        offset + goalStateProjection.flags.length,
+                      )
+                    ) presentedGoalCriteria.add(id);
+                  }
                   if (taskObservationPage && runId) {
                     const { task, offset, sha256 } = taskObservationPage;
                     const selected = observations.find(({ taskId }) =>

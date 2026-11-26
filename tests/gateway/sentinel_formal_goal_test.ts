@@ -13,6 +13,8 @@ import {
   type UserId,
 } from "../../src/core/types/session.ts";
 import { createChatSession } from "../../src/gateway/chat.ts";
+import { createSentinelSubagent } from "../../src/gateway/sentinel_agent.ts";
+import { readSentinelGoalCompletion } from "../../src/gateway/sentinel_goal_completion.ts";
 import {
   advanceAdaptiveSentinel,
   createSentinelModelPlanner,
@@ -553,6 +555,65 @@ Deno.test("authenticated Sentinel chat drafts, approves and extends independentl
   }
 });
 
+async function withSentinelGoalSocket(
+  path: string,
+  check: (turn: (content: string) => Promise<string>) => Promise<void>,
+) {
+  const registry = createProviderRegistry();
+  const token = crypto.randomUUID();
+  const gateway = createGatewayServer({
+    port: 0,
+    token,
+    chatSession: createChatSession({
+      session: createSession({
+        userId: "owner" as UserId,
+        channelId: "test" as ChannelId,
+      }),
+      providerRegistry: registry,
+      hookRunner: createHookRunner(createPolicyEngine()),
+      sentinelSnapshotPath: path,
+      allowSentinelModelAccess: true,
+    }),
+  });
+  const { port } = await gateway.start();
+  const socket = new WebSocket(`ws://127.0.0.1:${port}/chat?token=${token}`);
+  try {
+    await new Promise<void>((resolve, reject) => {
+      socket.addEventListener("open", () => resolve(), { once: true });
+      socket.addEventListener("error", reject, { once: true });
+    });
+    const turn = (content: string) => {
+      const done = Promise.withResolvers<string>();
+      let response = "";
+      let failure: string | undefined;
+      const timer = setTimeout(
+        () => done.reject(new Error("Missing turn end")),
+        3000,
+      );
+      const receive = ({ data }: MessageEvent) => {
+        const event = JSON.parse(data);
+        if (event.type === "response") response = event.text;
+        if (event.type === "error") failure = event.message;
+        if (event.type === "turn_end") {
+          if (failure) done.reject(new Error(failure));
+          else done.resolve(response);
+        }
+      };
+      socket.addEventListener("message", receive);
+      socket.send(JSON.stringify({ type: "message", content }));
+      return done.promise.finally(() => {
+        clearTimeout(timer);
+        socket.removeEventListener("message", receive);
+      });
+    };
+    await turn("/sentinel on");
+    await check(turn);
+  } finally {
+    socket.close();
+    await gateway.stop();
+  }
+}
+
 Deno.test("reviewed standalone Sentinel admission binds optional inventory coverage", async () => {
   const directory = await Deno.makeTempDir();
   const path = resolveSentinelCasePath(directory);
@@ -571,66 +632,8 @@ Deno.test("reviewed standalone Sentinel admission binds optional inventory cover
       })
     }`;
 
-  async function connected(
-    check: (turn: (content: string) => Promise<string>) => Promise<void>,
-  ) {
-    const registry = createProviderRegistry();
-    const token = crypto.randomUUID();
-    const gateway = createGatewayServer({
-      port: 0,
-      token,
-      chatSession: createChatSession({
-        session: createSession({
-          userId: "owner" as UserId,
-          channelId: "test" as ChannelId,
-        }),
-        providerRegistry: registry,
-        hookRunner: createHookRunner(createPolicyEngine()),
-        sentinelSnapshotPath: path,
-        allowSentinelModelAccess: true,
-      }),
-    });
-    const { port } = await gateway.start();
-    const socket = new WebSocket(`ws://127.0.0.1:${port}/chat?token=${token}`);
-    try {
-      await new Promise<void>((resolve, reject) => {
-        socket.addEventListener("open", () => resolve(), { once: true });
-        socket.addEventListener("error", reject, { once: true });
-      });
-      const turn = (content: string) => {
-        const done = Promise.withResolvers<string>();
-        let response = "";
-        let failure: string | undefined;
-        const timer = setTimeout(
-          () => done.reject(new Error("Missing turn end")),
-          3000,
-        );
-        const receive = ({ data }: MessageEvent) => {
-          const event = JSON.parse(data);
-          if (event.type === "response") response = event.text;
-          if (event.type === "error") failure = event.message;
-          if (event.type === "turn_end") {
-            if (failure) done.reject(new Error(failure));
-            else done.resolve(response);
-          }
-        };
-        socket.addEventListener("message", receive);
-        socket.send(JSON.stringify({ type: "message", content }));
-        return done.promise.finally(() => {
-          clearTimeout(timer);
-          socket.removeEventListener("message", receive);
-        });
-      };
-      await turn("/sentinel on");
-      await check(turn);
-    } finally {
-      socket.close();
-      await gateway.stop();
-    }
-  }
-
   try {
-    await connected(async (turn) => {
+    await withSentinelGoalSocket(path, async (turn) => {
       await assertRejects(
         () => turn(command("false")),
         Error,
@@ -657,7 +660,7 @@ Deno.test("reviewed standalone Sentinel admission binds optional inventory cover
         "when starting an assessment",
       );
     });
-    await connected(async (turn) => {
+    await withSentinelGoalSocket(path, async (turn) => {
       const saved = JSON.parse(await turn("assessment goals status"));
       assertEquals(saved.inventoryCoverageEnabled, false);
       const replay = JSON.parse(await turn(command(false)));
@@ -671,5 +674,140 @@ Deno.test("reviewed standalone Sentinel admission binds optional inventory cover
     });
   } finally {
     await Deno.remove(directory, { recursive: true });
+  }
+});
+
+Deno.test("Sentinel formal goal proof accepts overflow criteria only after an authorized planner read", async () => {
+  for (const allowRead of [false, true]) {
+    const dir = await Deno.makeTempDir();
+    const path = resolveSentinelCasePath(dir);
+    const proofId = "saved-proof";
+    const criteria = Array.from({ length: 9 }, (_, n) => ({
+      ...goal("assessment", proofId).criteria[0],
+      id: "criterion-" + n,
+    }));
+    const lastCriterion = "assessment/" + criteria.at(-1)!.id;
+    const registry = createProviderRegistry();
+    let permissionChecks = 0;
+    let finalProposal = false;
+    let plannerPrompt: string | undefined;
+    registry.register({
+      name: "planner-goal-fixture",
+      supportsStreaming: false,
+      complete(messages) {
+        const result = messages.findLast(({ role }) => role === "tool");
+        const usage = { inputTokens: 1, outputTokens: 1 };
+        if (!result) {
+          plannerPrompt = String(
+            messages.findLast(({ role }) => role === "user")?.content,
+          );
+          return Promise.resolve({
+            content: "",
+            usage,
+            toolCalls: [{
+              id: "goal-page",
+              type: "function",
+              function: {
+                name: "sentinel_goal_state",
+                arguments: JSON.stringify({ offset: 8, limit: 1 }),
+              },
+            }],
+          });
+        }
+        if (allowRead) {
+          assertEquals(
+            JSON.parse(String(result.content)).criteria[0].id,
+            lastCriterion,
+          );
+        } else assert(!String(result.content).includes(lastCriterion));
+        finalProposal = true;
+        return Promise.resolve({
+          content: JSON.stringify({
+            assignments: [],
+            prioritize: [],
+            goalObservations: [{
+              criterionId: lastCriterion,
+              evidence: [{
+                source: "graph_evidence",
+                reference: proofId,
+                detail: "The exact saved graph record.",
+              }],
+            }],
+          }),
+          usage,
+          toolCalls: [],
+        });
+      },
+    });
+    registry.setDefault("planner-goal-fixture");
+    const planner = createSentinelModelPlanner(
+      path,
+      (state) =>
+        createSentinelSubagent({
+          snapshotPath: path,
+          assessmentRevision: state.revision,
+          plannerExecutionEvidenceRunId: state.plan.runId,
+          providerRegistry: registry,
+          allowModelAccess: true,
+          hookRunner: {
+            evaluateHook(hook, { input }) {
+              const checksGoalPage = hook === "PRE_TOOL_CALL" &&
+                input.tool_name === "sentinel_goal_state";
+              if (checksGoalPage) permissionChecks++;
+              const allowed = !checksGoalPage || allowRead;
+              return Promise.resolve({
+                allowed,
+                action: allowed ? "ALLOW" : "BLOCK",
+                ruleId: null,
+                duration: 0,
+              });
+            },
+          },
+        }),
+    );
+
+    try {
+      await Deno.mkdir(dirname(path), { recursive: true });
+      await Deno.writeTextFile(
+        path,
+        JSON.stringify({
+          version: 1,
+          nodes: [
+            { id: proofId, kind: "evidence", label: "Saved review" },
+            { id: "asset", kind: "asset", label: "Local service" },
+          ],
+          edges: [{ from: proofId, to: "asset", relation: "observed_on" }],
+        }),
+      );
+      await withSentinelGoalSocket(path, async (turn) => {
+        const started = JSON.parse(
+          await turn(`assessment goals start ${
+            JSON.stringify({
+              objective: "Review the saved record.",
+              requestId: "overflow-goal",
+              goals: [{ ...goal("assessment", proofId), criteria }],
+            })
+          }`),
+        );
+        assertEquals(started.active, true);
+        const state = readSentinelAssessment(path);
+        assert(state);
+        planner.advance(state);
+        await until(() => finalProposal && !planner.hasInFlightWork());
+        assertEquals(permissionChecks, 1);
+        assert(plannerPrompt);
+        assert(plannerPrompt.length <= 8000);
+        assert(!plannerPrompt.includes(lastCriterion));
+        assertEquals(
+          readSentinelGoalCompletion(path)?.observations.map((
+            { criterionId },
+          ) => criterionId),
+          allowRead ? [lastCriterion] : [],
+        );
+      });
+    } finally {
+      planner.stop();
+      await Deno.remove(dir, { recursive: true });
+    }
   }
 });
