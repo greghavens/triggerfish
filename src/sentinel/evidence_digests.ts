@@ -327,6 +327,18 @@ export function openSentinelEvidenceDigests(baseDir: string, now = Date.now) {
       };
     },
 
+    read(rawScope: SentinelEvidenceDigestScope, digestId: string) {
+      const scope = scopeFor(rawScope);
+      if (
+        !scope || typeof digestId !== "string" || !digestPattern.test(digestId)
+      ) return;
+      const row = scoped.get(...scopeParams(scope), digestId);
+      return row && checkedCatalogEntry({
+        digest: summary(scope, row),
+        members: JSON.parse(String(row.members)),
+      });
+    },
+
     expand(
       rawScope: SentinelEvidenceDigestScope,
       digestId: string,

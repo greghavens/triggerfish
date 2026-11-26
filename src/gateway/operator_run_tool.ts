@@ -314,7 +314,7 @@ import {
   updateSentinelWorkerLimit,
 } from "./sentinel_adaptive_runtime.ts";
 import {
-  allowSentinelDigestObservations,
+  allowsRetainedSentinelDigest,
   executeOperatorEvidenceDigest,
 } from "./operator_evidence_digests.ts";
 import {
@@ -9344,12 +9344,15 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
             const result = JSON.parse(digest.text);
             const allowsObservations = () =>
               digestArgs.digestId === undefined ||
-              allowSentinelDigestObservations(
-                path,
-                runId,
-                ref.revision!,
-                result.page.members,
-              );
+              (typeof digestArgs.digestId === "string" &&
+                allowsRetainedSentinelDigest(
+                  options.baseDir,
+                  path,
+                  ref.id,
+                  runId,
+                  ref.revision!,
+                  digestArgs.digestId,
+                ));
             if (
               createHash("sha256").update(digest.text).digest("hex") !==
                 digest.sha256 ||

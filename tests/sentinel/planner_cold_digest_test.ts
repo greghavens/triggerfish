@@ -3072,3 +3072,198 @@ Deno.test("Planner input and commit honor mid-flight source asset revocation", a
     await Deno.remove(directory, { recursive: true });
   }
 });
+
+Deno.test("Retained digest pages reauthorize every assignment before and after archive", async () => {
+  const directory = await Deno.makeTempDir();
+  const caseId = "retained-digest-revocation";
+  const path = resolveSentinelCasePath(directory, caseId);
+  try {
+    await Deno.mkdir(dirname(path), { recursive: true, mode: 0o700 });
+    await Deno.writeTextFile(
+      path,
+      JSON.stringify({
+        version: 1,
+        nodes: ["allowed", "restricted"].map((id) => ({
+          id,
+          kind: "asset",
+          label: id,
+        })),
+        edges: [],
+      }),
+      { mode: 0o600 },
+    );
+    const state = startSentinelAssessment(path);
+    const runId = state.plan.runId;
+    assert(runId);
+    const ref = {
+      kind: "sentinel" as const,
+      id: caseId,
+      revision: state.revision,
+    };
+    const revision = adaptiveRevision(state);
+    const adaptive = openSentinelAdaptiveStore(
+      join(dirname(path), "sentinel-adaptive.db"),
+    );
+    let taskId: string;
+    try {
+      adaptive.sync(
+        revision,
+        [{
+          kind: "impact",
+          nodeId: "restricted",
+          reason: "Retained defensive evidence",
+        }],
+        null,
+        { number: state.revision, goal: { id: runId, label: "Review scope" } },
+      );
+      const lease = adaptive.claim(revision);
+      assert(lease);
+      taskId = lease.task.id;
+      assert(adaptive.complete({
+        taskId,
+        leaseToken: lease.leaseToken,
+        observation: { summary: "Retained result for the restricted asset." },
+      }));
+    } finally {
+      adaptive.close();
+    }
+    const publicMember = {
+      id: "asset:allowed",
+      kind: "asset" as const,
+      label: "Allowed asset",
+    };
+    const digests = openSentinelEvidenceDigests(directory);
+    let ids: string[];
+    try {
+      const scope = { caseId, runId, evidenceRevision: state.revision };
+      ids = [
+        [publicMember],
+        ...[
+          ["task:adaptive:", "task"],
+          ["observation:adaptive:", "observation"],
+          ["observation:adaptive:review:", "observation"],
+        ].map(([prefix, kind]) => [
+          publicMember,
+          {
+            id: prefix + taskId,
+            kind: kind as "task" | "observation",
+            label: "Restricted assignment",
+          },
+        ]),
+      ].map((members) => {
+        const retained = digests.record(scope, { members });
+        assert(retained);
+        return retained.id;
+      });
+    } finally {
+      digests.close();
+    }
+    const request = (digestId: string) => ({
+      ...ref,
+      action: "expand_digest",
+      digestId,
+      limit: 1,
+    });
+    const providers = createProviderRegistry();
+    providers.register({
+      name: "digest-revocation-planner",
+      supportsStreaming: false,
+      complete(messages) {
+        if (messages.some(({ role }) => role === "tool")) {
+          return Promise.resolve(completion("[]"));
+        }
+        return Promise.resolve(
+          completion("", "sentinel_expand_evidence_digest", {
+            revision: state.revision,
+            digestId: ids[1],
+            limit: 1,
+          }),
+        );
+      },
+    });
+    providers.setDefault("digest-revocation-planner");
+    const planner = createSentinelModelPlanner(
+      path,
+      (assessment, assignment) =>
+        assignment
+          ? { execute: () => Promise.resolve(), clear() {} }
+          : createSentinelSubagent({
+            snapshotPath: path,
+            assessmentRevision: assessment.revision,
+            plannerExecutionEvidenceRunId: runId,
+            providerRegistry: providers,
+            hookRunner: allowHooks,
+            allowModelAccess: true,
+          }),
+    );
+    try {
+      planner.advance(state);
+      const end = Date.now() + 4000;
+      while (planner.hasInFlightWork() && Date.now() < end) {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+      assert(!planner.hasInFlightWork());
+    } finally {
+      planner.stop();
+    }
+    const round = readAdaptiveSentinel(path, state)?.modelPlannerHistory.find(
+      ({ reads }) =>
+        reads?.some(({ tool }) => tool === "sentinel_expand_evidence_digest"),
+    );
+    assert(round);
+    const retainedRead = {
+      ...ref,
+      action: "planner_reads",
+      plannerIdentity: round.identity,
+      attempt: round.attempt,
+      ordinal: 1,
+      includeResult: true,
+    };
+    const cursors: string[] = [];
+    await withArchivedPlannerRead(directory, async (read) => {
+      for (const id of ids.slice(1)) {
+        const { page } = JSON.parse(await read(request(id)));
+        assertEquals(page.members, [publicMember]);
+        assert(page.nextCursor);
+        cursors.push(page.nextCursor);
+      }
+      assertEquals(JSON.parse(await read(retainedRead)).result.page.members, [
+        publicMember,
+      ]);
+      const narrowed = JSON.parse(
+        await read({
+          ...ref,
+          action: "narrow_constraints",
+          runId,
+          expectedVersion: 0,
+          requestId: crypto.randomUUID(),
+          deniedKinds: [],
+          allowedAssetIds: ["allowed"],
+        }),
+      );
+      assertEquals(narrowed.record.constraints.allowedAssetIds, ["allowed"]);
+    });
+    for (const archived of [false, true]) {
+      if (archived) {
+        await archiveAndRestoreDigestFixture(directory, path, ref, runId);
+      }
+      await withArchivedPlannerRead(directory, async (read) => {
+        assertStringIncludes(await read(retainedRead), "unavailable");
+        const { page } = JSON.parse(await read(request(ids[0])));
+        assertEquals(page.members, [publicMember]);
+        for (const [index, id] of ids.slice(1).entries()) {
+          assertStringIncludes(await read(request(id)), "unavailable");
+          assertStringIncludes(
+            await read({
+              ...request(id),
+              cursor: cursors[index],
+            }),
+            "unavailable",
+          );
+        }
+      });
+    }
+  } finally {
+    await Deno.remove(directory, { recursive: true });
+  }
+});
