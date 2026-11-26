@@ -48,6 +48,7 @@ export interface SentinelTrafficDownloadPageRequest {
 
 /** Shared chat session that serializes access to the orchestrator. */
 export interface ChatSession {
+  readonly recoverRunArchiveQuarantines?: () => Promise<void>;
   readonly approvalInbox?: ApprovalInboxSocketService;
   readonly sideQuestions?: SideQuestionService;
   readonly sentinelSnapshotPath?: string;

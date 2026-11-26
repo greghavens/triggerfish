@@ -196,11 +196,12 @@ async function withGateway(
     allowsHook: (hook: string, input: Record<string, unknown>) => boolean;
     onFrame: (frame: string) => void;
   },
+  denyStartupPurge?: string,
 ) {
   const approvals: string[] = [];
   const policy = {
     denyArchive: false,
-    denyPurgeMember: undefined as string | undefined,
+    denyPurgeMember: denyStartupPurge,
     denyReportAmendment: false,
     denyDispositionReview: false,
     afterConfirmation: undefined as (() => void) | undefined,
@@ -334,6 +335,7 @@ async function withGateway(
       bumpersEnabled: false,
     }),
     providerRegistry: registry,
+    customToolsBaseDir: baseDir,
     hookRunner: hooks,
     operatorRunExecutor: createOperatorRunToolExecutor({
       baseDir,
@@ -6551,7 +6553,13 @@ Deno.test("Owner gateway reviews exact single and batch archive purge and resume
   const baseDir = await Deno.makeTempDir();
   const directory = join(baseDir, "data", "run-archives");
   try {
-    const refs = ["purge-one", "purge-two", "purge-recover", "purge-current"]
+    const refs = [
+      "purge-one",
+      "purge-two",
+      "purge-recover",
+      "purge-current",
+      "purge-unmoved",
+    ]
       .map(
         (id) => ({ kind: "sentinel", id, archiveId: crypto.randomUUID() }),
       );
@@ -6589,7 +6597,7 @@ Deno.test("Owner gateway reviews exact single and batch archive purge and resume
         assertEquals(archived.receipt.status, "succeeded");
       }
     });
-    const [one, two, recovering, current] = targets;
+    const [one, two, recovering, current, unmoved] = targets;
     let child: typeof two | undefined;
     let unarchivedChild: typeof two | undefined;
     await withGateway(baseDir, async (turn) => {
@@ -6662,7 +6670,7 @@ Deno.test("Owner gateway reviews exact single and batch archive purge and resume
     assert(unarchivedChild);
     const { archiveId: lateArchiveId, ...lateChild } = unarchivedChild;
     const childTarget = child;
-    for (const target of [one, two, recovering]) {
+    for (const target of [one, two, recovering, unmoved]) {
       const state = startSentinelAssessment(
         resolveSentinelCasePath(baseDir, target.id),
       );
@@ -6767,8 +6775,18 @@ Deno.test("Owner gateway reviews exact single and batch archive purge and resume
       ...recovering,
       requestId: crypto.randomUUID(),
     };
+    const orphanQuarantine = join(directory, `.purge-${crypto.randomUUID()}`);
+    const completedQuarantine = join(directory, `.purge-${one.archiveId}`);
+    await Deno.mkdir(orphanQuarantine, { mode: 0o700 });
+    await Deno.mkdir(completedQuarantine, { mode: 0o700 });
     const journal = openRunArchiveActions(join(directory, "actions.db"));
     try {
+      const unmovedSource = journal.readArchived(unmoved.archiveId);
+      assert(unmovedSource);
+      assertEquals(
+        journal.admitPurge(crypto.randomUUID(), unmovedSource)?.status,
+        "pending",
+      );
       const original = journal.readArchived(recovering.archiveId);
       assert(original);
       assertEquals(
@@ -6782,7 +6800,49 @@ Deno.test("Owner gateway reviews exact single and batch archive purge and resume
     } finally {
       journal.close();
     }
+    await withGateway(
+      baseDir,
+      async () => {
+        assert(
+          (await Deno.lstat(join(directory, `.purge-${recovering.archiveId}`)))
+            .isDirectory,
+        );
+        await assertRejects(
+          () => Deno.lstat(completedQuarantine),
+          Deno.errors.NotFound,
+        );
+        const denied = openRunArchiveActions(join(directory, "actions.db"));
+        try {
+          assertEquals(
+            denied.readPurge(recovering.archiveId)?.status,
+            "pending",
+          );
+        } finally {
+          denied.close();
+        }
+      },
+      undefined,
+      recovering.id,
+    );
     await withGateway(baseDir, async (turn, approvals) => {
+      await assertRejects(
+        () => Deno.lstat(join(directory, `.purge-${recovering.archiveId}`)),
+        Deno.errors.NotFound,
+      );
+      const reopened = openRunArchiveActions(join(directory, "actions.db"));
+      try {
+        assertEquals(
+          reopened.readPurge(recovering.archiveId)?.status,
+          "succeeded",
+        );
+        assertEquals(reopened.readPurge(unmoved.archiveId)?.status, "pending");
+        assert(
+          (await Deno.lstat(join(directory, unmoved.archiveId))).isDirectory,
+        );
+        assert((await Deno.lstat(orphanQuarantine)).isDirectory);
+      } finally {
+        reopened.close();
+      }
       assertEquals(JSON.parse(await turn(resume)).receipt.status, "succeeded");
       assertEquals(approvals.length, 0);
       const result = JSON.parse(await turn({ action: "archive_catalog" }));

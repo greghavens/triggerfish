@@ -195,8 +195,12 @@ export function createGatewayServer(
       return sent;
     },
 
-    // deno-lint-ignore require-await
     async start(): Promise<import("./server_types.ts").GatewayAddr> {
+      try {
+        await chatSession?.recoverRunArchiveQuarantines?.();
+      } catch {
+        log.warn("Run archive quarantine reconciliation could not complete");
+      }
       const addrPromise = Promise.withResolvers<
         import("./server_types.ts").GatewayAddr
       >();

@@ -1,3 +1,4 @@
+import { recoverSentinelArchiveQuarantines } from "./operator_run_archive_purge.ts";
 import { reviewedRuleActions } from "./operator_reviewed_rules.ts";
 import { namedConversations } from "../core/named_records.ts";
 import { namedRecordActions } from "./operator_named_records.ts";
@@ -1355,7 +1356,24 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
       },
     };
   }
+  const archiveRecoveryBaseDir = config.operatorRunExecutor &&
+    config.customToolsBaseDir;
   const session: ChatSession = {
+    ...(archiveRecoveryBaseDir && {
+      async recoverRunArchiveQuarantines() {
+        const { authorizeOwnerRunCall } = savedToolAuthorization(
+          config.session,
+          () => config.session.taint,
+          () => true,
+        );
+        if (authorizeOwnerRunCall) {
+          await recoverSentinelArchiveQuarantines(
+            archiveRecoveryBaseDir,
+            authorizeOwnerRunCall,
+          );
+        }
+      },
+    }),
     approvalInbox: config.hookRunner.toolApprovalInbox,
     async readSentinelTrafficDownloadPage(request) {
       if (!config.operatorRunExecutor) return;

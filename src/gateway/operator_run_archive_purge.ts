@@ -3,7 +3,10 @@ import type { ArchiveDependency } from "../sentinel/archive_dependencies.ts";
 
 import { createHash } from "node:crypto";
 import { join } from "@std/path";
-import { withVerifiedRunArchive } from "../core/run_archive.ts";
+import {
+  type RunArchiveManifest,
+  withVerifiedRunArchive,
+} from "../core/run_archive.ts";
 import {
   orderedArchiveTargets,
   readArchivedRunDependencies,
@@ -73,6 +76,33 @@ function exists(path: string) {
   }
 }
 
+function archiveMatches(
+  manifest: RunArchiveManifest,
+  { kind, id, runId, revision }: Target,
+  digest: string,
+): boolean {
+  const source = manifest.identity;
+  return source.kind === kind && source.id === id && source.runId === runId &&
+    source.revision === revision &&
+    createHash("sha256").update(JSON.stringify(manifest)).digest("hex") ===
+      digest;
+}
+
+function removeQuarantine(path: string) {
+  const saved = exists(path);
+  if (
+    saved?.isDirectory && !saved.isSymlink && ((saved.mode ?? 0) & 0o077) === 0
+  ) {
+    Deno.removeSync(path, { recursive: true });
+  }
+}
+
+const verifySentinelArchive = {
+  expectedKind: "sentinel" as const,
+  permittedNames: permittedSentinelRestoreArtifacts,
+  requiredNames: requiredSentinelRestoreArtifacts,
+};
+
 async function hasRetainedDependent(
   journal: ReturnType<typeof openRunArchiveActions>,
   directory: string,
@@ -103,6 +133,83 @@ async function hasRetainedDependent(
         )
       ) return true;
     }
+  }
+}
+
+/** Reconcile packages already removed from their public archive path. */
+export async function recoverSentinelArchiveQuarantines(
+  baseDir: string,
+  authorize: (args: Record<string, unknown>) => Promise<boolean>,
+) {
+  const directory = join(baseDir, "data", "run-archives");
+  const root = exists(directory);
+  if (
+    !root?.isDirectory || root.isSymlink || ((root.mode ?? 0) & 0o077) ||
+    !exists(join(directory, "actions.db"))
+  ) return;
+  const journal = openRunArchiveActions(join(directory, "actions.db"));
+  try {
+    for await (const entry of Deno.readDir(directory)) {
+      if (!entry.isDirectory || !entry.name.startsWith(".purge-")) continue;
+      const archiveId = entry.name.slice(".purge-".length);
+      if (
+        !uuid.test(archiveId) ||
+        entry.name !== `.purge-${archiveId.toLowerCase()}`
+      ) continue;
+      try {
+        using packageLock = lockRunArchiveAction(directory, archiveId);
+        using catalogLock = packageLock &&
+          lockSentinelArchiveCatalog(directory);
+        if (!catalogLock || exists(join(directory, archiveId))) continue;
+        const receipt = journal.readPurge(archiveId);
+        if (!receipt) continue;
+        const target = parseTarget({ ...receipt.identity, archiveId });
+        const archived = journal.readArchived(archiveId, true);
+        if (!target || archived?.archiveDigest !== receipt.archiveDigest) {
+          continue;
+        }
+        const quarantine = join(directory, entry.name);
+        if (receipt.status === "succeeded") {
+          removeQuarantine(quarantine);
+          continue;
+        }
+        const action = {
+          action: "purge_archive",
+          ...target,
+          requestId: receipt.requestId,
+        };
+        if (
+          !await authorize(action) ||
+          await hasRetainedDependent(journal, directory, target)
+        ) continue;
+        const completed = await withVerifiedRunArchive(
+          quarantine,
+          directory,
+          verifySentinelArchive,
+          async ({ manifest }) => {
+            if (
+              !archiveMatches(manifest, target, receipt.archiveDigest) ||
+              !await authorize(action)
+            ) return;
+            return withSentinelAssessmentWriteLock(
+              resolveSentinelCasePath(baseDir, target.id),
+              (state) => {
+                if (
+                  state?.plan.runId === target.runId ||
+                  exists(join(directory, archiveId))
+                ) return;
+                return journal.completePurge(receipt);
+              },
+            );
+          },
+        );
+        if (completed?.status === "succeeded") removeQuarantine(quarantine);
+      } catch {
+        // Keep incomplete or unverifiable quarantines for reviewed recovery.
+      }
+    }
+  } finally {
+    journal.close();
   }
 }
 
@@ -246,15 +353,7 @@ export async function executeOperatorArchivePurge(
         ) continue;
         const path = join(directory, archiveId);
         const staged = join(directory, `.purge-${archiveId}`);
-        const cleanup = () => {
-          const saved = exists(staged);
-          if (
-            saved?.isDirectory && !saved.isSymlink &&
-            ((saved.mode ?? 0) & 0o077) === 0
-          ) {
-            Deno.removeSync(staged, { recursive: true });
-          }
-        };
+        const cleanup = () => removeQuarantine(staged);
         if (receipt?.status === "succeeded") {
           try {
             cleanup();
@@ -285,22 +384,11 @@ export async function executeOperatorArchivePurge(
           const completed = await withVerifiedRunArchive(
             hasStaged ? staged : path,
             directory,
-            {
-              expectedKind: "sentinel",
-              permittedNames: permittedSentinelRestoreArtifacts,
-              requiredNames: requiredSentinelRestoreArtifacts,
-            },
+            verifySentinelArchive,
             async ({ manifest }) => {
-              const { identity } = manifest;
-              if (
-                identity.kind !== target.kind || identity.id !== target.id ||
-                identity.runId !== target.runId ||
-                identity.revision !== target.revision ||
-                createHash("sha256").update(JSON.stringify(manifest)).digest(
-                    "hex",
-                  ) !==
-                  source.archiveDigest
-              ) return;
+              if (!archiveMatches(manifest, target, source.archiveDigest!)) {
+                return;
+              }
               if (!await authorized(target)) return;
               return withSentinelAssessmentWriteLock(
                 resolveSentinelCasePath(baseDir, target.id),
