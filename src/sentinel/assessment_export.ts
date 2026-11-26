@@ -388,8 +388,7 @@ export function renderScopedSentinelFindings(
   const records = [];
   try {
     const maxScannedWorkerFindings = 256;
-    const workerIds = !explicit && selection.kind !== "imported" &&
-        !selection.disposition && runId
+    const workerIds = !explicit && selection.kind !== "imported" && runId
       ? journal?.listFindingIds(
         caseId,
         runId,
@@ -420,7 +419,9 @@ export function renderScopedSentinelFindings(
           (findingCategory &&
             report?.findingCategory?.toLowerCase() !== findingCategory) ||
           (disposition &&
-            (!imported || (dispositions.get(id) ?? "open") !== disposition)) ||
+            (imported
+                ? dispositions.get(id) ?? "open"
+                : report?.disposition) !== disposition) ||
           (assetId && !scope.includes(assetId)) ||
           (query &&
             ![title, summary].some((value) =>
@@ -476,6 +477,8 @@ export function renderScopedSentinelFindings(
         title: redactCredentialText(report.title),
         summary: redactCredentialText(report.summary),
         ...(report.severity !== undefined && { severity: report.severity }),
+        ...(report.disposition !== undefined &&
+          { disposition: report.disposition }),
         ...(report.findingCategory &&
           { findingCategory: report.findingCategory }),
         assetIds: [source.targetId],
@@ -542,6 +545,9 @@ export function renderScopedSentinelFindings(
           "",
           `- ${t("Finding ID")} ${markdownText(row.id)}`,
           ...(row.severity ? [`- ${t("Severity")} ${row.severity}`] : []),
+          ...(row.disposition
+            ? [`- ${t("Analyst disposition")} ${row.disposition}`]
+            : []),
           ...(row.kind === "worker" && row.findingCategory
             ? [
               `- ${t("Finding category")} ${markdownText(row.findingCategory)}`,

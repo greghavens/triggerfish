@@ -7952,8 +7952,8 @@ ${
         if (
           ref.kind !== "sentinel" || ref.revision === undefined ||
           !canFlowTo("INTERNAL", context?.ceiling ?? "INTERNAL") ||
-          ((args.severity !== undefined ||
-            args.findingCategory !== undefined) &&
+          ((args.severity !== undefined || args.findingCategory !== undefined ||
+            args.disposition !== undefined) &&
             (!context?.authenticatedOwnerSessionId ||
               !canFlowTo(
                 context.inputClassification ?? "PUBLIC",
@@ -7972,6 +7972,7 @@ ${
               "summary",
               "severity",
               "findingCategory",
+              "disposition",
               "requestId",
             ].includes(key)
           ) ||

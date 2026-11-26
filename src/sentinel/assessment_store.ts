@@ -45,7 +45,7 @@ import {
   resolveSentinelIncidentAlerts,
   summarizeSentinelIncident,
 } from "./incident_correlation.ts";
-import { loadSentinelGraph } from "./graph.ts";
+import { loadSentinelGraph, sentinelFindingDispositions } from "./graph.ts";
 import { parseSentinelTelemetryAlert } from "./case_report.ts";
 import { DatabaseSync } from "node:sqlite";
 import { createHash } from "node:crypto";
@@ -3926,12 +3926,7 @@ export function readSentinelIncidentReviews(
   }
 }
 
-export const sentinelFindingDispositions = [
-  "open",
-  "confirmed",
-  "resolved",
-  "dismissed",
-] as const;
+export { sentinelFindingDispositions };
 
 export interface SentinelFindingReview {
   readonly id: number;

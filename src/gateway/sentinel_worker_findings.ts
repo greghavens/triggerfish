@@ -16,7 +16,10 @@ import {
   readSentinelRunIdForRevision,
   withSentinelAssessmentWriteLock,
 } from "../sentinel/assessment_store.ts";
-import { sentinelFindingSeverities } from "../sentinel/graph.ts";
+import {
+  sentinelFindingDispositions,
+  sentinelFindingSeverities,
+} from "../sentinel/graph.ts";
 import { locateSentinelCase } from "../sentinel/cases.ts";
 import {
   executionFindingAsset,
@@ -659,10 +662,14 @@ export async function amendOperatorSentinelFindingReport(
     summary,
     severity,
     findingCategory,
+    disposition,
     requestId,
   } = args;
   const rating = sentinelFindingSeverities.find((value) => value === severity);
   const category = normalizeFindingReportCategory(findingCategory);
+  const decision = sentinelFindingDispositions.find((value) =>
+    value === disposition
+  );
   const caseId = locateSentinelCase(path)?.caseId;
   if (
     !caseId || typeof receiptId !== "string" ||
@@ -672,7 +679,8 @@ export async function amendOperatorSentinelFindingReport(
     !/^[a-f0-9]{64}$/.test(evidenceVersion) ||
     (severity !== undefined && rating === undefined) ||
     (findingCategory !== undefined && category === undefined) ||
-    (rating === undefined && category === undefined &&
+    (disposition !== undefined && decision === undefined) ||
+    (rating === undefined && category === undefined && decision === undefined &&
       (title === undefined || summary === undefined)) ||
     (title !== undefined &&
       (typeof title !== "string" || !title.trim() || title.length > 256 ||
@@ -698,7 +706,10 @@ export async function amendOperatorSentinelFindingReport(
         if (!finding || finding.caseId !== caseId || finding.runId !== runId) {
           return;
         }
-        if (rating !== undefined || category !== undefined) {
+        if (
+          rating !== undefined || category !== undefined ||
+          decision !== undefined
+        ) {
           const policy = readSentinelOperatingConstraints(
             path,
             runId,
@@ -724,6 +735,7 @@ export async function amendOperatorSentinelFindingReport(
           evidenceVersion,
           ...(rating !== undefined && { severity: rating }),
           ...(category !== undefined && { findingCategory: category }),
+          ...(decision !== undefined && { disposition: decision }),
           title: typeof title === "string" ? title : report.title,
           summary: typeof summary === "string" ? summary : report.summary,
         };
@@ -740,6 +752,7 @@ export async function amendOperatorSentinelFindingReport(
             receipt.evidenceVersion === evidenceVersion &&
             receipt.severity === rating &&
             receipt.findingCategory === category &&
+            receipt.disposition === decision &&
             (title === undefined || receipt.title === title) &&
             (summary === undefined || receipt.summary === summary)
           ) return { runId, amendment: receipt };
@@ -758,6 +771,7 @@ export async function amendOperatorSentinelFindingReport(
           runId,
           priorSeverity: report.severity,
           priorCategory: report.findingCategory,
+          priorDisposition: report.disposition,
           amendment: approvedRunId === undefined
             ? undefined
             : journal.updateFindingReport(input, evidenceIsCurrent),
@@ -788,6 +802,12 @@ export async function amendOperatorSentinelFindingReport(
                 ? "(none)"
                 : JSON.stringify(preview.priorCategory)
             } → ${category ? JSON.stringify(category) : "(clear)"}`
+            : ""
+        }${
+          decision !== undefined
+            ? `\nAnalyst disposition: ${
+              preview.priorDisposition ?? "unreviewed"
+            } → ${decision}`
             : ""
         }${typeof title === "string" ? `\nTitle: ${title}` : ""}${
           typeof summary === "string" ? `\nSummary: ${summary}` : ""

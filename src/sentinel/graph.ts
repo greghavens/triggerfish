@@ -188,6 +188,12 @@ export const sentinelFindingSeverities = [
   "low",
   "info",
 ] as const;
+export const sentinelFindingDispositions = [
+  "open",
+  "confirmed",
+  "resolved",
+  "dismissed",
+] as const;
 type Kind = typeof kinds[number];
 type Severity = typeof sentinelFindingSeverities[number];
 

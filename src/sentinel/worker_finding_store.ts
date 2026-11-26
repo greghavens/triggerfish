@@ -6,7 +6,10 @@ import { createHash } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import { redactCredentialText } from "../core/logger/redactor.ts";
 import { isSentinelCaseId, locateSentinelCase } from "./cases.ts";
-import { sentinelFindingSeverities } from "./graph.ts";
+import {
+  sentinelFindingDispositions,
+  sentinelFindingSeverities,
+} from "./graph.ts";
 import { assertOperatorSourceDirectoryInfo } from "./source_snapshot_lock.ts";
 
 export interface SentinelWorkerFindingReceiptScope {
@@ -84,9 +87,13 @@ export function findingReportMetadata(
   const findingCategory = amendments.findLast((item) =>
     item.version <= version && item.findingCategory !== undefined
   )?.findingCategory;
+  const disposition = amendments.findLast((item) =>
+    item.version <= version && item.disposition !== undefined
+  )?.disposition;
   return {
     ...(severity !== undefined && { severity }),
     ...(findingCategory && { findingCategory }),
+    ...(disposition !== undefined && { disposition }),
   };
 }
 
@@ -102,6 +109,7 @@ export interface SentinelWorkerFindingReportUpdate {
   readonly evidenceVersion?: string;
   readonly severity?: typeof sentinelFindingSeverities[number];
   readonly findingCategory?: string;
+  readonly disposition?: typeof sentinelFindingDispositions[number];
   readonly title: string;
   readonly summary: string;
 }
@@ -241,6 +249,7 @@ function normalizeAmendment(raw: SentinelWorkerFindingReportUpdate) {
     evidenceVersion,
     severity,
     findingCategory,
+    disposition,
     title,
     summary,
   } = raw;
@@ -261,6 +270,9 @@ function normalizeAmendment(raw: SentinelWorkerFindingReportUpdate) {
         !sentinelFindingSeverities.includes(severity))) ||
     (findingCategory !== undefined &&
       (taskId !== "operator" || category === undefined)) ||
+    (disposition !== undefined &&
+      (taskId !== "operator" ||
+        !sentinelFindingDispositions.includes(disposition))) ||
     !bounded(title, 256) || !bounded(summary, 4096)
   ) throw new Error("Invalid Sentinel worker finding report amendment");
   return {
@@ -275,6 +287,7 @@ function normalizeAmendment(raw: SentinelWorkerFindingReportUpdate) {
     ...(evidenceVersion !== undefined && { evidenceVersion }),
     ...(severity !== undefined && { severity }),
     ...(category !== undefined && { findingCategory: category }),
+    ...(disposition !== undefined && { disposition }),
     title,
     summary,
   };
@@ -698,6 +711,8 @@ export function openSentinelWorkerFindingStore(
       ...(item.kind === "report_amendment" &&
         item.findingCategory !== undefined &&
         { findingCategory: item.findingCategory }),
+      ...(item.kind === "report_amendment" && item.disposition !== undefined &&
+        { disposition: item.disposition }),
       ...(item.kind === "finding"
         ? { evidenceId: item.evidenceId }
         : item.evidenceVersion

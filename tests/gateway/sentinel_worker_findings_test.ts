@@ -1615,14 +1615,19 @@ Deno.test("Leased Sentinel workers report, recheck, and amend findings visible i
               ).digest,
               requestId: crypto.randomUUID(),
               findingCategory: "Identity control",
+              disposition: "dismissed",
             }),
           ).amendment;
           assertEquals(amended.findingCategory, "Identity control");
+          assertEquals(amended.disposition, "dismissed");
         },
       );
       const categoryExport = {
         ...filterExport,
-        findingFilter: { findingCategory: "identity control" },
+        findingFilter: {
+          findingCategory: "identity control",
+          disposition: "dismissed",
+        },
       };
       const categoryReport = await request("export", categoryExport);
       assertEquals(categoryReport.type, "export");
@@ -1631,6 +1636,11 @@ Deno.test("Leased Sentinel workers report, recheck, and amend findings visible i
       assertEquals(categoryFindings.length, 1);
       assertEquals(categoryFindings[0].id, finding!.id);
       assertEquals(categoryFindings[0].findingCategory, "Identity control");
+      assertEquals(categoryFindings[0].disposition, "dismissed");
+      assertEquals(
+        categoryFindings[0].rechecks.map(({ id }: { id: string }) => id),
+        [check!.id],
+      );
       const earlierCategories = await request("export", {
         ...categoryExport,
         revision: first.revision,

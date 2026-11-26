@@ -313,8 +313,8 @@ references from that revision. An unavailable ID rejects the whole selection.
 Use `findingFilter` in place of `findingIds` to match an exact `assetId`,
 the source `kind` (`imported` or `worker`), or a case-insensitive text
 `query` on saved report titles and summaries. Filter findings by their
-saved `severity`, worker findings by `findingCategory`, or imported
-findings by their analyst `disposition`. An empty
+saved `severity` or analyst `disposition`, and worker findings by
+`findingCategory`. An empty
 filter selects every finding in the case at that revision. Over-limit reports require narrower
 filters or exact IDs.
 
@@ -332,8 +332,10 @@ affected assets and their declared in-scope ancestors. Aggregate counts count
 each finding once per asset, even when it affects multiple descendants.
 
 An authenticated owner can use `operator_runs amend_finding_report` with
-`severity` or `findingCategory`, the current `reportVersion`, and the exact
-saved attachment `evidenceVersion` to correct a worker finding in scope.
+`severity`, `findingCategory`, or `disposition`, the current
+`reportVersion`, and the exact saved attachment `evidenceVersion` to
+correct a worker finding in scope. A worker finding's disposition records
+the analyst decision in the report without changing tasks or recheck receipts.
 Use an empty category string to clear the label. Each approved correction
 appends a report version while earlier versions keep their original
 metadata and evidence.
