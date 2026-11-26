@@ -4237,6 +4237,21 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
         assertEquals(child.links, [linked.link]);
       }, reopenedWorkflows);
 
+      const templateCategoryId = crypto.randomUUID();
+      const templateCategoryTitle = "Template assessments";
+      const firstTemplateCategory = JSON.parse(
+        (await turn({
+          action: "create_run_category",
+          title: templateCategoryTitle,
+          requestId: templateCategoryId,
+        })).result,
+      ).receipt.category;
+      assertEquals(firstTemplateCategory, {
+        id: templateCategoryId,
+        version: 1,
+        title: templateCategoryTitle,
+      });
+      const templateCategory = { id: templateCategoryId, version: 1 };
       const templateId = crypto.randomUUID();
       const saveTemplate = {
         action: "set_assessment_template",
@@ -4244,6 +4259,7 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
         templateVersion: 0,
         requestId: crypto.randomUUID(),
         title: "Review configuration",
+        category: templateCategory,
         childDescription: "Configuration baseline review",
         childGoal: "Compare approved configuration to the baseline.",
       };
@@ -4299,11 +4315,39 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
         JSON.parse(confirmations.at(-1)!.split("\n").at(-1)!).template,
         firstTemplate,
       );
+      assertEquals(firstTemplate.category, firstTemplateCategory);
+      assertEquals(templatedRun.admissionCategory, firstTemplateCategory);
+      const renameTemplateCategory = JSON.parse(
+        (await turn({
+          action: "rename_run_category",
+          categoryId: templateCategoryId,
+          expectedVersion: 1,
+          requestId: crypto.randomUUID(),
+          title: "Updated assessment group",
+        })).result,
+      ).receipt.category;
+      assertEquals(renameTemplateCategory.version, 2);
+      const staleTemplateStart = {
+        ...firstTemplateStart,
+        requestId: crypto.randomUUID(),
+        targetId: "stale-template-category",
+      };
+      assertStringIncludes(
+        (await turn(staleTemplateStart)).result,
+        "unavailable",
+      );
+      assertEquals(
+        readSentinelAssessment(
+          resolveSentinelCasePath(baseDir, staleTemplateStart.targetId),
+        ),
+        undefined,
+      );
       const changeTemplate = {
         ...saveTemplate,
         templateVersion: 1,
         requestId: crypto.randomUUID(),
         childGoal: "Review configuration drift against the baseline.",
+        category: { id: templateCategoryId, version: 2 },
       };
       const secondTemplate =
         JSON.parse((await turn(changeTemplate)).result).template;
@@ -4434,6 +4478,51 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
           "unavailable",
         );
         assertEquals(confirmations.length, afterWithdrawal);
+      }, reopenedWorkflows);
+
+      const direct = {
+        ...exact,
+        action: "spawn",
+        targetKind: "sentinel",
+        targetId: "direct-categorized-child",
+        initialGraph: "empty",
+        requestId: crypto.randomUUID(),
+        category: { id: templateCategoryId, version: 2 },
+      };
+      const linkedWithCategory = JSON.parse((await turn(direct)).result);
+      assertEquals(
+        linkedWithCategory.admissionCategory,
+        renameTemplateCategory,
+      );
+      const linkJournal = openOperatorRunLinkStore(
+        join(baseDir, "operator-run-links.db"),
+      );
+      try {
+        assertEquals(
+          linkJournal.categories.forRun({
+            kind: "sentinel",
+            id: direct.targetId,
+            runId: linkedWithCategory.run.details.runId,
+          }),
+          renameTemplateCategory,
+        );
+      } finally {
+        linkJournal.close();
+      }
+      const removedCategory = JSON.parse(
+        (await turn({
+          action: "delete_run_category",
+          categoryId: templateCategoryId,
+          expectedVersion: 2,
+          requestId: crypto.randomUUID(),
+        })).result,
+      ).receipt;
+      assertEquals(removedCategory.categoryId, templateCategoryId);
+      await withGateway(async (afterCategoryRestart) => {
+        assertEquals(
+          JSON.parse((await afterCategoryRestart(direct)).result),
+          linkedWithCategory,
+        );
       }, reopenedWorkflows);
 
       const childCase = "linked-sentinel";

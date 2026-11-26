@@ -251,8 +251,8 @@ export async function handleSentinelFormalGoalChat(
       "Choose whether inventory coverage is enabled when starting an assessment.",
     );
   }
-  const category = parseOperatorRunCategorySelection(input.category);
-  if (input.category !== undefined && (mode !== "start" || !category)) {
+  const explicitCategory = parseOperatorRunCategorySelection(input.category);
+  if (input.category !== undefined && (mode !== "start" || !explicitCategory)) {
     throw new Error(
       "Select an exact category version for a new Sentinel assessment",
     );
@@ -261,6 +261,10 @@ export async function handleSentinelFormalGoalChat(
   if (selected && mode !== "start") {
     throw new Error("Assessment templates require a new assessment");
   }
+  const category = explicitCategory ?? (selected?.template.category && {
+    id: selected.template.category.id,
+    version: selected.template.category.version,
+  });
   const plan = mode === "start"
     ? {
       goal: selected?.template.objective ??

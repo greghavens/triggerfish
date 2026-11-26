@@ -1135,6 +1135,9 @@ Deno.test("standalone Sentinel start binds the reviewed template version and exa
   const templateId = crypto.randomUUID();
   const objective = "Verify the published service configuration.";
   const description = "Approved configuration review";
+  const categoryId = crypto.randomUUID();
+  const categoryTitle = "Configuration reviews";
+  const category = { id: categoryId, version: 1 };
   const templateRequest = {
     action: "set_assessment_template",
     templateId,
@@ -1143,6 +1146,7 @@ Deno.test("standalone Sentinel start binds the reviewed template version and exa
     title: "Service review template",
     childDescription: description,
     childGoal: objective,
+    category,
   };
   const selected = { id: templateId, version: 1 };
   const criteria = [goal("configure", "future-configuration")];
@@ -1163,6 +1167,17 @@ Deno.test("standalone Sentinel start binds the reviewed template version and exa
       path,
       JSON.stringify({ version: 1, nodes: [], edges: [] }),
     );
+    const journal = openOperatorRunLinkStore(
+      join(directory, "operator-run-links.db"),
+    );
+    try {
+      const change = { kind: "create", title: categoryTitle } as const;
+      const preview = journal.categories.review(categoryId, change)?.preview;
+      assert(preview);
+      assert(journal.categories.review(categoryId, change, preview)?.receipt);
+    } finally {
+      journal.close();
+    }
     assert(
       await executeAssessmentTemplates(
         directory,
@@ -1181,6 +1196,10 @@ Deno.test("standalone Sentinel start binds the reviewed template version and exa
       assertEquals(draft.goals, criteria);
       assertEquals(draft.template.objective, objective);
       assertEquals(draft.template.description, description);
+      assertEquals(draft.template.category, {
+        ...category,
+        title: categoryTitle,
+      });
       await assertRejects(
         () => turn(start({ objective })),
         Error,
@@ -1190,6 +1209,10 @@ Deno.test("standalone Sentinel start binds the reviewed template version and exa
       approved = JSON.parse(await turn(start()));
       assertEquals(approved?.duplicate, false);
       assertEquals(approved?.formalGoals, criteria);
+      assertEquals(approved?.admissionCategory, {
+        ...category,
+        title: categoryTitle,
+      });
       const state = readSentinelAssessment(path);
       assertEquals(state?.plan.goal, objective);
       assertEquals(state?.plan.childDescription, description);
@@ -1246,6 +1269,7 @@ Deno.test("standalone Sentinel start binds the reviewed template version and exa
       assertEquals(replay.duplicate, true);
       assertEquals(replay.appliedRevision, approved?.appliedRevision);
       assertEquals(replay.assessmentTemplate, approved?.assessmentTemplate);
+      assertEquals(replay.admissionCategory, approved?.admissionCategory);
       const readback = JSON.parse(await turn("assessment goals status"));
       assertEquals(readback.assessmentTemplate, approved?.assessmentTemplate);
       await assertRejects(

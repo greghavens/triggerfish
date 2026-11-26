@@ -8,9 +8,10 @@ import { createSentinelFindingRemediationReader } from "../sentinel/finding_reme
 import { reopenSentinelPeerCoverage } from "./sentinel_peer_coverage.ts";
 import { discoverSentinelFindingNodeTraffic } from "./sentinel_finding_traffic_tool.ts";
 import { isSentinelHintTrafficReference } from "../sentinel/traffic_receipts.ts";
-import type {
-  CategorizedOperatorRun,
-  OperatorRunCategoryChange,
+import {
+  type CategorizedOperatorRun,
+  type OperatorRunCategoryChange,
+  parseOperatorRunCategorySelection,
 } from "../core/operator_run_categories.ts";
 import { executeCompletedSentinelGraphFollowup } from "../sentinel/completed_graph_followup.ts";
 import {
@@ -1214,6 +1215,11 @@ export const operatorRunTool: ToolDefinition = {
     sequence: {
       type: "integer",
       description: "Exact workflow trace event sequence",
+    },
+    category: {
+      type: "object",
+      description:
+        "Existing Sentinel run category as an object with exact id and version for a reviewed template or linked start.",
     },
     categoryId: {
       type: "string",
@@ -10865,6 +10871,7 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
           childDescription: rawChildDescription,
           templateId,
           templateVersion,
+          category: rawCategory,
           goalProposal,
           initialGraph,
           organizationId,
@@ -10900,6 +10907,19 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
         const template = selection &&
           readAssessmentTemplate(options.baseDir, selection);
         if (selection && !template) return unavailable;
+        const explicitCategory = parseOperatorRunCategorySelection(rawCategory);
+        if (
+          rawCategory !== undefined && (
+            !explicitCategory || targetKind !== "sentinel" ||
+            !context?.authenticatedOwnerSessionId ||
+            !canFlowTo("INTERNAL", context.ceiling ?? "PUBLIC") ||
+            !await context.authorizeOwnerRunCall?.(args)
+          )
+        ) return unavailable;
+        const category = explicitCategory ?? (template?.category && {
+          id: template.category.id,
+          version: template.category.version,
+        });
         const childGoal = template?.objective ?? rawChildGoal;
         const childDescription = template?.description ?? rawChildDescription;
         const templateKey = template
@@ -10926,6 +10946,7 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
               "childDescription",
               "templateId",
               "templateVersion",
+              "category",
               "goalProposal",
               "initialGraph",
               "organizationId",
@@ -11098,6 +11119,7 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
             childGoal,
             childDescription,
             ...(templateKey === undefined ? [] : [templateKey]),
+            ...(category === undefined ? [] : [category]),
             goalApproval,
             timeoutSeconds,
             modelProfile,
@@ -11138,6 +11160,12 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
                   ),
               );
             }
+            const admissionCategory = providers.sentinel.startCategory(other);
+            if (
+              (category === undefined) !== (admissionCategory === undefined) ||
+              (category && (admissionCategory?.id !== category.id ||
+                admissionCategory.version !== category.version))
+            ) return unavailable;
             if (
               !providers.sentinel.matchesStartEmpty(
                 other,
@@ -11179,6 +11207,7 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
                 run: child,
                 link,
                 ...(selection && { template: selection }),
+                ...(admissionCategory && { admissionCategory }),
               })
               : unavailable;
           }
@@ -11194,6 +11223,9 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
           selection &&
           !withCurrentAssessmentTemplate(options.baseDir, selection, () => true)
         ) return unavailable;
+        const admissionCategory = category &&
+          links.categories.atVersion(category);
+        if (category && !admissionCategory) return unavailable;
         const graphDigest = emptyCreationDigest
           ? providers.sentinel.canStartEmpty(target)
             ? emptyLinkedSentinelGraphDigest
@@ -11223,6 +11255,7 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
                 ...(childGoal !== undefined && { childGoal }),
                 ...(childDescription !== undefined && { childDescription }),
                 ...(template && { template }),
+                ...(admissionCategory && { admissionCategory }),
                 ...(goalApproval && { goalApproval }),
                 ...(membership && { membership }),
                 ...(seedTask && { seedTask }),
@@ -11268,6 +11301,7 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
                 childGoal,
                 childDescription,
                 templateKey,
+                category,
                 goalApproval,
                 membership,
                 seedTask,
@@ -11279,7 +11313,12 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
                 linkedCaseSources,
               });
             const start = async () => {
-              if (!selection) return admit();
+              if (!selection) {
+                if (category && !await context?.authorizeOwnerRunCall?.(args)) {
+                  return;
+                }
+                return admit();
+              }
               if (
                 !await context?.authorizeOwnerRunCall?.(args) ||
                 !await context?.authorizeOwnerRunCall?.({

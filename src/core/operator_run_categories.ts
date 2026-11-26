@@ -205,6 +205,12 @@ export function createOperatorRunCategories(
         ).all(limit, offset) as unknown as OperatorRunCategory[]
         : [];
     },
+    atVersion(selected: OperatorRunCategorySelection) {
+      const current = category(selected.id);
+      return current?.version === selected.version
+        ? parseOperatorRunAdmissionCategory(current)
+        : undefined;
+    },
     forRun(run: CategorizedOperatorRun) {
       const id = memberCategory(run);
       return id ? category(id) : undefined;

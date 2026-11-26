@@ -1,3 +1,7 @@
+import type {
+  OperatorRunCategory,
+  OperatorRunCategorySelection,
+} from "../core/operator_run_categories.ts";
 import type { SentinelModelRoute } from "../sentinel/model_routes.ts";
 import {
   canCreateEmptyLinkedSentinelCase,
@@ -36,6 +40,7 @@ import {
   readSentinelFormalGoalApproval,
   readSentinelInventoryCoverageForRevision,
   readSentinelLinkedSourcesForRevision,
+  readSentinelLinkedStartCategory,
   readSentinelLinkedStartModelRoute,
   readSentinelLinkedStartSeed,
   readSentinelModelProfileForRevision,
@@ -98,6 +103,7 @@ export function createOperatorSentinelRuns(
   ): boolean;
   childDescription(ref: OperatorRunRef): string | undefined;
   matchesStartTemplate(ref: OperatorRunRef, templateKey?: string): boolean;
+  startCategory(ref: OperatorRunRef): OperatorRunCategory | undefined;
   startSeed(ref: OperatorRunRef): SentinelLinkedSeedTask | undefined;
   matchesStartGoal(ref: OperatorRunRef, goal?: string): boolean;
   matchesStartTimeout(ref: OperatorRunRef, timeoutSeconds?: number): boolean;
@@ -113,6 +119,7 @@ export function createOperatorSentinelRuns(
       membership?: SentinelCaseMembershipProof;
       childDescription?: string;
       templateKey?: string;
+      category?: OperatorRunCategorySelection;
       seedTask?: SentinelLinkedSeedTask;
       timeoutSeconds?: number;
       modelProfile?: SelectedModelProfile;
@@ -440,6 +447,12 @@ export function createOperatorSentinelRuns(
       const path = pathFor(ref);
       return path && ref.revision !== undefined
         ? readSentinelChildDescription(path, ref.revision)
+        : undefined;
+    },
+    startCategory(ref) {
+      const path = pathFor(ref);
+      return path && ref.revision !== undefined
+        ? readSentinelLinkedStartCategory(path, ref.revision)
         : undefined;
     },
     matchesStartTemplate(ref, templateKey) {

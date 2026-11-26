@@ -1,3 +1,13 @@
+import {
+  parseOperatorRunAdmissionCategory,
+  parseOperatorRunCategorySelection,
+  readAdmissionRunCategory,
+} from "../core/operator_run_categories.ts";
+import {
+  openOperatorRunLinkStore,
+  withOperatorRunLinks,
+} from "../core/operator_runs.ts";
+import { isDeepStrictEqual } from "node:util";
 /** Operator-reviewed reusable metadata for exact Sentinel linked starts. */
 
 import { join } from "@std/path";
@@ -53,6 +63,7 @@ function open(baseDir: string) {
         description TEXT NOT NULL,
         objective TEXT NOT NULL,
         requestId TEXT NOT NULL UNIQUE,
+        category TEXT,
         PRIMARY KEY(id, version)
       ) STRICT;
       CREATE TABLE IF NOT EXISTS assessment_template_withdrawals (
@@ -62,6 +73,22 @@ function open(baseDir: string) {
         at TEXT NOT NULL
       ) STRICT;
     `);
+    const hasCategoryColumn = () =>
+      db.prepare(
+        "PRAGMA table_info(assessment_templates)",
+      ).all().some(({ name }) => name === "category");
+    if (!hasCategoryColumn()) {
+      db.exec("BEGIN IMMEDIATE");
+      try {
+        if (!hasCategoryColumn()) {
+          db.exec("ALTER TABLE assessment_templates ADD COLUMN category TEXT");
+        }
+        db.exec("COMMIT");
+      } catch (error) {
+        db.exec("ROLLBACK");
+        throw error;
+      }
+    }
     return db;
   } catch (error) {
     db.close();
@@ -75,12 +102,17 @@ function project(row?: Record<string, unknown>) {
     !text(row.name, 80) || !text(row.description, 160) ||
     !text(row.objective, 500)
   ) return;
+  const category = typeof row.category === "string"
+    ? parseOperatorRunAdmissionCategory(JSON.parse(row.category))
+    : undefined;
+  if (row.category != null && !category) return;
   return {
     id: row.id,
     version: row.version,
     name: row.name,
     description: row.description,
     objective: row.objective,
+    ...(category && { category }),
   };
 }
 
@@ -258,6 +290,8 @@ export async function executeAssessmentTemplates(
       db.close();
     }
   }
+  const selectedCategory = parseOperatorRunCategorySelection(args.category);
+  if (args.category !== undefined && !selectedCategory) return;
   const { title, childDescription, childGoal, requestId } = args;
   if (
     action !== "set_assessment_template" || typeof templateId !== "string" ||
@@ -276,6 +310,7 @@ export async function executeAssessmentTemplates(
         "childDescription",
         "childGoal",
         "requestId",
+        "category",
       ].includes(key)
     )
   ) return;
@@ -297,9 +332,15 @@ export async function executeAssessmentTemplates(
       "SELECT * FROM assessment_templates WHERE requestId = ?",
     ).get(request);
   const replay = (row: Record<string, unknown>) => {
-    const template = project(row);
-    return template && JSON.stringify(template) === JSON.stringify(proposal)
-      ? { template }
+    const stored = project(row);
+    if (!stored) return;
+    const { category, ...metadata } = stored;
+    const sameSelection = category
+      ? category.id === selectedCategory?.id &&
+        category.version === selectedCategory.version
+      : selectedCategory === undefined;
+    return sameSelection && isDeepStrictEqual(metadata, proposal)
+      ? { template: stored }
       : undefined;
   };
   try {
@@ -308,39 +349,64 @@ export async function executeAssessmentTemplates(
     if (
       blocked() || (latest(db, proposal.id)?.version ?? 0) !== templateVersion
     ) return;
+    const linkPath = selectedCategory && join(baseDir, "operator-run-links.db");
+    const category = (() => {
+      if (!linkPath || !selectedCategory) return;
+      const links = openOperatorRunLinkStore(linkPath);
+      try {
+        return links.categories.atVersion(selectedCategory);
+      } finally {
+        links.close();
+      }
+    })();
+    if (selectedCategory && !category) return;
+    const reviewed = { ...proposal, ...(category && { category }) };
     if (
       !await confirm(
         `Save this exact Sentinel assessment template version?\n${
-          JSON.stringify(proposal)
+          JSON.stringify(reviewed)
         }`,
       )
     ) {
       return { declined: true as const };
     }
     if (!await authorize(args)) return;
-    db.exec("BEGIN IMMEDIATE");
-    let committed = false;
-    try {
-      const existing = prior();
-      if (existing) return replay(existing);
-      if (
-        blocked() || (latest(db, proposal.id)?.version ?? 0) !== templateVersion
-      ) return;
-      db.prepare("INSERT INTO assessment_templates VALUES (?, ?, ?, ?, ?, ?)")
-        .run(
+    return withOperatorRunLinks(db, linkPath, () => {
+      db.exec("BEGIN IMMEDIATE");
+      let committed = false;
+      try {
+        const existing = prior();
+        if (existing) return replay(existing);
+        if (
+          blocked() ||
+          (latest(db, proposal.id)?.version ?? 0) !== templateVersion
+        ) return;
+        if (
+          selectedCategory &&
+          !isDeepStrictEqual(
+            readAdmissionRunCategory(db, selectedCategory),
+            category,
+          )
+        ) return;
+        db.prepare(`
+          INSERT INTO assessment_templates (id, version, name, description, objective, requestId, category)
+          VALUES (?, ?, ?, ?, ?, ?, ?)
+        `).run(
           proposal.id,
           proposal.version,
           proposal.name,
           proposal.description,
           proposal.objective,
           request,
+          category ? JSON.stringify(category) : null,
         );
-      db.exec("COMMIT");
-      committed = true;
-      return { template: proposal };
-    } finally {
-      if (!committed) db.exec("ROLLBACK");
-    }
+        db.exec("COMMIT");
+        committed = true;
+        return { template: reviewed };
+      } finally {
+        if (!committed) db.exec("ROLLBACK");
+      }
+    });
   } finally {
     db.close();
   }

@@ -2,6 +2,7 @@ import {
   assignAdmissionRunCategory,
   type OperatorRunCategory,
   type OperatorRunCategorySelection,
+  parseOperatorRunAdmissionCategory,
   parseOperatorRunCategorySelection,
   readAdmissionRunCategory,
 } from "../core/operator_run_categories.ts";
@@ -1496,6 +1497,7 @@ export function startSentinelAssessment(
     goalApproval?: SentinelFormalGoalApproval;
     membership?: SentinelCaseMembershipProof;
     childDescription?: string;
+    category?: OperatorRunCategorySelection;
     templateKey?: string;
     timeoutSeconds?: number;
     modelProfile?: SelectedModelProfile;
@@ -1510,6 +1512,15 @@ export function startSentinelAssessment(
     plan.completedFormalGoalIds !== undefined ||
     plan.withdrawnFormalGoalIds !== undefined
   ) throw new Error("Formal Sentinel goals require an approved goal proposal");
+  const selectedCategory = parseOperatorRunCategorySelection(
+    linkedStart?.category,
+  );
+  if (
+    plan.admissionCategory !== undefined ||
+    (linkedStart?.category !== undefined && !selectedCategory)
+  ) {
+    throw new Error("Invalid Sentinel admission category");
+  }
   const childDescription = linkedStart?.childDescription;
   if (
     plan.childDescription !== undefined ||
@@ -1615,9 +1626,17 @@ export function startSentinelAssessment(
             spawnParent: _parent,
             ...settings
           } = plan;
+          const admissionCategory = selectedCategory &&
+            readAdmissionRunCategory(db, selectedCategory);
+          if (selectedCategory && !admissionCategory) {
+            throw new Error(
+              "The selected Sentinel category version is unavailable",
+            );
+          }
           const startedAt = Date.now();
           const asJson = JSON.stringify({
             ...settings,
+            ...(admissionCategory && { admissionCategory }),
             runId: crypto.randomUUID(),
             admissionAt: nextAssessmentAdmission(),
             runStartedAt: startedAt,
@@ -1715,6 +1734,27 @@ export function startSentinelAssessment(
             saveFormalGoalRequest(db, approval, formal.binding, started);
           }
           if (linkedStart) {
+            if (admissionCategory) {
+              assignAdmissionRunCategory(db, {
+                kind: "sentinel",
+                id: linkedStart.caseId,
+                runId: started.plan.runId!,
+                revision: started.revision,
+              }, admissionCategory);
+              if (
+                !db.prepare("PRAGMA table_info(assessment_run_revisions)").all()
+                  .some(({ name }) => name === "linkedStartCategory")
+              ) {
+                db.exec(
+                  "ALTER TABLE assessment_run_revisions ADD COLUMN linkedStartCategory TEXT",
+                );
+              }
+              db.prepare(
+                "UPDATE assessment_run_revisions SET linkedStartCategory = ? WHERE revision = ?",
+              )
+                .run(JSON.stringify(admissionCategory), started.revision);
+            }
+
             if (linkedStart.templateKey !== undefined) {
               if (!/^[a-f0-9]{64}$/.test(linkedStart.templateKey)) {
                 throw new Error("Invalid linked Sentinel template version");
@@ -2851,6 +2891,27 @@ export function readSentinelChildDescription(
       throw new Error("Invalid saved linked Sentinel description");
     }
     return description;
+  } finally {
+    db.close();
+  }
+}
+
+/** Reopen the frozen category at the exact linked admission revision. */
+export function readSentinelLinkedStartCategory(
+  path: string,
+  revision: number,
+) {
+  const db = openStore(path, false);
+  if (!db) return;
+  try {
+    if (!hasTable(db, "assessment_run_revisions")) return;
+    const raw = db.prepare(
+      "SELECT * FROM assessment_run_revisions WHERE revision = ?",
+    )
+      .get(revision)?.linkedStartCategory;
+    const source = typeof raw === "string" &&
+      parseOperatorRunAdmissionCategory(JSON.parse(raw));
+    return source || undefined;
   } finally {
     db.close();
   }
