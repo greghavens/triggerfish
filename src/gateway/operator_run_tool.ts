@@ -550,7 +550,7 @@ export const operatorRunTool: ToolDefinition = {
     activeOnly: {
       type: "boolean",
       description:
-        "List only queued, running, or retry-pending attempts for the current Sentinel finding.",
+        "List queued, running, or retry-pending attempts. Omit receiptId to discover active attempts in the exact current Sentinel case.",
     },
     receiptId: {
       type: "string",
@@ -3756,8 +3756,10 @@ ${
         const { receiptId, activeOnly = false, limit = 5, cursor } = args;
         if (
           ref.kind !== "sentinel" || ref.revision === undefined ||
-          typeof receiptId !== "string" ||
-          !/^worker-finding:[a-f0-9]{64}$/.test(receiptId) ||
+          (receiptId === undefined
+            ? activeOnly !== true
+            : typeof receiptId !== "string" ||
+              !/^worker-finding:[a-f0-9]{64}$/.test(receiptId)) ||
           typeof activeOnly !== "boolean" ||
           typeof limit !== "number" || !Number.isSafeInteger(limit) ||
           limit < 1 || limit > 10 ||
@@ -3783,7 +3785,7 @@ ${
           {
             caseId: ref.id,
             revision: ref.revision,
-            findingId: receiptId,
+            findingId: receiptId as string | undefined,
             activeOnly,
           },
           limit,

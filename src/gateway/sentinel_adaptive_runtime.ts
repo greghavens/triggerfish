@@ -1009,7 +1009,7 @@ export function readSentinelFindingRecheckAttempts(
   scope: {
     caseId: string;
     revision: number;
-    findingId: string;
+    findingId?: string;
     activeOnly: boolean;
   },
   limit: number,
@@ -1025,33 +1025,44 @@ export function readSentinelFindingRecheckAttempts(
       .snapshot;
   if (
     !runId || !snapshot || locateSentinelCase(path)?.caseId !== caseId ||
+    (!findingId && !activeOnly) ||
     (activeOnly && (!current?.active || current.revision !== revision)) ||
     !hasSentinelWorkerFindingJournal(path)
   ) return;
   const journal = openSentinelWorkerFindingStore(path);
   try {
-    const original = journal.readFinding(findingId);
-    if (
-      !original || original.caseId !== caseId || original.runId !== runId ||
-      original.evidenceRevision > revision
-    ) return;
     const policy = readSentinelOperatingConstraintsForRevision(path, revision);
-    const target = {
-      kind: "review_evidence",
-      nodeId: original.targetId,
-    } as const;
-    if (
-      !sentinelOperatingConstraintsAllow(
-        policy?.constraints,
-        target,
-        snapshot,
-      ) ||
-      (current?.plan.runId === runId && current.revision !== revision &&
-        !caseOperatingScope(path, current.revision)(target))
-    ) return;
+    const currentScope = current?.plan.runId === runId &&
+        current.revision !== revision
+      ? caseOperatingScope(path, current.revision)
+      : undefined;
+    const originals = new Map<string, ReturnType<typeof journal.readFinding>>();
+    const readOriginal = (id: string) => {
+      if (originals.has(id)) return originals.get(id);
+      const original = journal.readFinding(id);
+      const target = {
+        kind: "review_evidence",
+        nodeId: original?.targetId,
+      } as const;
+      const visible = original && original.caseId === caseId &&
+          original.runId === runId && original.evidenceRevision <= revision &&
+          sentinelOperatingConstraintsAllow(
+            policy?.constraints,
+            target,
+            snapshot,
+          ) &&
+          (!currentScope || currentScope(target))
+        ? original
+        : undefined;
+      originals.set(id, visible);
+      return visible;
+    };
+    const original = findingId ? readOriginal(findingId) : undefined;
+    if (findingId && !original) return;
 
     const map = new Map<string, {
       taskId: string;
+      findingId?: string;
       status: string;
       evidenceId: string;
       attempts: number | null;
@@ -1081,10 +1092,20 @@ export function readSentinelFindingRecheckAttempts(
             mapping.revision,
           );
           for (const task of tasks) {
+            const source = task.plannerRound?.recheckFindingId;
             if (
               task.kind !== "review_evidence" || !task.nodeId ||
-              task.plannerRound?.recheckFindingId !== findingId ||
-              executionFindingAsset(snapshot, task.nodeId) !== original.targetId
+              !source || (findingId && source !== findingId) ||
+              !sentinelOperatingConstraintsAllow(
+                policy?.constraints,
+                { kind: "review_evidence", nodeId: task.nodeId },
+                snapshot,
+              )
+            ) continue;
+            const target = readOriginal(source);
+            if (
+              !target ||
+              executionFindingAsset(snapshot, task.nodeId) !== target.targetId
             ) continue;
             const review = reviews.get(task.id);
             const status = review?.status ??
@@ -1092,6 +1113,7 @@ export function readSentinelFindingRecheckAttempts(
             const lastAttempt = settlements.get(task.id);
             map.set(task.id, {
               taskId: task.id,
+              ...(!findingId && { findingId: source }),
               status,
               evidenceId: task.nodeId,
               attempts: review?.attempts ?? 0,
@@ -1107,9 +1129,13 @@ export function readSentinelFindingRecheckAttempts(
     } catch (error) {
       if (!(error instanceof Deno.errors.NotFound)) throw error;
     }
-    for (const result of journal.listFindingRechecks(findingId, revision)) {
+    for (
+      const result of findingId && original
+        ? journal.listFindingRechecks(findingId, revision)
+        : []
+    ) {
       if (
-        result.caseId !== caseId || result.runId !== runId ||
+        !original || result.caseId !== caseId || result.runId !== runId ||
         result.evidenceRevision !== revision ||
         result.targetId !== original.targetId ||
         result.controlId !== original.controlId
@@ -1133,11 +1159,14 @@ export function readSentinelFindingRecheckAttempts(
       }
     }
     for (
-      const record of journal.listInconclusiveRechecks(findingId, revision)
+      const record of findingId && original
+        ? journal.listInconclusiveRechecks(findingId, revision)
+        : []
     ) {
       const entry = map.get(record.taskId);
       if (
-        entry && record.caseId === caseId && record.runId === runId &&
+        original && entry && record.caseId === caseId &&
+        record.runId === runId &&
         record.targetId === original.targetId &&
         entry.evidenceId === record.evidenceId &&
         record.snapshotDigest === digestSentinelSnapshot(snapshot)

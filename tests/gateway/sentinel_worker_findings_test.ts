@@ -2271,6 +2271,34 @@ async function verifyOperatorNativeRecheck(options: {
   assertEquals(writes, 1);
 
   const path = resolveSentinelCasePath(options.baseDir, caseId);
+  await withFindingAssignmentGateway(
+    options.baseDir,
+    () => Promise.resolve(false),
+    async (turn) => {
+      const selector = {
+        action: "finding_recheck_attempts",
+        kind: "sentinel",
+        id: caseId,
+        revision: options.state.revision,
+      };
+      const queued = JSON.parse(
+        await turn({ ...selector, activeOnly: true, limit: 1 }),
+      ).page;
+      assertEquals(queued.entries, [{
+        findingId: options.findingId,
+        taskId: assigned.taskId,
+        status: "queued",
+        attempts: 0,
+        evidenceId: options.evidenceId,
+      }]);
+      assertEquals(queued.nextCursor, null);
+      assertStringIncludes(await turn(selector), "unavailable");
+      assertStringIncludes(
+        await turn({ ...selector, activeOnly: true, revision: 0 }),
+        "unavailable",
+      );
+    },
+  );
   let verified: { id: string } | undefined;
   const rationale =
     "The retained control evidence did not resolve the operator’s requested comparison.";
@@ -3920,6 +3948,24 @@ async function verifyReceiptFamily(
                       attempts: 1,
                       evidenceId: input.target,
                     }]);
+                    const inventory = JSON.parse(
+                      await turn({
+                        action: "finding_recheck_attempts",
+                        kind: "sentinel",
+                        id: "main",
+                        revision: state.revision,
+                        activeOnly: true,
+                      }),
+                    ).page;
+                    assertEquals(
+                      inventory.entries,
+                      running.entries.map(
+                        (entry: Record<string, unknown>) => ({
+                          ...entry,
+                          findingId: input.recheckFindingId,
+                        }),
+                      ),
+                    );
                     inspectedRunningAttempt = true;
                   });
                   const check = {

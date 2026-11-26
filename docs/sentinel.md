@@ -354,8 +354,11 @@ assigned worker when it opens the recheck context.
 Use `operator_runs finding_recheck_attempts` with the exact case, evidence
 revision, and original finding's `receiptId` to review recheck work.
 `activeOnly: true` limits the view to pending and running work in the
-current assessment. The page reports worker state and its last recorded
-settlement separately from the verdict. A failed or interrupted attempt
+current assessment. Omit `receiptId` with `activeOnly: true` to discover
+work across findings in that exact case revision. Each entry includes its
+finding ID. Use that ID to open individual attempt history and outcomes.
+The page reports worker state and its last recorded settlement separately
+from the verdict. A failed or interrupted attempt
 does not establish a verdict. If the page becomes stale, start again
 without its cursor.
 
