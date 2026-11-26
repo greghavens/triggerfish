@@ -4214,9 +4214,32 @@ Deno.test("Scoped planner provenance hides forbidden graph records and retained 
   const caseId = "scoped-base-provenance";
   const path = resolveSentinelCasePath(directory, caseId);
   const graphNodes = [
-    { id: "approved", kind: "asset", label: "Approved asset" },
+    {
+      id: "approved",
+      kind: "asset",
+      label: "Approved asset",
+      assetType: "subdomain",
+      parentId: "restricted",
+    },
     { id: "alternate", kind: "asset", label: "Allowed alternate asset" },
-    { id: "restricted", kind: "asset", label: "Out-of-scope bridge" },
+    {
+      id: "restricted",
+      kind: "asset",
+      label: "Out-of-scope bridge",
+      assetType: "root_domain",
+    },
+    {
+      id: "allowed-finding",
+      kind: "finding",
+      label: "Allowed finding",
+      severity: "medium",
+    },
+    {
+      id: "restricted-finding",
+      kind: "finding",
+      label: "Out-of-scope finding",
+      severity: "high",
+    },
   ];
   const checks = [
     {
@@ -4234,9 +4257,19 @@ Deno.test("Scoped planner provenance hides forbidden graph records and retained 
         graph: "provenance",
         from: "asset:approved",
         to: "asset:alternate",
+        relation: "depends_on",
       },
     },
     { tool: "sentinel_graph_overview", args: {} },
+    { tool: "sentinel_trace", args: { node: "approved" } },
+    { tool: "sentinel_trace", args: { node: "alternate", depth: 0 } },
+    { tool: "sentinel_impact", args: { node: "alternate" } },
+    { tool: "sentinel_report", args: { limit: 1 } },
+    { tool: "sentinel_coverage", args: { limit: 1 } },
+    {
+      tool: "sentinel_path",
+      args: { graph: "inventory", from: "approved", to: "alternate" },
+    },
   ];
   let phase = 0;
   let clock = Date.now();
@@ -4298,6 +4331,8 @@ Deno.test("Scoped planner provenance hides forbidden graph records and retained 
         edges: [
           { from: "approved", to: "restricted", relation: "depends_on" },
           { from: "restricted", to: "alternate", relation: "depends_on" },
+          { from: "allowed-finding", to: "approved", relation: "affects" },
+          { from: "restricted-finding", to: "restricted", relation: "affects" },
         ],
       }),
       { mode: 0o600 },
@@ -4312,10 +4347,15 @@ Deno.test("Scoped planner provenance hides forbidden graph records and retained 
     };
     planner.advance(state);
     await settle();
-    assertEquals(JSON.parse(responses[0][1]).totalNodes, 3);
+    assertEquals(JSON.parse(responses[0][1]).totalNodes, 5);
     assertStringIncludes(responses[0][2], "asset:restricted");
     assertStringIncludes(responses[0][3], "Out-of-scope bridge");
     assertEquals(JSON.parse(responses[0][4]).nodesByKind.asset, 3);
+    assertStringIncludes(responses[0][5], '"parentId":"restricted"');
+    assertStringIncludes(responses[0][7], "Out-of-scope bridge");
+    assertEquals(JSON.parse(responses[0][8]).totalFindings, 2);
+    assertEquals(JSON.parse(responses[0][9]).summary.totalFindings, 2);
+    assertStringIncludes(responses[0][10], "Out-of-scope bridge");
     const saved = readAdaptiveSentinel(path, state)?.modelPlannerHistory.find(
       ({ reads }) =>
         reads?.some(({ tool }) => tool === "sentinel_provenance_search"),
@@ -4330,8 +4370,18 @@ Deno.test("Scoped planner provenance hides forbidden graph records and retained 
       includeResult: true,
     };
     let allowedRead = "";
+    let allowedInventoryRead = "";
     await withArchivedPlannerRead(directory, async (read) => {
       allowedRead = await read(retained);
+      allowedInventoryRead = await read({ ...retained, ordinal: 7 });
+      assertEquals(
+        JSON.parse(allowedInventoryRead).result,
+        JSON.parse(responses[0][6]),
+      );
+      assertEquals(
+        JSON.parse(await read({ ...retained, ordinal: 11 })).result,
+        JSON.parse(responses[0][10]),
+      );
       assertEquals(JSON.parse(allowedRead).result, JSON.parse(responses[0][0]));
       assertEquals(
         JSON.parse(await read({ ...retained, ordinal: 4 })).result,
@@ -4358,14 +4408,28 @@ Deno.test("Scoped planner provenance hides forbidden graph records and retained 
     planner.advance(readSentinelAssessment(path)!);
     await settle();
     assertEquals(responses[1][0], responses[0][0]);
-    assertEquals(JSON.parse(responses[1][1]).totalNodes, 2);
-    assertEquals(JSON.parse(responses[1][2]).totalConnections, 0);
+    assertEquals(JSON.parse(responses[1][1]).totalNodes, 3);
+    assertStringIncludes(responses[1][2], "finding:allowed-finding");
     assertEquals(JSON.parse(responses[1][3]).path, null);
     assertEquals(JSON.parse(responses[1][4]).nodesByKind.asset, 2);
+    assertEquals(
+      JSON.parse(responses[1][5]).nodes.map(({ id }: { id: string }) => id),
+      [
+        "approved",
+        "allowed-finding",
+      ],
+    );
+    assertEquals(responses[1][6], responses[0][6]);
+    assertEquals(JSON.parse(responses[1][7]).assets.length, 1);
+    assertEquals(JSON.parse(responses[1][8]).totalFindings, 1);
+    assertEquals(JSON.parse(responses[1][8]).nextOffset, null);
+    assertEquals(JSON.parse(responses[1][9]).summary.totalFindings, 1);
+    assertEquals(JSON.parse(responses[1][10]).path, null);
     assert(
       responses[1].every((text) =>
         !text.includes("asset:restricted") &&
-        !text.includes("Out-of-scope bridge")
+        !text.includes("Out-of-scope") &&
+        !text.includes('"parentId":"restricted"')
       ),
     );
     for (const restored of [false, true]) {
@@ -4374,7 +4438,11 @@ Deno.test("Scoped planner provenance hides forbidden graph records and retained 
       }
       await withArchivedPlannerRead(directory, async (read) => {
         assertEquals(await read(retained), allowedRead);
-        for (const ordinal of [2, 3, 4, 5]) {
+        assertEquals(
+          await read({ ...retained, ordinal: 7 }),
+          allowedInventoryRead,
+        );
+        for (const ordinal of [2, 3, 4, 5, 6, 8, 9, 10, 11]) {
           assertStringIncludes(
             await read({ ...retained, ordinal }),
             "unavailable",

@@ -231,7 +231,10 @@ import {
   assignedHostnameResolutionEdges,
   assignedMitigationEdges,
 } from "../sentinel/assigned_relationship_facts.ts";
-import { loadSentinelGraph } from "../sentinel/graph.ts";
+import {
+  loadSentinelGraph,
+  scopeSentinelInventoryReferences,
+} from "../sentinel/graph.ts";
 import {
   readAssignedSentinelModelReview,
   readHistoricalAdaptiveSentinel,
@@ -3432,6 +3435,25 @@ export function reopenSentinelProvenanceNode(
   }, true);
 }
 
+interface InventoryReferenceFields {
+  readonly parentId?: unknown;
+  readonly relationshipSources?: unknown;
+}
+
+function sameInventoryReferences(
+  saved: InventoryReferenceFields,
+  current: object,
+): boolean {
+  return saved.parentId ===
+      ("parentId" in current ? current.parentId : undefined) &&
+    isDeepStrictEqual(
+      saved.relationshipSources,
+      "relationshipSources" in current
+        ? current.relationshipSources
+        : undefined,
+    );
+}
+
 /** Reauthorize saved identities without replacing the original review or note. */
 export function allowsRetainedSentinelProvenancePage(
   path: string,
@@ -3450,7 +3472,7 @@ export function allowsRetainedSentinelProvenancePage(
   const page = JSON.parse(text);
   if (args.node !== undefined) {
     const node = visible.inspect(args.node);
-    if (!node) return false;
+    if (!node || !sameInventoryReferences(page.node, node.node)) return false;
     const current = new Set(visible.snapshot().nodes.map(({ id }) => id));
     const unresolved = new Set(
       node.connections.flatMap((item) =>
@@ -3477,9 +3499,12 @@ export function allowsRetainedSentinelProvenancePage(
     return !!complete &&
       complete.connections.length === node.connections.length;
   }
-  if (!page.nodes.every(({ id }: { id: string }) => !!visible.inspect(id))) {
-    return false;
-  }
+  if (
+    !page.nodes.every((saved: InventoryReferenceFields & { id: string }) => {
+      const current = visible.inspect(saved.id)?.node;
+      return !!current && sameInventoryReferences(saved, current);
+    })
+  ) return false;
   const count = (graph: typeof visible) =>
     graph.searchNodes(args.query ?? "", args.kind, args.origin).length;
   const visibleCount = count(visible);
@@ -3715,7 +3740,7 @@ export function allowsSavedSentinelProvenancePath(
   const graph = readSentinelProvenance(path, revision, assignmentId)?.graph
     .snapshot();
   if (!graph) return false;
-  const nodes = new Set(graph.nodes.map(({ id }) => id));
+  const nodes = new Map(graph.nodes.map((node) => [node.id, node]));
   if (
     typeof args.from !== "string" || !nodes.has(args.from) ||
     typeof args.to !== "string" || !nodes.has(args.to)
@@ -3727,12 +3752,61 @@ export function allowsSavedSentinelProvenancePath(
   const savedPage = JSON.parse(saved);
   const paths = savedPage.path ? [savedPage.path] : savedPage.paths ?? [];
   return paths.every((route: {
-    nodes: { id: string }[];
+    nodes: (InventoryReferenceFields & { id: string })[];
     edges: { from: string; to: string; relation: string }[];
   }) =>
-    route.nodes.every(({ id }) => nodes.has(id)) &&
+    route.nodes.every((saved) => {
+      const current = nodes.get(saved.id);
+      return !!current && sameInventoryReferences(saved, current);
+    }) &&
     route.edges.every((edge) => edge && edges.has(key(edge)))
   );
+}
+
+/** Project the direct graph before any model-facing count, ranking or traversal. */
+function scopedSentinelInventoryGraph(
+  path: string,
+  revision: number,
+  graph: Graph,
+): Graph {
+  const runId = readSentinelRunIdForRevision(path, revision);
+  if (!runId) throw new Error("Saved Sentinel inventory scope is unavailable");
+  const constraints = readSentinelOperatingConstraints(path, runId)
+    ?.constraints;
+  if (
+    constraints?.allowedAssetIds === undefined &&
+    !constraints?.deniedKinds.includes("review_evidence")
+  ) return graph;
+  const snapshot = graph.snapshot();
+  const allowed = new Set(
+    snapshot.nodes.filter(({ id }) =>
+      sentinelOperatingConstraintsAllow(constraints, {
+        kind: "review_evidence",
+        nodeId: id,
+      }, snapshot)
+    ).map(({ id }) => id),
+  );
+  const controlledFindings = new Map<string, string[]>();
+  for (const { from, to, relation } of snapshot.edges) {
+    if (relation !== "mitigates") continue;
+    const findings = controlledFindings.get(from) ?? [];
+    findings.push(to);
+    controlledFindings.set(from, findings);
+  }
+  for (const [control, findings] of controlledFindings) {
+    if (findings.every((id) => allowed.has(id))) allowed.add(control);
+  }
+  const caseId = locateSentinelCase(path)?.caseId;
+  const nodes = snapshot.nodes.filter(({ id }) => allowed.has(id)).map((node) =>
+    scopeSentinelInventoryReferences(node, (id) => allowed.has(id), caseId)
+  );
+  return loadSentinelGraph({
+    version: snapshot.version,
+    nodes,
+    edges: snapshot.edges.filter(({ from, to }) =>
+      allowed.has(from) && allowed.has(to)
+    ),
+  });
 }
 
 /** Rebuild a graph read against the saved evidence and evaluation time. */
@@ -3741,11 +3815,19 @@ export async function readSentinelGraphProjection(
   revision: number,
   name: string,
   args: Record<string, unknown>,
+  scoped = false,
 ) {
   const saved = readSentinelAssessmentRevision(path, revision);
   const snapshot = saved?.result.sharedGraph.snapshot;
   if (!snapshot) return "Error: The saved Sentinel inventory is unavailable.";
-  const graph = loadSentinelGraph(snapshot);
+  let graph = loadSentinelGraph(snapshot);
+  if (scoped) {
+    try {
+      graph = scopedSentinelInventoryGraph(path, revision, graph);
+    } catch {
+      return "Error: The saved Sentinel inventory scope is unavailable.";
+    }
+  }
   if (name === SENTINEL_PATH_READ) {
     return await queryPath(
       { snapshotPath: path, assessmentRevision: revision },
@@ -3755,7 +3837,7 @@ export async function readSentinelGraphProjection(
     );
   }
   const evaluatedAt = name === SENTINEL_COVERAGE_READ &&
-      snapshot.edges.some(({ relation }) => relation === "verifies")
+      graph.snapshot().edges.some(({ relation }) => relation === "verifies")
     ? saved.result.controlEvaluationAt ?? saved.updatedAt
     : undefined;
   return queryGraph(graph, name, args, evaluatedAt);
@@ -4324,8 +4406,11 @@ function createAgent(
           toolName === SENTINEL_PROVENANCE_NODE_READ ||
           toolName === SENTINEL_PROVENANCE_SEARCH ||
           toolName === SENTINEL_PATH_READ;
+        const inventoryGraphRead = isSentinelInventoryFindingRead(toolName) ||
+          isSentinelInventoryNeighborhoodRead(toolName);
         const scoped = typeof toolName === "string" &&
           (toolName === sentinelInventoryTool.name || provenanceRead ||
+            inventoryGraphRead ||
             isSentinelWorkerFindingTool(toolName) ||
             isSentinelGraphFactTool(toolName) ||
             toolName === proposeWorkerGoalTool.name ||
@@ -4470,15 +4555,17 @@ function createAgent(
         ) return { ...result, allowed: false, action: "BLOCK" };
         if (
           result.allowed && name === "POST_TOOL_RESPONSE" &&
-          (provenanceRead || digestRead || toolName === SENTINEL_DEFENSE_READ ||
+          (provenanceRead || digestRead || inventoryGraphRead ||
+            toolName === SENTINEL_DEFENSE_READ ||
             toolName === SENTINEL_INCIDENT_ALERTS_READ) &&
           canReadPlannerCase && (!turn || !currentPlannerReceiptScope(turn))
         ) return { ...result, allowed: false, action: "BLOCK" };
         if (
           result.allowed && name === "POST_TOOL_RESPONSE" &&
-          (provenanceRead || toolName === SENTINEL_DEFENSE_READ ||
+          (provenanceRead || inventoryGraphRead ||
+            toolName === SENTINEL_DEFENSE_READ ||
             toolName === SENTINEL_INCIDENT_ALERTS_READ) &&
-          options.assignedTaskId
+          options.assignedTaskLeaseToken !== undefined
         ) {
           const runId = options.assessmentRevision !== undefined &&
             readSentinelRunIdForRevision(
@@ -5776,15 +5863,34 @@ function createAgent(
           leased || canReadPlannerCase ? { assignment } : undefined,
         );
       }
+      const scopeInventory = canReadPlannerCase || turn.requiresLiveAssignment;
+      const readInventoryGraph: ReadGraph = async () => {
+        const graph = await turn.readGraph();
+        const revision = options.assessmentRevision;
+        if (!scopeInventory) return graph;
+        if (
+          revision === undefined ||
+          (canReadPlannerCase && !currentPlannerReceiptScope(turn))
+        ) {
+          throw new Error(
+            "The requested Sentinel inventory scope is unavailable.",
+          );
+        }
+        return scopedSentinelInventoryGraph(
+          options.snapshotPath,
+          revision,
+          graph,
+        );
+      };
       if (name === SENTINEL_PATH_READ) {
         if (canReadPlannerCase && !currentPlannerReceiptScope(turn)) {
           return "Error: The requested Sentinel evidence scope is unavailable.";
         }
-        return await queryPath(options, turn.readGraph, args, true);
+        return await queryPath(options, readInventoryGraph, args, true);
       }
       let graph: Graph;
       try {
-        graph = await turn.readGraph();
+        graph = await readInventoryGraph();
       } catch {
         return "Error: The operator-managed Sentinel snapshot is unavailable or invalid.";
       }
@@ -7177,8 +7283,15 @@ function createAgent(
                       );
                     if (
                       (!retained &&
-                        await queryPath(options, turn.readGraph, args) !==
-                          saved) ||
+                        (args.graph === "provenance"
+                            ? await queryPath(options, turn.readGraph, args)
+                            : await readSentinelGraphProjection(
+                              options.snapshotPath,
+                              revision,
+                              call.name,
+                              args,
+                              true,
+                            )) !== saved) ||
                       signal.aborted || !readAssignedModelReview(options)
                     ) return false;
                     continue;

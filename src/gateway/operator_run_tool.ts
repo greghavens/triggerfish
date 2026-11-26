@@ -2147,6 +2147,7 @@ async function reopenSentinelSourceResult(
       revision,
       step.tool,
       selector,
+      true,
     );
   }
   if (
@@ -8001,6 +8002,7 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
                   ref.revision,
                   step.tool,
                   args,
+                  true,
                 );
               if (
                 !text || text.startsWith("Error:") ||
@@ -8020,6 +8022,14 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
                   await readDefenseCoverage(readOptions, args, {
                       assignment: task,
                     }) !== text) ||
+                (isSentinelArchivedInventoryRead(step.tool, args) &&
+                  await readSentinelGraphProjection(
+                      path,
+                      ref.revision,
+                      step.tool,
+                      args,
+                      true,
+                    ) !== text) ||
                 (step.tool === "sentinel_path" && args.graph === "provenance" &&
                   !allowsSavedSentinelProvenancePath(
                     path,
@@ -10016,7 +10026,11 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
             return unavailable;
           }
           if (
-            includeResult && [
+            includeResult &&
+            (isSentinelArchivedInventoryRead(
+              read.tool,
+              "graph" in selector ? selector : {},
+            ) || [
               "sentinel_worker_observation",
               "sentinel_defense",
               "sentinel_incident_alerts",
@@ -10024,7 +10038,7 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
               "sentinel_provenance_search",
               "sentinel_graph_overview",
               "sentinel_path",
-            ].includes(read.tool) &&
+            ].includes(read.tool)) &&
             text !== await reopenSentinelSourceResult(
                 options.baseDir,
                 path,

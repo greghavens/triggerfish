@@ -227,6 +227,29 @@ export type GraphNode =
     | { readonly kind: "control" }
   );
 
+/** Remove typed references to endpoints outside an authorized inventory view. */
+export function scopeSentinelInventoryReferences<T extends GraphNode>(
+  node: T,
+  allow: (id: string) => boolean,
+  caseId?: string,
+): T {
+  if (node.kind === "asset" && node.parentId && !allow(node.parentId)) {
+    return { ...node, parentId: undefined };
+  }
+  if (node.kind === "evidence" && node.relationshipSources) {
+    const sources = node.relationshipSources.filter((source) =>
+      source.caseId === caseId && allow(source.from) && allow(source.to)
+    );
+    if (sources.length !== node.relationshipSources.length) {
+      return {
+        ...node,
+        relationshipSources: sources.length ? sources : undefined,
+      };
+    }
+  }
+  return node;
+}
+
 const relationships = {
   affects: ["finding", "asset"],
   mitigates: ["control", "finding"],

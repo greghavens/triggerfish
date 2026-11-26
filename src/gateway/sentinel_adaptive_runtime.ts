@@ -80,7 +80,10 @@ import type { SentinelOutputLanguage } from "../core/config_types.ts";
 import type { LlmUsage } from "../core/types/llm.ts";
 import { dirname, join } from "@std/path";
 import { createHash } from "node:crypto";
-import { loadSentinelGraph } from "../sentinel/graph.ts";
+import {
+  loadSentinelGraph,
+  scopeSentinelInventoryReferences,
+} from "../sentinel/graph.ts";
 import { isDeepStrictEqual } from "node:util";
 import {
   acceptSentinelPlanSuggestions,
@@ -1992,6 +1995,7 @@ export function readSentinelProvenance(
     const assets = incidents.get(id);
     return !!assets?.length && assets.every((asset) => inventory.has(asset));
   };
+  const caseId = locateSentinelCase(snapshotPath)?.caseId;
   const projection = projectSentinelProvenance(
     graph,
     (node) => {
@@ -2008,6 +2012,14 @@ export function readSentinelProvenance(
       return true;
     },
     (reference) => inventory.has(reference),
+    (node) =>
+      node.origin === "imported"
+        ? scopeSentinelInventoryReferences(
+          node,
+          (id) => inventory.has(id),
+          caseId,
+        )
+        : node,
   );
   return { revision: state.revision, graph: projection };
 }

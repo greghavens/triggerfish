@@ -1931,11 +1931,12 @@ export function projectSentinelProvenance(
   graph: ReturnType<typeof buildSentinelProvenance>,
   allow: (node: ProvenanceNode) => boolean,
   allowUnresolved: (reference: string) => boolean,
+  projectNode: (node: ProvenanceNode) => ProvenanceNode = (node) => node,
 ) {
   const projected = indexProvenance();
   const saved = graph.snapshot();
   for (const node of saved.nodes) {
-    if (allow(node)) projected.addNode(node);
+    if (allow(node)) projected.addNode(projectNode(node));
   }
   for (const { from, to, relation } of saved.edges) {
     if (projected.hasNode(from) && projected.hasNode(to)) {
