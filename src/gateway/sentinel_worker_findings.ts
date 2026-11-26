@@ -12,9 +12,11 @@ import { MAX_SENTINEL_FINDING_RESULT_CHARS } from "../sentinel/worker_finding_re
 import type { ToolDefinition } from "../core/types/tool.ts";
 import {
   readSentinelAssessment,
+  readSentinelOperatingConstraints,
   readSentinelRunIdForRevision,
   withSentinelAssessmentWriteLock,
 } from "../sentinel/assessment_store.ts";
+import { sentinelFindingSeverities } from "../sentinel/graph.ts";
 import { locateSentinelCase } from "../sentinel/cases.ts";
 import {
   executionFindingAsset,
@@ -654,8 +656,10 @@ export async function amendOperatorSentinelFindingReport(
     evidenceVersion,
     title,
     summary,
+    severity,
     requestId,
   } = args;
+  const rating = sentinelFindingSeverities.find((value) => value === severity);
   const caseId = locateSentinelCase(path)?.caseId;
   if (
     !caseId || typeof receiptId !== "string" ||
@@ -663,9 +667,14 @@ export async function amendOperatorSentinelFindingReport(
     typeof reportVersion !== "number" || !Number.isSafeInteger(reportVersion) ||
     reportVersion < 1 || typeof evidenceVersion !== "string" ||
     !/^[a-f0-9]{64}$/.test(evidenceVersion) ||
-    typeof title !== "string" || !title.trim() || title.length > 256 ||
-    typeof summary !== "string" || !summary.trim() || summary.length > 4096 ||
-    title.includes("\0") || summary.includes("\0") ||
+    (severity !== undefined && rating === undefined) ||
+    (rating === undefined && (title === undefined || summary === undefined)) ||
+    (title !== undefined &&
+      (typeof title !== "string" || !title.trim() || title.length > 256 ||
+        title.includes("\0"))) ||
+    (summary !== undefined &&
+      (typeof summary !== "string" || !summary.trim() ||
+        summary.length > 4096 || summary.includes("\0"))) ||
     typeof requestId !== "string" ||
     !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(requestId)
   ) return unavailable;
@@ -684,6 +693,20 @@ export async function amendOperatorSentinelFindingReport(
         if (!finding || finding.caseId !== caseId || finding.runId !== runId) {
           return;
         }
+        if (rating !== undefined) {
+          const policy = readSentinelOperatingConstraints(
+            path,
+            runId,
+            revision,
+          );
+          if (
+            policy?.constraints.allowedAssetIds?.includes(finding.targetId) ===
+              false ||
+            !state.result?.sharedGraph.snapshot?.nodes.some(({ id, kind }) =>
+              kind === "asset" && id === finding.targetId
+            )
+          ) return;
+        }
         const input = {
           caseId,
           runId,
@@ -694,8 +717,9 @@ export async function amendOperatorSentinelFindingReport(
           findingId: receiptId,
           expectedVersion: reportVersion,
           evidenceVersion,
-          title,
-          summary,
+          ...(rating !== undefined && { severity: rating }),
+          title: typeof title === "string" ? title : report.title,
+          summary: typeof summary === "string" ? summary : report.summary,
         };
         const receipt = readSentinelWorkerFindingWriteReceipt(
           path,
@@ -708,7 +732,9 @@ export async function amendOperatorSentinelFindingReport(
             receipt.findingId === receiptId &&
             receipt.expectedVersion === reportVersion &&
             receipt.evidenceVersion === evidenceVersion &&
-            receipt.title === title && receipt.summary === summary
+            receipt.severity === rating &&
+            (title === undefined || receipt.title === title) &&
+            (summary === undefined || receipt.summary === summary)
           ) return { runId, amendment: receipt };
           return;
         }
@@ -723,6 +749,7 @@ export async function amendOperatorSentinelFindingReport(
         }
         return {
           runId,
+          priorSeverity: report.severity,
           amendment: approvedRunId === undefined
             ? undefined
             : journal.updateFindingReport(input, evidenceIsCurrent),
@@ -742,7 +769,13 @@ export async function amendOperatorSentinelFindingReport(
     }
     if (
       !await confirm(
-        `Amend Sentinel finding ${receiptId} in case ${caseId}, revision ${revision}, report version ${reportVersion}, with attachment digest ${evidenceVersion}?\nTitle: ${title}\nSummary: ${summary}`,
+        `Amend Sentinel finding ${receiptId} in case ${caseId}, revision ${revision}, report version ${reportVersion}, with attachment digest ${evidenceVersion}?${
+          rating !== undefined
+            ? `\nSeverity: ${preview.priorSeverity ?? "unrated"} → ${rating}`
+            : ""
+        }${typeof title === "string" ? `\nTitle: ${title}` : ""}${
+          typeof summary === "string" ? `\nSummary: ${summary}` : ""
+        }`,
       )
     ) return "Error: The operator declined the report amendment.";
     const amendment = inspect(preview.runId)?.amendment;

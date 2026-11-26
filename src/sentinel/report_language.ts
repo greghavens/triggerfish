@@ -85,6 +85,7 @@ const spanish = {
   "The imported graph contains no findings.":
     "El grafo importado no contiene hallazgos.",
   "Finding ID": "ID del hallazgo",
+  "Severity": "Gravedad",
   "Reported severity": "Gravedad registrada",
   "Source label": "Etiqueta de origen",
   "Affected asset IDs": "ID de los activos afectados",
@@ -230,6 +231,7 @@ const ko: Record<ReportMessage, string> = {
   "The imported graph contains no findings.":
     "가져온 그래프에 발견 사항이 없습니다.",
   "Finding ID": "발견 사항 ID",
+  "Severity": "심각도",
   "Reported severity": "보고된 심각도",
   "Source label": "원본 레이블",
   "Affected asset IDs": "영향을 받는 자산 ID",
@@ -367,6 +369,7 @@ const zh: Record<ReportMessage, string> = {
   "No graph snapshot was supplied.": "未提供图谱快照。",
   "The imported graph contains no findings.": "导入的图谱没有发现项。",
   "Finding ID": "发现项 ID",
+  "Severity": "严重性",
   "Reported severity": "报告的严重程度",
   "Source label": "源标签",
   "Affected asset IDs": "受影响资产 ID",
@@ -513,6 +516,7 @@ const ja: Record<ReportMessage, string> = {
   "The imported graph contains no findings.":
     "取り込んだグラフに検出事項はありません。",
   "Finding ID": "検出事項 ID",
+  "Severity": "重大度",
   "Reported severity": "報告された重大度",
   "Source label": "元のラベル",
   "Affected asset IDs": "影響を受ける資産の ID",

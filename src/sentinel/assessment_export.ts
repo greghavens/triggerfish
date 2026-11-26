@@ -376,7 +376,7 @@ export function renderScopedSentinelFindings(
   try {
     const maxScannedWorkerFindings = 256;
     const workerIds = !explicit && selection.kind !== "imported" &&
-        !selection.severity && !selection.disposition && runId
+        !selection.disposition && runId
       ? journal?.listFindingIds(
         caseId,
         runId,
@@ -402,7 +402,7 @@ export function renderScopedSentinelFindings(
         );
         const summary = redactCredentialText(report?.summary ?? "");
         if (
-          (severity && imported?.severity !== severity) ||
+          (severity && (imported?.severity ?? report?.severity) !== severity) ||
           (disposition &&
             (!imported || (dispositions.get(id) ?? "open") !== disposition)) ||
           (assetId && !scope.includes(assetId)) ||
@@ -459,6 +459,7 @@ export function renderScopedSentinelFindings(
         kind: "worker" as const,
         title: redactCredentialText(report.title),
         summary: redactCredentialText(report.summary),
+        ...(report.severity !== undefined && { severity: report.severity }),
         assetIds: [source.targetId],
         controlIds: [source.controlId],
         evidenceIds: [source.evidenceId],
@@ -522,7 +523,8 @@ export function renderScopedSentinelFindings(
           `## ${markdownText(row.title)}`,
           "",
           `- ${t("Finding ID")} ${markdownText(row.id)}`,
-          ...(row.summary ? [`- ${markdownText(row.summary)}`] : []),
+          ...(row.severity ? [`- ${t("Severity")} ${row.severity}`] : []),
+          ...(row.kind === "worker" ? [`- ${markdownText(row.summary)}`] : []),
           `- ${t("Affected asset IDs")} ${
             linkedIds(row.assetIds, t("None linked"))
           }`,
@@ -532,7 +534,7 @@ export function renderScopedSentinelFindings(
           `- ${t("Evidence IDs")} ${
             linkedIds(row.evidenceIds, t("None linked"))
           }`,
-          ...(row.original
+          ...(row.kind === "worker"
             ? [
               `- ${t("Evidence revision")} ${row.original.evidenceRevision} · ${
                 markdownText(row.original.snapshotDigest)
@@ -540,7 +542,7 @@ export function renderScopedSentinelFindings(
               `- ${t("Task")} ${markdownText(row.original.taskId)}`,
             ]
             : []),
-          ...(row.rechecks ?? []).flatMap((record) => [
+          ...(row.kind === "worker" ? row.rechecks : []).flatMap((record) => [
             `- ${t("Control recheck")} ${markdownText(record.id)} · ${
               t(record.outcome)
             } · ${markdownText(record.evidenceId)}`,
@@ -549,7 +551,7 @@ export function renderScopedSentinelFindings(
             }`,
             `  - ${t("Task")} ${markdownText(record.taskId)}`,
           ]),
-          ...(row.amendments ?? []).map((record) =>
+          ...(row.kind === "worker" ? row.amendments : []).map((record) =>
             `- ${t("Updated")} v${record.version} · ${
               markdownText(record.id)
             } · ${markdownText(record.title)}`

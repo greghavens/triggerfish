@@ -209,6 +209,7 @@ import {
   readSharedSentinelTopologySource,
 } from "../sentinel/shared_inventory.ts";
 import {
+  findingReportSeverity,
   hasSentinelWorkerFindingJournal,
   openSentinelWorkerFindingStore,
   readSentinelCaseFindingReceipts,
@@ -557,6 +558,12 @@ export const operatorRunTool: ToolDefinition = {
       type: "boolean",
       description:
         "Whether to pin this exact Sentinel run in the owner run list",
+    },
+    severity: {
+      type: "string",
+      description:
+        "Reviewed severity correction on the exact current finding report.",
+      enum: ["critical", "high", "medium", "low", "info"],
     },
     summary: { type: "string", description: "New finding report summary" },
     reportVersion: {
@@ -7644,6 +7651,12 @@ ${
         if (
           ref.kind !== "sentinel" || ref.revision === undefined ||
           !canFlowTo("INTERNAL", context?.ceiling ?? "INTERNAL") ||
+          (args.severity !== undefined &&
+            (!context?.authenticatedOwnerSessionId ||
+              !canFlowTo(
+                context.inputClassification ?? "PUBLIC",
+                "INTERNAL",
+              ))) ||
           Object.keys(args).some((key) =>
             ![
               "action",
@@ -7655,6 +7668,7 @@ ${
               "evidenceVersion",
               "title",
               "summary",
+              "severity",
               "requestId",
             ].includes(key)
           ) ||
@@ -7871,6 +7885,7 @@ ${
                 amendment.version === version && amendment.caseId === ref.id &&
                 amendment.runId === runId
               );
+            const severity = findingReportSeverity(report.amendments, version);
             return selected
               ? safeProjection({
                 run: ref,
@@ -7884,6 +7899,7 @@ ${
                   ...("evidenceVersion" in selected && {
                     evidenceVersion: selected.evidenceVersion,
                   }),
+                  ...(severity !== undefined && { severity }),
                   title: selected.title,
                   summary: selected.summary,
                 },

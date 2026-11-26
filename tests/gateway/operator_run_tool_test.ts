@@ -11,7 +11,10 @@ import type {
 import { DatabaseSync } from "node:sqlite";
 import { openSentinelAssetDiscoveryStore } from "../../src/sentinel/asset_discovery_store.ts";
 import { digestSentinelSnapshot } from "../../src/sentinel/shared_inventory.ts";
-import { openSentinelFindingTrafficLinks } from "../../src/sentinel/finding_traffic_links.ts";
+import {
+  openSentinelFindingTrafficLinks,
+  sentinelFindingTrafficEvidenceVersion,
+} from "../../src/sentinel/finding_traffic_links.ts";
 import {
   readProjectedSentinelTrafficReceipt,
   reopenProjectedSentinelTrafficPage,
@@ -1265,6 +1268,121 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
             parentId === undefined
           ),
         );
+      });
+      const savedRatingSnapshot = treeAssessment.result?.sharedGraph.snapshot;
+      assert(savedRatingSnapshot);
+      const ratingJournal = openSentinelWorkerFindingStore(treePath);
+      const seedRating = (targetId: string) =>
+        ratingJournal.recordFinding({
+          ...original,
+          caseId: treeCase,
+          runId: treeAssessment.plan.runId!,
+          evidenceRevision: treeAssessment.revision,
+          targetId,
+          snapshotDigest: digestSentinelSnapshot(savedRatingSnapshot),
+          requestId: crypto.randomUUID(),
+        });
+      const ratedFinding = seedRating("application-a");
+      const unratedOutside = seedRating("private-parent");
+      ratingJournal.close();
+      const savedTreeGraph = JSON.parse(await Deno.readTextFile(treePath));
+      savedTreeGraph.nodes.push({
+        id: "additional-evidence",
+        kind: "evidence",
+        label: "Next retained revision",
+      });
+      await Deno.writeTextFile(treePath, JSON.stringify(savedTreeGraph));
+      const afterRatingRefresh = refreshSentinelAssessment(treePath);
+      assert(
+        afterRatingRefresh &&
+          afterRatingRefresh.revision > treeAssessment.revision,
+      );
+      const correction = {
+        action: "amend_finding_report",
+        ...treeRun,
+        revision: afterRatingRefresh.revision,
+        receiptId: ratedFinding.id,
+        reportVersion: 1,
+        evidenceVersion: sentinelFindingTrafficEvidenceVersion(
+          treePath,
+          afterRatingRefresh.revision,
+          ratedFinding.id,
+        ).digest,
+        severity: "high",
+        requestId: crypto.randomUUID(),
+      };
+      const beforeRating = confirmations.length;
+      denied = "PRE_TOOL_CALL";
+      await turn(correction);
+      assertEquals(confirmations.length, beforeRating);
+      denied = undefined;
+      for (
+        const change of [
+          {
+            ...correction,
+            receiptId: unratedOutside.id,
+            evidenceVersion: sentinelFindingTrafficEvidenceVersion(
+              treePath,
+              afterRatingRefresh.revision,
+              unratedOutside.id,
+            ).digest,
+          },
+          { ...correction, revision: treeAssessment.revision },
+          { ...correction, evidenceVersion: "a".repeat(64) },
+          { ...correction, severity: "unrated" },
+        ]
+      ) {
+        assertStringIncludes((await turn(change)).result, "unavailable");
+      }
+      assertEquals(confirmations.length, beforeRating);
+      const rated = JSON.parse((await turn(correction)).result).amendment;
+      assertEquals(rated.severity, "high");
+      assertEquals(rated.title, ratedFinding.title);
+      assertEquals(rated.summary, ratedFinding.summary);
+      assertStringIncludes(confirmations.at(-1)!, "unrated → high");
+      assertEquals(confirmations.length, beforeRating + 1);
+      const reportRead = {
+        action: "finding_report",
+        ...treeRun,
+        revision: afterRatingRefresh.revision,
+        receiptId: ratedFinding.id,
+      };
+      await withGateway(async (reconnected) => {
+        assertEquals(
+          JSON.parse((await reconnected(correction)).result).amendment,
+          rated,
+        );
+        assertEquals(confirmations.length, beforeRating + 1);
+        assertStringIncludes(
+          (await reconnected({ ...correction, requestId: crypto.randomUUID() }))
+            .result,
+          "unavailable",
+        );
+        const current =
+          JSON.parse((await reconnected(reportRead)).result).report;
+        assertEquals(current.severity, "high");
+        assertEquals(current.sourceReceiptId, rated.id);
+        const originalVersion = JSON.parse(
+          (await reconnected({ ...reportRead, reportVersion: 1 })).result,
+        ).report;
+        assertEquals(originalVersion.severity, undefined);
+        assertEquals(originalVersion.sourceReceiptId, ratedFinding.id);
+        const old = JSON.parse(
+          (await reconnected({
+            ...reportRead,
+            revision: treeAssessment.revision,
+          })).result,
+        ).report;
+        assertEquals(old.sourceReceiptId, ratedFinding.id);
+        assertEquals(old.severity, undefined);
+        denied = "POST_TOOL_RESPONSE";
+        assertEquals(
+          (await reconnected(reportRead)).result,
+          "Tool response withheld by policy.",
+        );
+        denied = "PRE_OUTPUT";
+        assertEquals((await reconnected(reportRead)).response, undefined);
+        denied = undefined;
       });
       assert(stopSentinelAssessment(treePath));
       await Deno.remove(dirname(treePath), { recursive: true });

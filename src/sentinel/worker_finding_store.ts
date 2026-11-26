@@ -5,6 +5,7 @@ import { dirname, join, resolve } from "@std/path";
 import { createHash } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import { isSentinelCaseId, locateSentinelCase } from "./cases.ts";
+import { sentinelFindingSeverities } from "./graph.ts";
 import { assertOperatorSourceDirectoryInfo } from "./source_snapshot_lock.ts";
 
 export interface SentinelWorkerFindingReceiptScope {
@@ -62,6 +63,15 @@ export type SentinelWorkerFindingJournalRecord =
   | SentinelWorkerFindingRecord
   | SentinelWorkerFindingRecheckRecord;
 
+export function findingReportSeverity(
+  amendments: readonly SentinelWorkerFindingReportAmendment[],
+  version = Number.MAX_SAFE_INTEGER,
+) {
+  return amendments.findLast((item) =>
+    item.version <= version && item.severity !== undefined
+  )?.severity;
+}
+
 export interface SentinelWorkerFindingReportUpdate {
   readonly caseId: string;
   readonly runId: string;
@@ -72,6 +82,7 @@ export interface SentinelWorkerFindingReportUpdate {
   readonly findingId: string;
   readonly expectedVersion: number;
   readonly evidenceVersion?: string;
+  readonly severity?: typeof sentinelFindingSeverities[number];
   readonly title: string;
   readonly summary: string;
 }
@@ -209,6 +220,7 @@ function normalizeAmendment(raw: SentinelWorkerFindingReportUpdate) {
     findingId,
     expectedVersion,
     evidenceVersion,
+    severity,
     title,
     summary,
   } = raw;
@@ -223,6 +235,9 @@ function normalizeAmendment(raw: SentinelWorkerFindingReportUpdate) {
     (evidenceVersion !== undefined &&
       (typeof evidenceVersion !== "string" ||
         !/^[a-f0-9]{64}$/.test(evidenceVersion))) ||
+    (severity !== undefined &&
+      (taskId !== "operator" ||
+        !sentinelFindingSeverities.includes(severity))) ||
     !bounded(title, 256) || !bounded(summary, 4096)
   ) throw new Error("Invalid Sentinel worker finding report amendment");
   return {
@@ -235,6 +250,7 @@ function normalizeAmendment(raw: SentinelWorkerFindingReportUpdate) {
     findingId,
     expectedVersion,
     ...(evidenceVersion !== undefined && { evidenceVersion }),
+    ...(severity !== undefined && { severity }),
     title,
     summary,
   };
@@ -561,11 +577,13 @@ export function openSentinelWorkerFindingStore(
       "SELECT * FROM receipts WHERE findingId = ? AND revision <= ? AND reportVersion IS NOT NULL ORDER BY reportVersion",
     ).all(findingId, revision).map(decodeAmendment);
     const latest = amendments.at(-1);
+    const severity = findingReportSeverity(amendments);
     return {
       finding,
       version: latest?.version ?? 1,
       title: latest?.title ?? finding.title,
       summary: latest?.summary ?? finding.summary,
+      ...(severity !== undefined && { severity }),
       amendments,
     };
   }
@@ -652,6 +670,8 @@ export function openSentinelWorkerFindingStore(
         ? "operator" as const
         : "worker" as const,
       recordedAt: item.recordedAt,
+      ...(item.kind === "report_amendment" && item.severity !== undefined &&
+        { severity: item.severity }),
       ...(item.kind === "finding"
         ? { evidenceId: item.evidenceId }
         : item.evidenceVersion
