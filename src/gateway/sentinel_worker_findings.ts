@@ -1,3 +1,8 @@
+import {
+  INCONCLUSIVE_RECHECK_TOOL,
+  inconclusiveRecheckArgs,
+} from "../sentinel/recheck_inconclusive.ts";
+import { digestSentinelSnapshot } from "../sentinel/shared_inventory.ts";
 import { notifyCommittedEvidence } from "../core/evidence_task_progression.ts";
 import { sentinelFindingTrafficEvidenceVersion } from "../sentinel/finding_traffic_links.ts";
 import { readSentinelFindingPageReference } from "../sentinel/worker_goal_recovery.ts";
@@ -108,6 +113,22 @@ export const sentinelFindingWriteTools: readonly ToolDefinition[] = [
       evidenceId: exactId,
       requestId: exactId,
       summary,
+    },
+  },
+  {
+    name: INCONCLUSIVE_RECHECK_TOOL,
+    description:
+      "Record a reason why the exact assigned retained-evidence recheck could not establish a verdict. This records no verified finding result.",
+    parameters: {
+      findingId: exactId,
+      evidenceId: exactId,
+      requestId: exactId,
+      rationale: {
+        type: "string",
+        description:
+          "Concise explanation of what prevented a verified verdict.",
+        required: true,
+      },
     },
   },
   {
@@ -408,6 +429,49 @@ export function executeSentinelWorkerFindingTool(
                 item.kind === "recheck" && item.findingId === finding.id
               ).slice(0, 5),
             };
+          },
+        ),
+      );
+    }
+
+    if (name === INCONCLUSIVE_RECHECK_TOOL) {
+      const input = inconclusiveRecheckArgs(args);
+      if (!input) return unavailable;
+      return projectResult(
+        withFindingJournal(
+          scope,
+          signal,
+          true,
+          (state, caseId, journal, target) => {
+            const task = assignedTask(scope);
+            const runId = state.plan.runId;
+            const snapshot = state.result?.sharedGraph.snapshot;
+            if (
+              !task || !runId || !snapshot || signal?.aborted ||
+              task.kind !== "review_evidence" ||
+              task.plannerRound?.recheckFindingId !== input.findingId ||
+              task.nodeId !== target || target !== input.evidenceId
+            ) return;
+            const original = journal.readFinding(input.findingId);
+            if (
+              !original ||
+              executionFindingAsset(snapshot, input.evidenceId) !==
+                original.targetId ||
+              !snapshot.edges.some(({ from, to, relation }) =>
+                from === input.evidenceId && to === original.controlId &&
+                relation === "verifies"
+              )
+            ) return;
+            const record = journal.recordInconclusive({
+              ...input,
+              caseId,
+              runId,
+              taskId: task.id,
+              targetId: original.targetId,
+              evidenceRevision: state.revision,
+              snapshotDigest: digestSentinelSnapshot(snapshot),
+            });
+            return record && { _classification: "INTERNAL", record };
           },
         ),
       );

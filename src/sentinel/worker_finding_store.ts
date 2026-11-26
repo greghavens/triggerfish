@@ -1,3 +1,9 @@
+import {
+  decodeInconclusiveRecheck,
+  inconclusiveRecheckId,
+  normalizeInconclusiveRecheck,
+  type SentinelInconclusiveRecheckInput,
+} from "./recheck_inconclusive.ts";
 /** Case-local journal for trusted, evidence-backed worker receipts. */
 /// <reference path="../core/sqlite_types.d.ts" />
 
@@ -469,6 +475,15 @@ export function openSentinelWorkerFindingStore(
           throw new Error("Sentinel worker finding receipt limit reached");
         }
         if (input.kind === "recheck") {
+          if (
+            hasInconclusive() && db.prepare(
+              "SELECT 1 FROM inconclusive_rechecks WHERE revision = ? AND taskId = ?",
+            ).get(input.evidenceRevision, input.taskId)
+          ) {
+            throw new Error(
+              "The recheck assignment already recorded an inconclusive result.",
+            );
+          }
           const original = read(input.findingId);
           if (
             original?.kind !== "finding" || original.caseId !== input.caseId ||
@@ -520,6 +535,74 @@ export function openSentinelWorkerFindingStore(
     });
     if (inserted) onCommit?.(record);
     return record;
+  }
+
+  const hasInconclusive = () =>
+    !!db.prepare(
+      "SELECT 1 FROM sqlite_schema WHERE name = 'inconclusive_rechecks'",
+    ).get();
+  function readInconclusive(id: string) {
+    if (!hasInconclusive()) return;
+    const row = db.prepare("SELECT * FROM inconclusive_rechecks WHERE id = ?")
+      .get(id);
+    return row && decodeInconclusiveRecheck(row);
+  }
+  function readInconclusiveRequest(requestId: string) {
+    if (!hasInconclusive()) return;
+    const row = db.prepare(
+      "SELECT * FROM inconclusive_rechecks WHERE requestId = ?",
+    ).get(requestId);
+    return row && decodeInconclusiveRecheck(row);
+  }
+  function recordInconclusive(raw: SentinelInconclusiveRecheckInput) {
+    const input = normalizeInconclusiveRecheck(raw);
+    if (!input || input.caseId !== caseBinding) return;
+    const id = inconclusiveRecheckId(input);
+    return transaction(db, () => {
+      const original = readFinding(input.findingId);
+      if (
+        original?.caseId !== input.caseId || original.runId !== input.runId ||
+        original.targetId !== input.targetId ||
+        original.evidenceRevision > input.evidenceRevision ||
+        original.taskId === input.taskId
+      ) return;
+      const prior = readInconclusiveRequest(input.requestId);
+      if (prior) return prior.id === id ? prior : undefined;
+      if (
+        db.prepare("SELECT 1 FROM requests WHERE requestId = ?").get(
+          input.requestId,
+        ) ||
+        db.prepare(`SELECT 1 FROM receipts WHERE findingId = ? AND revision = ?
+          AND reportVersion IS NULL AND json_extract(input, '$.taskId') = ? LIMIT 1`)
+          .get(input.findingId, input.evidenceRevision, input.taskId)
+      ) return;
+      db.exec(`CREATE TABLE IF NOT EXISTS inconclusive_rechecks (
+        id TEXT PRIMARY KEY, requestId TEXT NOT NULL UNIQUE, revision INTEGER NOT NULL,
+        taskId TEXT NOT NULL, findingId TEXT NOT NULL REFERENCES receipts(id),
+        input TEXT NOT NULL, recordedAt INTEGER NOT NULL, UNIQUE(revision, taskId)
+      ) STRICT`);
+      if (
+        Number(
+            db.prepare("SELECT count(*) AS count FROM inconclusive_rechecks")
+              .get()?.count,
+          ) >= MAX_RECEIPTS ||
+        db.prepare(
+          "SELECT 1 FROM inconclusive_rechecks WHERE revision = ? AND taskId = ?",
+        )
+          .get(input.evidenceRevision, input.taskId)
+      ) return;
+      db.prepare("INSERT INTO inconclusive_rechecks VALUES (?,?,?,?,?,?,?)")
+        .run(
+          id,
+          input.requestId,
+          input.evidenceRevision,
+          input.taskId,
+          input.findingId,
+          JSON.stringify(input),
+          now(),
+        );
+      return readInconclusive(id);
+    });
   }
 
   function readFinding(id: string): SentinelWorkerFindingRecord | undefined {
@@ -792,6 +875,16 @@ export function openSentinelWorkerFindingStore(
         graphFindingId ?? null,
         limit,
       ).map(({ id }) => String(id));
+    },
+    readInconclusive,
+    readInconclusiveRequest,
+    recordInconclusive,
+    listInconclusiveRechecks(findingId: string, revision: number) {
+      if (!hasInconclusive()) return [];
+      return db.prepare(
+        "SELECT * FROM inconclusive_rechecks WHERE findingId = ? AND revision = ? ORDER BY rowid DESC",
+      )
+        .all(findingId, revision).map(decodeInconclusiveRecheck);
     },
     listFindingRechecks(findingId: string, revision: number) {
       return db.prepare(

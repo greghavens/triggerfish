@@ -1,3 +1,4 @@
+import { INCONCLUSIVE_RECHECK_TOOL } from "../sentinel/recheck_inconclusive.ts";
 import {
   readSentinelPeerCoverageReceipt,
   readSentinelPeerCoverageSelector,
@@ -3672,7 +3673,11 @@ function createAgent(
       priorAssignedEvidenceTool,
       savedWorkflowReceiptTool,
       intermediateWorkflowObservationTool,
-      ...sentinelFindingWriteTools,
+      ...sentinelFindingWriteTools.filter(({ name }) =>
+        name !== INCONCLUSIVE_RECHECK_TOOL ||
+        readAssignedModelReview(options)?.plannerRound?.recheckFindingId !==
+          undefined
+      ),
       proposeWorkerGoalTool,
       proveWorkerGoalTool,
       sentinelFindingTrafficAttachTool,

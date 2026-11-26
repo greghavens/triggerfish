@@ -1,6 +1,14 @@
 /** Canonical input and output for finding writes verified by their journal. */
 import { redactCredentialText } from "../core/logger/redactor.ts";
-import { readSentinelWorkerFindingWriteReceipt } from "./worker_finding_store.ts";
+import {
+  INCONCLUSIVE_RECHECK_TOOL,
+  inconclusiveRecheckArgs,
+} from "./recheck_inconclusive.ts";
+import {
+  hasSentinelWorkerFindingJournal,
+  openSentinelWorkerFindingStore,
+  readSentinelWorkerFindingWriteReceipt,
+} from "./worker_finding_store.ts";
 
 export const MAX_SENTINEL_FINDING_RESULT_CHARS = 6000;
 
@@ -30,6 +38,7 @@ export function sentinelRecheckContextArgs(input: unknown) {
 }
 
 const fields = {
+  [INCONCLUSIVE_RECHECK_TOOL]: ["findingId", "evidenceId", "rationale"],
   sentinel_report_finding: [
     "graphFindingId",
     "controlId",
@@ -56,6 +65,7 @@ export function sentinelFindingMutationArguments(
   name: FindingTool,
   input: Record<string, unknown>,
 ) {
+  if (name === INCONCLUSIVE_RECHECK_TOOL) return inconclusiveRecheckArgs(input);
   const keys = name === "sentinel_update_finding_report" &&
       input.evidenceVersion !== undefined
     ? [...fields[name], "evidenceVersion"] as const
@@ -92,6 +102,32 @@ export function lookupSentinelFindingMutation(
   snapshotDigest: string,
   evidenceId?: string,
 ) {
+  if (name === INCONCLUSIVE_RECHECK_TOOL) {
+    if (!hasSentinelWorkerFindingJournal(path)) return;
+    const journal = openSentinelWorkerFindingStore(path);
+    try {
+      const record = journal.readInconclusiveRequest(requestId);
+      if (
+        !record || record.caseId !== scope.caseId ||
+        record.evidenceRevision !== scope.evidenceRevision ||
+        record.taskId !== scope.taskId || record.targetId !== scope.targetId ||
+        record.snapshotDigest !== snapshotDigest ||
+        record.evidenceId !== evidenceId
+      ) return;
+      const args = inconclusiveRecheckArgs({
+        findingId: record.findingId,
+        evidenceId: record.evidenceId,
+        rationale: record.rationale,
+        requestId,
+      });
+      const result = JSON.stringify({ _classification: "INTERNAL", record });
+      return args && result.length <= MAX_SENTINEL_FINDING_RESULT_CHARS
+        ? { args, result, id: record.id }
+        : undefined;
+    } finally {
+      journal.close();
+    }
+  }
   const receipt = readSentinelWorkerFindingWriteReceipt(path, scope, requestId);
   if (
     !receipt ||

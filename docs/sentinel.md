@@ -359,6 +359,12 @@ settlement separately from the verdict. A failed or interrupted attempt
 does not establish a verdict. If the page becomes stale, start again
 without its cursor.
 
+An exact leased recheck can record a separate inconclusive rationale when
+it cannot establish a verified result. The attempt exposes the
+`inconclusiveReceiptId`, which the owner can reopen with `finding_receipt`.
+The rationale stays available after archive restore. It does not produce
+a pass or fail, satisfy evidence requirements, or change the finding.
+
 The worker finding report shows a separate remediation status as of the selected
 evidence revision. A verified result identifies its exact recheck and evidence.
 Missing, expired, or inaccessible evidence yields `unknown`. The owner report

@@ -1,3 +1,7 @@
+import {
+  INCONCLUSIVE_RECHECK_ID,
+  INCONCLUSIVE_RECHECK_TOOL,
+} from "../sentinel/recheck_inconclusive.ts";
 import { normalizeSentinelRecheckNote } from "../sentinel/worker_finding_recovery.ts";
 import { createSentinelFindingRemediationReader } from "../sentinel/finding_remediation.ts";
 import { reopenSentinelPeerCoverage } from "./sentinel_peer_coverage.ts";
@@ -7870,18 +7874,40 @@ ${
                   step.tool !== "sentinel_update_finding_report" && snapshot
                 ? executionFindingAsset(snapshot, task.nodeId)
                 : task.nodeId;
-              const receipt = targetId &&
+              let inconclusive;
+              if (
+                step.tool === INCONCLUSIVE_RECHECK_TOOL &&
+                targetId && snapshot && hasSentinelWorkerFindingJournal(path)
+              ) {
+                const journal = openSentinelWorkerFindingStore(path);
+                try {
+                  const row = journal.readInconclusive(receiptId);
+                  if (
+                    row?.caseId === ref.id && row.runId === runId &&
+                    row.evidenceRevision === ref.revision &&
+                    row.taskId === task.id &&
+                    row.evidenceId === task.nodeId &&
+                    row.targetId === targetId &&
+                    row.snapshotDigest === digestSentinelSnapshot(snapshot)
+                  ) inconclusive = row;
+                } finally {
+                  journal.close();
+                }
+              }
+              const receipt = inconclusive ?? (targetId &&
                 readSentinelWorkerFindingTraceReceipt(path, {
                   caseId: ref.id,
                   runId,
                   evidenceRevision: ref.revision,
                   taskId: task.id,
                   targetId,
-                }, receiptId);
+                }, receiptId));
               const kind = step.tool === "sentinel_report_finding"
                 ? "finding"
                 : step.tool === "sentinel_record_finding_recheck"
                 ? "recheck"
+                : step.tool === INCONCLUSIVE_RECHECK_TOOL
+                ? "inconclusive_recheck"
                 : "report_amendment";
               if (!receipt || receipt.kind !== kind) return unavailable;
               const retained = receipt.kind === "report_amendment"
@@ -9313,7 +9339,9 @@ ${
               limit < 1 || limit > 10 || (cursor !== undefined &&
                 (typeof cursor !== "string" || !receiptPattern.test(cursor)))
             : typeof receiptId !== "string" ||
-              !receiptPattern.test(receiptId)) ||
+              (!receiptPattern.test(receiptId) &&
+                !(action === "finding_receipt" &&
+                  INCONCLUSIVE_RECHECK_ID.test(receiptId)))) ||
           reportVersion !== undefined &&
             (typeof reportVersion !== "number" ||
               !Number.isSafeInteger(reportVersion) || reportVersion < 1) ||
@@ -9499,6 +9527,25 @@ ${
                   : null,
               },
             });
+          }
+          if (INCONCLUSIVE_RECHECK_ID.test(receiptId as string)) {
+            const record = journal.readInconclusive(receiptId as string);
+            const snapshot = readSentinelAssessmentRevision(path, ref.revision)
+              ?.result.sharedGraph.snapshot;
+            const constraints = readSentinelOperatingConstraints(
+              path,
+              runId,
+              ref.revision,
+            )?.constraints;
+            return record?.caseId === ref.id && record.runId === runId &&
+                record.evidenceRevision === ref.revision && snapshot &&
+                digestSentinelSnapshot(snapshot) === record.snapshotDigest &&
+                sentinelOperatingConstraintsAllow(constraints, {
+                  kind: "review_evidence",
+                  nodeId: record.targetId,
+                }, snapshot)
+              ? safeProjection({ run: ref, record })
+              : unavailable;
           }
           const record = journal.read(receiptId as string);
           return record?.caseId === ref.id && record.runId === runId &&

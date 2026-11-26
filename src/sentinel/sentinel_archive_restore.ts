@@ -1,3 +1,4 @@
+import { decodeInconclusiveRecheck } from "./recheck_inconclusive.ts";
 import {
   decodeSentinelTrafficComposition,
   MAX_TRAFFIC_COMPOSITION_JOURNAL_BYTES,
@@ -230,6 +231,8 @@ function checkedDatabase<T>(
         ? Object.hasOwn(auxiliary.tables, name) ||
           family === "sentinel-goal-completion.db" &&
             name === "goal_evidence_submissions" ||
+          family === "sentinel-worker-findings.db" &&
+            version === 2 && name === "inconclusive_rechecks" ||
           family === "sentinel-finding-traffic-links.db" &&
             version === 2 && (name === "traffic_link_request_aliases" ||
               name === "traffic_link_annotations" ||
@@ -766,6 +769,44 @@ function validateAuxiliary(
             !exactLink.get(id, row.revision as number, row.finding_id as string)
           )
         ) throw new Error("Invalid archived Sentinel traffic batch scope");
+      }
+    }
+    if (tables.has("inconclusive_rechecks")) {
+      requireColumns(db, "inconclusive_rechecks", [
+        "id",
+        "requestId",
+        "revision",
+        "taskId",
+        "findingId",
+        "input",
+        "recordedAt",
+      ]);
+      const rows = db.prepare("SELECT * FROM inconclusive_rechecks LIMIT 4097")
+        .all();
+      if (rows.length > 4096) {
+        throw new Error("Invalid archived Sentinel inconclusive recheck count");
+      }
+      const origin = db.prepare(
+        "SELECT input FROM receipts WHERE id = ? AND findingId IS NULL",
+      );
+      for (const raw of rows) {
+        const record = decodeInconclusiveRecheck(raw);
+        const finding = JSON.parse(
+          String(origin.get(record.findingId)?.input ?? "null"),
+        );
+        if (
+          !finding || finding.kind !== "finding" || finding.caseId !== caseId ||
+          finding.runId !== record.runId ||
+          finding.targetId !== record.targetId ||
+          finding.evidenceRevision > record.evidenceRevision ||
+          finding.taskId === record.taskId ||
+          record.caseId !== caseId || record.evidenceRevision > revision ||
+          (record.evidenceRevision === revision && record.runId !== runId)
+        ) {
+          throw new Error(
+            "Invalid archived Sentinel inconclusive recheck scope",
+          );
+        }
       }
     }
     const scoped = name === "sentinel-worker-findings.db"

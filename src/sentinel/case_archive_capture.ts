@@ -194,6 +194,19 @@ const evidenceStoreSchemas: Partial<
         optionalColumns: ["reportVersion"],
       },
       { name: "requests", columns: ["requestId", "receiptId"] },
+      {
+        name: "inconclusive_rechecks",
+        columns: [
+          "id",
+          "requestId",
+          "revision",
+          "taskId",
+          "findingId",
+          "input",
+          "recordedAt",
+        ],
+        optionalTable: true,
+      },
     ],
   },
   "sentinel-worker-graph-facts.db": {

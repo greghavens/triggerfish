@@ -1,3 +1,4 @@
+import { INCONCLUSIVE_RECHECK_TOOL } from "../sentinel/recheck_inconclusive.ts";
 import {
   readSentinelTrafficReceipt,
   type SentinelHintTrafficReference,
@@ -981,6 +982,7 @@ export function readSentinelFindingRecheckAttempts(
       };
       outcomeUncertain?: true;
       resultReceiptId?: string;
+      inconclusiveReceiptId?: string;
       outcome?: "pass" | "fail";
     }>();
     const database = storePath(path);
@@ -1049,6 +1051,19 @@ export function readSentinelFindingRecheckAttempts(
           resultReceiptId: result.id,
           outcome: result.outcome,
         });
+      }
+    }
+    for (
+      const record of journal.listInconclusiveRechecks(findingId, revision)
+    ) {
+      const entry = map.get(record.taskId);
+      if (
+        entry && record.caseId === caseId && record.runId === runId &&
+        record.targetId === original.targetId &&
+        entry.evidenceId === record.evidenceId &&
+        record.snapshotDigest === digestSentinelSnapshot(snapshot)
+      ) {
+        entry.inconclusiveReceiptId = record.id;
       }
     }
     const entries = Array.from(map.values()).filter(({ status }) =>
@@ -5068,7 +5083,7 @@ export function createSentinelModelPlanner(
             : []),
           ...(task.plannerRound?.recheckFindingId
             ? [
-              "After reopening the assigned receipt, open recheckFindingId with sentinel_finding_recheck_context and record the recheck for that exact finding.",
+              "After reopening the assigned receipt, open recheckFindingId with sentinel_finding_recheck_context and record the verified recheck. If no verified verdict is available, use sentinel_record_inconclusive_recheck for the exact finding and explain why.",
             ]
             : []),
           "If observation is omitted, use sentinel_worker_observation with task set to assignment.",
@@ -5406,6 +5421,8 @@ export function createSentinelModelPlanner(
                     ? "sentinel_report_finding"
                     : write.kind === "recheck"
                     ? "sentinel_record_finding_recheck"
+                    : write.kind === "inconclusive_recheck"
+                    ? INCONCLUSIVE_RECHECK_TOOL
                     : write.kind === "report_amendment"
                     ? "sentinel_update_finding_report"
                     : write.kind === "graph_relationship"
