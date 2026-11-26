@@ -67,6 +67,7 @@ import {
 import {
   parseFindingExportFilter,
   renderScopedSentinelFindings,
+  renderScopedSentinelFindingsPage,
   renderSentinelAlertsJson,
   renderSentinelDecisionHistoryJson,
   renderSentinelFindingsCsv,
@@ -1362,8 +1363,10 @@ export function createTidepoolSentinelHandler(
             );
           }
           const format = message.format;
+          const paged = message.findingPageSize !== undefined ||
+            message.findingCursor !== undefined;
           if (
-            message.findingIds !== undefined ||
+            paged || message.findingIds !== undefined ||
             message.findingFilter !== undefined || format === "findings-json" ||
             format === "md-zip"
           ) {
@@ -1386,17 +1389,33 @@ export function createTidepoolSentinelHandler(
                 "Select findings or a finding filter and an exact evidence revision to export.",
               );
             }
-            const content = renderScopedSentinelFindings(
-              path,
-              caseId,
-              state,
-              selection,
-              format,
-              language,
-            );
+            const page = paged
+              ? renderScopedSentinelFindingsPage(
+                path,
+                caseId,
+                state,
+                selection,
+                format,
+                language,
+                message.findingPageSize ?? 16,
+                message.findingCursor,
+              )
+              : undefined;
+            const content = paged
+              ? page?.content
+              : renderScopedSentinelFindings(
+                path,
+                caseId,
+                state,
+                selection,
+                format,
+                language,
+              );
             if (content === undefined) {
               throw new SentinelAssignmentError(
-                "The finding report is unavailable. Narrow the filter or select exact findings.",
+                paged
+                  ? "The finding report page is unavailable. Use the current selection or request a smaller page."
+                  : "The finding report is unavailable. Narrow the filter or select exact findings.",
               );
             }
             send({
@@ -1406,10 +1425,13 @@ export function createTidepoolSentinelHandler(
               revision: state.revision,
               format,
               content,
+              ...(page?.findingPage && { findingPage: page.findingPage }),
               ...(format === "md-zip" && {
                 encoding: "base64",
                 contentType: "application/zip",
-                filename: `sentinel-findings-r${state.revision}.zip`,
+                filename: `sentinel-findings-r${state.revision}${
+                  page?.findingPage ? `-offset-${page.findingPage.offset}` : ""
+                }.zip`,
               }),
             });
             return;

@@ -21,9 +21,12 @@ function crc32(bytes: Uint8Array): number {
 export function encodeSentinelFindingZip(
   markdown: readonly string[],
   maxBytes: number,
+  offset = 0,
 ): string | undefined {
   const entries = markdown.map((content, index) => ({
-    name: Buffer.from(`finding-${String(index + 1).padStart(2, "0")}.md`),
+    name: Buffer.from(
+      `finding-${String(offset + index + 1).padStart(2, "0")}.md`,
+    ),
     body: Buffer.from(content),
   }));
   let localSize = 0;

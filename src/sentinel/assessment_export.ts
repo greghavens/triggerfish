@@ -1,4 +1,5 @@
 /** Render a saved defensive assessment without writing files or fetching data. */
+import { createHash } from "node:crypto";
 
 import {
   type SentinelReportLanguage,
@@ -351,7 +352,20 @@ export function parseFindingExportFilter(
   };
 }
 
-/** Export reviewed finding IDs or a complete case-local match set at one revision. */
+interface FindingExportPageRequest {
+  readonly size: number;
+  readonly offset: number;
+  readonly manifestDigest?: string;
+}
+
+interface FindingExportPage {
+  readonly manifestDigest: string;
+  readonly offset: number;
+  readonly count: number;
+  readonly total: number;
+  readonly nextCursor: string | null;
+}
+
 export function renderScopedSentinelFindings(
   path: string,
   caseId: string,
@@ -360,16 +374,74 @@ export function renderScopedSentinelFindings(
   format: ScopedFindingExportFormat,
   language: SentinelReportLanguage,
 ): string | undefined {
+  return renderFindingExport(
+    path,
+    caseId,
+    assessment,
+    selection,
+    format,
+    language,
+  )?.content;
+}
+
+export function renderScopedSentinelFindingsPage(
+  path: string,
+  caseId: string,
+  assessment: SentinelAssessmentExportInput,
+  selection: string[] | FindingExportFilter,
+  format: ScopedFindingExportFormat,
+  language: SentinelReportLanguage,
+  size: unknown,
+  cursor: unknown,
+) {
+  if (
+    typeof size !== "number" || !Number.isSafeInteger(size) ||
+    size < 1 || size > MAX_FINDING_EXPORT_COUNT ||
+    (cursor !== undefined && typeof cursor !== "string")
+  ) return;
+  const match = typeof cursor === "string"
+    ? /^finding-export:([a-f0-9]{64}):([1-9][0-9]{0,6})$/.exec(cursor)
+    : null;
+  if (cursor !== undefined && !match) return;
+  return renderFindingExport(
+    path,
+    caseId,
+    assessment,
+    selection,
+    format,
+    language,
+    {
+      size,
+      offset: match ? Number(match[2]) : 0,
+      ...(match && { manifestDigest: match[1] }),
+    },
+  );
+}
+
+/** Resolve and render a bounded page while checking the exact selected manifest. */
+function renderFindingExport(
+  path: string,
+  caseId: string,
+  assessment: SentinelAssessmentExportInput,
+  selection: string[] | FindingExportFilter,
+  format: ScopedFindingExportFormat,
+  language: SentinelReportLanguage,
+  page?: FindingExportPageRequest,
+): { content: string; findingPage?: FindingExportPage } | undefined {
   const explicit = Array.isArray(selection);
   if (locateSentinelCase(path)?.caseId !== caseId) return;
   if (
     explicit &&
-    (!selection.length || selection.length > MAX_FINDING_EXPORT_COUNT ||
-      new Set(selection).size !== selection.length ||
+    (!selection.length ||
+      selection.length > (page ? 4096 : MAX_FINDING_EXPORT_COUNT) ||
       selection.some((id) =>
         typeof id !== "string" || !id || id.length > 4096 ||
         /[\p{Cc}\p{Cf}]/u.test(id)
-      ))
+      ) ||
+      new Set(selection).size !== selection.length ||
+      (page &&
+        new TextEncoder().encode(JSON.stringify(selection)).byteLength >
+          512 * 1024))
   ) return;
   const findings = new Map(
     (importedFindings(assessment) ?? []).map((
@@ -387,6 +459,10 @@ export function renderScopedSentinelFindings(
     path,
     assessment.revision,
   );
+  const attachmentsByFinding = Map.groupBy(
+    attachments,
+    ({ findingId }) => findingId,
+  );
   const annotationsByLink = Map.groupBy(
     exportSentinelTrafficLinkAnnotations(path, assessment.revision),
     ({ linkId }) => linkId,
@@ -399,8 +475,18 @@ export function renderScopedSentinelFindings(
     ? openSentinelWorkerFindingStore(path)
     : undefined;
   const records = [];
+  const manifest = page && createHash("sha256").update(JSON.stringify([
+    "sentinel-finding-export-v1",
+    caseId,
+    runId,
+    assessment.revision,
+    selection,
+    format,
+    language,
+  ]));
+  let findingTotal = 0;
   try {
-    const maxScannedWorkerFindings = 256;
+    const maxScannedWorkerFindings = page ? 4096 : 256;
     const workerIds = !explicit && selection.kind !== "imported" && runId
       ? journal?.listFindingIds(
         caseId,
@@ -419,6 +505,12 @@ export function renderScopedSentinelFindings(
       const imported = findings.get(id);
       const report = journal?.readFindingReport(id, assessment.revision);
       if (imported && report) return;
+      if (
+        !imported && (!report || report.finding.caseId !== caseId ||
+          report.finding.runId !== runId || report.amendments.some((item) =>
+            item.caseId !== caseId || item.runId !== runId
+          ))
+      ) return;
       if (!explicit) {
         const { assetId, query, severity, disposition, findingCategory } =
           selection;
@@ -441,12 +533,38 @@ export function renderScopedSentinelFindings(
               value.toLowerCase().includes(query)
             ))
         ) continue;
-        if (records.length >= MAX_FINDING_EXPORT_COUNT) return;
+        if (!page && records.length >= MAX_FINDING_EXPORT_COUNT) return;
       }
       const composition = trafficCompositionByFinding.get(id) ?? [];
-      const retainedTrafficLinks = attachments.filter((
-        { findingId, caseId: sourceCase },
-      ) => findingId === id && sourceCase === caseId).map((
+      const exactAttachments = (attachmentsByFinding.get(id) ?? []).filter(
+        ({ caseId: sourceCase }) => sourceCase === caseId,
+      );
+      const linkedRechecks = report && journal
+        ? journal.listFindingRechecks(id, assessment.revision)
+          .filter((item) =>
+            item.caseId === caseId && item.runId === runId &&
+            item.targetId === report.finding.targetId
+          )
+        : [];
+      if (page && manifest) {
+        manifest.update(JSON.stringify([
+          id,
+          imported,
+          dispositions.get(id),
+          report?.finding.id,
+          report?.amendments.map(({ id }) => id),
+          linkedRechecks.map(({ id }) => id),
+          exactAttachments.map((
+            { id },
+          ) => [id, annotationsByLink.get(id)?.map((item) => item.id)]),
+          composition.map(({ id }) => id),
+        ]));
+        const position = findingTotal++;
+        if (position < page.offset || position >= page.offset + page.size) {
+          continue;
+        }
+      }
+      const retainedTrafficLinks = exactAttachments.map((
         { requestId: _requestId, evidenceNote, ...link },
       ) => ({
         ...link,
@@ -488,24 +606,15 @@ export function renderScopedSentinelFindings(
         });
         continue;
       }
-      if (
-        !journal || !report || report.finding.caseId !== caseId ||
-        report.finding.runId !== runId ||
-        report.amendments.some((item) =>
-          item.caseId !== caseId || item.runId !== runId
-        )
-      ) return;
+      if (!report) return;
       const { requestId: _requestId, title, summary, ...source } =
         report.finding;
-      const rechecks = journal.listFindingRechecks(id, assessment.revision)
-        .filter((item) =>
-          item.caseId === caseId && item.runId === runId &&
-          item.targetId === source.targetId
-        )
-        .map(({ requestId: _requestId, summary, ...record }) => ({
-          ...record,
-          summary: redactCredentialText(summary),
-        }));
+      const rechecks = linkedRechecks.map((
+        { requestId: _requestId, summary, ...record },
+      ) => ({
+        ...record,
+        summary: redactCredentialText(summary),
+      }));
       records.push({
         id,
         kind: "worker" as const,
@@ -539,6 +648,24 @@ export function renderScopedSentinelFindings(
     }
   } finally {
     journal?.close();
+  }
+  let findingPage: FindingExportPage | undefined;
+  if (page && manifest) {
+    const manifestDigest = manifest.digest("hex");
+    if (
+      (page.manifestDigest && page.manifestDigest !== manifestDigest) ||
+      page.offset > 0 && page.offset >= findingTotal
+    ) return;
+    const nextOffset = page.offset + records.length;
+    findingPage = {
+      manifestDigest,
+      offset: page.offset,
+      count: records.length,
+      total: findingTotal,
+      nextCursor: nextOffset < findingTotal
+        ? `finding-export:${manifestDigest}:${nextOffset}`
+        : null,
+    };
   }
   const result = {
     version: 1,
@@ -647,16 +774,18 @@ export function renderScopedSentinelFindings(
         "",
       ].join("\n");
     if (format === "md-zip") {
-      return encodeSentinelFindingZip(
+      const zip = encodeSentinelFindingZip(
         records.map((record) => renderMarkdown([record])),
         MAX_FINDING_EXPORT_BYTES,
+        page?.offset,
       );
+      return zip === undefined ? undefined : { content: zip, findingPage };
     }
     content = renderMarkdown(records);
   }
   return new TextEncoder().encode(content).byteLength <=
       MAX_FINDING_EXPORT_BYTES
-    ? content
+    ? { content, findingPage }
     : undefined;
 }
 

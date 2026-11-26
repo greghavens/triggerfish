@@ -1395,6 +1395,93 @@ Deno.test("Leased Sentinel workers report, recheck, and amend findings visible i
       });
       assertEquals(tooMany.type, "error");
       assertEquals(tooMany.content, undefined);
+      const pageRequest = {
+        ...filterExport,
+        caseId: "other",
+        revision: other.revision,
+        findingFilter: {},
+        findingPageSize: 8,
+      };
+      const exportPage = (frame: Record<string, unknown>) => {
+        assertEquals(frame.type, "export");
+        const metadata = frame.findingPage as {
+          manifestDigest: string;
+          count: number;
+          offset: number;
+          total: number;
+          nextCursor: string | null;
+        };
+        const ids = JSON.parse(String(frame.content)).findings.map((
+          { id }: { id: string },
+        ) => id);
+        return { ...metadata, ids };
+      };
+      const firstPage = exportPage(await request("export", pageRequest));
+      assertEquals(firstPage.total, 17);
+      assertEquals(firstPage.count, 8);
+      assertEquals(firstPage.offset, 0);
+      assert(firstPage.nextCursor);
+      await withTidepool(baseDir, async (_list, _provenance, reconnected) => {
+        const secondPage = exportPage(
+          await reconnected("export", {
+            ...pageRequest,
+            findingCursor: firstPage.nextCursor,
+          }),
+        );
+        assert(secondPage.nextCursor);
+        assertEquals(secondPage.manifestDigest, firstPage.manifestDigest);
+        assertEquals(secondPage.offset, 8);
+        assertEquals(secondPage.count, 8);
+        const lastPage = exportPage(
+          await reconnected("export", {
+            ...pageRequest,
+            findingCursor: secondPage.nextCursor,
+          }),
+        );
+        assertEquals(lastPage.offset, 16);
+        assertEquals(lastPage.manifestDigest, firstPage.manifestDigest);
+        assertEquals(lastPage.nextCursor, null);
+        const allIds = [...firstPage.ids, ...secondPage.ids, ...lastPage.ids];
+        assertEquals(allIds.length, 17);
+        assertEquals(new Set(allIds).size, 17);
+        assertEquals(
+          [...allIds].sort(),
+          [
+            "review-gap",
+            ...Array.from(
+              { length: 16 },
+              (_, index) => `other-finding-${index}`,
+            ),
+          ].sort(),
+        );
+      });
+      const zipPageRequest = { ...pageRequest, format: "md-zip" };
+      const zipPage = await request("export", zipPageRequest);
+      assertEquals(zipPage.type, "export");
+      const zipCursor =
+        (zipPage.findingPage as { nextCursor: string }).nextCursor;
+      const zipContinuation = await request("export", {
+        ...zipPageRequest,
+        findingCursor: zipCursor,
+      });
+      assertEquals(
+        zipContinuation.filename,
+        `sentinel-findings-r${other.revision}-offset-8.zip`,
+      );
+      const zipPayload = Buffer.from(String(zipContinuation.content), "base64");
+      const firstNameSize = zipPayload.readUInt16LE(26);
+      assertEquals(
+        zipPayload.toString("utf8", 30, 30 + firstNameSize),
+        "finding-09.md",
+      );
+      const wrongPage = await request("export", {
+        ...pageRequest,
+        caseId: "main",
+        revision: secondRevision,
+        findingCursor: firstPage.nextCursor,
+      });
+      assertEquals(wrongPage.type, "error");
+      assertEquals(wrongPage.content, undefined);
       const narrowed = await request("export", {
         ...filterExport,
         caseId: "other",
@@ -1430,6 +1517,15 @@ Deno.test("Leased Sentinel workers report, recheck, and amend findings visible i
         note: "Verified against the recorded control failure.",
       });
       assertEquals(savedReview.type, "sentinel_state");
+      const stalePage = await request("export", {
+        ...pageRequest,
+        findingCursor: firstPage.nextCursor,
+      });
+      assertEquals(stalePage.type, "error");
+      assertEquals(stalePage.content, undefined);
+      const revisedFirstPage = exportPage(await request("export", pageRequest));
+      assert(revisedFirstPage.manifestDigest !== firstPage.manifestDigest);
+      assertEquals(revisedFirstPage.total, 17);
       assertEquals(await selectRated("open"), []);
       const confirmed = await selectRated("confirmed");
       assertEquals(confirmed.length, 1);
@@ -1596,6 +1692,14 @@ Deno.test("Leased Sentinel workers report, recheck, and amend findings visible i
         [undefined, undefined, [check!.id], undefined],
       );
       assertEquals(restored.workerFindings.amendments, [amendment!]);
+      const mixedRequest = {
+        ...filterExport,
+        findingIds: [finding!.id, "review-gap"],
+        findingPageSize: 1,
+      };
+      const mixedPage = exportPage(await request("export", mixedRequest));
+      assert(mixedPage.nextCursor);
+      assertEquals(mixedPage.ids, [finding!.id]);
       await withFindingAssignmentGateway(
         baseDir,
         () => Promise.resolve(true),
@@ -1622,6 +1726,12 @@ Deno.test("Leased Sentinel workers report, recheck, and amend findings visible i
           assertEquals(amended.disposition, "dismissed");
         },
       );
+      const staleMixed = await request("export", {
+        ...mixedRequest,
+        findingCursor: mixedPage.nextCursor,
+      });
+      assertEquals(staleMixed.type, "error");
+      assertEquals(staleMixed.content, undefined);
       const categoryExport = {
         ...filterExport,
         findingFilter: {
@@ -4171,6 +4281,13 @@ Deno.test("Sentinel schedules one scoped report worker from a committed finding 
           .digest;
       let annotationId: string | undefined;
       let withdrawalId: string | undefined;
+      const pagedCase = {
+        caseId: "main",
+        revision: state.revision,
+        format: "findings-json",
+        findingIds: [finding.id, "gap"],
+        findingPageSize: 1,
+      };
       await withFindingAssignmentGateway(
         baseDir,
         () => Promise.resolve(true),
@@ -4191,6 +4308,50 @@ Deno.test("Sentinel schedules one scoped report worker from a committed finding 
             }),
           );
           annotationId = outcome.amendment.id;
+          const findingRef = {
+            kind: "sentinel",
+            id: "main",
+            revision: state.revision,
+            receiptId: finding.id,
+          };
+          const anotherLink = JSON.parse(
+            await turn({
+              ...findingRef,
+              action: "attach_finding_traffic",
+              evidenceId: traffic.evidenceId,
+              digest: traffic.digest,
+              reportVersion: saved.reports[0].version,
+              evidenceRole: "supporting",
+              evidenceNote: "Second exact attachment for ordering.",
+              requestId: crypto.randomUUID(),
+            }),
+          ).link;
+          const beforeOrder = await request("export", pagedCase);
+          assertEquals(beforeOrder.type, "export");
+          const beforeCursor =
+            (beforeOrder.findingPage as { nextCursor: string }).nextCursor;
+          assert(beforeCursor);
+          const reordered = JSON.parse(
+            await turn({
+              ...findingRef,
+              action: "reorder_finding_traffic",
+              trafficLinkIds: [links[0].id, anotherLink.id],
+              reportVersion: saved.reports[0].version,
+              evidenceVersion: sentinelFindingTrafficEvidenceVersion(
+                path,
+                state.revision,
+                finding.id,
+              ).digest,
+              requestId: crypto.randomUUID(),
+            }),
+          ).amendment;
+          assertEquals(reordered.operation, "reorder");
+          const staleOrder = await request("export", {
+            ...pagedCase,
+            findingCursor: beforeCursor,
+          });
+          assertEquals(staleOrder.type, "error");
+          assertEquals(staleOrder.content, undefined);
           const latestVersion = sentinelFindingTrafficEvidenceVersion(
             path,
             state.revision,
@@ -4220,19 +4381,40 @@ Deno.test("Sentinel schedules one scoped report worker from a committed finding 
       });
       assertEquals(report.type, "export");
       const exportedFinding = JSON.parse(String(report.content)).findings[0];
-      const [exportedLink] = exportedFinding.trafficLinks;
+      const exportedLink = exportedFinding.trafficLinks.find((
+        { id }: { id: string },
+      ) => id === links[0].id);
       assertEquals(exportedLink.withdrawn, true);
-      assertEquals(exportedFinding.trafficLinkSetHistory[0].id, withdrawalId);
-      assertEquals(
-        exportedFinding.trafficLinkSetHistory[0].requestId,
-        undefined,
-      );
+      const withdrawal = exportedFinding.trafficLinkSetHistory.find((
+        { operation }: { operation: string },
+      ) => operation === "withdraw");
+      assertEquals(withdrawal.id, withdrawalId);
+      assertEquals(withdrawal.requestId, undefined);
       assertEquals(exportedLink.id, links[0].id);
       assertEquals(exportedLink.trafficDigest, traffic.digest);
       assertEquals(exportedLink.evidenceRole, attachment.evidenceRole);
       assertEquals(exportedLink.annotations[0].id, annotationId);
       assertEquals(exportedLink.annotations[0].evidenceRole, "verification");
       assertEquals(exportedLink.annotations[0].requestId, undefined);
+      const finalPage = await request("export", pagedCase);
+      const archivedCursor =
+        (finalPage.findingPage as { nextCursor: string }).nextCursor;
+      assert(archivedCursor);
+      assert(stopSentinelAssessment(path));
+      const next = startSentinelAssessment(path, {
+        goal: "Investigate another saved run",
+      });
+      assert(next.revision > state.revision);
+      const archivedPage = await request("export", {
+        ...pagedCase,
+        findingCursor: archivedCursor,
+      });
+      assertEquals(archivedPage.type, "export");
+      assertEquals(archivedPage.revision, state.revision);
+      assertEquals(
+        JSON.parse(String(archivedPage.content)).findings[0].id,
+        "gap",
+      );
     });
   } finally {
     planner?.stop();
