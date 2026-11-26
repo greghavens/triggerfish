@@ -1219,6 +1219,11 @@ export const operatorRunTool: ToolDefinition = {
       type: "string",
       description: "Cursor from the prior retained tool usage totals page.",
     },
+    includeSavedWorkflowReceipts: {
+      type: "boolean",
+      description:
+        "Include saved workflow receipt reads after checking current GitHub metadata access. Never fetches new workflow runs.",
+    },
     modelProfileVersion: {
       type: "integer",
       description: "Exact reviewed named model profile revision to activate.",
@@ -1822,7 +1827,8 @@ export function sentinelOperatorCaseReadParameterAllowed(
   if (
     parameter === "includeRetainedTopology" ||
     parameter === "includeRetainedFindingSources" ||
-    parameter === "includeRetainedTrafficMetadata"
+    parameter === "includeRetainedTrafficMetadata" ||
+    parameter === "includeSavedWorkflowReceipts"
   ) {
     return action === "case_local_tool_usage";
   }
@@ -9027,6 +9033,7 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
         const includeTopology = args.includeRetainedTopology;
         const includeFindings = args.includeRetainedFindingSources;
         const includeTraffic = args.includeRetainedTrafficMetadata;
+        const includeWorkflows = args.includeSavedWorkflowReceipts;
         if (
           ref.kind !== "sentinel" || ref.revision === undefined ||
           typeof args.runId !== "string" || !digestPattern.test(args.runId) ||
@@ -9036,6 +9043,8 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
             typeof includeFindings !== "boolean") ||
           (includeTraffic !== undefined &&
             typeof includeTraffic !== "boolean") ||
+          (includeWorkflows !== undefined &&
+            typeof includeWorkflows !== "boolean") ||
           Object.keys(args).some((key) =>
             ![
               "action",
@@ -9046,6 +9055,7 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
               "includeRetainedTopology",
               "includeRetainedFindingSources",
               "includeRetainedTrafficMetadata",
+              "includeSavedWorkflowReceipts",
             ].includes(key)
           ) ||
           !await controller.inspect(ref)
@@ -9067,6 +9077,27 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
                 step,
                 step.goalReceiptRead.args,
               )
+            : undefined,
+          includeWorkflows === true
+            ? async (step) => {
+              const text = await execute({
+                action: "worker_trace_result",
+                kind: "sentinel",
+                id: ref.id,
+                revision,
+                taskId: step.taskId,
+                stepIndices: [step.ordinal],
+              }, context);
+              if (!text.startsWith("{")) return false;
+              const validated = JSON.parse(text);
+              return validated.runId === args.runId &&
+                validated.taskId === step.taskId &&
+                validated.index === step.ordinal &&
+                validated.result !== undefined &&
+                createHash("sha256").update(JSON.stringify(validated.result))
+                    .digest("hex") ===
+                  step.receiptSha256;
+            }
             : undefined,
         );
         return usage?.runId === args.runId

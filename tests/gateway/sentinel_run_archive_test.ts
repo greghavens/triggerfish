@@ -22,6 +22,7 @@ import {
   createSentinelSubagent,
   projectSentinelSharedFindingSource,
   projectSentinelSharedTopologySource,
+  readSentinelPrerequisiteWorkflowReceipt,
 } from "../../src/gateway/sentinel_agent.ts";
 import { DatabaseSync } from "node:sqlite";
 import { createSentinelLiveWorkflowReader } from "../../src/gateway/sentinel_live_workflow.ts";
@@ -181,6 +182,7 @@ async function withGateway(
       denyTrafficBefore: boolean;
       denyRunResponse: boolean;
       denyWorkflowMetadata: boolean;
+      denySavedWorkflowSource?: string;
       denySharedAssetLinks: boolean;
       denyWorkerSourceBefore: boolean;
       denyWorkerSourceAfter: boolean;
@@ -211,6 +213,7 @@ async function withGateway(
     denyTrafficBefore: false,
     denyRunResponse: false,
     denyWorkflowMetadata: false,
+    denySavedWorkflowSource: undefined as string | undefined,
     denySharedAssetLinks: false,
     denyWorkerSourceBefore: false,
     denyWorkerSourceAfter: false,
@@ -267,6 +270,8 @@ async function withGateway(
       }
 
       const allowed = (visibility?.allowsHook(hook, input) ?? true) &&
+        !(input.tool_name === "sentinel_saved_workflow_receipt" &&
+          hook === policy.denySavedWorkflowSource) &&
         !(input.tool_name === "sentinel_shared_topology_source" &&
           hook === policy.denyTopologySourceHook) &&
         !(input.tool_name === "sentinel_shared_finding_source" &&
@@ -7023,6 +7028,174 @@ Deno.test("Owner gateway reviews exact single and batch archive purge and resume
         result.archives.map((item: { archiveId: string }) => item.archiveId),
         [lateArchiveId, current.archiveId],
       );
+    });
+  } finally {
+    await Deno.remove(baseDir, { recursive: true });
+  }
+});
+
+Deno.test("Gateway usage reauthorizes only exact saved workflow receipts after explicit opt-in", async () => {
+  const baseDir = await Deno.makeTempDir();
+  const caseId = "restorable";
+  const path = resolveSentinelCasePath(baseDir, caseId);
+  try {
+    await Deno.mkdir(dirname(path), { recursive: true });
+    await Deno.writeTextFile(
+      path,
+      JSON.stringify({
+        version: 1,
+        nodes: [{ id: "app", label: "Application", kind: "asset" }],
+        edges: [],
+      }),
+    );
+    const state = startSentinelAssessment(path);
+    advanceAdaptiveSentinel(path, state);
+    const revision = adaptiveRevision(state);
+    const store = openSentinelAdaptiveStore(
+      join(dirname(path), "sentinel-adaptive.db"),
+    );
+    let savedTaskId: string;
+    let exact: string;
+    try {
+      store.sync(revision, [{
+        kind: "impact",
+        nodeId: "app",
+        reason: MODEL_ASSIGNMENT_REASON,
+      }], revision);
+      advanceAdaptiveSentinel(path, state);
+      const source = store.claimModelReview(revision, MODEL_ASSIGNMENT_REASON);
+      assert(source);
+      const runs = [{ id: 20, status: "completed", conclusion: "success" }];
+      const receipt = {
+        repository: "owner/repo",
+        workflowId: 22,
+        connectorId: "workflow-status",
+        observedAt: "2026-11-24T11:00:00.000Z",
+        evidenceRevision: state.revision,
+        resultSha256: createHash("sha256").update(JSON.stringify(runs))
+          .digest("hex"),
+        runs,
+      };
+      assert(store.finishModelReview(revision, source.task.id, source.token, {
+        note: "Saved workflow status.",
+        steps: [{
+          tool: "sentinel_live_workflow_status",
+          target: "app",
+          outcome: "returned",
+          githubWorkflowRead: receipt,
+        }],
+      }));
+      store.sync(
+        revision,
+        [{
+          kind: "trace" as const,
+          nodeId: "app",
+          depth: 1,
+          reason: MODEL_ASSIGNMENT_REASON,
+          prerequisites: [source.task.id],
+          reviewedFrom: source.task.id,
+          plannerRound: {
+            identity: revision,
+            attempt: 1,
+            sourceKind: "model_review" as const,
+            githubWorkflowCitation: {
+              sourceTaskId: source.task.id,
+              resultSha256: receipt.resultSha256,
+            },
+          },
+        }],
+        revision,
+      );
+      advanceAdaptiveSentinel(path, state);
+      const followUp = store.claimModelReview(
+        revision,
+        MODEL_ASSIGNMENT_REASON,
+        (task) => task.depth === 1 && task.kind === "trace",
+      );
+      assert(followUp);
+      const text = readSentinelPrerequisiteWorkflowReceipt(
+        path,
+        state.revision,
+        followUp.task,
+      );
+      assert(text);
+      savedTaskId = followUp.task.id;
+      exact = text;
+      assert(store.finishModelReview(
+        revision,
+        followUp.task.id,
+        followUp.token,
+        {
+          note: "Reviewed saved workflow evidence.",
+          steps: [{
+            tool: "sentinel_saved_workflow_receipt",
+            outcome: "returned",
+            goalReceiptRead: {
+              args: {},
+              sha256: createHash("sha256").update(text).digest("hex"),
+            },
+          }],
+        },
+      ));
+    } finally {
+      store.close();
+    }
+
+    await withGateway(baseDir, async (turn, _approvals, policy) => {
+      const run = {
+        kind: "sentinel",
+        id: caseId,
+        revision: state.revision,
+      };
+      const trace = {
+        ...run,
+        action: "worker_trace_result",
+        taskId: savedTaskId,
+        stepIndices: [0],
+      };
+      const usage = {
+        ...run,
+        runId: state.plan.runId,
+        action: "case_local_tool_usage",
+      };
+      const savedTotals = (response: string) => {
+        assert(response.startsWith("{"), response);
+        return JSON.parse(response).totals.filter((
+          { tool }: { tool: string },
+        ) => tool === "sentinel_saved_workflow_receipt");
+      };
+      assertEquals(savedTotals(await turn(usage)), []);
+      assertEquals(policy.workflowMetadataCalls, 0);
+      assertEquals(JSON.parse(await turn(trace)).result, JSON.parse(exact));
+      assertEquals(policy.workflowMetadataCalls, 2);
+      const included = { ...usage, includeSavedWorkflowReceipts: true };
+      const visible = await turn(included);
+      assertEquals(savedTotals(visible), [{
+        role: "worker",
+        tool: "sentinel_saved_workflow_receipt",
+        calls: 1,
+        failed: 0,
+      }]);
+      assertEquals(policy.workflowMetadataCalls, 4);
+      assert(!visible.includes("owner/repo"));
+      assert(!visible.includes('"runs"'));
+      assert(!visible.includes(savedTaskId));
+
+      assertStringIncludes(
+        await turn({ ...included, id: "outside" }),
+        "unavailable",
+      );
+      assertEquals(policy.workflowMetadataCalls, 4);
+      policy.denySavedWorkflowSource = "PRE_TOOL_CALL";
+      assertStringIncludes(await turn(included), "unavailable");
+      assertEquals(policy.workflowMetadataCalls, 4);
+      policy.denySavedWorkflowSource = "POST_TOOL_RESPONSE";
+      assertStringIncludes(await turn(included), "unavailable");
+      assertEquals(policy.workflowMetadataCalls, 5);
+      policy.denySavedWorkflowSource = undefined;
+      policy.denyWorkflowMetadata = true;
+      assertStringIncludes(await turn(included), "unavailable");
+      assertEquals(policy.workflowMetadataCalls, 6);
     });
   } finally {
     await Deno.remove(baseDir, { recursive: true });

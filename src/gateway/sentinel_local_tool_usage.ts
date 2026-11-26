@@ -4,6 +4,7 @@ import { canFlowTo } from "../core/types/classification.ts";
 import {
   readSentinelLocalUsageSteps,
   type SentinelLinkedUsageStep,
+  type SentinelSavedWorkflowUsageStep,
 } from "../sentinel/local_tool_usage.ts";
 import type { OperatorRunToolContext } from "./operator_run_tool.ts";
 import { readSentinelFindingReceiptScope } from "./sentinel_worker_findings.ts";
@@ -17,6 +18,9 @@ export async function readAuthorizedSentinelLocalToolUsage(
   args: Record<string, unknown>,
   context: OperatorRunToolContext | undefined,
   reopenLinked?: (step: SentinelLinkedUsageStep) => Promise<string | undefined>,
+  authorizeSavedWorkflow?: (
+    step: SentinelSavedWorkflowUsageStep,
+  ) => Promise<boolean>,
 ) {
   const owner = context?.authorizeOwnerRunCall;
   const authorizeTrace = context?.authorizeSentinelTraceRead;
@@ -38,6 +42,7 @@ export async function readAuthorizedSentinelLocalToolUsage(
       args.includeRetainedTopology === true,
       args.includeRetainedFindingSources === true,
       args.includeRetainedTrafficMetadata === true,
+      args.includeSavedWorkflowReceipts === true,
     );
     if (
       !rows ||
@@ -58,6 +63,18 @@ export async function readAuthorizedSentinelLocalToolUsage(
     { role: "planner" | "worker"; tool: string; calls: number; failed: number }
   >();
   for (const step of selected.rows) {
+    if (step.tool === "sentinel_saved_workflow_receipt") {
+      if (
+        !currentCase() || !await authorizeSavedWorkflow?.(step) ||
+        !currentCase()
+      ) return;
+      const key = "worker/" + step.tool;
+      const group = groups.get(key) ??
+        { role: "worker" as const, tool: step.tool, calls: 0, failed: 0 };
+      group.calls++;
+      groups.set(key, group);
+      continue;
+    }
     const scope = "taskId" in step
       ? { caseId, revision, taskId: step.taskId }
       : {
