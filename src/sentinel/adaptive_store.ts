@@ -8359,11 +8359,15 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
       revision?: number,
       caseWideOnly = false,
       anchorRunId?: string,
+      trafficAssetId?: string,
     ) {
       return db.prepare(`
         SELECT hint.* FROM adaptive_case_hints AS hint
         WHERE (? IS NULL OR hint.id < ?) AND (? IS NULL OR hint.evidenceRevision <= ?)
           AND (? = 0 OR hint.assetIds IS NULL)
+          AND (? IS NULL OR (hint.evidenceRevision = ? AND hint.trafficReference IS NOT NULL AND
+            json_extract(hint.assetIds, '$[0]') = ? AND
+            json_array_length(hint.assetIds) = 1))
           AND (? IS NULL OR hint.assetIds IS NULL OR EXISTS (
             SELECT 1 FROM adaptive_operator_case_hint_requests AS request
             WHERE request.hintId = hint.id AND request.runId = ?
@@ -8375,6 +8379,9 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
         revision ?? null,
         revision ?? null,
         Number(caseWideOnly),
+        trafficAssetId ?? null,
+        revision ?? null,
+        trafficAssetId ?? null,
         anchorRunId ?? null,
         anchorRunId ?? null,
         limit,

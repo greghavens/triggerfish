@@ -131,9 +131,12 @@ export function isSentinelAssignedPrerequisiteRead(tool: unknown) {
 export const SENTINEL_CASE_HINTS_READ = "sentinel_case_hints";
 
 export function sentinelCaseHintsReadArgs(args: Record<string, unknown>) {
-  const { before, limit } = args;
+  const { before, limit, assignedTraffic } = args;
   if (
-    Object.keys(args).some((key) => key !== "before" && key !== "limit") ||
+    Object.keys(args).some((key) =>
+      !["before", "limit", "assignedTraffic"].includes(key)
+    ) ||
+    (assignedTraffic !== undefined && assignedTraffic !== true) ||
     (before !== undefined &&
       (typeof before !== "number" || !Number.isSafeInteger(before) ||
         before < 1)) ||
@@ -144,6 +147,7 @@ export function sentinelCaseHintsReadArgs(args: Record<string, unknown>) {
   return {
     ...(before !== undefined && { before }),
     ...(limit !== undefined && { limit }),
+    ...(assignedTraffic === true && { assignedTraffic: true as const }),
   };
 }
 
@@ -637,6 +641,7 @@ type GoalReceiptReadArguments =
     beforeReceiptId?: string;
     cursor?: string;
     before?: number;
+    assignedTraffic?: true;
     after?: string;
     incidentId?: string;
     behavior?: string;

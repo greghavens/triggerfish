@@ -46,6 +46,7 @@ const recheckContext = "sentinel_finding_recheck_context";
 const recordRecheck = "sentinel_record_finding_recheck";
 const amend = "sentinel_update_finding_report";
 const assigned = "sentinel_assigned_target";
+const caseHints = "sentinel_case_hints";
 const reviewedBody = "🙂".repeat(520) + "reviewed fixture";
 const rawSecret = "unretained-finding-traffic-fixture";
 const call = (name: string, args: Record<string, unknown> = {}) => ({
@@ -447,6 +448,21 @@ Deno.test("Leased workers attach only exact saved traffic and authenticated Tide
       { evidenceId: neighbor.evidenceId, digest: neighbor.digest },
     );
     assert(hint && otherHint);
+    const hintView = await runWorker(path, lease, [[
+      call(caseHints, { assignedTraffic: true, limit: 1 }),
+      call(caseHints, {
+        assignedTraffic: true,
+        assetId: observations[1].assetId,
+      }),
+      call(caseHints),
+    ]]);
+    const discoveredHint = JSON.parse(hintView.responses[0][0]);
+    assertEquals(discoveredHint.hints, [hint]);
+    assertEquals(discoveredHint.nextBefore, null);
+    assert(!JSON.stringify(discoveredHint).includes(rawSecret));
+    assertStringIncludes(hintView.responses[0][1], "valid hint");
+    assertEquals(JSON.parse(hintView.responses[0][2]).hints, []);
+
     const bodySearch = {
       action: "traffic_search",
       kind: "sentinel",
@@ -500,7 +516,7 @@ Deno.test("Leased workers attach only exact saved traffic and authenticated Tide
       ...exact,
       findingId,
       reportVersion: 1,
-      sourceHintId: hint.id,
+      sourceHintId: discoveredHint.hints[0].id,
       evidenceRole: "proof",
       evidenceNote:
         "Shows the retained response at the time of the failed control check.",
@@ -759,9 +775,10 @@ Deno.test("Leased workers attach only exact saved traffic and authenticated Tide
     };
     const unrelated = "worker-recheck:" + "0".repeat(64);
     const staleHint = await runWorker(path, nextLease, [
-      [call(get, current)],
+      [call(get, current), call(caseHints, { assignedTraffic: true })],
       [call(attach, { ...attachRecheck, sourceHintId: hint.id })],
     ]);
+    assertEquals(JSON.parse(staleHint.responses[0][1]).hints, []);
     assertStringIncludes(staleHint.responses[1][0], "unavailable");
     const bound = await runWorker(path, nextLease, [
       [call(get, current)],

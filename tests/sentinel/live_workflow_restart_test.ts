@@ -2616,6 +2616,29 @@ for (
           assert(refreshed?.revision === assessment.revision + 1);
         }
         if (routeScenario) await setModelRoute("alternate");
+        if (phase === "resume_traffic_batch") {
+          const currentReceipt = readSentinelTrafficReceiptPage(
+            path,
+            assessment.revision,
+            {
+              assetId,
+              evidenceId: trafficId,
+            },
+          )?.receipts[0];
+          assert(currentReceipt);
+          assert(recordOperatorSentinelRunHint(
+            path,
+            assessment.revision,
+            crypto.randomUUID(),
+            "Later guidance for this asset.",
+            "owner",
+            [assetId],
+            {
+              evidenceId: currentReceipt.evidenceId,
+              digest: currentReceipt.digest,
+            },
+          ));
+        }
         child = spawn(phase);
         const resumed = await child.output();
         child = undefined;
@@ -2937,6 +2960,15 @@ for (
               `${phase}:traffic_attachment`,
             ],
           );
+          if (phase === "resume_traffic_batch") {
+            await verifyHistoricalWorkerReads(
+              dir,
+              path,
+              assessment,
+              "Recovered the traffic and attachment.",
+              [0],
+            );
+          }
           if (directTraffic) {
             const step = readAdaptiveSentinel(path, assessment)?.modelReviews
               .flatMap(({ steps }) => steps).find(({ tool }) =>

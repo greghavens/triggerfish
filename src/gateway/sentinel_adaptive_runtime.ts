@@ -115,6 +115,7 @@ import {
   readSentinelIncidentReviews,
   readSentinelLinkedStartSeed,
   readSentinelOperatingConstraints,
+  readSentinelRunIdForRevision,
   type SentinelGitHubWorkflowReadReceipt,
   type SentinelReviewStep,
   withSentinelAssessmentWriteLock,
@@ -1349,6 +1350,42 @@ export function readSentinelOperatorTrafficHint(
     runId,
     assetId,
   );
+}
+
+/** Read the approved exact-version hint page for a single scoped asset. */
+export function readSentinelAssetTrafficHints(
+  path: string,
+  revision: number,
+  assetId: string,
+  limit: number,
+  before?: number,
+) {
+  const current = readSentinelAssessment(path);
+  const runId = readSentinelRunIdForRevision(path, revision);
+  if (
+    !current || !runId ||
+    current.plan.runId !== runId ||
+    !sentinelHintAssetsInScope(path, current, [assetId])
+  ) return;
+  const store = openSentinelAdaptiveStore(storePath(path));
+  try {
+    const page = store.caseHints(
+      limit,
+      before,
+      revision,
+      false,
+      runId,
+      assetId,
+    );
+    return page.every(({ trafficReference }) =>
+        trafficReference &&
+        readSentinelTrafficReceipt(path, revision, trafficReference, assetId)
+      )
+      ? page
+      : undefined;
+  } finally {
+    store.close();
+  }
 }
 
 export function readSentinelCaseHints(

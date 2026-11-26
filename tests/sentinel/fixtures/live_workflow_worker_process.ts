@@ -1263,7 +1263,36 @@ registry.register({
       });
     }
     if (trafficBatch) {
-      if (phase.startsWith("interrupt_traffic_") && !results.length) {
+      const scopedHint = traffic.sourceHintId !== undefined;
+      if (
+        scopedHint && phase.startsWith("interrupt_traffic_") && !results.length
+      ) {
+        return Promise.resolve({
+          content: "",
+          usage,
+          toolCalls: [{
+            type: "function",
+            id: "assigned-traffic-hint",
+            function: {
+              name: "sentinel_case_hints",
+              arguments: JSON.stringify({ assignedTraffic: true, limit: 1 }),
+            },
+          }],
+        });
+      }
+      if (
+        scopedHint &&
+        JSON.parse(String(results[0]?.content)).hints[0]?.id !==
+          traffic.sourceHintId
+      ) {
+        throw new Error(
+          "The current assignment's approved traffic hint did not survive",
+        );
+      }
+      if (
+        phase.startsWith("interrupt_traffic_") &&
+        results.length === Number(scopedHint)
+      ) {
         const revision = readSentinelAssessment(path)?.revision;
         const { evidenceId, digest, findingId } = traffic;
         return Promise.resolve({
@@ -1352,8 +1381,8 @@ registry.register({
       if (
         results.length !==
           (trafficSearch || trafficListing || trafficPayload || directTraffic
-            ? 3
-            : 2) ||
+              ? 3
+              : 2) + Number(scopedHint) ||
         (directTraffic &&
           JSON.parse(String(results[0].content)).text !==
             "retained-payload-tail") ||
@@ -2363,8 +2392,8 @@ try {
           summary === "Recovered the traffic and attachment." &&
           steps.length ===
             (trafficSearch || trafficListing || trafficPayload || directTraffic
-              ? 3
-              : 2) &&
+                ? 3
+                : 2) + Number(traffic.sourceHintId !== undefined) &&
           (!directTraffic ||
             steps[0].goalReceiptRead?.args.evidenceId ===
               traffic.historicalEvidenceId) &&

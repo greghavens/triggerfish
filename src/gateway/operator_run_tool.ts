@@ -1612,6 +1612,8 @@ async function reopenSentinelSourceResult(
     }
   } else if (step.tool === "sentinel_case_hints") {
     const args = sentinelGoalReceiptReadArguments(step.tool, selector);
+    if (args?.assignedTraffic && typeof step.target !== "string") return;
+    const assetId = args?.assignedTraffic ? step.target : undefined;
     const first = step.caseHintFirstId;
     if (args && first === null) {
       text = JSON.stringify({ hints: [], nextBefore: null });
@@ -1621,7 +1623,13 @@ async function reopenSentinelSourceResult(
       first >= 1 &&
       (args.before === undefined || first < args.before)
     ) {
-      text = projectCaseHints(path, args.limit ?? 3, first + 1, revision);
+      text = projectCaseHints(
+        path,
+        args.limit ?? 3,
+        first + 1,
+        revision,
+        assetId,
+      );
     }
   } else if (step.tool === "sentinel_graph_overview") {
     const projection = readSentinelGraphOverviewProjection(
@@ -6061,6 +6069,8 @@ ${
               if (
                 !task || !authorize || !args || !citation ||
                 step.outcome !== "returned" ||
+                (args.assignedTraffic &&
+                  (!task.nodeId || step.target !== task.nodeId)) ||
                 (first !== null &&
                   (typeof first !== "number" ||
                     !Number.isSafeInteger(first + 1) ||
@@ -6080,6 +6090,7 @@ ${
                   args.limit ?? 3,
                   first + 1,
                   ref.revision,
+                  args.assignedTraffic ? task.nodeId ?? undefined : undefined,
                 );
               if (
                 createHash("sha256").update(text).digest("hex") !==
