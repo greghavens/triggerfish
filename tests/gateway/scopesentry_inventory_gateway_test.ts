@@ -1,3 +1,5 @@
+import { startScopesentryHttpsFixture } from "./fixtures/scopesentry_https.ts";
+import { fixtureInventoryCredential } from "./fixtures/scopesentry_inventory_responses.ts";
 import {
   assert,
   assertEquals,
@@ -138,6 +140,7 @@ function operatorGateway(
           await result.promise;
           assertExists(toolResult);
           assert(!String(toolResult).includes("unrelated.example"));
+          assert(!String(toolResult).includes(fixtureInventoryCredential));
           return toolResult;
         } finally {
           socket.removeEventListener("message", listener);
@@ -157,11 +160,14 @@ function operatorGateway(
   };
 }
 
-Deno.test("gateway imports exact retained connector inventory with live policy, scope and idempotent receipt", async () => {
+async function verifyInventoryImport(transport: "stdio" | "native HTTPS") {
   const baseDir = await Deno.makeTempDir();
   const caseId = "approved-source";
   const path = resolveSentinelCasePath(baseDir, caseId);
   const callsPath = join(baseDir, "connector-calls.jsonl");
+  const https = transport === "native HTTPS"
+    ? await startScopesentryHttpsFixture(callsPath)
+    : undefined;
   const calls = async () =>
     (await Deno.readTextFile(callsPath)).split("\n").filter(Boolean).map((
       line,
@@ -174,7 +180,7 @@ Deno.test("gateway imports exact retained connector inventory with live policy, 
   const secretStore = createMemorySecretStore();
   await secretStore.setSecret(
     "scopesentry-fixture",
-    "synthetic-inventory-fixture",
+    fixtureInventoryCredential,
   );
   let deny = "";
   let classificationsSeen = 0;
@@ -208,20 +214,26 @@ Deno.test("gateway imports exact retained connector inventory with live policy, 
   const classifications = new Map<string, ClassificationLevel>();
   const mcp = wireMcpServers(
     {
-      scopesentry: {
-        command: Deno.execPath(),
-        args: [
-          "run",
-          "--allow-read",
-          "--allow-write",
-          "--allow-env",
-          new URL("./fixtures/scopesentry_connector.ts", import.meta.url)
-            .pathname,
-          callsPath,
-        ],
-        env: { CONNECTOR_CREDENTIAL: "keychain:scopesentry-fixture" },
-        classification: "INTERNAL",
-      },
+      scopesentry: https
+        ? {
+          url: https.url,
+          api_key_ref: "keychain:scopesentry-fixture",
+          classification: "INTERNAL",
+        }
+        : {
+          command: Deno.execPath(),
+          args: [
+            "run",
+            "--allow-read",
+            "--allow-write",
+            "--allow-env",
+            new URL("./fixtures/scopesentry_connector.ts", import.meta.url)
+              .pathname,
+            callsPath,
+          ],
+          env: { CONNECTOR_CREDENTIAL: "keychain:scopesentry-fixture" },
+          classification: "INTERNAL",
+        },
     },
     hookRunner,
     () => session,
@@ -243,6 +255,13 @@ Deno.test("gateway imports exact retained connector inventory with live policy, 
     ) {
       assert(Date.now() < deadline, "The local connector did not connect");
       await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    if (https) {
+      assertEquals(https.operations, [
+        "initialize",
+        "notifications/initialized",
+        "tools/list",
+      ]);
     }
     await Deno.writeTextFile(callsPath, "");
     await Deno.mkdir(dirname(path), { recursive: true, mode: 0o700 });
@@ -316,6 +335,19 @@ Deno.test("gateway imports exact retained connector inventory with live policy, 
         sourceDimension: "project",
         query: "Fiber",
       };
+      if (https) {
+        https.resolveToLoopback(true);
+        assertStringIncludes(await turn(sources), "unavailable");
+        https.resolveToLoopback(false);
+        await secretStore.deleteSecret("scopesentry-fixture");
+        assertStringIncludes(await turn(sources), "unavailable");
+        await secretStore.setSecret(
+          "scopesentry-fixture",
+          fixtureInventoryCredential,
+        );
+        assertEquals(https.operations.length, 3);
+        assertEquals(await calls(), []);
+      }
       deny = "pre";
       assertStringIncludes(await turn(sources), "unavailable");
       assertEquals(await calls(), []);
@@ -362,6 +394,7 @@ Deno.test("gateway imports exact retained connector inventory with live policy, 
       deny = "";
       await Deno.writeTextFile(callsPath, "");
       mcpInvocations = 0;
+      classificationsSeen = 0;
       assert(
         (await turn({ ...request, sourceSelection: "*" })).includes(
           "unavailable",
@@ -422,7 +455,10 @@ Deno.test("gateway imports exact retained connector inventory with live policy, 
     });
     deny = "";
     await gateway(async (turn) => {
-      assertEquals(JSON.parse(await turn(request)).receipt.status, "succeeded");
+      assertEquals(
+        JSON.parse(await turn(request)).receipt.status,
+        "succeeded",
+      );
       assertEquals((await calls()).length, 4);
       const latest = readSentinelAssessment(path)!;
       assert(
@@ -460,7 +496,18 @@ Deno.test("gateway imports exact retained connector inventory with live policy, 
       assertEquals((await calls()).length, 7);
     });
   } finally {
-    await mcp.manager.disconnectAll();
-    await Deno.remove(baseDir, { recursive: true });
+    try {
+      await mcp.manager.disconnectAll();
+    } finally {
+      await https?.close();
+      await Deno.remove(baseDir, { recursive: true });
+    }
   }
-});
+}
+
+for (const transport of ["stdio", "native HTTPS"] as const) {
+  Deno.test(
+    `gateway imports exact retained connector inventory over ${transport} with live policy, scope and idempotent receipt`,
+    () => verifyInventoryImport(transport),
+  );
+}
