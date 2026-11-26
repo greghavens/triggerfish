@@ -682,7 +682,7 @@ function attachForScope(
   assetId: string,
   taskId: string,
   args: Record<string, unknown>,
-  approvedTraffic: ReadonlySet<string>,
+  approvedTraffic: ReadonlyMap<string, TrafficReadStep>,
   signal?: AbortSignal,
 ): string {
   const {
@@ -720,7 +720,17 @@ function attachForScope(
       ),
     )
   );
-  if (!family) return requiredReceipt;
+  const sourceStep = family && approvedTraffic.get(
+    sentinelTrafficAttachmentKey(
+      caseId,
+      revision,
+      assetId,
+      evidenceId,
+      digest,
+      family,
+    ),
+  );
+  if (!sourceStep) return requiredReceipt;
   const traffic = readSentinelTrafficReceipt(snapshotPath, revision, {
     evidenceId,
     digest,
@@ -760,6 +770,12 @@ function attachForScope(
     ) return unavailable;
     const journal = openSentinelFindingTrafficLinks(snapshotPath);
     try {
+      const prior = journal.readAssignmentRequest({
+        caseId,
+        evidenceRevision: revision,
+        assetId,
+        taskId,
+      }, requestId);
       const link = journal.record({
         caseId,
         evidenceRevision: revision,
@@ -773,6 +789,9 @@ function attachForScope(
         ...annotation,
         ...(sourceHintId !== undefined &&
           { sourceHint: { id: sourceHintId, runId } }),
+        ...((!prior || prior.sourceStep) && {
+          sourceStep: prior?.sourceStep ?? sourceStep,
+        }),
         authority: { kind: "assignment", taskId },
         requestId,
       }, () =>
@@ -794,10 +813,10 @@ export function executeSentinelFindingTrafficTool(
   scope: Scope,
   name: string,
   args: Record<string, unknown>,
-  approvedTraffic: ReadonlySet<string>,
+  approvedTraffic: ReadonlyMap<string, TrafficReadStep>,
   signal?: AbortSignal,
   allowPayloadAsset?: (id: string) => boolean,
-  reporterTrafficReads?: ReadonlyMap<string, TrafficReadStep>,
+  reporter = false,
 ): string {
   const {
     snapshotPath,
@@ -810,7 +829,7 @@ export function executeSentinelFindingTrafficTool(
     assignedTaskLeaseToken !== undefined;
   const attach = name === sentinelFindingTrafficAttachTool.name;
   const definition = attach
-    ? reporterTrafficReads
+    ? reporter
       ? sentinelReporterTrafficAttachTool
       : sentinelFindingTrafficAttachTool
     : sentinelFindingTrafficListTool;
@@ -842,7 +861,7 @@ export function executeSentinelFindingTrafficTool(
       ) return unavailable;
       if (attach) {
         if ("trafficRefs" in args) {
-          return reporterTrafficReads && subject && assignedTaskId &&
+          return reporter && subject && assignedTaskId &&
               state.plan.runId
             ? attachReporterBatch(
               scope,
@@ -851,7 +870,7 @@ export function executeSentinelFindingTrafficTool(
               subject,
               assignedTaskId,
               args,
-              reporterTrafficReads,
+              approvedTraffic,
               signal,
             )
             : unavailable;

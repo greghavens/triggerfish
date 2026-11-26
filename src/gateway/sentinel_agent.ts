@@ -1316,8 +1316,7 @@ interface ActiveTurn {
   readonly readGoalScopedReceipts: Set<string>;
   readonly approvalConstraints?:
     SentinelTurnCheckpointOptions["operatingConstraints"];
-  readonly approvedTraffic: Set<string>;
-  readonly approvedReporterTraffic: Map<
+  readonly approvedTrafficReads: Map<
     string,
     { stepIndex: number; sha256: string }
   >;
@@ -5745,12 +5744,12 @@ function createAgent(
           options,
           name,
           args,
-          turn.approvedTraffic,
+          turn.approvedTrafficReads,
           turn.signal,
           canReadPlannerCase
             ? (assetId) => currentPlannerReceiptScope(turn, assetId)
             : undefined,
-          reporter ? turn.approvedReporterTraffic : undefined,
+          reporter,
         );
         if (
           name === sentinelFindingTrafficListTool.name &&
@@ -5991,7 +5990,7 @@ function createAgent(
           plannerRead
             ? (target) => currentPlannerReceiptScope(turn, target)
             : undefined,
-          turn.approvedReporterTraffic,
+          turn.approvedTrafficReads,
         );
         if (
           (name === SENTINEL_RECHECK_CONTEXT_TOOL ||
@@ -6946,12 +6945,11 @@ function createAgent(
       if (turn && !failed && name === sentinelTrafficGetTool.name) {
         const key = approvedSentinelTrafficAttachmentKey(result);
         if (key) {
-          turn.approvedTraffic.add(key);
           if (
             turn.traceStepCount < 16 &&
-            !turn.approvedReporterTraffic.has(key)
+            !turn.approvedTrafficReads.has(key)
           ) {
-            turn.approvedReporterTraffic.set(key, {
+            turn.approvedTrafficReads.set(key, {
               stepIndex: turn.traceStepCount,
               sha256: createHash("sha256").update(result).digest("hex"),
             });
@@ -7898,8 +7896,7 @@ function createAgent(
               digest: approvalConstraints.digest,
             },
           }),
-          approvedTraffic: new Set(),
-          approvedReporterTraffic: new Map(),
+          approvedTrafficReads: new Map(),
           stagedGraphFacts: [],
           trace,
           onBatchReadReceipt,
@@ -8487,12 +8484,11 @@ function createAgent(
                   ) return false;
                   const key = approvedSentinelTrafficAttachmentKey(saved);
                   if (!key) return false;
-                  turn.approvedTraffic.add(key);
                   if (
                     stepIndex < 16 &&
-                    !turn.approvedReporterTraffic.has(key)
+                    !turn.approvedTrafficReads.has(key)
                   ) {
-                    turn.approvedReporterTraffic.set(key, {
+                    turn.approvedTrafficReads.set(key, {
                       stepIndex,
                       sha256: createHash("sha256").update(saved).digest("hex"),
                     });

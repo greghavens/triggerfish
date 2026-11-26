@@ -5491,14 +5491,20 @@ export function createSentinelModelPlanner(
           traffic,
           targetId,
         );
-        return args && read?.receipt.family === link.trafficSource
-          ? {
-            id: link.id,
-            args,
-            traffic,
-            result: JSON.stringify({ _classification: "INTERNAL", link }),
-          }
-          : undefined;
+        if (
+          !args || read?.receipt.family !== link.trafficSource ||
+          (link.sourceStep &&
+            link.sourceStep.sha256 !== createHash("sha256")
+                .update(JSON.stringify(read)).digest("hex"))
+        ) return;
+        return {
+          id: link.id,
+          args,
+          ...(link.sourceStep
+            ? { trafficBatch: [{ args: traffic, ...link.sourceStep }] }
+            : { traffic }),
+          result: JSON.stringify({ _classification: "INTERNAL", link }),
+        };
       }
       if (isSentinelFindingMutation(tool)) {
         const asset = tool !== "sentinel_update_finding_report"

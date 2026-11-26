@@ -7528,6 +7528,12 @@ async function testScopedReporterRestart(
               ) => item.sourceStep.stepIndex),
               [2, 3],
             );
+          } else {
+            assertEquals(link.sourceStep, {
+              stepIndex: 2,
+              sha256: createHash("sha256").update(String(results[2].content))
+                .digest("hex"),
+            });
           }
           assertEquals(link.trafficDigest, traffic.digest);
           assertEquals(link.authority, {
@@ -7739,6 +7745,7 @@ async function testScopedReporterRestart(
         links[0].trafficDigest,
         traffic.digest,
       );
+      assertEquals(links[0].sourceStep?.stepIndex, 2);
       assertEquals(links[0].evidenceRole, attachment.evidenceRole);
       assertEquals(links[0].evidenceNote, attachment.evidenceNote);
       assert(saved);
@@ -7920,6 +7927,7 @@ async function testScopedReporterRestart(
         trafficSource: links[0].trafficSource,
         trafficDigest: traffic.digest,
         authority: links[0].authority,
+        sourceStep: links[0].sourceStep,
         recordedAt: links[0].recordedAt,
         evidenceRole: attachment.evidenceRole,
         evidenceNote: attachment.evidenceNote,

@@ -10899,7 +10899,7 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
             limit,
             offset,
           },
-          new Set(),
+          new Map(),
         );
         if (response.startsWith("Error:")) return response;
         const page = JSON.parse(response);
