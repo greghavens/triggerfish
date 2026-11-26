@@ -5226,7 +5226,9 @@ ${
         action === "dismiss_task_dependencies"
       ) {
         const { taskId, proposalId } = args;
+        const authorize = context?.authorizeOwnerRunCall;
         if (
+          !authorize || !context?.authenticatedOwnerSessionId ||
           ref.kind !== "sentinel" || ref.revision === undefined ||
           !canFlowTo("INTERNAL", context?.ceiling ?? "INTERNAL") ||
           typeof taskId !== "string" ||
@@ -5271,6 +5273,7 @@ ${
         ) {
           return "Error: The operator declined the run action.";
         }
+        if (!await authorize(args)) return unavailable;
         controlSentinelTask(
           path,
           queue.revision,

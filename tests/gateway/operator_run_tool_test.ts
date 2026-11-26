@@ -3127,13 +3127,17 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
       await turn(apply);
       assertEquals(confirmations.length, beforeApply);
       denied = undefined;
+      await denyDuringRunReview(apply);
+      const notApplied = JSON.parse((await turn(taskRead)).result).tasks[0];
+      assertEquals(notApplied.prerequisites, []);
+      assertEquals(notApplied.dependencyProposal, proposed.dependencyProposal);
       assertEquals(JSON.parse((await turn(apply)).result).decision, "applied");
       assertEquals(
         JSON.parse((await turn(taskRead)).result).tasks[0].prerequisites,
         [assigned.receipt.taskId],
       );
       assertStringIncludes((await turn(apply)).result, "unavailable");
-      assertEquals(confirmations.length, beforeApply + 1);
+      assertEquals(confirmations.length, beforeApply + 2);
       const dismissStore = openSentinelAdaptiveStore(
         join(dirname(path), "sentinel-adaptive.db"),
       );
@@ -3148,14 +3152,17 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
       }
       const removal =
         JSON.parse((await turn(taskRead)).result).tasks[0].dependencyProposal;
+      const dismiss = {
+        ...taskRead,
+        action: "dismiss_task_dependencies",
+        proposalId: removal.id,
+      };
+      await denyDuringRunReview(dismiss);
+      const stillProposed = JSON.parse((await turn(taskRead)).result).tasks[0];
+      assertEquals(stillProposed.prerequisites, [assigned.receipt.taskId]);
+      assertEquals(stillProposed.dependencyProposal, removal);
       assertEquals(
-        JSON.parse(
-          (await turn({
-            ...taskRead,
-            action: "dismiss_task_dependencies",
-            proposalId: removal.id,
-          })).result,
-        ).decision,
+        JSON.parse((await turn(dismiss)).result).decision,
         "dismissed",
       );
       const unchanged = JSON.parse((await turn(taskRead)).result).tasks[0];
