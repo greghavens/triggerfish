@@ -27,13 +27,24 @@ export interface ManagedNotificationChannel {
   readonly sentinelIncidents?: ManagedSentinelIncidentScope;
 }
 
+type DeliveryState = "in_flight" | "delivered" | "blocked" | "uncertain";
+
+interface ManagedNotificationAttempt {
+  readonly requestId: string;
+  readonly createdAt: string;
+  readonly state: DeliveryState;
+}
+
+export const maxManagedNotificationRetries = 3;
+
 export interface ManagedNotificationDelivery {
   readonly id: string;
   readonly channelId: string;
   readonly channelVersion: number;
   readonly createdAt: string;
   readonly source?: ManagedSentinelIncidentSource;
-  readonly state: "in_flight" | "delivered" | "blocked" | "uncertain";
+  readonly state: DeliveryState;
+  readonly retries?: readonly ManagedNotificationAttempt[];
 }
 
 const channelPrefix = "managed-notification-channel:";
@@ -109,14 +120,33 @@ export function createManagedNotificationChannels(storage: StorageProvider) {
       transport: (
         stillCurrent: () => Promise<boolean>,
       ) => Promise<"delivered" | "blocked" | "uncertain">,
-      source?: ManagedNotificationDelivery["source"],
+      options?: {
+        readonly source?: ManagedNotificationDelivery["source"];
+        readonly retry?: {
+          readonly requestId: string;
+          readonly expectedRetries: number;
+        };
+      },
     ): Promise<ManagedNotificationDelivery | undefined> {
       const key = deliveryPrefix + channel.id + ":" + id;
-      const existing = await load<ManagedNotificationDelivery>(key);
-      if (existing) {
-        return existing.channelVersion === channel.version
-          ? existing
-          : undefined;
+      const raw = await storage.get(key);
+      const existing = raw === null
+        ? undefined
+        : JSON.parse(raw) as ManagedNotificationDelivery;
+      const retry = options?.retry;
+      if (existing && existing.channelVersion !== channel.version) return;
+      if (!retry && existing) return existing;
+      if (retry) {
+        if (!existing) return;
+        const attempts = existing.retries ?? [];
+        if (attempts.some(({ requestId }) => requestId === retry.requestId)) {
+          return existing;
+        }
+        if (
+          existing.state !== "blocked" ||
+          attempts.length !== retry.expectedRetries ||
+          attempts.length >= maxManagedNotificationRetries
+        ) return;
       }
       const stillCurrent = async () => {
         const latest = await get(channel.id);
@@ -124,30 +154,47 @@ export function createManagedNotificationChannels(storage: StorageProvider) {
           latest.enabled && !latest.retired;
       };
       if (!await stillCurrent()) return;
-      const claim: ManagedNotificationDelivery = {
-        id,
-        channelId: channel.id,
-        channelVersion: channel.version,
-        createdAt: new Date().toISOString(),
-        ...(source && { source }),
-        state: "in_flight",
-      };
+      const createdAt = new Date().toISOString();
+      const attempt = retry
+        ? { requestId: retry.requestId, createdAt, state: "in_flight" as const }
+        : undefined;
+      const previous = existing?.retries ?? [];
+      const claim: ManagedNotificationDelivery = existing && attempt
+        ? { ...existing, state: "in_flight", retries: [...previous, attempt] }
+        : {
+          id,
+          channelId: channel.id,
+          channelVersion: channel.version,
+          createdAt,
+          ...(options?.source && { source: options.source }),
+          state: "in_flight",
+        };
       const claimed = JSON.stringify(claim);
-      if (!await compareAndSet(key, null, claimed)) {
+      if (!await compareAndSet(key, raw, claimed)) {
         const completed = await load<ManagedNotificationDelivery>(key);
-        return completed?.channelVersion === channel.version
+        return completed?.channelVersion === channel.version &&
+            (!retry ||
+              completed.retries?.some(({ requestId }) =>
+                requestId === retry.requestId
+              ))
           ? completed
           : undefined;
       }
-      let state: "delivered" | "blocked" | "uncertain" = "uncertain";
+      let state: Exclude<DeliveryState, "in_flight"> = "uncertain";
       try {
         state = await stillCurrent()
           ? await transport(stillCurrent)
           : "blocked";
-      } finally {
-        await compareAndSet(key, claimed, JSON.stringify({ ...claim, state }));
+      } catch {
+        // Once a transport starts, an exception cannot prove it did not send.
       }
-      return { ...claim, state };
+      const result: ManagedNotificationDelivery = {
+        ...claim,
+        state,
+        ...(attempt && { retries: [...previous, { ...attempt, state }] }),
+      };
+      await compareAndSet(key, claimed, JSON.stringify(result));
+      return result;
     },
   };
 }

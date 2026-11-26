@@ -1,5 +1,6 @@
 import {
   createSentinelIncidentDelivery,
+  isCurrentSentinelIncident,
   readSentinelIncidentScope,
 } from "../notifications/sentinel_incidents.ts";
 import { createManagedNotificationChannels } from "../../core/managed_notification_channels.ts";
@@ -94,17 +95,21 @@ function configuredNotificationChannels(
   coreInfra: CoreInfraResult,
   toolInfra: ToolInfraResult,
 ) {
+  const sentinelIncidents =
+    bootstrap.config.sentinel?.notify_incident_increases === true;
   return {
     store: createManagedNotificationChannels(coreInfra.storage),
     sendWebhook: createNotificationWebhookTransport(
       toolInfra.mainKeychain,
       createDomainPolicy(buildDomainSecurityConfig(bootstrap.config)),
     ),
-    readSentinelIncidentScope:
-      bootstrap.config.sentinel?.notify_incident_increases === true
-        ? (caseId: string) =>
-          readSentinelIncidentScope(bootstrap.baseDir, caseId)
-        : undefined,
+    readSentinelIncidentScope: sentinelIncidents
+      ? (caseId: string) => readSentinelIncidentScope(bootstrap.baseDir, caseId)
+      : undefined,
+    isCurrentSentinelIncident: sentinelIncidents
+      ? (source: Parameters<typeof isCurrentSentinelIncident>[1]) =>
+        isCurrentSentinelIncident(bootstrap.baseDir, source)
+      : undefined,
   };
 }
 

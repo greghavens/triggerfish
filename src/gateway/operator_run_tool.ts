@@ -1,3 +1,4 @@
+import type { ManagedSentinelIncidentSource } from "../core/managed_notification_channels.ts";
 import {
   executeOperatorNotificationChannel,
   notificationChannelActions,
@@ -937,6 +938,11 @@ export const operatorRunTool: ToolDefinition = {
       type: "string",
       description: "ID of the managed notification channel.",
     },
+    notificationDeliveryId: {
+      type: "string",
+      description:
+        "Exact managed notification delivery ID from delivery history.",
+    },
     notificationChannelSettings: {
       type: "object",
       description:
@@ -1838,9 +1844,11 @@ export interface OperatorRunToolContext {
     args: Record<string, unknown>,
   ) => Promise<boolean>;
   readonly authorizeNotificationOutput?: (
+    channelId: string,
     origin: string,
     classification: ClassificationLevel,
     body: string,
+    source?: ManagedSentinelIncidentSource,
   ) => Promise<boolean>;
   readonly ownerRecoverySessionId?: string;
   readonly delegatedRecovery?: {

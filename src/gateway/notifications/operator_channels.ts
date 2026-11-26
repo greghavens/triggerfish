@@ -1,11 +1,17 @@
-import type {
-  ManagedNotificationChannel,
-  ManagedNotificationChannels,
-  ManagedSentinelIncidentScope,
+import {
+  type ManagedNotificationChannel,
+  type ManagedNotificationChannels,
+  type ManagedSentinelIncidentScope,
+  type ManagedSentinelIncidentSource,
+  maxManagedNotificationRetries,
 } from "../../core/managed_notification_channels.ts";
 import { canFlowTo } from "../../core/types/classification.ts";
 import { isSentinelCaseId } from "../../sentinel/cases.ts";
 import type { OperatorRunToolContext } from "../operator_run_tool.ts";
+import {
+  matchesSentinelIncidentSubscription,
+  sentinelIncidentNotificationBody,
+} from "./sentinel_incidents.ts";
 
 export const notificationChannelActions = [
   "notification_channels",
@@ -13,6 +19,7 @@ export const notificationChannelActions = [
   "retire_notification_channel",
   "test_notification_channel",
   "notification_deliveries",
+  "retry_notification_delivery",
 ] as const;
 type Action = typeof notificationChannelActions[number];
 
@@ -21,6 +28,9 @@ export interface OperatorNotificationChannels {
   readonly readSentinelIncidentScope?: (
     caseId: string,
   ) => ManagedSentinelIncidentScope | undefined;
+  readonly isCurrentSentinelIncident?: (
+    source: ManagedSentinelIncidentSource,
+  ) => boolean;
   readonly sendWebhook: (
     channel: ManagedNotificationChannel,
     body: string,
@@ -112,6 +122,16 @@ export async function executeOperatorNotificationChannel(
       "requestId",
     ],
     notification_deliveries: ["notificationChannelId"],
+    retry_notification_delivery: [
+      "notificationChannelId",
+      "notificationDeliveryId",
+      "requestId",
+      "expectedVersion",
+      "kind",
+      "id",
+      "runId",
+      "revision",
+    ],
   };
   if (
     Object.keys(args).some((key) =>
@@ -134,7 +154,10 @@ export async function executeOperatorNotificationChannel(
     expectedVersion >= Number.MAX_SAFE_INTEGER
   ) return;
   const current = await store.get(id);
-  if (action === "test_notification_channel") {
+  if (
+    action === "test_notification_channel" ||
+    action === "retry_notification_delivery"
+  ) {
     const authorizeOutput = context.authorizeNotificationOutput;
     if (
       !current?.enabled || current.retired ||
@@ -145,34 +168,79 @@ export async function executeOperatorNotificationChannel(
         current.classification,
       )
     ) return;
-    const existing = await store.delivery(id, requestId);
-    if (existing) {
-      return existing.channelVersion === current.version
-        ? { delivery: existing }
-        : undefined;
+
+    const retrying = action === "retry_notification_delivery";
+    const deliveryId = retrying ? args.notificationDeliveryId : requestId;
+    if (
+      typeof deliveryId !== "string" ||
+      !/^[a-z0-9][a-z0-9:_-]{0,159}$/.test(deliveryId)
+    ) return;
+    const existing = await store.delivery(id, deliveryId);
+    if (existing && existing.channelVersion !== current.version) return;
+    const source = existing?.source;
+    const sourceCurrent = () =>
+      !source ||
+      (context.authorizeSentinelCaseRead?.(source.caseId, source.revision) !==
+          false &&
+        matchesSentinelIncidentSubscription(
+          current.sentinelIncidents,
+          source,
+        ) &&
+        config.isCurrentSentinelIncident?.(source) === true);
+    if (
+      source
+        ? args.kind !== "sentinel" || args.id !== source.caseId ||
+          args.runId !== source.runId || args.revision !== source.revision ||
+          !sourceCurrent()
+        : [args.kind, args.id, args.runId, args.revision].some((value) =>
+          value !== undefined
+        )
+    ) return;
+    const attempts = existing?.retries ?? [];
+    if (
+      existing &&
+      (!retrying || attempts.some((attempt) => attempt.requestId === requestId))
+    ) {
+      return { delivery: existing };
     }
     if (
+      retrying && (existing?.state !== "blocked" ||
+        attempts.length >= maxManagedNotificationRetries)
+    ) return;
+
+    const body = source
+      ? sentinelIncidentNotificationBody(source)
+      : testMessage;
+    const exactDelivery = retrying
+      ? `Retry delivery ${deliveryId} (attempt ${attempts.length + 2})`
+      : "Send a synthetic notification";
+    if (
       !await confirm(
-        `Send a synthetic notification to ${current.destinationOrigin} using channel ${id} at version ${expectedVersion}?`,
+        `${exactDelivery} to ${current.destinationOrigin} using channel ${id} at version ${expectedVersion}?`,
       ) ||
-      !await authorize(args)
+      !await authorize(args) || !sourceCurrent()
     ) return;
     const delivery = await store.send(
       current,
-      requestId,
+      deliveryId,
       (stillCurrent) =>
         config.sendWebhook(
           current,
-          testMessage,
+          body,
           async () =>
-            await authorize(args) &&
+            sourceCurrent() && await authorize(args) &&
             await authorizeOutput(
+              current.id,
               current.destinationOrigin,
               current.classification,
-              testMessage,
+              body,
+              source,
             ) &&
-            await stillCurrent(),
+            await stillCurrent() && sourceCurrent(),
         ),
+      retrying
+        ? { retry: { requestId, expectedRetries: attempts.length } }
+        : undefined,
     );
     return delivery ? { delivery } : undefined;
   }

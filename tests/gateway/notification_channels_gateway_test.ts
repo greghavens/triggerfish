@@ -3,11 +3,13 @@ import type { HookRunner } from "../../src/core/policy/hooks/hooks.ts";
 import type { OperatorNotificationChannels } from "../../src/gateway/notifications/operator_channels.ts";
 import {
   createSentinelIncidentDelivery,
+  isCurrentSentinelIncident,
   readSentinelIncidentScope,
 } from "../../src/gateway/notifications/sentinel_incidents.ts";
 import { startSentinelAssessmentCoordinator } from "../../src/gateway/sentinel_assessment_service.ts";
 import {
   refreshSentinelAssessment,
+  setSentinelIncidentNotifications,
   startSentinelAssessment,
 } from "../../src/sentinel/assessment_store.ts";
 import { resolveSentinelCasePath } from "../../src/sentinel/cases.ts";
@@ -44,6 +46,7 @@ Deno.test("gateway reviews notification subscriptions and durably deduplicates s
   let endpoint = origin + privatePath;
   let preDenied = false;
   let outputDenied = false;
+  let denyIncident = true;
   let responseLost = false;
   let classified = 0;
   let calls = 0;
@@ -91,7 +94,9 @@ Deno.test("gateway reviews notification subscriptions and durably deduplicates s
           (hook === "PRE_TOOL_CALL" && preDenied) ||
           (hook === "PRE_OUTPUT" &&
             ((outputDenied && context.input.destination === origin) ||
-              context.input.notification_channel_id === "blocked-subscription"))
+              (denyIncident &&
+                context.input.notification_channel_id ===
+                  "blocked-subscription")))
         ) {
           return Promise.resolve({
             allowed: false,
@@ -109,6 +114,9 @@ Deno.test("gateway reviews notification subscriptions and durably deduplicates s
     };
     channels = {
       store: createManagedNotificationChannels(storage),
+      isCurrentSentinelIncident: (source) =>
+        isCurrentSentinelIncident(baseDir, source),
+
       readSentinelIncidentScope: (caseId) =>
         readSentinelIncidentScope(baseDir, caseId),
       sendWebhook: createNotificationWebhookTransport(
@@ -318,6 +326,13 @@ Deno.test("gateway reviews notification subscriptions and durably deduplicates s
       "uncertain",
     );
     assertEquals(calls, 2);
+    const retryUnknown = {
+      action: "retry_notification_delivery",
+      ...selector,
+      notificationDeliveryId: "uncertain",
+      requestId: "retry-uncertain",
+    };
+    assertStringIncludes(await turn(retryUnknown), "unavailable");
     const records = await turn(history);
     assertEquals(JSON.parse(records).deliveries.length, 4);
     assert(!records.includes(privatePath));
@@ -388,6 +403,42 @@ Deno.test("gateway reviews notification subscriptions and durably deduplicates s
     assertEquals(blocked.length, 1);
     assertEquals(blocked[0].state, "blocked");
     assertEquals(blocked[0].source.revision, incident.revision);
+    const retryIncident = {
+      action: "retry_notification_delivery",
+      notificationChannelId: "blocked-subscription",
+      notificationDeliveryId: blocked[0].id,
+      expectedVersion: 1,
+      requestId: "retry-blocked-incident",
+      kind: "sentinel",
+      id: "main",
+      runId: incident.plan.runId,
+      revision: incident.revision,
+    };
+    denyIncident = false;
+    assertStringIncludes(
+      await turn({ ...retryIncident, id: "other" }),
+      "unavailable",
+    );
+    setSentinelIncidentNotifications(path, false);
+    assertStringIncludes(await turn(retryIncident), "unavailable");
+    assertEquals(calls, 3);
+    setSentinelIncidentNotifications(path, true);
+    const retry = await turn(retryIncident);
+    assertEquals(JSON.parse(retry).delivery.state, "delivered");
+    assertEquals(
+      JSON.parse(retry).delivery.retries[0].requestId,
+      retryIncident.requestId,
+    );
+    assertEquals(await turn(retryIncident), retry);
+    assertEquals(calls, 4);
+    assertStringIncludes(
+      await turn({ ...retryIncident, requestId: "second-retry" }),
+      "unavailable",
+    );
+    await disconnect();
+    await connect();
+    assertEquals(await turn(retryIncident), retry);
+    assertEquals(calls, 4);
     const deliveredIncident = JSON.parse(await turn(history)).deliveries.find(
       (row: { source?: { kind: string } }) =>
         row.source?.kind === "sentinel_incident_increase",
@@ -421,7 +472,7 @@ Deno.test("gateway reviews notification subscriptions and durably deduplicates s
       await turn({ ...probe, requestId: "stale" }),
       "unavailable",
     );
-    assertEquals(calls, 3);
+    assertEquals(calls, 4);
   } finally {
     await disconnect();
     await Deno.remove(baseDir, { recursive: true });

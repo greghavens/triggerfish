@@ -28,6 +28,43 @@ export function readSentinelIncidentScope(
   return { caseId, runId: state.plan.runId, afterRevision: state.revision };
 }
 
+export function isCurrentSentinelIncident(
+  baseDir: string,
+  source: ManagedSentinelIncidentSource,
+): boolean {
+  const scope = readSentinelIncidentScope(baseDir, source.caseId);
+  if (
+    scope?.runId !== source.runId || scope.afterRevision !== source.revision
+  ) {
+    return false;
+  }
+  const receipt = readSentinelNotificationState(
+    resolveSentinelCasePath(baseDir, source.caseId),
+  ).latest;
+  return receipt?.revision === source.revision &&
+    receipt.state !== "disabled" && receipt.state !== "pending";
+}
+
+export function sentinelIncidentNotificationBody(
+  source: ManagedSentinelIncidentSource,
+): string {
+  return JSON.stringify({
+    type: "triggerfish.sentinel.incident_increase",
+    caseId: source.caseId,
+    runId: source.runId,
+    revision: source.revision,
+    message: "Sentinel detected an increase in incident candidates.",
+  });
+}
+
+export function matchesSentinelIncidentSubscription(
+  scope: ManagedSentinelIncidentScope | undefined,
+  source: ManagedSentinelIncidentSource,
+): boolean {
+  return scope?.caseId === source.caseId && scope.runId === source.runId &&
+    scope.afterRevision < source.revision;
+}
+
 /** Fan out one committed, currently authorized event to reviewed subscriptions. */
 export function createSentinelIncidentDelivery(
   baseDir: string,
@@ -45,34 +82,15 @@ export function createSentinelIncidentDelivery(
     source: ManagedSentinelIncidentSource,
     coordinatorCurrent: () => boolean,
   ): Promise<void> => {
-    const isCurrent = () => {
-      if (!coordinatorCurrent()) return false;
-      const scope = readSentinelIncidentScope(baseDir, source.caseId);
-      if (
-        scope?.runId !== source.runId ||
-        scope.afterRevision !== source.revision
-      ) return false;
-      const receipt = readSentinelNotificationState(
-        resolveSentinelCasePath(baseDir, source.caseId),
-      ).latest;
-      return receipt?.revision === source.revision &&
-        receipt.state !== "disabled" && receipt.state !== "pending";
-    };
+    const isCurrent = () =>
+      coordinatorCurrent() && isCurrentSentinelIncident(baseDir, source);
     if (!isCurrent()) return;
     const id = `incident:${source.caseId}:${source.runId}:${source.revision}`;
-    const body = JSON.stringify({
-      type: "triggerfish.sentinel.incident_increase",
-      caseId: source.caseId,
-      runId: source.runId,
-      revision: source.revision,
-      message: "Sentinel detected an increase in incident candidates.",
-    });
-    const eligible = (await channels.store.channels()).filter((channel) => {
-      const scope = channel.sentinelIncidents;
-      return channel.enabled && channel.classification === "INTERNAL" &&
-        scope?.caseId === source.caseId && scope.runId === source.runId &&
-        scope.afterRevision < source.revision;
-    });
+    const body = sentinelIncidentNotificationBody(source);
+    const eligible = (await channels.store.channels()).filter((channel) =>
+      channel.enabled && channel.classification === "INTERNAL" &&
+      matchesSentinelIncidentSubscription(channel.sentinelIncidents, source)
+    );
     await Promise.all(eligible.map(async (channel) => {
       if (!isCurrent()) return;
       const metadata = {
@@ -96,7 +114,7 @@ export function createSentinelIncidentDelivery(
             });
             return decision.allowed && await stillCurrent() && isCurrent();
           }),
-        source,
+        { source },
       );
     }));
   };

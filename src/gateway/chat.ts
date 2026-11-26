@@ -785,19 +785,35 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
         );
         return allowed && isCurrent();
       },
-      async authorizeNotificationOutput(origin, classification, body) {
-        if (!isCurrent() || !canFlowTo(taint(), classification)) return false;
+      async authorizeNotificationOutput(
+        channelId,
+        origin,
+        classification,
+        body,
+        source,
+      ) {
+        const outputTaint = () =>
+          source ? maxClassification("INTERNAL", taint()) : taint();
+        if (!isCurrent() || !canFlowTo(outputTaint(), classification)) {
+          return false;
+        }
         const metadata = {
           destination: origin,
+          notification_channel_id: channelId,
           target_classification: classification,
+          ...(source && {
+            case_id: source.caseId,
+            run_id: source.runId,
+            evidence_revision: source.revision,
+          }),
         };
         const decision = await config.hookRunner.evaluateHook("PRE_OUTPUT", {
-          session: { ...session, taint: taint() },
+          session: { ...session, taint: outputTaint() },
           input: { ...metadata, content: body },
           auditInput: metadata,
         });
         return decision.allowed && isCurrent() &&
-          canFlowTo(taint(), classification);
+          canFlowTo(outputTaint(), classification);
       },
       ...(config.recoverAgentTurn && { ownerRecoverySessionId: session.id }),
       ...(config.runSubagentRecoveryCommand && {
