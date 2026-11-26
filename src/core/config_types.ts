@@ -269,6 +269,7 @@ export interface TriggerFishConfig {
       readonly model?: string;
     };
     readonly vision?: string;
+    readonly live_route_allowlists?: ModelProfileAllowlists;
     readonly providers: Readonly<
       Record<string, { readonly model: string; readonly apiKey?: string }>
     >;

@@ -3470,10 +3470,20 @@ export function createOperatorRunToolExecutor(options: {
         args,
         context,
         options.confirm,
-        (profile) =>
-          options.sentinelProfiles?.().some((allowed) =>
-            isDeepStrictEqual(allowed, profile)
-          ) ?? false,
+        (profile, role) => {
+          if (["goals", "reporter", "recheck"].includes(role)) {
+            return options.sentinelProfiles?.().some((allowed) =>
+              isDeepStrictEqual(allowed, profile)
+            ) ?? false;
+          }
+          const classes: readonly ClassificationLevel[] = role === "event"
+            ? ["INTERNAL"]
+            : ["PUBLIC", "INTERNAL", "CONFIDENTIAL", "RESTRICTED"];
+          return classes.some((level) =>
+            canFlowTo(level, context?.ceiling ?? "PUBLIC") &&
+            options.liveModelRoutes?.eligible(profile, level) === true
+          );
+        },
       );
     }
     if (

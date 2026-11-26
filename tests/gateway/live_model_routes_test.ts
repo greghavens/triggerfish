@@ -213,6 +213,8 @@ Deno.test("gateway pins approved classification routes for the entire model turn
         session,
         hookRunner: hooks,
         providerRegistry: ownerRoutes,
+        customToolsBaseDir: baseDir,
+        agentModelProfileAllowlists: approvals,
         getSessionTaint: () => "INTERNAL",
         targetClassification: "INTERNAL",
         operatorRunExecutor: createOperatorRunToolExecutor({
@@ -653,6 +655,63 @@ Deno.test("gateway pins approved classification routes for the entire model turn
     assertEquals(await turn(resumeCommand(revokedId)), denied);
     assertEquals(requests, []);
     assertEquals(readCount, afterSecondInterrupt);
+
+    approvals.INTERNAL = ["first", "second"];
+    await select("first");
+    const agentProfile = {
+      action: "set_agent_profile",
+      id: "model-pinned-agent",
+      expectedVersion: 0,
+      requestId: crypto.randomUUID(),
+      profileSettings: {
+        name: "Model pinned fixture",
+        description: "Select the exact reviewed model.",
+        role: "assistant",
+        prompt: "Use verified fixture evidence.",
+        tools: ["fixture_check"],
+        modelProfile: { provider: "second", model: "second" },
+      },
+    };
+    assertEquals(
+      JSON.parse(await turn(JSON.stringify(agentProfile))).profile.version,
+      1,
+    );
+    await turn("/agent-profile model-pinned-agent");
+    assertEquals(
+      await turn("Use the selected agent model."),
+      "Answered by second.",
+    );
+    const selectedRecovery = crypto.randomUUID();
+    await interrupt(selectedRecovery);
+    const afterSelectedInterrupt = readCount;
+    gateway = makeGateway();
+    socket = await connect();
+    await turn("/agent-profile model-pinned-agent");
+    assertEquals(
+      await turn(resumeCommand(selectedRecovery)),
+      "Resumed on second with the exact committed receipt.",
+    );
+    assertEquals(readCount, afterSelectedInterrupt);
+
+    const revokedAgentRecovery = crypto.randomUUID();
+    await interrupt(revokedAgentRecovery);
+    approvals.INTERNAL = ["first"];
+    gateway = makeGateway();
+    socket = await connect();
+    await turn("/agent-profile model-pinned-agent");
+    requests.length = 0;
+    assertEquals(
+      await turn("Do not fall back from this profile."),
+      "The approved model route is unavailable.",
+    );
+    assertEquals(await turn(resumeCommand(revokedAgentRecovery)), denied);
+    assertEquals(requests, []);
+    await turn("/agent-profile off");
+    assertEquals(
+      await turn("Resume ordinary model selection."),
+      "Answered by first.",
+    );
+    requests.length = 0;
 
     socket.close();
     await gateway.stop();

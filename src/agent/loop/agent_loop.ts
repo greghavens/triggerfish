@@ -200,10 +200,6 @@ async function forceTextOnlyResponse(
       "based on the information gathered so far. Do not attempt any more tool calls." +
       (wrapup ? "\n" + wrapup : ""),
   });
-  const taint = ctx.state.config.getSessionTaint?.() ?? "PUBLIC";
-  const provider = ctx.state.config.providerRegistry
-    .getForClassification(taint) ??
-    ctx.state.config.providerRegistry.getDefault()!;
   const finalizationDeadline = deadline
     ? AbortSignal.timeout(15_000)
     : undefined;
@@ -211,10 +207,17 @@ async function forceTextOnlyResponse(
     ? AbortSignal.any([ctx.signal, finalizationDeadline])
     : finalizationDeadline ?? ctx.signal;
   async function complete() {
+    const registry = ctx.state.config.providerRegistry;
+    const taint = ctx.state.config.getSessionTaint?.() ??
+      (registry.requireExactClassification ? ctx.session.taint : "PUBLIC");
+    const provider = registry.getForClassification(taint) ??
+      (registry.requireExactClassification ? undefined : registry.getDefault());
+    if (!provider) throw new Error("The approved model route is unavailable.");
     const messages = buildLlmMessages(ctx.systemPrompt, ctx.history);
     return await provider.complete(messages, [], {
       sessionId: ctx.sessionKey,
       signal,
+      modelUsageClassification: taint,
     });
   }
   let completion;

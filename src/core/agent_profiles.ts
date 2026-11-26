@@ -137,9 +137,7 @@ export function parseAgentProfileDefinition(
     (tools !== undefined && !visibleTools) ||
     (skills !== undefined && !visibleSkills) ||
     (admission !== undefined && (role !== "reporter" || !reviewedAdmission)) ||
-    (modelProfile !== undefined &&
-      (!reviewedModel ||
-        !["goals", "reporter", "recheck"].includes(String(role)))) ||
+    (modelProfile !== undefined && !reviewedModel) ||
     (maxTurns !== undefined &&
       (typeof maxTurns !== "number" || !Number.isInteger(maxTurns) ||
         maxTurns < 1 || maxTurns > 32)) ||

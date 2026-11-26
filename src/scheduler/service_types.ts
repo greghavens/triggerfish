@@ -48,6 +48,7 @@ export interface OrchestratorCreateOptions {
   /** Trusted scheduled agent binding. The role remains read-only. */
   readonly eventRecipient?: {
     readonly tools: readonly string[];
+    readonly profile?: import("../core/agent_profiles.ts").AgentProfileRevision;
     readonly isCurrent: () => boolean;
   };
   /** Trusted source for in-turn reports in an ordinary scheduled session. */

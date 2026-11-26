@@ -115,6 +115,7 @@ export interface ChatSessionConfig {
   readonly resolveSentinelChatCase?: (caseId: string) => string | undefined;
   readonly allowSentinelModelAccess?: boolean;
   readonly sentinelModelProfileAllowlists?: ModelProfileAllowlists;
+  readonly agentModelProfileAllowlists?: ModelProfileAllowlists;
   readonly sentinelOutputLanguage?: SentinelOutputLanguage;
   readonly sentinelWebContainmentConfigured?: boolean;
   readonly hookRunner: HookRunner;

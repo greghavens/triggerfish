@@ -86,6 +86,7 @@ export function createAgentEventScheduler(config: SchedulerServiceConfig) {
           isTrigger: true,
           eventRecipient: {
             tools: profile.definition.tools ?? [],
+            profile,
             isCurrent: current,
           },
           maxIterations: profile.definition.maxTurns ?? 4,

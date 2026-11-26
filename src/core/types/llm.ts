@@ -124,6 +124,8 @@ export interface LlmProviderRegistry {
   ) => LlmProviderRegistry;
   /** Opaque identity of a resolved and authorized snapshot. */
   readonly modelRouteIdentity?: string;
+  /** Selected model binding forbids borrowing the default provider. */
+  readonly requireExactClassification?: boolean;
   /** Register a provider. Replaces any existing provider with the same name. */
   register(provider: LlmProvider): void;
   /** Get a provider by name, or undefined if not registered. */

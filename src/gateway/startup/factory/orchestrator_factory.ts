@@ -1,4 +1,5 @@
 import { delegatedSubagentIdentity } from "./delegated_agent_recovery.ts";
+import { withReviewedAgentModel } from "../../../agent/providers/reviewed_agent_model.ts";
 import { isCustomToolName } from "../../../core/custom_tool_intent.ts";
 import { createCustomToolBindings } from "../../custom_tool_bindings.ts";
 import { buildManagedDelegatedObservationGrant } from "./managed_delegated_observation_grant.ts";
@@ -221,6 +222,13 @@ export function createOrchestratorFactory(
           session,
           recoveryTaint,
           "Restore trusted recovery scope",
+        );
+      }
+      if (eventRecipient) {
+        session = updateTaint(
+          session,
+          "INTERNAL",
+          "Trusted agent event metadata",
         );
       }
 
@@ -573,7 +581,13 @@ export function createOrchestratorFactory(
             },
           }
           : infra.hookRunner,
-        providerRegistry: infra.registry,
+        providerRegistry: eventRecipient?.profile
+          ? withReviewedAgentModel(
+            infra.registry,
+            () => eventRecipient.isCurrent() ? eventRecipient.profile : null,
+            config.models.live_route_allowlists,
+          )
+          : infra.registry,
         spinePath: infra.spinePath,
         maxIterations: options?.maxIterations,
         maxToolResponseChars: isTrigger ? 8_000 : undefined,

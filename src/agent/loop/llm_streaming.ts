@@ -121,11 +121,13 @@ async function runLlmProviderCall(
   ctx: AgentLoopContext,
   iterations: number,
 ) {
-  const taint = ctx.state.config.getSessionTaint?.() ?? "PUBLIC";
-  const classificationProvider = ctx.state.config.providerRegistry
-    .getForClassification(taint);
+  const registry = ctx.state.config.providerRegistry;
+  const taint = ctx.state.config.getSessionTaint?.() ??
+    (registry.requireExactClassification ? ctx.session.taint : "PUBLIC");
+  const classificationProvider = registry.getForClassification(taint);
   const provider = classificationProvider ??
-    ctx.state.config.providerRegistry.getDefault()!;
+    (registry.requireExactClassification ? undefined : registry.getDefault());
+  if (!provider) throw new Error("The approved model route is unavailable.");
   ctx.state.orchLog.debug("Provider selected for LLM call", {
     operation: "runLlmProviderCall",
     iteration: iterations,

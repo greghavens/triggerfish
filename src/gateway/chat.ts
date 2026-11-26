@@ -5,6 +5,7 @@ import { startNamedConversationTurn } from "./named_conversation_turns.ts";
 import { inventoryConnectorTools } from "./operator_scopesentry_import.ts";
 import { readAgentProfile } from "../core/agent_profiles.ts";
 import { withAgentProfileRuntime } from "../agent/orchestrator/agent_profile_runtime.ts";
+import { withReviewedAgentModel } from "../agent/providers/reviewed_agent_model.ts";
 import { isAgentProfileAction } from "./operator_agent_profiles.ts";
 import { namedModelProfileActions } from "./operator_model_profiles.ts";
 import { repositoryVisibilityDestinationMetadata } from "./sentinel_repository_visibility.ts";
@@ -996,7 +997,7 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
     "sentinel-recheck",
   ]);
   let activeAgentProfileId: string | undefined;
-  const runtimeConfig = withAgentProfileRuntime(orchestratorConfig, () => {
+  const readActiveAgentProfile = () => {
     if (
       !config.customToolsBaseDir || !activeAgentProfileId ||
       state.activeSessionId !== state.ownerSessionId
@@ -1009,7 +1010,15 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
     } catch {
       return null;
     }
-  });
+  };
+  const runtimeConfig = withAgentProfileRuntime({
+    ...orchestratorConfig,
+    providerRegistry: withReviewedAgentModel(
+      orchestratorConfig.providerRegistry,
+      readActiveAgentProfile,
+      config.agentModelProfileAllowlists,
+    ),
+  }, readActiveAgentProfile);
   const orchestrator = createOrchestrator({
     ...runtimeConfig,
     toolApprovalContext: {

@@ -191,7 +191,10 @@ function ensureSessionHistory(
 function alignCompactorBudgetToSession(state: OrchestratorState): void {
   const taint = state.config.getSessionTaint?.() ?? "PUBLIC";
   const override = state.config.providerRegistry.getForClassification(taint);
-  const provider = override ?? state.config.providerRegistry.getDefault();
+  const provider = override ??
+    (state.config.providerRegistry.requireExactClassification
+      ? undefined
+      : state.config.providerRegistry.getDefault());
   log.debug("Compactor budget alignment for session taint", {
     operation: "alignCompactorBudgetToSession",
     taint,
@@ -342,7 +345,13 @@ async function validateAgentTurnPreconditions(
     };
   }
   if (!hookResult.ok) return hookResult;
-  if (!config.providerRegistry.getDefault()) {
+  if (config.providerRegistry.requireExactClassification) {
+    if (
+      !config.providerRegistry.getForClassification(
+        config.getSessionTaint?.() ?? session.taint,
+      )
+    ) return { ok: false, error: "The approved model route is unavailable." };
+  } else if (!config.providerRegistry.getDefault()) {
     return { ok: false, error: "No default LLM provider configured" };
   }
   return { ok: true, value: true };
@@ -362,6 +371,7 @@ export async function orchestrateAgentTurn(
     resumeMessageIndex = 0,
     resumeClassification,
     resumeToolCalls,
+    acceptsSavedReadApproval,
     resumedPendingToolCall,
     authorizeResumeSources,
     beforeToolBatch,
@@ -489,7 +499,9 @@ export async function orchestrateAgentTurn(
         resumeToolCalls,
         turnState.config,
         turnSession,
-        toolPersistence,
+        acceptsSavedReadApproval
+          ? { ...toolPersistence, acceptsSavedApproval: acceptsSavedReadApproval }
+          : toolPersistence,
         signal,
       )
     ) {

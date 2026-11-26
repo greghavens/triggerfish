@@ -33,7 +33,7 @@ export async function executeAgentProfileAction(
   args: Record<string, unknown>,
   context: OperatorRunToolContext | undefined,
   confirm: (message: string) => Promise<boolean>,
-  permitsModel?: (profile: SelectedModelProfile) => boolean,
+  permitsModel?: (profile: SelectedModelProfile, role: string) => boolean,
 ): Promise<string> {
   const operator = context?.authenticatedOwnerSessionId;
   const authorize = context?.authorizeOwnerRunCall;
@@ -139,7 +139,8 @@ export async function executeAgentProfileAction(
       return unavailable;
     }
     const model = mutation.definition?.modelProfile;
-    const modelAllowed = () => !model || permitsModel?.(model) === true;
+    const modelAllowed = () =>
+      !model || permitsModel?.(model, mutation.definition!.role) === true;
     const saved = registry.receipt(mutation);
     if (!modelAllowed() || !await authorize(args) || !modelAllowed()) {
       return unavailable;

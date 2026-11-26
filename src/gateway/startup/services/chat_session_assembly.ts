@@ -178,6 +178,7 @@ export function assembleChatSession(
     allowSentinelModelAccess: deps.config.sentinel?.allow_model_access === true,
     sentinelModelProfileAllowlists: deps.config.sentinel
       ?.model_profile_allowlists,
+    agentModelProfileAllowlists: deps.config.models.live_route_allowlists,
     sentinelOutputLanguage: deps.config.sentinel?.output_language,
     hookRunner: deps.hookRunner,
     providerRegistry: deps.registry,
