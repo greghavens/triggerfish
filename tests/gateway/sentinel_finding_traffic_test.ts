@@ -1083,3 +1083,120 @@ Deno.test("Leased workers attach only exact saved traffic and authenticated Tide
     await Deno.remove(baseDir, { recursive: true });
   }
 });
+
+Deno.test("Authenticated retained HTTP authority search separates ports and binds cursors to scope", async () => {
+  const baseDir = await Deno.makeTempDir();
+  const path = resolveSentinelCasePath(baseDir, caseId);
+  try {
+    const origins = [
+      "http://dual.example",
+      "https://dual.example",
+      "http://dual.example:8443",
+      "https://dual.example:8443",
+      "http://other.example:8443",
+      "https://[2001:db8::2]:8443",
+    ];
+    const entries = origins.map((origin) => ({
+      startedDateTime: new Date().toISOString(),
+      request: { url: `${origin}/unretained`, method: "GET" },
+      response: { status: 200 },
+    }));
+    await ingestSentinelTraffic(
+      new Blob([entries.map((entry) => JSON.stringify(entry)).join("\n")])
+        .stream(),
+      "HTTP origin search fixture",
+      path,
+      "har",
+    );
+    const { observations, snapshot } = importSentinelHar({
+      log: { version: "1.2", entries },
+    }, "HTTP origin search fixture");
+    await Deno.writeTextFile(path, JSON.stringify(snapshot));
+    const state = startSentinelAssessment(path);
+    const query = {
+      action: "traffic_search",
+      kind: "sentinel",
+      id: caseId,
+      revision: state.revision,
+      authority: "dual.example:8443",
+      limit: 1,
+    };
+    const projectedOrigins = (page: {
+      receipts: { observation: { origin: string } }[];
+    }) => page.receipts.map(({ observation }) => observation.origin);
+    const [first, host, http, https, ipv6, oldOrigin, dnsOnly] =
+      await readTrafficThroughGateway(baseDir, [
+        query,
+        { ...query, authority: "DUAL.EXAMPLE", limit: 10 },
+        { ...query, authority: "dual.example:80" },
+        { ...query, authority: "dual.example:443" },
+        { ...query, authority: "[2001:0DB8:0:0::2]:8443" },
+        { ...query, authority: undefined, origin: origins[0] },
+        { ...query, authority: undefined, hostname: "dual.example" },
+      ]);
+    const page = JSON.parse(first);
+    assert(page.nextCursor);
+    assertEquals(
+      projectedOrigins(JSON.parse(host)).sort(),
+      origins.slice(0, 4).sort(),
+    );
+    assertEquals(projectedOrigins(JSON.parse(http)), [origins[0]]);
+    assertEquals(projectedOrigins(JSON.parse(https)), [origins[1]]);
+    assertEquals(projectedOrigins(JSON.parse(ipv6)), [origins[5]]);
+    assertEquals(projectedOrigins(JSON.parse(oldOrigin)), [origins[0]]);
+    assertEquals(projectedOrigins(JSON.parse(dnsOnly)), []);
+    const [next, ...rejected] = await readTrafficThroughGateway(baseDir, [
+      { ...query, authority: "DUAL.EXAMPLE:8443", cursor: page.nextCursor },
+      { ...query, authority: "dual.example", cursor: page.nextCursor },
+      ...[
+        "dual.example:65536",
+        "dual.example/path",
+        "user@dual.example",
+        "https://dual.example",
+        "dual.example\n",
+      ].map((authority) => ({
+        ...query,
+        authority,
+      })),
+    ]);
+    const continuation = JSON.parse(next);
+    assertEquals(continuation.nextCursor, null);
+    assertEquals(
+      [...projectedOrigins(page), ...projectedOrigins(continuation)].sort(),
+      origins.slice(2, 4).sort(),
+    );
+    for (const result of rejected) assertStringIncludes(result, "unavailable");
+    const lease = createLease(path, state, observations[3].assetId);
+    const worker = await runWorker(path, lease, [[
+      call(search, { revision: state.revision, authority: query.authority }),
+      call(search, {
+        revision: state.revision,
+        authority: "other.example:8443",
+      }),
+    ]]);
+    assertEquals(projectedOrigins(JSON.parse(worker.responses[0][0])), [
+      origins[3],
+    ]);
+    assertEquals(projectedOrigins(JSON.parse(worker.responses[0][1])), []);
+    assert(state.plan.runId);
+    assert(recordSentinelOperatingConstraints(path, {
+      runId: state.plan.runId,
+      evidenceRevision: state.revision,
+      expectedVersion: 0,
+      operatorScope: "owner",
+      requestId: crypto.randomUUID(),
+      constraints: {
+        deniedKinds: [],
+        allowedAssetIds: [observations[2].assetId],
+      },
+    }));
+    const [narrowed, staleCursor] = await readTrafficThroughGateway(baseDir, [
+      query,
+      { ...query, cursor: page.nextCursor },
+    ]);
+    assertEquals(projectedOrigins(JSON.parse(narrowed)), [origins[2]]);
+    assertStringIncludes(staleCursor, "unavailable");
+  } finally {
+    await Deno.remove(baseDir, { recursive: true });
+  }
+});

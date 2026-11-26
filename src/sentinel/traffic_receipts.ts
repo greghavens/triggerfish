@@ -47,6 +47,7 @@ export interface SentinelTrafficReceiptQuery {
   readonly family?: SentinelTrafficSource;
   readonly evidenceId?: string;
   readonly origin?: string;
+  readonly authority?: string;
   readonly hostname?: string;
   readonly method?: string;
   readonly status?: number;
@@ -516,6 +517,38 @@ function matchesReviewedHeader(text: string | undefined, phrase: string) {
   );
 }
 
+function parseHttpAuthority(value: unknown) {
+  if (
+    typeof value !== "string" || value.length > 261 || value.trim() !== value
+  ) {
+    return;
+  }
+  const parts = /^(\[[a-f0-9:.]+\]|[a-z0-9.-]+)(?::([1-9]\d{0,4}))?$/i
+    .exec(value);
+  if (!parts) return;
+  const [, host, rawPort] = parts;
+  if (!host.startsWith("[") && !HOST.test(host.toLowerCase())) return;
+  const port = rawPort === undefined ? undefined : Number(rawPort);
+  if (port !== undefined && port > 65_535) return;
+  const parsed = URL.parse(`http://${host}`);
+  if (
+    !parsed || (!host.startsWith("[") &&
+      parsed.hostname !== host.toLowerCase())
+  ) return;
+  return { host: parsed.hostname, port };
+}
+
+function matchesHttpAuthority(
+  origin: string,
+  authority: NonNullable<ReturnType<typeof parseHttpAuthority>>,
+) {
+  const url = new URL(origin);
+  return url.hostname === authority.host &&
+    (authority.port === undefined ||
+      authority.port ===
+        Number(url.port || (url.protocol === "https:" ? 443 : 80)));
+}
+
 export function validSentinelTrafficReceiptQuery(
   query: SentinelTrafficReceiptQuery,
 ): boolean {
@@ -525,6 +558,7 @@ export function validSentinelTrafficReceiptQuery(
     evidenceId,
     hostname,
     origin,
+    authority,
     method,
     status,
     from,
@@ -541,6 +575,7 @@ export function validSentinelTrafficReceiptQuery(
     (hostname !== undefined &&
       (typeof hostname !== "string" || !HOST.test(hostname))) ||
     (origin !== undefined && !httpOrigin(origin)) ||
+    (authority !== undefined && !parseHttpAuthority(authority)) ||
     (method !== undefined && !METHODS.has(method)) ||
     (status !== undefined &&
       (!Number.isInteger(status) ||
@@ -570,6 +605,7 @@ export function readSentinelTrafficReceiptPage(
     evidenceId,
     hostname,
     origin,
+    authority,
     method,
     status,
     from,
@@ -587,6 +623,7 @@ export function readSentinelTrafficReceiptPage(
     allowedAssetIds,
   );
   if (!available) return undefined;
+  const selectedAuthority = parseHttpAuthority(authority);
   const phrase = bodyContains?.toLowerCase();
   const header = headerContains?.toLowerCase();
   const results = available.filter(
@@ -607,6 +644,9 @@ export function readSentinelTrafficReceiptPage(
         (hostname === undefined ||
           (!http && observation.hostname === hostname)) &&
         (origin === undefined || (http && observation.origin === origin)) &&
+        (selectedAuthority === undefined ||
+          (http &&
+            matchesHttpAuthority(observation.origin, selectedAuthority))) &&
         (method === undefined || (http && observation.method === method)) &&
         (status === undefined || (http && observation.status === status)) &&
         (from === undefined || (at !== undefined && at >= from)) &&
@@ -633,6 +673,9 @@ export function readSentinelTrafficReceiptPage(
     until,
     ...(phrase === undefined ? [] : ["reviewed-text", phrase]),
     ...(header === undefined ? [] : ["reviewed-header", header]),
+    ...(selectedAuthority === undefined
+      ? []
+      : ["http-authority", selectedAuthority.host, selectedAuthority.port]),
     results.map(({ digest }) => digest),
   ]);
   const offset = cursor === undefined

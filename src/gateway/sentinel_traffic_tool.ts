@@ -61,6 +61,11 @@ export const sentinelTrafficSearchTool: ToolDefinition = {
       type: "string",
       description: "Exact HTTP origin without path or credentials",
     },
+    authority: {
+      type: "string",
+      description:
+        "Exact retained HTTP hostname with optional port, across HTTP and HTTPS. Use brackets for IPv6. Omit scheme, path and credentials.",
+    },
     hostname: { type: "string", description: "Exact normalized DNS hostname" },
     method: { type: "string", description: "Exact normalized HTTP method" },
     status: { type: "integer", description: "Exact HTTP status" },
