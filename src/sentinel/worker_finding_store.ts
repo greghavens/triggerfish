@@ -554,6 +554,7 @@ export function openSentinelWorkerFindingStore(
     if (!Number.isSafeInteger(revision) || revision < 1) {
       throw new Error("Invalid Sentinel worker finding evidence revision");
     }
+    if (!findingPattern.test(findingId)) return undefined;
     const finding = readFinding(findingId);
     if (!finding || finding.evidenceRevision > revision) return undefined;
     const amendments = db.prepare(
@@ -686,6 +687,14 @@ export function openSentinelWorkerFindingStore(
     updateFindingReport,
     readFindingReport,
     listFindingReportVersions,
+    listFindingRechecks(findingId: string, revision: number) {
+      return db.prepare(
+        "SELECT * FROM receipts WHERE findingId = ? AND revision <= ? AND reportVersion IS NULL ORDER BY rowid DESC",
+      ).all(findingId, revision).map(decode).filter(
+        (entry): entry is SentinelWorkerFindingRecheckRecord =>
+          entry.kind === "recheck",
+      );
+    },
     listAmendments(revision: number): SentinelWorkerFindingReportAmendment[] {
       if (!Number.isSafeInteger(revision) || revision < 1) {
         throw new Error("Invalid Sentinel worker finding evidence revision");

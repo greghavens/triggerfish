@@ -1280,7 +1280,94 @@ Deno.test("Leased Sentinel workers report, recheck, and amend findings visible i
         ?.observations[0].evidence[0].reference,
       check.id,
     );
-    await withTidepool(baseDir, async (list, provenance) => {
+    await withTidepool(baseDir, async (list, provenance, request) => {
+      const selected = {
+        caseId: "main",
+        revision: secondRevision,
+        findingIds: [finding!.id],
+      };
+      const reviewed = await request("export", {
+        ...selected,
+        format: "findings-json",
+      });
+      assertEquals(reviewed.type, "export");
+      const selectedReport = JSON.parse(String(reviewed.content));
+      assertEquals(selectedReport.caseId, "main");
+      assertEquals(selectedReport.revision, secondRevision);
+      assertEquals(selectedReport.findings.length, 1);
+      const [record] = selectedReport.findings;
+      assertEquals(record.id, finding!.id);
+      assertEquals(record.original.evidenceId, finding!.evidenceId);
+      assertEquals(record.original.taskId, finding!.taskId);
+      assertEquals(record.original.snapshotDigest, finding!.snapshotDigest);
+      assertEquals(record.rechecks.map(({ id }: { id: string }) => id), [
+        check!.id,
+      ]);
+      assertEquals(record.amendments.map(({ id }: { id: string }) => id), [
+        amendment!.id,
+      ]);
+      assertEquals(record.reportVersion, amendment!.version);
+      assertEquals(record.original.requestId, undefined);
+      const originalOnly = JSON.parse(String(
+        (await request("export", {
+          ...selected,
+          revision: first.revision,
+          format: "findings-json",
+        })).content,
+      )).findings[0];
+      assertEquals(originalOnly.reportVersion, 1);
+      assertEquals(originalOnly.rechecks, []);
+      assertEquals(originalOnly.amendments, []);
+      for (const format of ["csv", "markdown"]) {
+        const output = await request("export", { ...selected, format });
+        assertEquals(output.type, "export");
+        const visible = String(output.content).replace(
+          /&#(\d+);/g,
+          (_entity, code) => String.fromCodePoint(Number(code)),
+        );
+        assertStringIncludes(visible, finding!.id);
+        assertStringIncludes(visible, check!.id);
+        assert(!String(output.content).includes("Waiting dependent"));
+      }
+      const beforeUnknown = await request("export", {
+        ...selected,
+        format: "findings-json",
+        findingIds: [finding!.id, "unrelated"],
+      });
+      assertEquals(beforeUnknown.type, "error");
+      assertEquals(beforeUnknown.content, undefined);
+      const importedExport = await request("export", {
+        ...selected,
+        revision: first.revision,
+        format: "findings-json",
+        findingIds: ["review-gap"],
+      });
+      assertEquals(importedExport.type, "export");
+      const importedOnly = JSON.parse(String(importedExport.content));
+      assertEquals(importedOnly.findings.map(({ id }: { id: string }) => id), [
+        "review-gap",
+      ]);
+      assertEquals(importedOnly.findings[0].kind, "imported");
+      assertEquals(importedOnly.findings[0].assetIds, ["app"]);
+      assertEquals(
+        (await request("export", { ...selected, format: "provenance" })).type,
+        "error",
+      );
+      for (
+        const change of [
+          { caseId: "other" },
+          { revision: undefined },
+          { findingIds: [finding!.id, finding!.id] },
+        ]
+      ) {
+        const rejected = await request("export", {
+          ...selected,
+          ...change,
+          format: "findings-json",
+        });
+        assertEquals(rejected.type, "error");
+        assertEquals(rejected.content, undefined);
+      }
       assertEquals(await list(first.revision), [finding!]);
       assertEquals(await list(secondRevision), [check!]);
       assertEquals(

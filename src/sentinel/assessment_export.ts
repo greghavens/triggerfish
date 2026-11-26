@@ -16,11 +16,17 @@ import {
   readSentinelFindingReviews,
   readSentinelIncidentReviews,
   readSentinelOperatingConstraintsForRevision,
+  readSentinelRunIdForRevision,
 } from "./assessment_store.ts";
 import { locateSentinelCase } from "./cases.ts";
 import { exportSentinelFindingTrafficLinks } from "./finding_traffic_links.ts";
 import { loadSentinelGraph } from "./graph.ts";
-import { readSentinelWorkerFindingReport } from "./worker_finding_store.ts";
+import {
+  hasSentinelWorkerFindingJournal,
+  openSentinelWorkerFindingStore,
+  readSentinelWorkerFindingReport,
+} from "./worker_finding_store.ts";
+import { redactCredentialText } from "../core/logger/redactor.ts";
 import {
   type AdaptiveProvenanceView,
   buildSentinelProvenance,
@@ -270,6 +276,204 @@ export function renderSentinelFindingsCsv(
   return [csvColumns, ...rows].map((row) => row.map(csvCell).join(","))
     .join("\r\n") +
     "\r\n";
+}
+
+export type SelectedFindingExportFormat = "csv" | "markdown" | "findings-json";
+
+/** Export only reviewed finding identifiers from one exact saved revision. */
+export function renderSelectedSentinelFindings(
+  path: string,
+  caseId: string,
+  assessment: SentinelAssessmentExportInput,
+  ids: readonly string[],
+  format: SelectedFindingExportFormat,
+  language: SentinelReportLanguage,
+): string | undefined {
+  if (
+    locateSentinelCase(path)?.caseId !== caseId ||
+    !ids.length || ids.length > 16 || new Set(ids).size !== ids.length ||
+    ids.some((id) =>
+      typeof id !== "string" || !id || id.length > 4096 ||
+      /[\p{Cc}\p{Cf}]/u.test(id)
+    )
+  ) return;
+  const findings = new Map(
+    (importedFindings(assessment) ?? []).map((
+      finding,
+    ) => [finding.id, finding]),
+  );
+  const runId = readSentinelRunIdForRevision(path, assessment.revision);
+  const revisions = readSentinelFindingReviews(path, assessment.revision);
+  const dispositions = new Map(
+    revisions.toReversed().map((
+      review,
+    ) => [review.findingId, review.disposition]),
+  );
+  const attachments = exportSentinelFindingTrafficLinks(
+    path,
+    assessment.revision,
+  );
+  const journal = runId && hasSentinelWorkerFindingJournal(path)
+    ? openSentinelWorkerFindingStore(path)
+    : undefined;
+  const records = [];
+  try {
+    for (const id of ids) {
+      const imported = findings.get(id);
+      const report = journal?.readFindingReport(id, assessment.revision);
+      if (imported && report) return;
+      const trafficLinks = attachments.filter((
+        { findingId, caseId: sourceCase },
+      ) => findingId === id && sourceCase === caseId).map((
+        { requestId: _requestId, evidenceNote, ...link },
+      ) => ({
+        ...link,
+        ...(evidenceNote !== undefined &&
+          { evidenceNote: redactCredentialText(evidenceNote) }),
+      }));
+      if (imported) {
+        records.push({
+          id,
+          kind: "imported" as const,
+          title: redactCredentialText(imported.label),
+          severity: imported.severity,
+          disposition: dispositions.get(id) ?? "open",
+          assetIds: imported.assets,
+          controlIds: imported.controls,
+          evidenceIds: imported.evidence,
+          trafficLinks,
+        });
+        continue;
+      }
+      if (
+        !journal || !report || report.finding.caseId !== caseId ||
+        report.finding.runId !== runId ||
+        report.amendments.some((item) =>
+          item.caseId !== caseId || item.runId !== runId
+        )
+      ) return;
+      const { requestId: _requestId, title, summary, ...source } =
+        report.finding;
+      const rechecks = journal.listFindingRechecks(id, assessment.revision)
+        .filter((item) =>
+          item.caseId === caseId && item.runId === runId &&
+          item.targetId === source.targetId
+        )
+        .map(({ requestId: _requestId, summary, ...record }) => ({
+          ...record,
+          summary: redactCredentialText(summary),
+        }));
+      records.push({
+        id,
+        kind: "worker" as const,
+        title: redactCredentialText(report.title),
+        summary: redactCredentialText(report.summary),
+        assetIds: [source.targetId],
+        controlIds: [source.controlId],
+        evidenceIds: [source.evidenceId],
+        original: {
+          ...source,
+          title: redactCredentialText(title),
+          summary: redactCredentialText(summary),
+        },
+        reportVersion: report.version,
+        amendments: report.amendments.map((
+          { requestId: _requestId, title, summary, ...record },
+        ) => ({
+          ...record,
+          title: redactCredentialText(title),
+          summary: redactCredentialText(summary),
+        })),
+        rechecks,
+        trafficLinks,
+      });
+    }
+  } finally {
+    journal?.close();
+  }
+  const result = {
+    version: 1,
+    caseId,
+    revision: assessment.revision,
+    findings: records,
+  };
+  let content: string;
+  if (format === "findings-json") {
+    content = JSON.stringify(result, null, 2) + "\n";
+  } else if (format === "csv") {
+    const headers = [
+      "case_id",
+      "evidence_revision",
+      "finding_id",
+      "title",
+      "exact_record",
+    ];
+    const rows = records.map((row) => [
+      caseId,
+      String(assessment.revision),
+      row.id,
+      row.title,
+      JSON.stringify(row),
+    ]);
+    content = [headers, ...rows].map((row) =>
+      row.map(csvCell).join(",")
+    ).join("\r\n") + "\r\n";
+  } else {
+    const t = sentinelReportText(language);
+    content = [
+      `# ${t("Sentinel investigation report")}`,
+      "",
+      `- ${t("Saved revision")} ${assessment.revision}`,
+      `- ${markdownText(caseId)}`,
+      ...records.flatMap((row) => [
+        "",
+        `## ${markdownText(row.title)}`,
+        "",
+        `- ${t("Finding ID")} ${markdownText(row.id)}`,
+        ...(row.summary ? [`- ${markdownText(row.summary)}`] : []),
+        `- ${t("Affected asset IDs")} ${
+          linkedIds(row.assetIds, t("None linked"))
+        }`,
+        `- ${t("Mitigation IDs")} ${
+          linkedIds(row.controlIds, t("None linked"))
+        }`,
+        `- ${t("Evidence IDs")} ${
+          linkedIds(row.evidenceIds, t("None linked"))
+        }`,
+        ...(row.original
+          ? [
+            `- ${t("Evidence revision")} ${row.original.evidenceRevision} · ${
+              markdownText(row.original.snapshotDigest)
+            }`,
+            `- ${t("Task")} ${markdownText(row.original.taskId)}`,
+          ]
+          : []),
+        ...(row.rechecks ?? []).flatMap((record) => [
+          `- ${t("Control recheck")} ${markdownText(record.id)} · ${
+            t(record.outcome)
+          } · ${markdownText(record.evidenceId)}`,
+          `  - ${t("Evidence revision")} ${record.evidenceRevision} · ${
+            markdownText(record.snapshotDigest)
+          }`,
+          `  - ${t("Task")} ${markdownText(record.taskId)}`,
+        ]),
+        ...(row.amendments ?? []).map((record) =>
+          `- ${t("Updated")} v${record.version} · ${
+            markdownText(record.id)
+          } · ${markdownText(record.title)}`
+        ),
+        ...row.trafficLinks.map((link) =>
+          `- ${markdownText(link.id)} · ${markdownText(link.trafficId)} · ${
+            markdownText(link.trafficDigest)
+          }`
+        ),
+      ]),
+      "",
+    ].join("\n");
+  }
+  return new TextEncoder().encode(content).byteLength <= 256 * 1024
+    ? content
+    : undefined;
 }
 
 /** Export an inert Markdown report separating imported data and analyst review. */

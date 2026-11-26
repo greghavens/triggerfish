@@ -299,6 +299,14 @@ change. Sentinel preserves the original graph under its source digest before
 publishing the change. Ambiguous host identities and changed publications
 require a new, exact preview.
 
+### Export selected findings
+
+The authenticated Tidepool Sentinel `export` route accepts up to 16 exact
+`findingIds` with a case ID and a saved evidence `revision`. Set `format` to
+`findings-json`, `csv`, or `markdown`. The export includes only the selected
+findings, their saved report versions, linked rechecks, and retained traffic
+references from that revision. An unavailable ID rejects the whole selection.
+
 ### Archive and restore a named assessment
 
 The authenticated owner agent can use `operator_runs` to archive a stopped

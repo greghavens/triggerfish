@@ -65,6 +65,7 @@ import {
   updateSentinelAssessmentGoal,
 } from "../../../sentinel/assessment_store.ts";
 import {
+  renderSelectedSentinelFindings,
   renderSentinelAlertsJson,
   renderSentinelDecisionHistoryJson,
   renderSentinelFindingsCsv,
@@ -1324,6 +1325,7 @@ export function createTidepoolSentinelHandler(
         case "export": {
           if (
             message.format !== "csv" && message.format !== "markdown" &&
+            message.format !== "findings-json" &&
             message.format !== "provenance" && message.format !== "inventory" &&
             message.format !== "alerts" && message.format !== "decisions" &&
             message.format !== "incidents"
@@ -1350,6 +1352,42 @@ export function createTidepoolSentinelHandler(
             );
           }
           const format = message.format;
+          if (message.findingIds !== undefined || format === "findings-json") {
+            const language = message.language ?? "en";
+            if (
+              typeof revision !== "number" ||
+              !Array.isArray(message.findingIds) ||
+              (format !== "csv" && format !== "markdown" &&
+                format !== "findings-json") ||
+              !isSentinelReportLanguage(language)
+            ) {
+              throw new SentinelAssignmentError(
+                "Select exact findings and an evidence revision to export.",
+              );
+            }
+            const content = renderSelectedSentinelFindings(
+              path,
+              caseId,
+              state,
+              message.findingIds,
+              format,
+              language,
+            );
+            if (content === undefined) {
+              throw new SentinelAssignmentError(
+                "The selected finding report is unavailable.",
+              );
+            }
+            send({
+              topic: "sentinel",
+              type: "export",
+              caseId,
+              revision: state.revision,
+              format,
+              content,
+            });
+            return;
+          }
           if (format === "incidents") {
             const content = renderSavedSentinelIncidentJson(
               path,
