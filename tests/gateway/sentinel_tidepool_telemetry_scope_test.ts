@@ -1,3 +1,9 @@
+import { loadSentinelGraph } from "../../src/sentinel/graph.ts";
+import {
+  digestSentinelSnapshot,
+  readArchivedSentinelSnapshot,
+  retainSentinelSourceSnapshot,
+} from "../../src/sentinel/shared_inventory.ts";
 import { DatabaseSync } from "node:sqlite";
 import { advanceAdaptiveSentinel } from "../../src/gateway/sentinel_adaptive_runtime.ts";
 import { adaptiveRevision } from "../../src/sentinel/adaptive_planner.ts";
@@ -60,6 +66,15 @@ Deno.test("Authenticated Tidepool hides revoked retained alert records and mixed
     };
     await Deno.mkdir(dirname(path), { recursive: true });
     await Deno.writeTextFile(path, JSON.stringify(graph));
+    const originalGraph = loadSentinelGraph(graph).snapshot();
+    const sourceDigest = digestSentinelSnapshot(originalGraph);
+    await retainSentinelSourceSnapshot(
+      baseDir,
+      "main",
+      sourceDigest,
+      originalGraph,
+    );
+
     function alert(
       type: string,
       asset: string,
@@ -75,6 +90,15 @@ Deno.test("Authenticated Tidepool hides revoked retained alert records and mixed
         evidenceIds: [evidenceId],
       };
     }
+    const peerCase = "retained-peer";
+    const peerPath = resolveSentinelCasePath(baseDir, peerCase);
+    await Deno.mkdir(dirname(peerPath), { recursive: true, mode: 0o700 });
+    await retainSentinelSourceSnapshot(
+      baseDir,
+      peerCase,
+      sourceDigest,
+      originalGraph,
+    );
     await Deno.writeTextFile(
       sentinelAlertsPath(path),
       JSON.stringify([
@@ -127,6 +151,23 @@ Deno.test("Authenticated Tidepool hides revoked retained alert records and mixed
         ws.removeEventListener("message", receive);
       });
     }
+    const sourceSelection = {
+      sourceCase: "main",
+      snapshotDigest: sourceDigest,
+      asset: "app",
+    };
+    const originalArchive = await request("source_snapshot", sourceSelection);
+    assertEquals(originalArchive.type, "sentinel_source_snapshot");
+    assertEquals(originalArchive.published, false);
+    assertEquals(originalArchive.graph, originalGraph);
+    assertEquals(
+      (await request("source_snapshot", {
+        ...sourceSelection,
+        sourceCase: peerCase,
+      })).type,
+      "sentinel_source_snapshot",
+    );
+
     const raw = await request("revision_alerts");
     assertEquals((raw.alerts as unknown[]).length, 4);
     const before = await request("incident_page");
@@ -273,6 +314,38 @@ Deno.test("Authenticated Tidepool hides revoked retained alert records and mixed
       operatorScope: "fixture-owner",
       constraints: { deniedKinds: [], allowedAssetIds: ["app", "proxy"] },
     }));
+
+    const scopedArchive = await request("source_snapshot", sourceSelection);
+    assertEquals(scopedArchive.type, "sentinel_source_snapshot");
+    assertEquals(scopedArchive.scopeRestricted, true);
+    assertEquals(scopedArchive.snapshotDigest, sourceDigest);
+    const disclosed = scopedArchive.graph as { nodes: { id: string }[] };
+    assertEquals(disclosed.nodes.map(({ id }) => id).toSorted(), [
+      "allowed-finding",
+      "app",
+      "proxy",
+    ]);
+    assert(!JSON.stringify(scopedArchive).includes('"private"'));
+    const revokedArchive = await request("source_snapshot", {
+      ...sourceSelection,
+      asset: "private",
+    });
+    assertEquals(revokedArchive.type, "error");
+    assertEquals(revokedArchive.graph, undefined);
+    assertEquals(revokedArchive.citations, undefined);
+    assertEquals(scopedArchive.citations, []);
+    assertEquals(scopedArchive.nextCitationCursor, undefined);
+    const foreignArchive = await request("source_snapshot", {
+      ...sourceSelection,
+      sourceCase: peerCase,
+    });
+    assertEquals(foreignArchive.type, "error");
+    assertEquals(foreignArchive.graph, undefined);
+
+    assertEquals(
+      await readArchivedSentinelSnapshot(baseDir, "main", sourceDigest),
+      originalGraph,
+    );
 
     const live = await request("status", { includeRevisions: true });
     assertEquals(live.type, "sentinel_state");

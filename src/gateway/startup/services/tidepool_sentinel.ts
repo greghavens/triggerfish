@@ -2331,7 +2331,7 @@ export function createTidepoolSentinelHandler(
         case "source_snapshot": {
           const { sourceCase, snapshotDigest, asset } = message;
           if (
-            typeof sourceCase !== "string" ||
+            !isSentinelCaseId(sourceCase) ||
             typeof snapshotDigest !== "string" ||
             typeof asset !== "string" || !asset.trim()
           ) {
@@ -2339,6 +2339,10 @@ export function createTidepoolSentinelHandler(
               "Choose a valid source snapshot.",
             );
           }
+          const sourcePath = resolveSentinelCasePath(
+            bootstrap.baseDir,
+            sourceCase,
+          );
           let graph;
           let published = false;
           try {
@@ -2350,12 +2354,12 @@ export function createTidepoolSentinelHandler(
             );
           } catch (error) {
             if (!(error instanceof Deno.errors.NotFound)) throw error;
-            const current = await readSentinelChatSnapshot(
-              resolveSentinelCasePath(bootstrap.baseDir, sourceCase),
-            ).catch((error) => {
-              if (error instanceof Deno.errors.NotFound) return undefined;
-              throw error;
-            });
+            const current = await readSentinelChatSnapshot(sourcePath).catch(
+              (error) => {
+                if (error instanceof Deno.errors.NotFound) return undefined;
+                throw error;
+              },
+            );
             if (current === undefined) {
               throw new SentinelAssignmentError(
                 "The source snapshot is unavailable.",
@@ -2369,6 +2373,37 @@ export function createTidepoolSentinelHandler(
             }
             published = true;
           }
+          const sourceState = readSentinelAssessment(sourcePath);
+          const sourceScope = sourceState &&
+            retainedTelemetryScope(sourcePath, sourceState.revision);
+          const recipientState = sourceCase !== caseId &&
+            readSentinelAssessment(path);
+          const recipientScope = recipientState &&
+            retainedTelemetryScope(path, recipientState.revision);
+          if (recipientScope) {
+            throw new SentinelAssignmentError(
+              "The source snapshot is unavailable in this case scope.",
+            );
+          }
+          if (sourceState && sourceScope) {
+            const currentAssets = sourceState.result?.sharedGraph.snapshot
+              ?.nodes;
+            if (
+              !currentAssets?.some(({ id, kind }) =>
+                id === asset && kind === "asset"
+              ) ||
+              !sourceScope.allowFinding(asset)
+            ) {
+              throw new SentinelAssignmentError(
+                "The asset is unavailable in the source snapshot.",
+              );
+            }
+            graph = scopedSentinelInventoryGraph(
+              sourcePath,
+              sourceState.revision,
+              loadSentinelGraph(graph),
+            ).snapshot();
+          }
           if (
             !graph.nodes.some(({ id, kind }) =>
               id === asset && kind === "asset"
@@ -2378,7 +2413,7 @@ export function createTidepoolSentinelHandler(
               "The asset is unavailable in the source snapshot.",
             );
           }
-          const cases = [
+          const cases = sourceScope ? [] : [
             ...new Set([
               caseId,
               "main",
@@ -2436,6 +2471,11 @@ export function createTidepoolSentinelHandler(
                 bootstrap.baseDir,
                 consumerCase,
               );
+              const consumerState = readSentinelAssessment(citationPath);
+              if (
+                consumerState &&
+                retainedTelemetryScope(citationPath, consumerState.revision)
+              ) continue;
               for (
                 let kind = index === startCase ? startKind : 0;
                 kind < readers.length;
@@ -2476,6 +2516,7 @@ export function createTidepoolSentinelHandler(
             snapshotDigest,
             asset,
             graph,
+            ...(sourceScope && { scopeRestricted: true }),
             published,
             citations,
             moreCitations: nextCitationCursor !== undefined,
