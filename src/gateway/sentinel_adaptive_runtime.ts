@@ -1697,6 +1697,7 @@ export function submitSentinelAssignmentIntent(
     readonly kind: string;
     readonly nodeId: string;
     readonly prioritizeNext?: true;
+    readonly priorityRank?: number;
     readonly recheckFindingId?: string;
     readonly passingRecheckForFindingId?: string;
     readonly graphRelationship?: SentinelGraphFactRequirement;
@@ -1737,7 +1738,8 @@ export function submitSentinelAssignmentIntent(
             ) &&
             prior.recheckFindingId === input.recheckFindingId &&
             prior.passingRecheckForFindingId === passing &&
-            prior.prioritizeNext === input.prioritizeNext
+            prior.prioritizeNext === input.prioritizeNext &&
+            prior.priorityRank === input.priorityRank
           ? { state, receipt: prior, replay: true }
           : undefined;
       }
@@ -1795,8 +1797,9 @@ export function submitSentinelAssignmentIntent(
         task,
         reason: OPERATOR_ASSIGNMENT_REASON,
         prioritize: input.prioritizeNext,
-        takeOverQueued: !!queued &&
-          !decisionAllowsClaim(snapshotPath, state.revision)(queued),
+        priorityRank: input.priorityRank,
+        takeOverQueued: !!queued && (input.priorityRank !== undefined ||
+          !decisionAllowsClaim(snapshotPath, state.revision)(queued)),
       });
       return receipt ? { state, receipt, replay: false } : undefined;
     } finally {

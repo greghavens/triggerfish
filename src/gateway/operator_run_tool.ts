@@ -823,6 +823,11 @@ export const operatorRunTool: ToolDefinition = {
       ],
       description: "Filter the Sentinel task queue by durable execution status",
     },
+    priorityRank: {
+      type: "integer",
+      description:
+        "Set a local graph assignment's reviewed rank from 1 to 10. Zero uses the default rank of 5.",
+    },
     prioritizeNext: {
       type: "boolean",
       description:
@@ -4457,6 +4462,7 @@ ${
           attempts: task.attempts,
           prioritized: task.prioritized ?? false,
           plannerPriority: task.plannerPriority,
+          operatorPriority: task.operatorPriority,
           retirementReason: task.retirementReason,
           decisionHold: queue?.diagnostics?.decisionHolds.get(task.id),
           controlPrerequisiteHold:
@@ -4503,6 +4509,7 @@ ${
           passingRecheckForFindingId,
           graphRelationship,
           prioritizeNext,
+          priorityRank,
         } = args;
         if (
           ref.kind !== "sentinel" || ref.revision === undefined ||
@@ -4521,6 +4528,7 @@ ${
               "passingRecheckForFindingId",
               "graphRelationship",
               "prioritizeNext",
+              "priorityRank",
             ].includes(key)
           ) ||
           typeof runId !== "string" || !digestPattern.test(runId) ||
@@ -4530,7 +4538,12 @@ ${
           typeof taskKind !== "string" || !/^[a-z_]{1,64}$/.test(taskKind) ||
           (prioritizeNext !== undefined &&
             typeof prioritizeNext !== "boolean") ||
-          (prioritizeNext === true &&
+          (priorityRank !== undefined &&
+            (typeof priorityRank !== "number" ||
+              !Number.isSafeInteger(priorityRank) ||
+              priorityRank < 0 || priorityRank > 10 ||
+              prioritizeNext === true)) ||
+          ((prioritizeNext === true || priorityRank !== undefined) &&
             ((taskKind !== "trace" && taskKind !== "impact") ||
               recheckFindingId !== undefined ||
               passingRecheckForFindingId !== undefined ||
@@ -4615,6 +4628,8 @@ ${
           kind: taskKind,
           nodeId: node,
           ...(prioritizeNext === true && { prioritizeNext: true as const }),
+          ...(typeof priorityRank === "number" &&
+            { priorityRank: priorityRank || 5 }),
           ...(relationship && { graphRelationship: relationship }),
           ...(typeof recheckFindingId === "string" && { recheckFindingId }),
           ...(typeof passingRecheckForFindingId === "string" &&

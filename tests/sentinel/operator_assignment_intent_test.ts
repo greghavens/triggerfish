@@ -178,3 +178,38 @@ Deno.test("Operator takeover and queued insertion roll back together when intent
     await Deno.remove(directory, { recursive: true });
   }
 });
+
+Deno.test("Queued operator rank carries only with the retained assignment", async () => {
+  const directory = await Deno.makeTempDir();
+  const store = openSentinelAdaptiveStore(join(directory, "adaptive.db"));
+  try {
+    store.sync(revision, [], null, { number: 1, goal });
+    assertEquals(
+      store.recordOperatorAssignmentIntent({ ...intent(), priorityRank: 9 })
+        ?.priorityRank,
+      9,
+    );
+    const next = "fixture-revision-two";
+    const ordinary = { ...assignment, nodeId: "ordinary-target" };
+    store.sync(
+      next,
+      [ordinary, { ...assignment, carriedFrom: id }],
+      revision,
+      { number: 2, goal },
+    );
+    assertEquals(
+      store.list(next).map(({ operatorPriority }) => operatorPriority),
+      [
+        undefined,
+        9,
+      ],
+    );
+    assertEquals(
+      store.claim(next)?.task.id,
+      sentinelAdaptiveTaskId(next, assignment),
+    );
+  } finally {
+    store.close();
+    await Deno.remove(directory, { recursive: true });
+  }
+});

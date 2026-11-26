@@ -4262,7 +4262,20 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
       const priorityCase = "selected-assignment-priority";
       const priorityPath = resolveSentinelCasePath(baseDir, priorityCase);
       await Deno.mkdir(dirname(priorityPath), { recursive: true });
-      await Deno.writeTextFile(priorityPath, JSON.stringify(childGraph));
+      await Deno.writeTextFile(
+        priorityPath,
+        JSON.stringify({
+          ...childGraph,
+          nodes: [
+            ...childGraph.nodes,
+            ...["rank-a", "rank-b", "rank-low", "rank-default"].map((id) => ({
+              id,
+              kind: "asset",
+              label: id,
+            })),
+          ],
+        }),
+      );
       const priorityState = startSentinelAssessment(priorityPath, {
         goal: "Review local graph.",
       });
@@ -4350,6 +4363,35 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
         })).result,
       ).receipt;
       assertEquals(heldPriority.taskId, blockedPriorityId);
+      const rankRequest = (node: string, priorityRank: number) => ({
+        ...priorityRequest,
+        node,
+        priorityRank,
+        prioritizeNext: undefined,
+        requestId: crypto.randomUUID(),
+      });
+      const rankedRequests = [
+        rankRequest("rank-a", 8),
+        rankRequest("rank-b", 8),
+        rankRequest("rank-low", 1),
+        rankRequest("rank-default", 0),
+      ];
+      const beforeInvalidRank = confirmations.length;
+      assertStringIncludes(
+        (await turn(rankRequest("rank-a", 11))).result,
+        "unavailable",
+      );
+      assertEquals(confirmations.length, beforeInvalidRank);
+      const ranked: { taskId: string; priorityRank: number }[] = [];
+      for (const request of rankedRequests) {
+        ranked.push(JSON.parse((await turn(request)).result).receipt);
+      }
+      assertEquals(ranked.map(({ priorityRank }) => priorityRank), [
+        8,
+        8,
+        1,
+        5,
+      ]);
       const originalPriorityApproval = confirmations.length;
       await withGateway(async (priorityTurn) => {
         assertEquals(
@@ -4361,6 +4403,15 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
             ...priorityRequest,
             prioritizeNext: undefined,
           })).result,
+          "unavailable",
+        );
+        assertEquals(
+          JSON.parse((await priorityTurn(rankedRequests[0])).result).receipt,
+          ranked[0],
+        );
+        assertStringIncludes(
+          (await priorityTurn({ ...rankedRequests[0], priorityRank: 9 }))
+            .result,
           "unavailable",
         );
         assertEquals(confirmations.length, originalPriorityApproval);
@@ -4379,8 +4430,12 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
           ).reverse().map(({ taskId }) => taskId),
           [
             preferred.taskId,
+            ranked[0].taskId,
+            ranked[1].taskId,
             ordinaryId,
             blockedPriorityId,
+            ranked[3].taskId,
+            ranked[2].taskId,
           ],
         );
       } finally {

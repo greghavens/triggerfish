@@ -846,6 +846,7 @@ export interface AdaptiveTask extends AdaptiveTaskRequest {
   readonly attempts: number;
   readonly prioritized?: boolean;
   readonly plannerPriority?: number;
+  readonly operatorPriority?: number;
   readonly retirementReason?: string;
   readonly dependencyRecommendation?: {
     readonly id: string;
@@ -2752,6 +2753,15 @@ function initialize(db: DatabaseSync): void {
       }
       if (
         !db.prepare("PRAGMA table_info(adaptive_tasks)").all().some(
+          ({ name }) => name === "operatorPriority",
+        )
+      ) {
+        db.exec(
+          "ALTER TABLE adaptive_tasks ADD COLUMN operatorPriority INTEGER",
+        );
+      }
+      if (
+        !db.prepare("PRAGMA table_info(adaptive_tasks)").all().some(
           ({ name }) => name === "retirementReason",
         )
       ) {
@@ -2805,6 +2815,7 @@ function initialize(db: DatabaseSync): void {
         reviewedFrom TEXT,
         plannerRound TEXT,
         plannerPriority INTEGER,
+        operatorPriority INTEGER,
         retirementReason TEXT,
         dependencyRecommendation TEXT,
         factSatisfaction TEXT
@@ -2859,6 +2870,9 @@ function decodeTask(row: Row): AdaptiveTask {
     status: row.cancelled ? "cancelled" : row.status as AdaptiveTaskStatus,
     attempts: Number(row.attempts),
     ...(row.prioritized && { prioritized: true }),
+    ...(typeof row.operatorPriority === "number" && {
+      operatorPriority: row.operatorPriority,
+    }),
     ...(row.status === "queued" && typeof row.plannerPriority === "number" && {
       plannerPriority: row.plannerPriority,
     }),
@@ -2934,6 +2948,7 @@ export interface AdaptiveOperatorAssignmentIntentInput {
   readonly reason: string;
   readonly takeOverQueued?: boolean;
   readonly prioritize?: true;
+  readonly priorityRank?: number;
 }
 
 export interface AdaptiveOperatorAssignmentIntentReceipt {
@@ -2949,6 +2964,7 @@ export interface AdaptiveOperatorAssignmentIntentReceipt {
   readonly passingRecheckForFindingId?: string;
   readonly graphRelationship?: SentinelGraphFactRequirement;
   readonly prioritizeNext?: true;
+  readonly priorityRank?: number;
   readonly disposition: "enqueued" | "adopted" | "existing";
   readonly recordedAt: string;
 }
@@ -3966,7 +3982,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
         JOIN adaptive_tasks AS required ON required.id = dependency.dependencyId
         WHERE dependency.taskId = task.id
           AND (required.status != 'completed' OR required.revision != task.revision)
-      ) ORDER BY ${priorityOrder} DESC, task.plannerPriority NULLS LAST, task.rowid
+      ) ORDER BY ${priorityOrder} DESC, COALESCE(task.operatorPriority, 5) DESC, task.plannerPriority NULLS LAST, task.rowid
       ${filter ? "" : "LIMIT 1"}
     `);
     return filter
@@ -4994,6 +5010,13 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
         for (const task of tasks) {
           if (!enqueue(revision, task, time, evidence) || !task.carriedFrom) {
             continue;
+          }
+          const carriedRank = lookup.get(task.carriedFrom)?.operatorPriority;
+          if (typeof carriedRank === "number") {
+            db.prepare(
+              "UPDATE adaptive_tasks SET operatorPriority = ? WHERE id = ? AND status = 'queued'",
+            )
+              .run(carriedRank, task.id);
           }
           const prior = recentPriority.get(task.carriedFrom, task.carriedFrom);
           if (prior?.event === "prioritized") {
@@ -6750,6 +6773,12 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
       input: AdaptiveOperatorAssignmentIntentInput,
     ): AdaptiveOperatorAssignmentIntentReceipt | undefined {
       const requestId = operatorAssignmentRequestId(input.requestId);
+      const rank = input.priorityRank;
+      if (
+        rank !== undefined &&
+        (!Number.isSafeInteger(rank) || rank < 1 || rank > 10 ||
+          input.prioritize)
+      ) return;
       if (
         !requestId || !Number.isSafeInteger(input.evidenceRevision) ||
         input.evidenceRevision < 1
@@ -6765,7 +6794,8 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
               prior.evidenceRevision === input.evidenceRevision &&
               prior.adaptiveRevision === adaptiveRevision &&
               prior.taskId === task.id &&
-              prior.prioritizeNext === input.prioritize
+              prior.prioritizeNext === input.prioritize &&
+              prior.priorityRank === rank
             ? prior
             : undefined;
         }
@@ -6781,7 +6811,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
           return undefined;
         }
 
-        if (input.prioritize && existing) {
+        if ((input.prioritize || rank !== undefined) && existing) {
           const queued = decodeTask(existing);
           if (
             queued.status !== "queued" || queued.plannerRound ||
@@ -6828,6 +6858,12 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
           );
         }
 
+        if (rank !== undefined) {
+          db.prepare(
+            "UPDATE adaptive_tasks SET operatorPriority = ? WHERE id = ?",
+          )
+            .run(rank, task.id);
+        }
         const receipt: AdaptiveOperatorAssignmentIntentReceipt = {
           requestId,
           runId,
@@ -6847,6 +6883,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
               task.plannerRound.passingRecheckForFindingId,
           }),
           ...(input.prioritize && { prioritizeNext: true as const }),
+          ...(rank !== undefined && { priorityRank: rank }),
           disposition,
           recordedAt: new Date(time).toISOString(),
         };
