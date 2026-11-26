@@ -518,7 +518,7 @@ export const operatorRunTool: ToolDefinition = {
     receiptId: {
       type: "string",
       description:
-        "Exact saved Sentinel worker finding or recheck ID. For assign, pair an exact worker finding with note and taskKind trace for a reviewed follow-up.",
+        "Exact saved Sentinel worker finding or recheck ID. For assign or completed_graph_followup, pair a worker finding with note and taskKind trace for reviewed retained evidence analysis.",
     },
     observationId: {
       type: "string",
@@ -1228,6 +1228,22 @@ export const sentinelOperatorCaseControlParameters = [
   "deniedKinds",
   "note",
 ] as const;
+
+function parseReviewedFindingFollowup(
+  receiptId: unknown,
+  note: unknown,
+  context?: OperatorRunToolContext,
+) {
+  if (
+    typeof receiptId !== "string" ||
+    !/^worker-finding:[a-f0-9]{64}$/.test(receiptId) ||
+    typeof note !== "string" || !note.trim() || note.length > 1000 ||
+    /[\p{Cc}\p{Cf}]/u.test(note) || redactCredentialText(note) !== note ||
+    !canFlowTo(context?.inputClassification ?? "INTERNAL", "INTERNAL") ||
+    !canFlowTo("INTERNAL", context?.ceiling ?? "INTERNAL")
+  ) return;
+  return { findingId: receiptId, note: note.trim() };
+}
 
 /** Runtime policy for reopening an approved original tool response. */
 export interface OperatorRunToolContext {
@@ -4374,7 +4390,8 @@ ${
         return enrollment ? safeProjection({ enrollment }) : unavailable;
       }
       if (action === "completed_graph_followup") {
-        const { runId, requestId, taskKind, node } = args;
+        const { runId, requestId, taskKind, node, receiptId, note } = args;
+        const finding = parseReviewedFindingFollowup(receiptId, note, context);
         if (
           ref.kind !== "sentinel" || ref.revision === undefined ||
           !canFlowTo("INTERNAL", context?.ceiling ?? "INTERNAL") ||
@@ -4383,6 +4400,8 @@ ${
           (taskKind !== "trace" && taskKind !== "impact") ||
           typeof node !== "string" || !node.trim() || node.length > 100 ||
           node.includes("\0") ||
+          ((receiptId !== undefined || note !== undefined) &&
+            (!finding || taskKind !== "trace")) ||
           Object.keys(args).some((key) =>
             ![
               "action",
@@ -4393,6 +4412,8 @@ ${
               "requestId",
               "taskKind",
               "node",
+              "receiptId",
+              "note",
             ].includes(key)
           ) ||
           !await controller.inspect(ref)
@@ -4404,15 +4425,34 @@ ${
           evidenceRevision: ref.revision,
           kind: taskKind,
           nodeId: node,
+          ...(finding && { finding }),
         } as const;
-        const before = reviewSentinelCompletedGraphFollowup(path, request);
+        const readFinding = (
+          state: NonNullable<ReturnType<typeof readSentinelAssessment>>,
+          source: NonNullable<typeof finding>,
+        ) =>
+          readSentinelFindingFollowup(
+            path,
+            state,
+            node,
+            source.findingId,
+            source.note,
+          );
+        const before = reviewSentinelCompletedGraphFollowup(
+          path,
+          request,
+          undefined,
+          readFinding,
+        );
         if (before?.receipt) {
           return safeProjection({ run: ref, receipt: before.receipt });
         }
         if (!before?.binding) return unavailable;
         if (
           !await options.confirm(
-            `Run this exact graph investigation on the completed assessment?\n${
+            `Run this exact ${
+              finding ? "retained finding review" : "graph investigation"
+            } on the completed assessment?\n${
               JSON.stringify({ run: ref, depth: 1, ...before.binding })
             }`,
           )
@@ -4422,7 +4462,7 @@ ${
           binding,
           execute: (state, constraints) =>
             executeCompletedSentinelGraphFollowup(state, binding, constraints),
-        });
+        }, readFinding);
         return result?.receipt
           ? safeProjection({ run: ref, receipt: result.receipt })
           : unavailable;
@@ -5003,23 +5043,12 @@ ${
           typeof node !== "string" || !node.trim() || node.length > 4096 ||
           node.includes("\0")
         ) return unavailable;
-        const isFindingFollowup = receiptId !== undefined || note !== undefined;
+        const finding = parseReviewedFindingFollowup(receiptId, note, context);
         if (
-          isFindingFollowup && (
-            taskKind !== "trace" || recheckFindingId !== undefined ||
+          (receiptId !== undefined || note !== undefined) &&
+          (!finding || taskKind !== "trace" || recheckFindingId !== undefined ||
             passingRecheckForFindingId !== undefined ||
-            graphRelationship !== undefined ||
-            typeof receiptId !== "string" ||
-            !/^worker-finding:[a-f0-9]{64}$/.test(receiptId) ||
-            typeof note !== "string" || !note.trim() || note.length > 1000 ||
-            /[\p{Cc}\p{Cf}]/u.test(note) ||
-            redactCredentialText(note) !== note ||
-            !canFlowTo(
-              context?.inputClassification ?? "INTERNAL",
-              "INTERNAL",
-            ) ||
-            !canFlowTo("INTERNAL", context?.ceiling ?? "INTERNAL")
-          )
+            graphRelationship !== undefined)
         ) return unavailable;
         const relationship = graphRelationship === undefined
           ? undefined
@@ -5090,21 +5119,19 @@ ${
           ? undefined
           : await reopen();
         if (recheckFindingId !== undefined && !original) return unavailable;
-        const findingState = isFindingFollowup
-          ? readSentinelAssessment(path)
-          : undefined;
+        const findingState = finding ? readSentinelAssessment(path) : undefined;
         const findingFollowup = findingState?.revision === ref.revision &&
             findingState.plan.runId === runId.toLowerCase() &&
-            typeof receiptId === "string" && typeof note === "string"
+            finding
           ? readSentinelFindingFollowup(
             path,
             findingState,
             node,
-            receiptId,
-            note.trim(),
+            finding.findingId,
+            finding.note,
           )
           : undefined;
-        if (isFindingFollowup && !findingFollowup) return unavailable;
+        if (finding && !findingFollowup) return unavailable;
         const intent = {
           requestId: requestId.toLowerCase(),
           runId: runId.toLowerCase(),

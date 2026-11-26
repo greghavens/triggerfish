@@ -3260,6 +3260,10 @@ export function reviewSentinelCompletedGraphFollowup(
       constraints?: SentinelOperatingConstraints,
     ) => CompletedSentinelGraphFollowupReceipt["observation"];
   },
+  readFinding?: (
+    state: StoredAssessment,
+    finding: NonNullable<CompletedSentinelGraphFollowupRequest["finding"]>,
+  ) => CompletedSentinelGraphFollowupBinding["findingFollowup"],
 ) {
   const db = openStore(path, false);
   if (!db) return;
@@ -3291,8 +3295,14 @@ export function reviewSentinelCompletedGraphFollowup(
           snapshot,
         )
       ) return;
+      const { finding, ...scope } = request;
+      const findingFollowup = finding && request.kind === "trace"
+        ? readFinding?.(state, finding)
+        : undefined;
+      if (finding && !findingFollowup) return;
       const binding: CompletedSentinelGraphFollowupBinding = {
-        ...request,
+        ...scope,
+        ...(findingFollowup && { findingFollowup }),
         graphSha256: createHash("sha256").update(JSON.stringify(snapshot))
           .digest("hex"),
         completionSha256: createHash("sha256").update(

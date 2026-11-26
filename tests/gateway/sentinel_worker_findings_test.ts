@@ -56,6 +56,7 @@ import {
 import { openSentinelAdaptiveStore } from "../../src/sentinel/adaptive_store.ts";
 import {
   applySentinelFormalGoals,
+  completeSentinelAssessmentGoal,
   pauseSentinelAssessment,
   readSentinelAssessment,
   recordSentinelOperatingConstraints,
@@ -4462,6 +4463,75 @@ Deno.test("Reviewed Sentinel finding follow-up preserves the originating report 
     } finally {
       journal.close();
     }
+    planner.stop();
+    const finalState = readSentinelAssessment(path);
+    assert(finalState?.active);
+    assert(completeSentinelAssessmentGoal(
+      path,
+      finalState.revision,
+      finalState.plan.goal ?? null,
+      "Reviewed original goal evidence.",
+    ));
+    const completed = readSentinelAssessment(path);
+    assert(completed?.completion);
+    assertEquals(completed.active, false);
+    const terminal = {
+      action: "completed_graph_followup",
+      kind: "sentinel",
+      id: "main",
+      revision: completed.revision,
+      runId: completed.plan.runId,
+      requestId: crypto.randomUUID(),
+      taskKind: "trace",
+      node: "app",
+      receiptId: record.id,
+      note: "Review the retained local graph around the published finding.",
+    };
+    let terminalConfirmations = 0;
+    let terminalReceipt:
+      | { findingFollowup: typeof saved.findingFollowup }
+      | undefined;
+    await withFindingAssignmentGateway(baseDir, () => {
+      terminalConfirmations++;
+      return Promise.resolve(true);
+    }, async (turn) => {
+      for (
+        const unsupported of [
+          { ...terminal, node: "neighbor" },
+          { ...terminal, taskKind: "impact" },
+          { ...terminal, receiptId: `worker-finding:${"f".repeat(64)}` },
+        ]
+      ) {
+        assertStringIncludes(await turn(unsupported), "unavailable");
+      }
+      assertEquals(terminalConfirmations, 0);
+      terminalReceipt = JSON.parse(await turn(terminal)).receipt;
+      assertEquals(terminalReceipt?.findingFollowup, {
+        ...saved.findingFollowup,
+        assignedRevision: completed.revision,
+        note: terminal.note,
+      });
+      assertEquals(terminalConfirmations, 1);
+    });
+    assert(terminalReceipt);
+    await withFindingAssignmentGateway(baseDir, () => {
+      throw new Error(
+        "Completed review replay must not request approval again",
+      );
+    }, async (turn) => {
+      assertEquals(JSON.parse(await turn(terminal)).receipt, terminalReceipt);
+      assertStringIncludes(await turn(input), "unavailable");
+      const status = JSON.parse(
+        await turn({
+          action: "inspect",
+          kind: "sentinel",
+          id: "main",
+          revision: completed.revision,
+        }),
+      ).run;
+      assertEquals(status.status, "completed");
+    });
+    assertEquals(readSentinelAssessment(path), completed);
     await withTidepool(baseDir, async (list) => {
       assertEquals(
         (await list(state.revision)).filter(({ id }) => id === record.id),

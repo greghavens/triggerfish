@@ -333,6 +333,15 @@ The `md-zip` response provides a base64 ZIP with one Markdown file per finding,
 a suggested `filename`, and `contentType: application/zip`. Each file retains the
 same reviewed report and exact evidence references as the Markdown export.
 
+In authenticated owner chat, add `receiptId` and reviewed `note` to an
+`operator_runs assign` trace for a saved worker finding on the selected
+asset. The assignment keeps the original finding, report version and
+evidence references. A paused case holds the assignment until resume.
+For a completed assessment, use `completed_graph_followup` with the same
+finding and note. It records a read-only review of the saved graph and
+keeps the assessment completed. This review does not perform a new control
+check.
+
 In authenticated owner chat, use `operator_runs finding_groups` with
 `scopes` containing one to four exact case IDs and saved revisions. Each
 group reports its count of imported and worker findings and has an independent

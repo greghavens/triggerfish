@@ -1,7 +1,10 @@
 /** One reviewed local investigation on an already completed assessment. */
 import { createHash } from "node:crypto";
 import { executeSentinelTask } from "./adaptive_planner.ts";
-import { sentinelAdaptiveTaskId } from "./adaptive_store.ts";
+import {
+  type AdaptiveFindingFollowup,
+  sentinelAdaptiveTaskId,
+} from "./adaptive_store.ts";
 import type { readSentinelAssessment } from "./assessment_store.ts";
 import {
   type SentinelOperatingConstraints,
@@ -14,10 +17,12 @@ export interface CompletedSentinelGraphFollowupRequest {
   readonly evidenceRevision: number;
   readonly kind: "trace" | "impact";
   readonly nodeId: string;
+  readonly finding?: Pick<AdaptiveFindingFollowup, "findingId" | "note">;
 }
 
 export interface CompletedSentinelGraphFollowupBinding
-  extends CompletedSentinelGraphFollowupRequest {
+  extends Omit<CompletedSentinelGraphFollowupRequest, "finding"> {
+  readonly findingFollowup?: AdaptiveFindingFollowup;
   readonly graphSha256: string;
   readonly completionSha256: string;
   readonly constraintsVersion: number;
