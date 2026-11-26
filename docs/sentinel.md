@@ -61,6 +61,10 @@ restarts. Paused, stopped, and completed assessments skip idle rounds.
 When starting a linked Sentinel run with `operator_runs spawn`, pass
 `plannerHeartbeatSeconds` to approve an interval for that run only. Omitting
 it uses the gateway setting.
+Pass `childGoal` to review and set the linked assessment's initial
+objective. The planner uses that objective on its first round. Retrying
+the same request requires the original objective, including its omission
+if the first request did not set one.
 To make an existing provider selectable for linked assessments, list its
 name in `sentinel.model_profile_allowlists.INTERNAL` (for example,
 `INTERNAL: [ollama]`). The owner tool lists permitted choices with

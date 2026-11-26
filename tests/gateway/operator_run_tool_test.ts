@@ -3136,8 +3136,39 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
         JSON.parse(confirmations.at(-1)!.split("\n").at(-1)!).childGoal,
         childGoal,
       );
-      assertEquals(readSentinelAssessment(childPath)?.plan.goal, childGoal);
+      const childState = readSentinelAssessment(childPath);
+      assert(childState);
+      assertEquals(childState.plan.goal, childGoal);
       assert(readSentinelAssessment(path)?.plan.goal !== childGoal);
+      let plannerObjective: string | undefined;
+      const childPlanner = createSentinelModelPlanner(
+        childPath,
+        (_state, taskId) => ({
+          execute(message, send) {
+            if (!taskId) {
+              assert(typeof message === "string");
+              plannerObjective = JSON.parse(message.split("\n").at(-1)!).goal;
+            }
+            send({
+              type: "response",
+              text: taskId
+                ? '{"summary":"Reviewed the child evidence.","followUps":[]}'
+                : '{"assignments":[],"prioritize":[]}',
+              taint: "INTERNAL",
+            });
+            return Promise.resolve();
+          },
+          clear() {},
+        }),
+      );
+      try {
+        childPlanner.advance(childState);
+        await until(() => plannerObjective !== undefined);
+        assertEquals(plannerObjective, childGoal);
+        await until(() => !childPlanner.hasInFlightWork());
+      } finally {
+        childPlanner.stop();
+      }
       const lastApproval = confirmations.length;
       await withGateway(async (reopenTurn) => {
         const reopened = JSON.parse((await reopenTurn(sentinelSpawn)).result);
