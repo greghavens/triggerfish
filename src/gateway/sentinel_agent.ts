@@ -10,9 +10,10 @@ import {
   SENTINEL_SAVED_REPOSITORY_VISIBILITY,
   type SentinelRepositoryVisibilityReference,
 } from "../sentinel/github_repository_visibility.ts";
-import type {
-  createSentinelRepositoryVisibilityReader,
-  SentinelRepositoryVisibilityDestination,
+import {
+  type createSentinelRepositoryVisibilityReader,
+  repositoryVisibilityDestinationMetadata,
+  type SentinelRepositoryVisibilityDestination,
 } from "./sentinel_repository_visibility.ts";
 import { readAdaptiveRepositoryVisibility } from "../sentinel/adaptive_store.ts";
 import {
@@ -2255,20 +2256,12 @@ async function authorizeRepositoryVisibilityDestination(
   replay: boolean,
 ) {
   if (!current() || destination.caseId !== caseId) return false;
-  const metadata = {
-    tool_name: SENTINEL_LIVE_REPOSITORY_VISIBILITY,
-    operation_type: "read",
-    resource_classification: "INTERNAL",
-    is_outbound_request: true,
-    is_owner: true,
-    url: destination.url,
-    sentinel_case_id: caseId,
-    sentinel_evidence_revision: evidenceRevision,
-    sentinel_task_id: taskId,
-    repository: destination.repository,
-    repository_id: destination.repositoryId,
+  const metadata = repositoryVisibilityDestinationMetadata(
+    destination,
+    evidenceRevision,
+    taskId,
     replay,
-  };
+  );
   const decision = await options.hookRunner.evaluateHook("PRE_TOOL_CALL", {
     session,
     input: {

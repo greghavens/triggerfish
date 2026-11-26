@@ -133,6 +133,11 @@ export function buildMainChatSession(
       resumeScheduledExecution: coreInfra.schedulerService
         ?.resumeScheduledExecution,
       readLiveWorkflow,
+      readRepositoryVisibility: configuredSentinelRepositoryVisibilityReader(
+        bootstrap.config,
+        bootstrap.baseDir,
+        createKeychain,
+      ),
       sentinelModelAccess:
         bootstrap.config.sentinel?.allow_model_access === true,
       sentinelGatewayWorkerLimit:

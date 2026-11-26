@@ -6,6 +6,7 @@ import type { SsrfChecker } from "../core/security/safe_fetch.ts";
 import { visibilityToClassification } from "../integrations/github/client.ts";
 import {
   repositoryVisibilityReceipt,
+  SENTINEL_LIVE_REPOSITORY_VISIBILITY,
   type SentinelRepositoryVisibilityReceipt,
 } from "../sentinel/github_repository_visibility.ts";
 import {
@@ -22,6 +23,28 @@ export interface SentinelRepositoryVisibilityDestination {
   readonly caseId: string;
   readonly repository: string;
   readonly repositoryId: number;
+}
+
+export function repositoryVisibilityDestinationMetadata(
+  destination: SentinelRepositoryVisibilityDestination,
+  evidenceRevision: number,
+  taskId: string,
+  replay: boolean,
+) {
+  return {
+    tool_name: SENTINEL_LIVE_REPOSITORY_VISIBILITY,
+    operation_type: "read",
+    resource_classification: "INTERNAL",
+    is_outbound_request: true,
+    is_owner: true,
+    url: destination.url,
+    sentinel_case_id: destination.caseId,
+    sentinel_evidence_revision: evidenceRevision,
+    sentinel_task_id: taskId,
+    repository: destination.repository,
+    repository_id: destination.repositoryId,
+    replay,
+  };
 }
 
 export function createSentinelRepositoryVisibilityReader(options: {

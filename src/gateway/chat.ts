@@ -1,3 +1,4 @@
+import { repositoryVisibilityDestinationMetadata } from "./sentinel_repository_visibility.ts";
 import { createHash } from "node:crypto";
 import {
   checkpointOwnerCompaction,
@@ -771,6 +772,31 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
           { resultText: result, blocked: false },
         );
         return !response.blocked && isCurrent();
+      },
+      async authorizeRepositoryVisibilityDestination(
+        destination,
+        revision,
+        taskId,
+      ) {
+        if (!isCurrent()) return false;
+        const metadata = repositoryVisibilityDestinationMetadata(
+          destination,
+          revision,
+          taskId,
+          true,
+        );
+        const outcome = await config.hookRunner.evaluateHook("PRE_TOOL_CALL", {
+          session: { ...session, taint: taint() },
+          input: {
+            ...metadata,
+            tool_call: {
+              name: metadata.tool_name,
+              args: { url: destination.url },
+            },
+          },
+          auditInput: metadata,
+        });
+        return outcome.allowed && outcome.action === "ALLOW" && isCurrent();
       },
       async authorizeWorkflowDestination(destination, revision, taskId) {
         if (!isCurrent()) return false;

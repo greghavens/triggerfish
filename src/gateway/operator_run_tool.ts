@@ -1,3 +1,8 @@
+import type {
+  createSentinelRepositoryVisibilityReader,
+  SentinelRepositoryVisibilityDestination,
+} from "./sentinel_repository_visibility.ts";
+import { SENTINEL_LIVE_REPOSITORY_VISIBILITY } from "../sentinel/github_repository_visibility.ts";
 import { isWorkerNarrativeId } from "../sentinel/worker_narratives.ts";
 import {
   readLinkedSentinelWorkerReview,
@@ -40,6 +45,7 @@ import {
   type AdaptiveOperatorHintSelection,
   normalizeSentinelAssignmentQuestion,
   normalizeSentinelHintAssets,
+  readAdaptiveRepositoryVisibility,
   sentinelAssignmentQuestionDigest,
 } from "../sentinel/adaptive_store.ts";
 import { applyOperatorRunBatch } from "./operator_run_batch_control.ts";
@@ -239,6 +245,7 @@ import {
   readSentinelGitHubWorkflowReadReceipt,
   readSentinelGoalSupersessionSource,
   readSentinelIncidentReviews,
+  readSentinelLatestRunRevision,
   readSentinelLinkedSourcesForRevision,
   readSentinelModelRoute,
   readSentinelOperatingConstraintHistory,
@@ -1604,6 +1611,11 @@ export interface OperatorRunToolContext {
     call: Record<string, unknown>,
     result?: string,
   ) => Promise<boolean>;
+  readonly authorizeRepositoryVisibilityDestination?: (
+    destination: SentinelRepositoryVisibilityDestination,
+    revision: number,
+    taskId: string,
+  ) => Promise<boolean>;
   readonly authorizeWorkflowDestination?: (
     destination: SentinelLiveWorkflowDestination,
     revision: number,
@@ -2648,6 +2660,120 @@ async function authorizeSentinelWorkflowObservation(
     ) && allowed();
 }
 
+/** Reopen exact repository metadata under the original live operation policy. */
+export async function reopenOwnedSentinelRepositoryVisibility(
+  reader:
+    | ReturnType<typeof createSentinelRepositoryVisibilityReader>
+    | undefined,
+  context: OperatorRunToolContext | undefined,
+  scope: {
+    caseId: string;
+    path: string;
+    runId: string;
+    revision: number;
+    taskId: string;
+    assetId: string;
+    sourceStepIndex: number;
+    resultSha256?: string;
+  },
+  isCurrent: () => boolean,
+) {
+  const authorize = context?.authorizeRepositoryVisibilityDestination;
+  const authorizeTrace = context?.authorizeSentinelTraceRead;
+  if (!reader || !authorize || !authorizeTrace) return;
+  const {
+    caseId,
+    path,
+    runId,
+    revision,
+    taskId,
+    assetId,
+    sourceStepIndex,
+    resultSha256,
+  } = scope;
+  const lookup = () =>
+    readAdaptiveRepositoryVisibility(
+      join(dirname(path), "sentinel-adaptive.db"),
+      runId,
+      revision,
+      taskId,
+      assetId,
+      true,
+    );
+  const stored = lookup();
+  if (
+    !stored?.reference ||
+    stored.reference.sourceStepIndex !== sourceStepIndex ||
+    (resultSha256 !== undefined &&
+      stored.reference.resultSha256 !== resultSha256)
+  ) return;
+  const policy = () => {
+    const currentRevision = readSentinelLatestRunRevision(path, runId) ??
+      revision;
+    const saved = readSentinelOperatingConstraints(path, runId, revision);
+    const current = readSentinelOperatingConstraints(path, runId);
+    for (
+      const [number, constraints] of [[revision, saved], [
+        currentRevision,
+        current,
+      ]] as const
+    ) {
+      const graph = readSentinelAssessmentRevision(path, number)?.result
+        .sharedGraph.snapshot;
+      if (
+        !graph?.nodes.some(({ id, kind }) =>
+          id === assetId && kind === "asset"
+        ) ||
+        !sentinelOperatingConstraintsAllow(
+          constraints?.constraints,
+          { kind: "review_evidence", nodeId: assetId },
+          graph,
+        )
+      ) return;
+    }
+    return JSON.stringify([
+      currentRevision,
+      saved?.digest,
+      current?.digest,
+      current?.version,
+    ]);
+  };
+  const expected = policy();
+  const current = () =>
+    !!expected && isCurrent() && policy() === expected &&
+    isDeepStrictEqual(stored, lookup());
+  const traceScope = { caseId, revision, taskId };
+  const tool = SENTINEL_LIVE_REPOSITORY_VISIBILITY;
+  if (!current() || !await authorizeTrace(traceScope, tool, {}) || !current()) {
+    return;
+  }
+  const saved = await reader({
+    caseId,
+    assetId,
+    evidenceRevision: revision,
+    signal: new AbortController().signal,
+    resumeOnly: true,
+    isCurrent: current,
+    loadSaved: () => stored.receipt,
+    saveResult: () => undefined,
+    authorize: (destination) =>
+      destination.caseId === caseId && current()
+        ? authorize(destination, revision, taskId)
+        : Promise.resolve(false),
+  });
+  if (
+    !isDeepStrictEqual(saved, stored.receipt) || !current() ||
+    !await authorizeTrace(
+      traceScope,
+      tool,
+      {},
+      JSON.stringify(stored.projection),
+    ) ||
+    !current()
+  ) return;
+  return stored.projection;
+}
+
 export function createOperatorRunToolExecutor(options: {
   readonly baseDir: string;
   readonly confirm: (message: string) => Promise<boolean>;
@@ -2656,6 +2782,10 @@ export function createOperatorRunToolExecutor(options: {
   readonly readLiveWorkflow?: ReturnType<
     typeof createSentinelLiveWorkflowReader
   >;
+  readonly readRepositoryVisibility?: ReturnType<
+    typeof createSentinelRepositoryVisibilityReader
+  >;
+
   readonly authorizeExecutionTracePayload?: (
     payload: ExecutionTraceApprovedPayload,
     classification: ClassificationLevel,
@@ -10163,6 +10293,62 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
                 index,
                 result: JSON.parse(text),
               });
+            }
+            if (step?.tool === SENTINEL_LIVE_REPOSITORY_VISIBILITY) {
+              const task = history?.tasks.find(({ id }) => id === taskId);
+              const revision = ref.revision;
+              const assetId = task?.nodeId;
+              const resultSha256 = step.goalReceiptRead?.sha256 ??
+                step.resultSha256;
+              if (
+                !assetId || typeof taskId !== "string" ||
+                step.outcome !== "returned" || revision === undefined
+              ) return unavailable;
+              const current = () => {
+                if (
+                  context.authorizeSelectedSentinelCase &&
+                  !context.authorizeSelectedSentinelCase()
+                ) return false;
+                const retained = readHistoricalAdaptiveSentinel(
+                  path,
+                  revision,
+                  undefined,
+                  false,
+                  true,
+                );
+                const source = savedStep(retained);
+                return retained?.goal.id === runId &&
+                  source?.tool === step.tool &&
+                  source.outcome === "returned" &&
+                  (source.goalReceiptRead?.sha256 ?? source.resultSha256) ===
+                    resultSha256 &&
+                  retained.tasks.find(({ id }) => id === taskId)?.nodeId ===
+                    assetId;
+              };
+              const reopened = await reopenOwnedSentinelRepositoryVisibility(
+                options.readRepositoryVisibility,
+                context,
+                {
+                  caseId: ref.id,
+                  path,
+                  runId,
+                  revision,
+                  taskId,
+                  assetId,
+                  sourceStepIndex: index,
+                  resultSha256,
+                },
+                current,
+              );
+              return reopened
+                ? projectResult({
+                  run: ref,
+                  runId,
+                  taskId,
+                  index,
+                  result: reopened,
+                })
+                : unavailable;
             }
             if (step?.tool === "sentinel_live_workflow_status") {
               const task = history?.tasks.find(({ id }) => id === taskId);

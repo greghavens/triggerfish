@@ -188,6 +188,11 @@ async function withGateway(
     },
     decideApproval: (id: string) => Promise<Record<string, unknown>>,
   ) => Promise<void>,
+  visibility?: {
+    reader: ReturnType<typeof createSentinelRepositoryVisibilityReader>;
+    allowsHook: (hook: string, input: Record<string, unknown>) => boolean;
+    onFrame: (frame: string) => void;
+  },
 ) {
   const approvals: string[] = [];
   const policy = {
@@ -251,8 +256,9 @@ async function withGateway(
         policy.afterWorkerObservation?.();
       }
 
-      const allowed = !(policy.denyArchive && hook === "PRE_TOOL_CALL" &&
-        call?.args?.action === "archive") &&
+      const allowed = (visibility?.allowsHook(hook, input) ?? true) &&
+        !(policy.denyArchive && hook === "PRE_TOOL_CALL" &&
+          call?.args?.action === "archive") &&
         !(policy.denyReportAmendment && hook === "PRE_TOOL_CALL" &&
           call?.args?.action === "amend_finding_report") &&
         !(policy.denyDispositionReview && hook === "PRE_TOOL_CALL" &&
@@ -319,6 +325,7 @@ async function withGateway(
     hookRunner: hooks,
     operatorRunExecutor: createOperatorRunToolExecutor({
       baseDir,
+      readRepositoryVisibility: visibility?.reader,
       readLiveWorkflow: createSentinelLiveWorkflowReader({
         scopes: [{
           case: "restorable",
@@ -348,6 +355,13 @@ async function withGateway(
   const server = createGatewayServer({ port: 0, token, chatSession });
   const { port } = await server.start();
   const socket = new WebSocket(`ws://127.0.0.1:${port}/chat?token=${token}`);
+  if (visibility) {
+    socket.addEventListener(
+      "message",
+      ({ data }) => visibility.onFrame(String(data)),
+    );
+  }
+
   try {
     await new Promise<void>((done, fail) => {
       socket.addEventListener("open", () => done(), { once: true });
@@ -628,6 +642,25 @@ Deno.test("Repository visibility archives validate canonical scope before instal
       journal.close();
     }
     advanceAdaptiveSentinel(path, state);
+    const sourceReview = openSentinelAdaptiveStore(database);
+    try {
+      const lease = sourceReview.claimModelReview(
+        adaptive,
+        "Archive source",
+        ({ id }) => id === source,
+      );
+      assert(lease);
+      assert(
+        sourceReview.finishModelReview(
+          adaptive,
+          source,
+          lease.token,
+          "interrupted",
+        ),
+      );
+    } finally {
+      sourceReview.close();
+    }
     assert(stopSentinelAssessment(path));
     const ref = {
       kind: "sentinel",
@@ -909,6 +942,75 @@ Deno.test("Repository visibility archives validate canonical scope before instal
       reference: { taskId: source, sourceStepIndex: 0, resultSha256: digest },
     });
     assertEquals([fetches, credentialChecks], [0, 2]);
+
+    let denied: "destination" | "source-response" | "output" | undefined;
+    const transport: string[] = [];
+    const hooksSeen = new Set<string>();
+    const exact = {
+      kind: ref.kind,
+      id: ref.id,
+      revision: ref.revision,
+      action: "worker_trace_result",
+      taskId: source,
+      stepIndices: [0],
+    };
+    await withGateway(baseDir, async (turn) => {
+      assertStringIncludes(
+        await turn({ ...exact, stepIndices: [1] }),
+        "unavailable",
+      );
+      denied = "destination";
+      assertStringIncludes(await turn(exact), "unavailable");
+      assertEquals(credentialChecks, 2);
+      denied = "source-response";
+      assertStringIncludes(await turn(exact), "unavailable");
+      assertEquals(credentialChecks, 3);
+      denied = "output";
+      transport.length = 0;
+      assertEquals(JSON.parse(await turn(exact)).result, projection);
+      assert(!transport.some((frame) => frame.includes(raw.repository)));
+      denied = undefined;
+      assertEquals(JSON.parse(await turn(exact)).result, projection);
+      assertEquals(
+        hooksSeen,
+        new Set(["trace-pre", "destination", "source-response", "output"]),
+      );
+      assertEquals([fetches, credentialChecks], [0, 5]);
+    }, {
+      reader,
+      onFrame: (frame) => transport.push(frame),
+      allowsHook(hook, input) {
+        if (
+          hook === "PRE_OUTPUT" && typeof input.content === "string" &&
+          input.content.includes(raw.repository)
+        ) {
+          hooksSeen.add("output");
+          return denied !== "output";
+        }
+        if (
+          input.tool_name !== SENTINEL_LIVE_REPOSITORY_VISIBILITY
+        ) return true;
+        if (hook === "PRE_TOOL_CALL" && typeof input.url === "string") {
+          assertEquals(input.sentinel_case_id, caseId);
+          assertEquals(input.sentinel_evidence_revision, state.revision);
+          assertEquals(input.sentinel_task_id, source);
+          assertEquals(input.repository_id, raw.repositoryId);
+          assertEquals(input.replay, true);
+          hooksSeen.add("destination");
+          return denied !== "destination";
+        }
+        if (hook === "PRE_TOOL_CALL") {
+          assertEquals(input.assignment_id, source);
+          hooksSeen.add("trace-pre");
+        } else if (hook === "POST_TOOL_RESPONSE") {
+          assertEquals(input.assignment_id, source);
+          assertEquals(JSON.parse(String(input.tool_response)), projection);
+          hooksSeen.add("source-response");
+          return denied !== "source-response";
+        }
+        return true;
+      },
+    });
   } finally {
     await Deno.remove(baseDir, { recursive: true });
   }
