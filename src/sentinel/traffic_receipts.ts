@@ -60,6 +60,20 @@ export interface SentinelTrafficReceiptQuery {
 const EVIDENCE_ID = /^(?:har|dns):evidence:[a-f0-9]{64}$/;
 const DIGEST = /^[a-f0-9]{64}$/;
 const ASSET_ID = /^(?:har:asset|dns:(?:name|address)):[a-f0-9]{64}$/;
+export interface SentinelHintTrafficReference {
+  readonly evidenceId: string;
+  readonly digest: string;
+}
+export function isSentinelHintTrafficReference(
+  value: unknown,
+): value is SentinelHintTrafficReference {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const ref = value as Record<string, unknown>;
+  return Object.keys(ref).length === 2 &&
+    typeof ref.evidenceId === "string" && EVIDENCE_ID.test(ref.evidenceId) &&
+    typeof ref.digest === "string" && DIGEST.test(ref.digest);
+}
+
 const METHODS = new Set([
   "GET",
   "HEAD",

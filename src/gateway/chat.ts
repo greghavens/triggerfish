@@ -617,7 +617,7 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
       ceiling: ownerTargetClassification,
       inputClassification: taint(),
       authenticatedOwnerSessionId: session.id,
-      async authorizeLiveModelRouteChange(args) {
+      async authorizeOwnerRunCall(args) {
         if (!isCurrent()) return false;
         const allowed = await authorizeSavedToolCalls(
           [{ name: operatorRunTool.name, args }],

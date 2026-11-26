@@ -515,6 +515,7 @@ export function createOperatorSentinelRuns(
             context.note,
             undefined,
             context.assetIds,
+            context.trafficReference,
           )
           ? inspect(ref)
           : undefined;

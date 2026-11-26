@@ -66,6 +66,10 @@ export interface OperatorRunMutationContext {
   readonly taskId?: string;
   readonly expectedRunId?: string;
   readonly assetIds?: readonly string[];
+  readonly trafficReference?: {
+    readonly evidenceId: string;
+    readonly digest: string;
+  };
 }
 
 export interface OperatorRunProvider {
@@ -727,7 +731,14 @@ export class OperatorRunController {
     if (!await this.options.authorize(action, ref)) return undefined;
     const mutate = this.options.providers[ref.kind]?.mutations?.[action];
     if (!mutate) return undefined;
-    const { requestId, note, taskId, expectedRunId, assetIds } = context ?? {};
+    const {
+      requestId,
+      note,
+      taskId,
+      expectedRunId,
+      assetIds,
+      trafficReference,
+    } = context ?? {};
     if (
       (requestId !== undefined && !bounded(requestId, 128)) ||
       (note !== undefined && !bounded(note, 4096)) ||
@@ -737,7 +748,12 @@ export class OperatorRunController {
         (action !== "hint" || !Array.isArray(assetIds) ||
           !assetIds.length || assetIds.length > 4 ||
           new Set(assetIds).size !== assetIds.length ||
-          assetIds.some((id) => !bounded(id, 100))))
+          assetIds.some((id) => !bounded(id, 100)))) ||
+      (trafficReference !== undefined &&
+        (action !== "hint" || assetIds?.length !== 1 ||
+          !trafficReference || Object.keys(trafficReference).length !== 2 ||
+          !bounded(trafficReference.evidenceId, 100) ||
+          !/^[a-f0-9]{64}$/.test(trafficReference.digest)))
     ) throw new Error("Invalid operator run mutation context");
     // Starts target a configured plan ID. All other actions target an existing run.
     const exact = action === "start" ? ref : (await this.inspect(ref))?.ref;
@@ -754,6 +770,7 @@ export class OperatorRunController {
         taskId,
         ...(expectedRunId !== undefined && { expectedRunId }),
         ...(assetIds && { assetIds }),
+        ...(trafficReference && { trafficReference }),
       },
     );
     if (!result) return undefined;

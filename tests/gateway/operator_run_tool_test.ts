@@ -1,3 +1,4 @@
+import { captureStoppedSentinelCaseArtifacts } from "../../src/sentinel/case_archive_capture.ts";
 import type { OwnerAgentRecoveryExecutor } from "../../src/gateway/chat_session_config.ts";
 import { buildWorkflowRecoveryExecutor } from "../../src/gateway/startup/factory/agent_recovery.ts";
 import { createMemorySecretStore } from "../../src/core/secrets/mod.ts";
@@ -177,6 +178,7 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
     },
   });
   let originalToolInvocations = 0;
+  let denyTrafficHintSource = false;
   let denyTraceSource: "PRE_TOOL_CALL" | "POST_TOOL_RESPONSE" | undefined;
   const traceSourceChecks: string[] = [];
   const workflowPayload = {
@@ -339,6 +341,17 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
         ) {
           assertEquals(input.operation_type, "read");
           assertEquals(auditInput?.operation_type, "read");
+        }
+        if (
+          denyTrafficHintSource && hook === "PRE_TOOL_CALL" &&
+          runTool && call?.args?.action === "traffic_get"
+        ) {
+          return Promise.resolve({
+            allowed: false,
+            action: "BLOCK",
+            ruleId: null,
+            duration: 0,
+          });
         }
         const workflowSource =
           input.tool_name === "sentinel_live_workflow_status";
@@ -1010,6 +1023,89 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
       const traffic = readSentinelTrafficReceiptPage(peerPath, peer.revision)
         ?.receipts[0];
       assert(traffic);
+      const trafficHint = {
+        action: "hint",
+        ...peer,
+        requestId: crypto.randomUUID(),
+        note: "Review the recorded response on this asset.",
+        assetIds: [traffic.assetIds[0]],
+        trafficReference: {
+          evidenceId: traffic.evidenceId,
+          digest: traffic.digest,
+        },
+      };
+      const trafficApprovals = confirmations.length;
+      assertStringIncludes(
+        (await turn({
+          ...trafficHint,
+          trafficReference: {
+            ...trafficHint.trafficReference,
+            digest: "0".repeat(64),
+          },
+        })).result,
+        "unavailable",
+      );
+      assertStringIncludes(
+        (await turn({ ...trafficHint, assetIds: ["peer-asset"] })).result,
+        "unavailable",
+      );
+      assertStringIncludes(
+        (await turn({ ...trafficHint, revision: peer.revision + 1 })).result,
+        "unavailable",
+      );
+      denyTrafficHintSource = true;
+      assertStringIncludes((await turn(trafficHint)).result, "unavailable");
+      denyTrafficHintSource = false;
+      assertEquals(confirmations.length, trafficApprovals);
+      const trafficHintResult = (await turn(trafficHint)).result;
+      assert(
+        !trafficHintResult.startsWith("Error:"),
+        JSON.stringify({
+          trafficHintResult,
+          approvals: confirmations.length - trafficApprovals,
+        }),
+      );
+      assertEquals(JSON.parse(trafficHintResult).run.ref, peer);
+      assertEquals(JSON.parse((await turn(trafficHint)).result).run.ref, peer);
+      assertEquals(confirmations.length, trafficApprovals + 1);
+      const [trafficHintReceipt] = readSentinelCaseHints(peerPath, 10);
+      assertEquals(
+        trafficHintReceipt.trafficReference,
+        trafficHint.trafficReference,
+      );
+      let plannerHints: unknown;
+      const trafficPlanner = createSentinelModelPlanner(
+        peerPath,
+        (_state, taskId) => ({
+          execute(message, send) {
+            if (!taskId) {
+              assert(typeof message === "string");
+              assert(!message.includes(trafficSecret));
+              plannerHints =
+                JSON.parse(message.split("\n").at(-1)!).operatorAssetHints;
+            }
+            send({
+              type: "response",
+              text: '{"assignments":[],"prioritize":[]}',
+              taint: "INTERNAL",
+            });
+            return Promise.resolve();
+          },
+          clear() {},
+        }),
+      );
+      try {
+        trafficPlanner.advance(readSentinelAssessment(peerPath)!);
+        await until(() => plannerHints !== undefined);
+        assertEquals(plannerHints, [{
+          id: trafficHintReceipt.id,
+          text: trafficHint.note,
+          assetIds: trafficHint.assetIds,
+          trafficReference: trafficHint.trafficReference,
+        }]);
+      } finally {
+        trafficPlanner.stop();
+      }
       const journal = openSentinelWorkerFindingStore(peerPath);
       const { original, later } = (() => {
         try {
@@ -2698,6 +2794,9 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
         applied,
       );
       assertEquals(confirmations.length, beforeMembership + 1);
+      assertStringIncludes((await turn(trafficHint)).result, "unavailable");
+      assertEquals(confirmations.length, beforeMembership + 1);
+
       duringConfirmation = () => {
         const snapshot = JSON.parse(Deno.readTextFileSync(peerPath));
         snapshot.nodes.push({
@@ -2720,6 +2819,8 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
       duringConfirmation = undefined;
       const nextPeer = readSentinelAssessment(peerPath);
       assert(nextPeer);
+      assertStringIncludes((await turn(trafficHint)).result, "unavailable");
+
       assertEquals(
         JSON.parse((await turn(receiptAction)).result).record,
         original,
@@ -8531,6 +8632,44 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
         );
       }, reopenedEvidence);
     }, restarted);
+    // Capture a portable case after the linked traffic hint's revision changed.
+    const priorHint = readSentinelCaseHints(peerPath, 10).find((
+      { trafficReference },
+    ) => trafficReference);
+    assert(
+      priorHint?.trafficReference && priorHint.revision &&
+        priorHint.assetIds?.[0],
+    );
+    assert(stopSentinelAssessment(peerPath));
+    const stoppedPeer = readSentinelAssessment(peerPath);
+    assert(stoppedPeer?.plan.runId);
+    const staging = await Deno.makeTempDir({ dir: baseDir });
+    const captured = captureStoppedSentinelCaseArtifacts(baseDir, {
+      caseId: peer.id,
+      runId: stoppedPeer.plan.runId,
+      evidenceRevision: stoppedPeer.revision,
+    }, staging);
+    const portableSnapshot = captured.artifacts.find(({ name }) =>
+      name === "sentinel.json"
+    );
+    assert(portableSnapshot);
+    assertEquals(
+      readSentinelCaseHints(portableSnapshot.path, 10).find(({ id }) =>
+        id === priorHint.id
+      ),
+      priorHint,
+    );
+    assertEquals(
+      readSentinelTrafficReceiptPage(
+        portableSnapshot.path,
+        priorHint.revision,
+        {
+          evidenceId: priorHint.trafficReference.evidenceId,
+          assetId: priorHint.assetIds[0],
+        },
+      )?.receipts[0]?.digest,
+      priorHint.trafficReference.digest,
+    );
   } finally {
     for (const pending of [activeRunId, pausedRunId]) {
       if (!pending || !runs.getActiveRun(pending)) continue;

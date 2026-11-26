@@ -1,3 +1,4 @@
+import { isSentinelHintTrafficReference } from "../sentinel/traffic_receipts.ts";
 import type {
   CategorizedOperatorRun,
   OperatorRunCategoryChange,
@@ -902,6 +903,11 @@ export const operatorRunTool: ToolDefinition = {
       type: "string",
       description: "Exact retained Sentinel graph fact ID",
     },
+    trafficReference: {
+      type: "object",
+      description:
+        "Exact retained traffic evidenceId and digest to anchor a planner hint. Requires one assetIds entry.",
+    },
     assetIds: {
       type: "array",
       items: { type: "string" },
@@ -1088,7 +1094,7 @@ export interface OperatorRunToolContext {
     revision: number,
   ) => boolean;
   readonly authenticatedOwnerSessionId?: string;
-  readonly authorizeLiveModelRouteChange?: (
+  readonly authorizeOwnerRunCall?: (
     args: Record<string, unknown>,
   ) => Promise<boolean>;
   readonly ownerRecoverySessionId?: string;
@@ -2156,6 +2162,9 @@ export function createOperatorRunToolExecutor(options: {
           canFlowTo(classification, context?.ceiling ?? "PUBLIC"));
     }
     const action = args.action;
+    if (args.trafficReference !== undefined && action !== "hint") {
+      return unavailable;
+    }
     const backgroundRole =
       args.kind === "delegated" || args.kind === "scheduled"
         ? args.kind
@@ -2614,7 +2623,7 @@ ${
           return safeProjection({ ...current, classification: level }, label);
         }
         if (
-          !context.authorizeLiveModelRouteChange ||
+          !context.authorizeOwnerRunCall ||
           typeof requestId !== "string" || !digestPattern.test(requestId) ||
           typeof expectedVersion !== "number" ||
           !Number.isSafeInteger(expectedVersion) ||
@@ -2656,7 +2665,7 @@ ${
             }`)
           ) return "Error: The operator declined the run action.";
         }
-        if (!await context.authorizeLiveModelRouteChange(args)) {
+        if (!await context.authorizeOwnerRunCall(args)) {
           return unavailable;
         }
         const saved = routes.commit(edit);
@@ -9421,6 +9430,7 @@ ${
         }
         control = { requestId: args.requestId.toLowerCase() };
       }
+      let authorizeTrafficHint: (() => Promise<boolean>) | undefined;
       if (action === "hint") {
         if (
           ref.kind !== "sentinel" ||
@@ -9431,6 +9441,12 @@ ${
           !digestPattern.test(args.requestId)
         ) return unavailable;
         const assetIds = normalizeSentinelHintAssets(args.assetIds);
+        const trafficReference = args.trafficReference;
+        if (
+          trafficReference !== undefined &&
+          (!isSentinelHintTrafficReference(trafficReference) ||
+            assetIds?.length !== 1 || !context?.authorizeOwnerRunCall)
+        ) return unavailable;
         if (args.assetIds !== undefined) {
           if (
             !assetIds || ref.revision === undefined ||
@@ -9444,12 +9460,46 @@ ${
             !current?.active || current.revision !== ref.revision ||
             !sentinelHintAssetsInScope(path, current, assetIds)
           ) return unavailable;
+          if (trafficReference) {
+            const authorizeCall = context?.authorizeOwnerRunCall;
+            if (!context || !authorizeCall) return unavailable;
+            const revision = ref.revision;
+            authorizeTrafficHint = async () => {
+              const receipt = readProjectedSentinelTrafficReceipt(
+                path,
+                ref.id,
+                revision,
+                trafficReference,
+                assetIds[0],
+              );
+              if (
+                !receipt || !await authorizeCall({
+                  action: "traffic_get",
+                  kind: "sentinel",
+                  id: ref.id,
+                  revision,
+                  ...trafficReference,
+                })
+              ) return false;
+              return await context.authorizeSavedResponse(
+                operatorRunTool.name,
+                safeProjection({
+                  caseId: ref.id,
+                  revision,
+                  ...trafficReference,
+                }),
+                "INTERNAL",
+              ) && await authorizeCall(args);
+            };
+            if (!await authorizeTrafficHint()) return unavailable;
+          }
           const prior = readSentinelOperatorAssetHint(
             path,
             current,
             args.requestId.toLowerCase(),
             args.note.trim(),
             assetIds,
+            trafficReference,
           );
           if (prior === null) return unavailable;
           if (prior) return safeProjection({ run });
@@ -9458,6 +9508,7 @@ ${
           note: args.note.trim(),
           requestId: args.requestId.toLowerCase(),
           ...(assetIds && { assetIds }),
+          ...(trafficReference && { trafficReference }),
         };
       }
       if (

@@ -1,3 +1,7 @@
+import {
+  readSentinelTrafficReceipt,
+  type SentinelHintTrafficReference,
+} from "../sentinel/traffic_receipts.ts";
 import { notifyCommittedEvidence } from "../core/evidence_task_progression.ts";
 import { readLinkedFindingProof } from "./sentinel_linked_findings.ts";
 import { reopenSentinelAssignedInventory } from "./sentinel_inventory_tool.ts";
@@ -1256,11 +1260,19 @@ export function recordOperatorSentinelRunHint(
   note: string,
   operatorScope = "owner",
   assetIds?: readonly string[],
+  trafficReference?: SentinelHintTrafficReference,
 ) {
   const saved = withSentinelAssessmentWriteLock(snapshotPath, (state) => {
     if (
       !state?.active || state.revision !== revision ||
-      (assetIds && !sentinelHintAssetsInScope(snapshotPath, state, assetIds))
+      (assetIds && !sentinelHintAssetsInScope(snapshotPath, state, assetIds)) ||
+      (trafficReference && (assetIds?.length !== 1 ||
+        !readSentinelTrafficReceipt(
+          snapshotPath,
+          revision,
+          trafficReference,
+          assetIds[0],
+        )))
     ) return;
     const runId = state.plan.runId ?? "sentinel-assessment";
     const store = openSentinelAdaptiveStore(storePath(snapshotPath));
@@ -1272,6 +1284,7 @@ export function recordOperatorSentinelRunHint(
         operatorScope,
         runId,
         assetIds,
+        trafficReference,
       );
       return receipt && { receipt, runId };
     } finally {
@@ -1297,6 +1310,7 @@ export function readSentinelOperatorAssetHint(
   requestId: string,
   text: string,
   assetIds: readonly string[],
+  trafficReference?: SentinelHintTrafficReference,
 ) {
   const store = openSentinelAdaptiveStore(storePath(path));
   try {
@@ -1307,6 +1321,7 @@ export function readSentinelOperatorAssetHint(
       "owner",
       state.plan.runId ?? "sentinel-assessment",
       assetIds,
+      trafficReference,
     );
   } finally {
     store.close();
@@ -5432,6 +5447,7 @@ export function createSentinelModelPlanner(
               "To report verified goal progress, optionally include goalObservations in the response object with assignments and prioritize. Each observation has criterionId and evidence entries {source,reference,detail}. Use only exact registered criteria. For an adaptive_task requirement of the form task:trace:DEPTH:NODE or task:impact:DEPTH:NODE, plan the specified kind, depth, and exact node as needed and cite the actual completed task ID in goalObservations. For task:verify_control_coverage:pass:FINDING_ID, request verify_control_coverage on the exact finding and cite its actual completed task only if coverage is pass. For a finding_recheck requirement, use findingRechecks or sentinel_worker_findings with receiptId and revision to reopen an exact receipt and cite the exact passing worker-recheck ID for the required original finding. For graph_fact criteria, cite the exact committed graph fact ID. If the requirement names a directed [from, relation, to] tuple, use only a receipt for that edge. An uncertain or missing proof must not be reported.",
             ]
             : []),
+          "A trafficReference in operatorAssetHints identifies one retained source. Reopen it only with the case-scoped traffic reader and use it only for the anchored asset.",
           "For a follow-up supported by githubWorkflowReads, use sourceTaskId, sourceKind model_review and sourceWorkflowResultSha256. Keep the exact target.",
           ...(state.plan.linkedCaseSources
             ? [
@@ -5443,9 +5459,25 @@ export function createSentinelModelPlanner(
         const observedCriteria = new Set(
           goalCompletion?.observations.map(({ criterionId }) => criterionId),
         );
-        const assetHints = hints.flatMap(({ id, text, assetIds }) =>
-          assetIds && sentinelHintAssetsInScope(snapshotPath, state, assetIds)
-            ? [{ id, text, assetIds }]
+        const assetHints = hints.flatMap((
+          { id, revision, text, assetIds, trafficReference },
+        ) =>
+          assetIds &&
+            sentinelHintAssetsInScope(snapshotPath, state, assetIds) &&
+            (!trafficReference ||
+              (revision === state.revision && assetIds.length === 1 &&
+                readSentinelTrafficReceipt(
+                  snapshotPath,
+                  revision,
+                  trafficReference,
+                  assetIds[0],
+                )))
+            ? [{
+              id,
+              text,
+              assetIds,
+              ...(trafficReference && { trafficReference }),
+            }]
             : []
         );
         const inputs = {
