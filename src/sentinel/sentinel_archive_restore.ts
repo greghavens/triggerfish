@@ -2,6 +2,7 @@ import {
   decodeStagedTrafficFinding,
   stagedTrafficItems,
   stagedTrafficLinkMatches,
+  validPortableAnalystFinding,
 } from "./worker_finding_store.ts";
 import { parseOperatorRunAdmissionCategory } from "../core/operator_run_categories.ts";
 import {
@@ -861,6 +862,15 @@ function validateAuxiliary(
           );
         }
       }
+    }
+    if (name === "sentinel-worker-findings.db") {
+      const records = db.prepare(
+        "SELECT id, input FROM receipts WHERE json_type(input, '$.analyst') IS NOT NULL LIMIT 4097",
+      ).all();
+      if (
+        records.length > 4096 ||
+        records.some(({ input, id }) => !validPortableAnalystFinding(input, id))
+      ) throw new Error("Invalid archived Sentinel analyst finding");
     }
     const scoped = name === "sentinel-worker-findings.db"
       ? { table: "receipts", column: "input", hasRun: true }

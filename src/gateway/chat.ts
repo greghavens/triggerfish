@@ -418,7 +418,8 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
                     action === "preview_inventory_affiliation" ||
                     action === "affiliate_inventory_asset" ||
                     action === "append_goals" || action === "withdraw_goal" ||
-                    action === "add_case_membership") &&
+                    action === "add_case_membership" ||
+                    action === "record_analyst_finding") &&
                   {
                     case_id: typeof call.args?.id === "string" &&
                         isSentinelCaseId(call.args.id)

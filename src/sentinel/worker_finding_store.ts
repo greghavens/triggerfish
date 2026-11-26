@@ -49,6 +49,12 @@ export interface SentinelWorkerFindingInput
   readonly findingCategory?: string;
 }
 
+export interface SentinelAnalystFindingInput
+  extends Omit<SentinelWorkerFindingInput, "taskId"> {
+  readonly taskId?: never;
+  readonly analyst: { readonly operatorScope: "owner" };
+}
+
 export interface SentinelFindingTrafficPublication {
   readonly evidenceId: string;
   readonly digest: string;
@@ -58,7 +64,7 @@ export interface SentinelFindingTrafficPublication {
 }
 
 type StagedFindingPublication = {
-  readonly finding: ReturnType<typeof normalizeFinding>;
+  readonly finding: AssignedFindingInput;
   readonly findingId: string;
   readonly traffic: SentinelFindingTrafficPublications;
 };
@@ -187,11 +193,9 @@ type Receipt = {
 };
 
 export type SentinelWorkerFindingRecord =
-  & SentinelWorkerFindingInput
+  & (SentinelWorkerFindingInput | SentinelAnalystFindingInput)
   & Receipt
-  & {
-    readonly kind: "finding";
-  };
+  & { readonly kind: "finding" };
 export type SentinelWorkerFindingRecheckRecord =
   & SentinelWorkerFindingRecheckInput
   & Receipt
@@ -285,10 +289,12 @@ type FindingWriteReceipt =
   | SentinelWorkerFindingJournalRecord
   | SentinelWorkerFindingReportAmendment;
 
-type FindingWriteScope = Pick<
-  SentinelWorkerFindingReceiptScope,
-  "caseId" | "runId" | "evidenceRevision" | "taskId" | "targetId"
->;
+type FindingWriteScope =
+  & Pick<
+    SentinelWorkerFindingReceiptScope,
+    "caseId" | "runId" | "evidenceRevision" | "targetId"
+  >
+  & { readonly taskId: string | undefined };
 
 const APPLICATION_ID = 0x53574644;
 const VERSION = 2;
@@ -321,12 +327,13 @@ function canonicalTime(value: unknown): number {
     : NaN;
 }
 
-function normalizeScope(scope: SentinelWorkerFindingReceiptScope) {
+function normalizeFindingScope(
+  scope: Omit<SentinelWorkerFindingReceiptScope, "taskId">,
+) {
   const {
     caseId,
     runId,
     evidenceRevision,
-    taskId,
     targetId,
     graphFindingId,
     controlId,
@@ -340,7 +347,7 @@ function normalizeScope(scope: SentinelWorkerFindingReceiptScope) {
   if (
     !isSentinelCaseId(caseId) || !bounded(runId, 128) ||
     !Number.isSafeInteger(evidenceRevision) || evidenceRevision < 1 ||
-    !bounded(taskId, 256) || !bounded(targetId, 4096) ||
+    !bounded(targetId, 4096) ||
     !bounded(graphFindingId, 4096) || !bounded(controlId, 4096) ||
     !bounded(evidenceId, 4096) || !bounded(requestId, 128) ||
     typeof snapshotDigest !== "string" || !digestPattern.test(snapshotDigest) ||
@@ -353,7 +360,6 @@ function normalizeScope(scope: SentinelWorkerFindingReceiptScope) {
     caseId,
     runId,
     evidenceRevision,
-    taskId,
     targetId,
     graphFindingId,
     controlId,
@@ -366,19 +372,62 @@ function normalizeScope(scope: SentinelWorkerFindingReceiptScope) {
   };
 }
 
-function normalizeFinding(raw: SentinelWorkerFindingInput) {
+function normalizeScope(scope: SentinelWorkerFindingReceiptScope) {
+  const { caseId, runId, evidenceRevision, ...fields } = normalizeFindingScope(
+    scope,
+  );
+  if (!bounded(scope.taskId, 256)) {
+    throw new Error("Invalid Sentinel worker finding assignment");
+  }
+  return {
+    caseId,
+    runId,
+    evidenceRevision,
+    taskId: scope.taskId,
+    ...fields,
+  };
+}
+
+function normalizeFinding(
+  raw: SentinelWorkerFindingInput,
+): AssignedFindingInput;
+function normalizeFinding(
+  raw: SentinelAnalystFindingInput,
+): AnalystFindingInput;
+function normalizeFinding(
+  raw: SentinelWorkerFindingInput | SentinelAnalystFindingInput,
+): AssignedFindingInput | AnalystFindingInput;
+function normalizeFinding(
+  raw: SentinelWorkerFindingInput | SentinelAnalystFindingInput,
+): AssignedFindingInput | AnalystFindingInput {
   const metadata = initialFindingMetadata(raw);
   if (!metadata || !bounded(raw.title, 256) || !bounded(raw.summary, 4096)) {
     throw new Error("Invalid Sentinel worker finding text");
   }
-  return {
-    ...normalizeScope(raw),
+  const report = {
     title: raw.title,
     summary: raw.summary,
     ...metadata,
     kind: "finding" as const,
   };
+  if ("analyst" in raw) {
+    if (
+      raw.taskId !== undefined || raw.analyst?.operatorScope !== "owner" ||
+      Object.keys(raw.analyst).length !== 1
+    ) {
+      throw new Error("Invalid Sentinel analyst finding attribution");
+    }
+    return {
+      ...normalizeFindingScope(raw),
+      ...report,
+      analyst: { operatorScope: "owner" },
+    };
+  }
+  return { ...normalizeScope(raw), ...report };
 }
+
+type AssignedFindingInput = SentinelWorkerFindingInput & { kind: "finding" };
+type AnalystFindingInput = SentinelAnalystFindingInput & { kind: "finding" };
 
 function normalizeRecheck(raw: SentinelWorkerFindingRecheckInput) {
   if (
@@ -491,7 +540,7 @@ function openDatabase(snapshotPath: string, readOnly: boolean) {
 }
 
 type Row = NonNullable<ReturnType<ReturnType<DatabaseSync["prepare"]>["get"]>>;
-type FindingInput = ReturnType<typeof normalizeFinding>;
+type FindingInput = AssignedFindingInput | AnalystFindingInput;
 type RecheckInput = ReturnType<typeof normalizeRecheck>;
 type JournalInput = FindingInput | RecheckInput;
 
@@ -501,6 +550,23 @@ function findingReceiptId(input: JournalInput): string {
   return `worker-${input.kind}:${
     createHash("sha256").update(JSON.stringify(content)).digest("hex")
   }`;
+}
+
+/** The portable archive must preserve the exact analyst attribution and receipt. */
+export function validPortableAnalystFinding(
+  input: unknown,
+  id: unknown,
+): boolean {
+  if (typeof input !== "string" || typeof id !== "string") return false;
+  try {
+    const parsed = JSON.parse(input) as AnalystFindingInput;
+    if (parsed.kind !== "finding" || !("analyst" in parsed)) return false;
+    const normalized = normalizeFinding(parsed);
+    return JSON.stringify(normalized) === input &&
+      findingReceiptId(normalized) === id;
+  } catch {
+    return false;
+  }
 }
 
 function amendmentReceiptId(input: SentinelWorkerFindingReportUpdate): string {
@@ -1079,7 +1145,13 @@ export function openSentinelWorkerFindingStore(
     recordFinding(
       input: SentinelWorkerFindingInput,
       onCommit?: (record: SentinelWorkerFindingRecord) => void,
-    ): SentinelWorkerFindingRecord {
+    ): AssignedFindingInput & Receipt {
+      return write(normalizeFinding(input), onCommit);
+    },
+    recordAnalystFinding(
+      input: SentinelAnalystFindingInput,
+      onCommit?: (record: AnalystFindingInput & Receipt) => void,
+    ) {
       return write(normalizeFinding(input), onCommit);
     },
     publishTrafficFinding(
@@ -1198,11 +1270,14 @@ export function openSentinelWorkerFindingStore(
 
 export function readSentinelStagedTrafficFinding(
   path: string,
-  scope: FindingWriteScope & { runId: string },
+  scope: FindingWriteScope,
   requestId: string,
 ) {
   const caseId = locateSentinelCase(path)?.caseId;
-  if (caseId !== scope.caseId || !hasSentinelWorkerFindingJournal(path)) return;
+  if (
+    !scope.taskId || caseId !== scope.caseId ||
+    !hasSentinelWorkerFindingJournal(path)
+  ) return;
   const db = openDatabase(path, true);
   try {
     db.exec("PRAGMA busy_timeout = 1500; PRAGMA trusted_schema = OFF");

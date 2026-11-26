@@ -539,6 +539,7 @@ function pendingRecheckFindings(snapshotPath: string, state: State) {
   const snapshot = state.result?.sharedGraph.snapshot;
   if (!caseId || !runId || !snapshot) return [];
   const constraints = operatingConstraints(snapshotPath, state)?.constraints;
+  const allowed = caseOperatingScope(snapshotPath, state.revision);
   const candidates: { id: string; targetId: string }[] = [];
   for (const record of readSentinelWorkerFindingHistory(snapshotPath)) {
     if (
@@ -548,7 +549,11 @@ function pendingRecheckFindings(snapshotPath: string, state: State) {
         constraints,
         { kind: "review_evidence", nodeId: record.targetId },
         snapshot,
-      ) || !findingRecheckStillApplies(snapshot, record)
+      ) ||
+      ("analyst" in record &&
+        (!allowed({ kind: "review_finding", nodeId: record.graphFindingId }) ||
+          !allowed({ kind: "review_evidence", nodeId: record.evidenceId }))) ||
+      !findingRecheckStillApplies(snapshot, record)
     ) continue;
     candidates.push({ id: record.id, targetId: record.targetId });
     if (candidates.length === 8) break;
@@ -2556,7 +2561,7 @@ export function readSentinelFindingFollowup(
     const report = journal.readFindingReport(findingId, state.revision);
     const finding = report?.finding;
     if (
-      !report || !finding || finding.caseId !== caseId ||
+      !report || !finding?.taskId || finding.caseId !== caseId ||
       finding.runId !== state.plan.runId || finding.targetId !== nodeId ||
       finding.evidenceRevision > state.revision ||
       !findingRecheckStillApplies(snapshot, finding)

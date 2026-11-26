@@ -839,7 +839,9 @@ function renderFindingExport(
               `- ${t("Evidence revision")} ${row.original.evidenceRevision} · ${
                 markdownText(row.original.snapshotDigest)
               }`,
-              `- ${t("Task")} ${markdownText(row.original.taskId)}`,
+              ...(row.original.taskId
+                ? [`- ${t("Task")} ${markdownText(row.original.taskId)}`]
+                : []),
             ]
             : []),
           ...(row.kind === "worker" ? row.rechecks : []).flatMap((record) => [

@@ -5053,7 +5053,8 @@ function createAgent(
           selectedCaseAction === "assign_batch" ||
           selectedCaseAction === "append_goals" ||
           selectedCaseAction === "withdraw_goal" ||
-          selectedCaseAction === "add_case_membership";
+          selectedCaseAction === "add_case_membership" ||
+          selectedCaseAction === "record_analyst_finding";
         const pendingTelemetry = active?.pendingTelemetryFence;
         const selectedCaseGraph =
           toolName === operatorRunReader?.definition.name &&

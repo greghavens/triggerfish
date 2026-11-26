@@ -555,7 +555,7 @@ export function createTidepoolSentinelHandler(
               }
               const scope = scopes.get(exactRevision);
               return scope?.runId === record.runId &&
-                scope.allows(record.targetId);
+                scope.allowsRecord(record);
             });
           const records = results.slice(offset, offset + 10);
           send({

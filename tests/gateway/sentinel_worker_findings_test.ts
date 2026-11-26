@@ -579,6 +579,256 @@ async function withFindingAssignmentGateway(
   }
 }
 
+Deno.test("Reviewed analyst finding uses exact local failing evidence and survives gateway restore", async () => {
+  const baseDir = await Deno.makeTempDir();
+  const caseId = "reviewed-analyst";
+  const path = resolveSentinelCasePath(baseDir, caseId);
+  let coordinator:
+    | ReturnType<typeof startSentinelAssessmentCoordinator>
+    | undefined;
+  let planner: ReturnType<typeof createSentinelModelPlanner> | undefined;
+  try {
+    const now = Date.now();
+    await Deno.mkdir(dirname(path), { recursive: true });
+    await Deno.writeTextFile(
+      path,
+      JSON.stringify({
+        version: 1,
+        nodes: [
+          { id: "app", kind: "asset", label: "Expected application" },
+          { id: "other", kind: "asset", label: "Unrelated application" },
+          {
+            id: "gap",
+            kind: "finding",
+            label: "Control gap",
+            severity: "high",
+          },
+          { id: "control", kind: "control", label: "Required control" },
+          {
+            id: "check",
+            kind: "evidence",
+            label: "Retained failed check",
+            controlVerification: {
+              outcome: "fail",
+              observedAt: new Date(now - 60_000).toISOString(),
+              validUntil: new Date(now + 3_600_000).toISOString(),
+            },
+          },
+        ],
+        edges: [
+          { from: "check", to: "app", relation: "observed_on" },
+          { from: "gap", to: "app", relation: "affects" },
+          { from: "control", to: "gap", relation: "mitigates" },
+          { from: "check", to: "control", relation: "verifies" },
+        ],
+      }),
+    );
+    const state = startSentinelAssessment(path);
+    const runId = state.plan.runId;
+    assert(runId);
+    assert(recordSentinelOperatingConstraints(path, {
+      runId,
+      evidenceRevision: state.revision,
+      operatorScope: "owner",
+      requestId: crypto.randomUUID(),
+      expectedVersion: 0,
+      constraints: { allowedAssetIds: ["app"], deniedKinds: [] },
+    }));
+    const ref = { kind: "sentinel", id: caseId, revision: state.revision };
+    const request = {
+      ...ref,
+      action: "record_analyst_finding",
+      runId,
+      targetId: "app",
+      findingId: "gap",
+      controlId: "control",
+      evidenceId: "check",
+      title: "Analyst reviewed required control",
+      summary: "The retained control verification fails for this application.",
+      severity: "high",
+      findingCategory: "Configuration",
+      requestId: crypto.randomUUID(),
+    };
+    let reviews = 0;
+    let blocked = true;
+    let denySources = false;
+    let revokeOnReview = true;
+    let classified = false;
+    let deniedDelivery = 0;
+    const frames: string[] = [];
+    let clock = now;
+    const seen = new Set<string>();
+    planner = createSentinelModelPlanner(
+      path,
+      (_state, task) => ({
+        execute(prompt, send) {
+          if (!task) {
+            const inputs = JSON.parse(String(prompt).split("\n").at(-1)!);
+            for (const { id } of inputs.pendingRecheckFindings ?? []) {
+              seen.add(id);
+            }
+            send({ type: "response", taint: "INTERNAL", text: "[]" });
+          }
+          return Promise.resolve();
+        },
+        clear() {},
+      }),
+      undefined,
+      () => clock,
+    );
+    coordinator = startSentinelAssessmentCoordinator({
+      snapshotPath: path,
+      advanceAdaptive: (current) => planner?.advance(current),
+    });
+    const confirm = () => {
+      reviews++;
+      denySources = revokeOnReview;
+      return Promise.resolve(true);
+    };
+    const policy = (hook: string, input: Record<string, unknown>) => {
+      if (
+        hook === "PRE_OUTPUT" && String(input.content).includes(request.title)
+      ) {
+        deniedDelivery++;
+        return false;
+      }
+      const call = input.tool_call as
+        | { args?: { action?: string } }
+        | undefined;
+      if (hook === "PRE_TOOL_CALL") {
+        if (blocked && call?.args?.action === request.action) return false;
+        if (denySources && call?.args?.action === "node") return false;
+      }
+      if (
+        hook === "POST_TOOL_RESPONSE" && input.tool_name === "operator_runs" &&
+        typeof input.tool_response === "string" &&
+        input.tool_response.includes('"operatorScope":"owner"')
+      ) classified = true;
+      return true;
+    };
+    let saved: SentinelWorkerFindingJournalRecord | undefined;
+    await withFindingAssignmentGateway(
+      baseDir,
+      confirm,
+      async (turn) => {
+        assertStringIncludes(await turn(request), "policy");
+        blocked = false;
+        assertStringIncludes(
+          await turn({ ...request, targetId: "other" }),
+          "unavailable",
+        );
+        assertStringIncludes(
+          await turn({ ...request, revision: state.revision + 1 }),
+          "unavailable",
+        );
+        assertEquals(reviews, 0);
+        assertStringIncludes(await turn(request), "unavailable");
+        assertEquals(reviews, 1);
+        assertEquals(
+          readSentinelWorkerFindingHistory(path, state.revision),
+          [],
+        );
+        revokeOnReview = false;
+        denySources = false;
+        clock += 120_000;
+        const committed = JSON.parse(await turn(request)).receipt;
+        saved = committed;
+        assertEquals(committed.analyst, { operatorScope: "owner" });
+        assertEquals(saved?.taskId, undefined);
+        assertEquals(saved?.targetId, request.targetId);
+        assertEquals(saved?.evidenceRevision, state.revision);
+        assertEquals(saved?.evidenceId, request.evidenceId);
+        assertEquals(saved?.summary, request.summary);
+        assert(classified);
+        await waitForCondition(() => seen.has(committed.id), () => {});
+      },
+      policy,
+      (frame) => frames.push(frame),
+    );
+    assert(saved);
+    assert(deniedDelivery > 0);
+    assert(frames.every((frame) => !frame.includes(request.title)));
+    const receiptId = saved.id;
+    const archiveId = crypto.randomUUID();
+    await withFindingAssignmentGateway(baseDir, confirm, async (turn) => {
+      assertEquals(JSON.parse(await turn(request)).receipt, saved);
+      assertStringIncludes(
+        await turn({ ...request, title: "Other claim" }),
+        "unavailable",
+      );
+      assertEquals(reviews, 2);
+      assertEquals(
+        JSON.parse(await turn({ ...ref, receiptId, action: "finding_receipt" }))
+          .record,
+        saved,
+      );
+      assertEquals(
+        JSON.parse(await turn({ ...ref, runId, action: "cancel" })).run.status,
+        "stopped",
+      );
+      const archived = await turn({
+        ...ref,
+        runId,
+        action: "archive",
+        requestId: archiveId,
+      });
+      assert(archived.startsWith("{"), archived);
+      assertEquals(JSON.parse(archived).receipt.status, "succeeded");
+    });
+    await Deno.rename(dirname(path), join(baseDir, "before-analyst-restore"));
+    await withFindingAssignmentGateway(baseDir, confirm, async (turn) => {
+      assertEquals(
+        JSON.parse(
+          await turn({
+            ...ref,
+            runId,
+            action: "restore",
+            archiveId,
+            requestId: crypto.randomUUID(),
+          }),
+        ).receipt.status,
+        "succeeded",
+      );
+      assertEquals(
+        JSON.parse(await turn({ ...ref, receiptId, action: "finding_receipt" }))
+          .record,
+        saved,
+      );
+    });
+    await withTidepool(baseDir, async (list) => {
+      assertEquals(await list(state.revision, caseId), [saved!]);
+    });
+    assert(recordSentinelOperatingConstraints(path, {
+      runId,
+      evidenceRevision: state.revision,
+      operatorScope: "owner",
+      requestId: crypto.randomUUID(),
+      expectedVersion: 1,
+      constraints: {
+        allowedAssetIds: ["app"],
+        deniedKinds: ["review_finding"],
+      },
+    }));
+    await withFindingAssignmentGateway(baseDir, confirm, async (turn) => {
+      assertStringIncludes(
+        await turn({
+          ...ref,
+          receiptId,
+          action: "finding_receipt",
+        }),
+        "unavailable",
+      );
+    });
+    await withTidepool(baseDir, async (list) => {
+      assertEquals(await list(state.revision, caseId), []);
+    });
+  } finally {
+    coordinator?.stop();
+    planner?.stop();
+    await Deno.remove(baseDir, { recursive: true });
+  }
+});
+
 Deno.test("Reviewed mixed-source assignment retains exact graph and finding lineage across gateway restore", async () => {
   const baseDir = await Deno.makeTempDir();
   const caseId = "mixed-source-review";

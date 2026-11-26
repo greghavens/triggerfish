@@ -167,7 +167,8 @@ export async function executeOperatorFindingPublication(
         const report = journal.readFindingReport(receiptId as string, revision);
         const finding = report?.finding;
         if (
-          !finding || finding.caseId !== caseId || finding.runId !== runId ||
+          !report || !finding?.taskId || finding.caseId !== caseId ||
+          finding.runId !== runId ||
           finding.evidenceRevision !== revision
         ) return;
         const original = snapshot.nodes.find(({ id }) =>

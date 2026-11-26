@@ -10,6 +10,8 @@ import {
   INCONCLUSIVE_RECHECK_TOOL,
   inconclusiveRecheckArgs,
 } from "../sentinel/recheck_inconclusive.ts";
+import { redactCredentialText } from "../core/logger/redactor.ts";
+import { isDeepStrictEqual } from "node:util";
 import { digestSentinelSnapshot } from "../sentinel/shared_inventory.ts";
 import { notifyCommittedEvidence } from "../core/evidence_task_progression.ts";
 import { sentinelFindingTrafficEvidenceVersion } from "../sentinel/finding_traffic_links.ts";
@@ -75,10 +77,18 @@ function allowedFindingContext(
     readonly runId: string;
     readonly evidenceRevision: number;
     readonly targetId: string;
+    readonly analyst?: unknown;
+    readonly graphFindingId?: string;
+    readonly controlId?: string;
+    readonly evidenceId?: string;
   },
 ) {
   return finding.caseId === caseId && finding.runId === state.plan.runId &&
     finding.evidenceRevision <= state.revision &&
+    (finding.analyst === undefined ||
+      readSentinelFindingReceiptScope(path, state.revision)?.allowsRecord(
+          finding,
+        ) === true) &&
     sentinelOperatingConstraintsAllow(
       readSentinelOperatingConstraints(path, finding.runId)?.constraints,
       { kind: "review_evidence", nodeId: finding.targetId },
@@ -113,16 +123,34 @@ export function readSentinelFindingReceiptScope(
   const saved = readSentinelOperatingConstraints(path, runId, revision)
     ?.constraints;
   const current = readSentinelOperatingConstraints(path, runId)?.constraints;
+  const allows = (
+    targetId: string,
+    kind: "review_evidence" | "review_finding" | "review_incident" =
+      "review_evidence",
+  ) => {
+    const target = { kind, nodeId: targetId };
+    return sentinelOperatingConstraintsAllow(saved, target, snapshot) &&
+      sentinelOperatingConstraintsAllow(current, target, snapshot);
+  };
   return {
     runId,
-    allows: (
-      targetId: string,
-      kind: "review_evidence" | "review_finding" | "review_incident" =
-        "review_evidence",
-    ) => {
-      const target = { kind, nodeId: targetId };
-      return sentinelOperatingConstraintsAllow(saved, target, snapshot) &&
-        sentinelOperatingConstraintsAllow(current, target, snapshot);
+    allows,
+    allowsRecord: (record: {
+      targetId: string;
+      analyst?: unknown;
+      graphFindingId?: string;
+      controlId?: string;
+      evidenceId?: string;
+    }) => {
+      if (!allows(record.targetId)) return false;
+      if (record.analyst === undefined) return true;
+      const { graphFindingId, controlId, evidenceId } = record;
+      return !!graphFindingId && !!evidenceId &&
+        allows(graphFindingId, "review_finding") && allows(evidenceId) &&
+        !!snapshot?.edges.some(({ from, to, relation }) =>
+          from === controlId && to === graphFindingId &&
+          relation === "mitigates"
+        );
     },
   };
 }
@@ -144,7 +172,9 @@ export function readScopedSentinelWorkerFindingReport(
   }) =>
     recordCase === caseId && runId === scope.runId &&
     evidenceRevision <= revision && scope.allows(targetId);
-  const findings = report.findings.filter(allows);
+  const findings = report.findings.filter((finding) =>
+    allows(finding) && scope.allowsRecord(finding)
+  );
   if (!findings.length) return null;
   const visible = new Set(findings.map(({ id }) => id));
   return {
@@ -184,7 +214,7 @@ export function currentSentinelFindingReceipts(
       targetId: string;
     }) =>
       item.caseId === caseId && item.runId === policy.runId &&
-      item.evidenceRevision <= revision && policy.allows(item.targetId)
+      item.evidenceRevision <= revision && policy.allowsRecord(item)
     );
 }
 
@@ -220,6 +250,10 @@ export function readSentinelFindingReportAttachmentReview(
     const finding = report?.finding;
     if (
       !finding || finding.caseId !== caseId || finding.runId !== runId ||
+      ("analyst" in finding &&
+        !readSentinelFindingReceiptScope(path, revision)?.allowsRecord(
+          finding,
+        )) ||
       !sentinelOperatingConstraintsAllow(
         readSentinelOperatingConstraints(path, runId)?.constraints,
         { kind: "review_evidence", nodeId: finding.targetId },
@@ -243,7 +277,7 @@ export function readSentinelFindingReportAttachmentReview(
     if (!amendment) {
       const staged = readSentinelStagedTrafficFinding(
         path,
-        finding,
+        { ...finding, taskId: finding.taskId },
         finding.requestId,
       );
       const attachments = staged?.findingId === finding.id &&
@@ -557,7 +591,7 @@ export function executeSentinelWorkerFindingTool(
               : undefined);
           const eligible = (record: ReturnType<typeof store.read>): boolean =>
             !!record && record.caseId === caseId &&
-            record.runId === policy.runId && policy.allows(record.targetId) &&
+            record.runId === policy.runId && policy.allowsRecord(record) &&
             (!allowReadTarget || allowReadTarget(record.targetId)) &&
             record.evidenceRevision <= selectedRevision &&
             (revisionFilter === undefined ||
@@ -1169,6 +1203,150 @@ export function reopenSentinelPlannerFindings(
     records,
     nextBeforeReceiptId: page.nextBeforeReceiptId,
   });
+}
+
+/** Record a reviewed defensive finding without inventing a worker assignment. */
+export async function recordOperatorSentinelFinding(
+  path: string,
+  revision: number,
+  args: Record<string, unknown>,
+  confirm: (prompt: string) => Promise<boolean>,
+  authorize: (
+    sources: readonly string[],
+    projection: string,
+  ) => Promise<boolean>,
+  isCurrent: () => boolean,
+): Promise<string> {
+  const {
+    runId,
+    targetId,
+    graphFindingId,
+    controlId,
+    evidenceId,
+    requestId,
+    title,
+    summary,
+  } = args;
+  const classification = initialFindingMetadata(args);
+  const caseId = locateSentinelCase(path)?.caseId;
+  const text = (value: unknown, limit: number): value is string =>
+    typeof value === "string" && !!value.trim() && value.length <= limit &&
+    !/[\p{Cc}\p{Cf}]/u.test(value) && redactCredentialText(value) === value;
+  if (
+    !caseId || !classification || typeof runId !== "string" ||
+    typeof requestId !== "string" ||
+    !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(requestId) ||
+    !text(targetId, 4096) || !text(graphFindingId, 4096) ||
+    !text(controlId, 4096) || !text(evidenceId, 4096) ||
+    !text(title, 256) || !text(summary, 4096)
+  ) return unavailable;
+  const sources = [
+    `asset:${targetId}`,
+    `finding:${graphFindingId}`,
+    `control:${controlId}`,
+    `evidence:${evidenceId}`,
+  ];
+  const inspect = (state: ReturnType<typeof readSentinelAssessment>) => {
+    const snapshot = state?.result?.sharedGraph.snapshot;
+    if (
+      !isCurrent() || !state?.active || state.paused ||
+      state.plan.runId !== runId ||
+      state.revision !== revision || !snapshot
+    ) return;
+    const evidence = snapshot.nodes.find(({ id }) => id === evidenceId);
+    if (
+      evidence?.kind !== "evidence" || evidence.executionSource ||
+      evidence.nativeWorkflowSource || evidence.relationshipSources?.length
+    ) return;
+    const policy = readSentinelFindingReceiptScope(path, revision);
+    if (
+      !policy?.allowsRecord({
+        analyst: true,
+        targetId,
+        graphFindingId,
+        controlId,
+        evidenceId,
+      })
+    ) return;
+    const proof = verifyWorkerFindingRecheck(snapshot, {
+      caseId,
+      evidenceRevision: revision,
+      evaluatedAt: state.result?.controlEvaluationAt ?? state.updatedAt,
+    }, { assetId: targetId, findingId: graphFindingId, controlId, evidenceId });
+    if (proof?.outcome !== "fail") return;
+    return {
+      caseId,
+      runId,
+      evidenceRevision: revision,
+      targetId,
+      graphFindingId,
+      controlId,
+      evidenceId,
+      requestId: requestId.toLowerCase(),
+      ...classification,
+      title: title.trim(),
+      summary: summary.trim(),
+      snapshotDigest: proof.snapshotDigest,
+      observedAt: proof.observedAt,
+      validUntil: proof.validUntil,
+      evaluatedAt: proof.evaluatedAt,
+      analyst: { operatorScope: "owner" as const },
+    };
+  };
+  const draft = inspect(readSentinelAssessment(path));
+  if (!draft || !await authorize(sources, projectResult(draft))) {
+    return unavailable;
+  }
+  const lookup = () =>
+    readSentinelWorkerFindingWriteReceipt(
+      path,
+      { ...draft, taskId: undefined },
+      draft.requestId,
+    );
+  const same = (receipt: ReturnType<typeof lookup>) => {
+    if (receipt?.kind !== "finding" || !("analyst" in receipt)) return false;
+    const { kind: _kind, id: _id, recordedAt: _at, ...input } = receipt;
+    return isDeepStrictEqual(input, draft);
+  };
+  const prior = lookup();
+  if (!isDeepStrictEqual(inspect(readSentinelAssessment(path)), draft)) {
+    return unavailable;
+  }
+  if (prior) return same(prior) ? projectResult(prior) : unavailable;
+  if (
+    !await confirm(
+      `Record this exact retained Sentinel control gap?\n${
+        projectResult(draft)
+      }`,
+    )
+  ) {
+    return unavailable;
+  }
+  if (!await authorize(sources, projectResult(draft))) return unavailable;
+  return withSentinelAssessmentWriteLock(path, (state) => {
+    if (!isDeepStrictEqual(inspect(state), draft)) return unavailable;
+    const duplicate = lookup();
+    if (duplicate) {
+      return same(duplicate) ? projectResult(duplicate) : unavailable;
+    }
+    const journal = openSentinelWorkerFindingStore(path);
+    try {
+      return projectResult(
+        journal.recordAnalystFinding(
+          draft,
+          ({ id }) =>
+            notifyCommittedEvidence({
+              case: caseId,
+              run_id: runId,
+              revision,
+              observation_id: id,
+            }),
+        ),
+      );
+    } finally {
+      journal.close();
+    }
+  }) ?? unavailable;
 }
 
 /** Confirm an exact owner amendment, then recheck its report and evidence under the case lock. */

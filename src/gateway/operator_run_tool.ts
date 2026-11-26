@@ -105,6 +105,7 @@ import {
   amendOperatorSentinelFindingReport,
   readSentinelFindingReceiptScope,
   readSentinelFindingReportAttachmentReview,
+  recordOperatorSentinelFinding,
   reopenSentinelPlannerFindings,
 } from "./sentinel_worker_findings.ts";
 import { sentinelOperatingConstraintsAllow } from "../sentinel/operating_constraints.ts";
@@ -536,6 +537,7 @@ export const operatorRunTool: ToolDefinition = {
         "linked_finding",
         "linked_findings",
         "amend_finding_report",
+        "record_analyst_finding",
         "traffic_search",
         "traffic_get",
         "traffic_blob",
@@ -932,7 +934,10 @@ export const operatorRunTool: ToolDefinition = {
       description: "Linked run type",
       enum: ["sentinel", "workflow", "delegated", "scheduled"],
     },
-    targetId: { type: "string", description: "Exact linked run ID" },
+    targetId: {
+      type: "string",
+      description: "Exact linked run or affected Sentinel asset ID",
+    },
     templateId: {
       type: "string",
       description: "Exact UUID of a workspace Sentinel assessment template.",
@@ -1503,6 +1508,7 @@ export const sentinelOperatorCaseControlActions = [
   "append_goals",
   "withdraw_goal",
   "add_case_membership",
+  "record_analyst_finding",
 ] as const;
 
 export const sentinelOperatorCaseControlParameters = [
@@ -1518,6 +1524,14 @@ export const sentinelOperatorCaseControlParameters = [
   "requestId",
   "deniedKinds",
   "note",
+  "targetId",
+  "findingId",
+  "controlId",
+  "evidenceId",
+  "title",
+  "summary",
+  "severity",
+  "findingCategory",
 ] as const;
 
 function parseReviewedFindingFollowup(
@@ -10825,6 +10839,67 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
         );
         return typeof result === "string" ? result : safeProjection(result);
       }
+      if (action === "record_analyst_finding") {
+        if (
+          ref.kind !== "sentinel" || ref.revision === undefined ||
+          !context?.authenticatedOwnerSessionId ||
+          !context.authorizeOwnerRunCall ||
+          !canFlowTo(context.inputClassification ?? "PUBLIC", "INTERNAL") ||
+          !canFlowTo("INTERNAL", context.ceiling ?? "PUBLIC") ||
+          Object.keys(args).some((key) =>
+            ![
+              "action",
+              "kind",
+              "id",
+              "revision",
+              "runId",
+              "targetId",
+              "findingId",
+              "controlId",
+              "evidenceId",
+              "title",
+              "summary",
+              "severity",
+              "findingCategory",
+              "requestId",
+            ].includes(key)
+          ) ||
+          !await controller.inspect(ref)
+        ) return unavailable;
+        const revision = ref.revision;
+        const authorizeWrite = context.authorizeOwnerRunCall;
+        const selectedCurrent = context.authorizeSelectedSentinelCase ??
+          (() => true);
+        const result = await recordOperatorSentinelFinding(
+          resolveSentinelCasePath(options.baseDir, ref.id),
+          revision,
+          { ...args, graphFindingId: args.findingId },
+          options.confirm,
+          async (sources, projection) => {
+            if (!selectedCurrent() || !await authorizeWrite(args)) return false;
+            for (const node of sources) {
+              if (
+                !await authorizeWrite({
+                  action: "node",
+                  kind: "sentinel",
+                  id: ref.id,
+                  revision,
+                  node,
+                })
+              ) return false;
+            }
+            return await context.authorizeSavedResponse(
+              operatorRunTool.name,
+              projection,
+              "INTERNAL",
+            );
+          },
+          selectedCurrent,
+        );
+        return result.startsWith("{")
+          ? safeProjection({ receipt: JSON.parse(result) })
+          : result;
+      }
       if (action === "amend_finding_report") {
         if (
           ref.kind !== "sentinel" || ref.revision === undefined ||
@@ -11300,7 +11375,7 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
           targetId: string;
         }) =>
           record.caseId === ref.id && record.runId === runId &&
-          record.evidenceRevision <= revision && scope.allows(record.targetId);
+          record.evidenceRevision <= revision && scope.allowsRecord(record);
         if (!hasSentinelWorkerFindingJournal(path)) {
           return listing && cursor === undefined
             ? safeProjection({
@@ -11451,6 +11526,12 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
                 sourceReceiptId: selected.id,
                 evidenceRevision: selected.evidenceRevision,
                 taskId: selected.taskId,
+                ...("analyst" in report.finding && {
+                  analyst: report.finding.analyst,
+                  evidenceId: report.finding.evidenceId,
+                  snapshotDigest: report.finding.snapshotDigest,
+                  targetId: report.finding.targetId,
+                }),
                 ...("evidenceVersion" in selected && {
                   evidenceVersion: selected.evidenceVersion,
                 }),
