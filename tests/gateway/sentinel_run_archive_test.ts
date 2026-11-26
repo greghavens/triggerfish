@@ -1,3 +1,4 @@
+import { withReviewedToolRules } from "../../src/core/policy/reviewed_tool_rules.ts";
 import { openRunArchiveActions } from "../../src/core/run_archive_actions.ts";
 import {
   projectRepositoryVisibility,
@@ -4449,6 +4450,14 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
       });
       plannerRegistry.setDefault("native-workflow-planner");
       let metadataReads = 0;
+      let credentialReads = 0;
+      const workflowScopes = [{
+        case: exact.id,
+        asset: "app",
+        owner: "owner",
+        repo: "repo",
+        workflow_id: 22,
+      }];
       let denyMetadata = true;
       let denyResponse = false;
       const planner = createSentinelSubagent({
@@ -4459,15 +4468,13 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
         sharedInventoryBaseDir: baseDir,
         allowModelAccess: true,
         authorizeExecutionTracePayload: () => Promise.resolve(false),
+        futureWorkflowScopes: workflowScopes,
         readRetainedWorkflow: createSentinelLiveWorkflowReader({
-          scopes: [{
-            case: exact.id,
-            asset: "app",
-            owner: "owner",
-            repo: "repo",
-            workflow_id: 22,
-          }],
-          resolveToken: () => Promise.resolve("fixture-metadata-token"),
+          scopes: workflowScopes,
+          resolveToken: () => {
+            credentialReads++;
+            return Promise.resolve("fixture-metadata-token");
+          },
           ssrfChecker: () => Promise.resolve({ ok: true, value: "192.0.2.1" }),
           verifyAccess: () => {
             metadataReads++;
@@ -4477,7 +4484,7 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
             throw new Error("Do not fetch historic runs again");
           },
         }),
-        hookRunner: {
+        hookRunner: withReviewedToolRules({
           evaluateHook(hook, { input }) {
             const native = input.tool_name === "sentinel_live_workflow_status";
             const allowed =
@@ -4490,12 +4497,45 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
               ruleId: null,
             });
           },
-        },
+        }, baseDir),
       });
       await planner.execute("Read the approved control evidence.", () => {});
       assertStringIncludes(toolResponse ?? "", "unavailable");
       assertEquals(metadataReads, 0);
       denyMetadata = false;
+      const blockDestination = {
+        action: "set_reviewed_tool_rule",
+        id: crypto.randomUUID(),
+        expectedVersion: 0,
+        requestId: crypto.randomUUID(),
+        reviewedRule: {
+          effect: "block",
+          enabled: true,
+          tool: "sentinel_live_workflow_status",
+          caseId: exact.id,
+          runId: attached.source.runId,
+          assetId: "app",
+          destinationHost: "api.github.com",
+        },
+      };
+      assertEquals(JSON.parse(await turn(blockDestination)).result.version, 1);
+      planner.clear();
+      toolResponse = undefined;
+      await planner.execute("Read the approved control evidence.", () => {});
+      assertStringIncludes(toolResponse ?? "", "unavailable");
+      assertEquals(credentialReads, 0);
+      assertEquals(metadataReads, 0);
+      assertEquals(
+        JSON.parse(
+          await turn({
+            ...blockDestination,
+            expectedVersion: 1,
+            requestId: crypto.randomUUID(),
+            reviewedRule: { ...blockDestination.reviewedRule, enabled: false },
+          }),
+        ).result.version,
+        2,
+      );
       denyResponse = true;
       planner.clear();
       await planner.execute("Read the approved control evidence.", () => {});
