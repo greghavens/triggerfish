@@ -3467,7 +3467,10 @@ ${
       if (action === "pause_runs" || action === "resume_runs") {
         const { requestId, runTargets } = args;
         const ceiling = context?.ceiling ?? "INTERNAL";
+        const authorize = context?.authorizeOwnerRunCall;
+        const controlAction = action === "pause_runs" ? "pause" : "resume";
         if (
+          !authorize || !context?.authenticatedOwnerSessionId ||
           !canFlowTo("INTERNAL", ceiling) ||
           typeof requestId !== "string" || !digestPattern.test(requestId) ||
           !Array.isArray(runTargets) || !runTargets.length ||
@@ -3506,7 +3509,7 @@ ${
           request: {
             scope: linkScope,
             operatorId,
-            action: action === "pause_runs" ? "pause" : "resume",
+            action: controlAction,
             requestId: requestId.toLowerCase(),
             targets,
           },
@@ -3514,6 +3517,10 @@ ${
           journal: links,
           ceiling,
           confirm: options.confirm,
+          authorize: async (target) =>
+            (!target ||
+              await authorize({ action: controlAction, ...target.ref })) &&
+            await authorize(args),
         });
         if (!controlled) return unavailable;
         if (controlled.declined) {

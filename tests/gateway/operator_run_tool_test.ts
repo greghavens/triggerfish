@@ -150,6 +150,7 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
   let sentinelModelAccess = true;
   let duringConfirmation: (() => void) | undefined;
   let denyArchiveTarget: string | undefined;
+  let denyBatchWorkflowPause: string | undefined;
   const evaluated: { hook: string; taint: string; target?: unknown }[] = [];
   let denied: "PRE_TOOL_CALL" | "POST_TOOL_RESPONSE" | "PRE_OUTPUT" | undefined;
   let allowTracePayload = true;
@@ -427,7 +428,11 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
             }
           }
         }
-        const allowed = !applies || hook !== denied;
+        const deniedBatchTarget = hook === "PRE_TOOL_CALL" && runTool &&
+          denyBatchWorkflowPause !== undefined &&
+          call?.args?.action === "pause" &&
+          call.args.id === denyBatchWorkflowPause;
+        const allowed = !deniedBatchTarget && (!applies || hook !== denied);
         return Promise.resolve({
           allowed,
           action: allowed ? "ALLOW" : "BLOCK",
@@ -5875,6 +5880,28 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
         "running",
       );
       duringConfirmation = () => {
+        denied = "PRE_TOOL_CALL";
+      };
+      try {
+        assertStringIncludes((await turn(pauseBatch)).result, "unavailable");
+      } finally {
+        duringConfirmation = undefined;
+        denied = undefined;
+      }
+      using blockedBatch = new DatabaseSync(
+        join(baseDir, "operator-run-links.db"),
+      );
+      assertEquals(
+        blockedBatch.prepare(
+          "SELECT 1 FROM sqlite_master WHERE name = 'run_control_batches'",
+        ).get() && blockedBatch.prepare(
+          "SELECT 1 FROM run_control_batches WHERE requestId = ?",
+        ).get(pauseBatch.requestId),
+        undefined,
+      );
+      assertEquals(readSentinelAssessment(batchPath)?.paused, false);
+      assertEquals(restarted.inspect(batchWorkflow.id)?.status, "running");
+      duringConfirmation = () => {
         Deno.writeTextFileSync(
           batchPath,
           JSON.stringify({
@@ -5888,26 +5915,32 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
         assertEquals(refreshSentinelAssessment(batchPath)?.revision, 2);
       };
       let pausedBatch;
+      denyBatchWorkflowPause = batchWorkflow.id;
       try {
         pausedBatch = JSON.parse((await turn(pauseBatch)).result);
       } finally {
         duringConfirmation = undefined;
+        denyBatchWorkflowPause = undefined;
       }
       assertEquals(
         pausedBatch.items.map(({ status }: { status: string }) => status),
         [
           "stale",
-          "applied",
+          "approved",
           "unavailable",
         ],
       );
       assertEquals(readSentinelAssessment(batchPath)?.paused, false);
+      assertEquals(restarted.inspect(batchWorkflow.id)?.status, "running");
       const reviewedBatchApproval = confirmations.length;
       await withGateway(async (restartTurn) => {
+        const retriedBatch = JSON.parse((await restartTurn(pauseBatch)).result);
+        assertEquals(retriedBatch.approvedAt, pausedBatch.approvedAt);
         assertEquals(
-          JSON.parse((await restartTurn(pauseBatch)).result),
-          pausedBatch,
+          retriedBatch.items.map(({ status }: { status: string }) => status),
+          ["stale", "applied", "unavailable"],
         );
+        assertEquals(restarted.inspect(batchWorkflow.id)?.status, "paused");
         assertStringIncludes(
           (await restartTurn({ ...pauseBatch, runTargets: [batchWorkflow] }))
             .result,

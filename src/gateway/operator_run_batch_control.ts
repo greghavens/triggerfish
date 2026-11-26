@@ -16,10 +16,12 @@ interface OperatorRunBatchOptions {
   readonly journal: ReturnType<typeof openOperatorRunLinkStore>;
   readonly ceiling: ClassificationLevel;
   readonly confirm: (message: string) => Promise<boolean>;
+  readonly authorize: (target?: OperatorRunBatchTarget) => Promise<boolean>;
 }
 
 export async function applyOperatorRunBatch(
-  { request, controller, journal, ceiling, confirm }: OperatorRunBatchOptions,
+  { request, controller, journal, ceiling, confirm, authorize }:
+    OperatorRunBatchOptions,
 ) {
   const wanted = request.action === "pause" ? "paused" : "running";
   const before = request.action === "pause" ? "running" : "paused";
@@ -71,6 +73,7 @@ export async function applyOperatorRunBatch(
         }`,
       )
     ) return { declined: true };
+    if (!await authorize()) return;
     receipt = journal.approveBatch(request, items);
   }
   for (const [index, item] of receipt.items.entries()) {
@@ -78,7 +81,7 @@ export async function applyOperatorRunBatch(
       // A prior process may have applied the transition. Observe current
       // authorized state, and never send the uncertain operation again.
       const settled = await inspect(item, false);
-      if (settled?.status === wanted) {
+      if (settled?.status === wanted && await authorize(item)) {
         journal.updateBatchItem(
           request,
           index,
@@ -91,6 +94,7 @@ export async function applyOperatorRunBatch(
     }
     if (item.status !== "approved") continue;
     const checked = await inspect(item);
+    if (!await authorize(item)) continue;
     if (checked?.status !== before) {
       journal.updateBatchItem(request, index, "approved", "stale");
       continue;
