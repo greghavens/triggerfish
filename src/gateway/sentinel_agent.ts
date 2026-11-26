@@ -4024,6 +4024,66 @@ async function readScopedSentinelAssessment(
   }
 }
 
+/** Resolve peer endpoints with full identity context, then filter before paging. */
+async function readScopedSentinelSharedTopology(
+  path: string,
+  revision: number,
+  args: Record<string, unknown>,
+  baseDir: string | undefined,
+  signal: AbortSignal | undefined,
+): Promise<string> {
+  const request = sentinelSharedAssetLinksArgs(args);
+  if (!baseDir || !request || request.includeFindings) {
+    return "Error: Provide an exact case asset ID and valid topology pagination.";
+  }
+  const unavailable =
+    "Error: The local asset or shared topology is unavailable.";
+  const { asset, offset = 0, limit = 5, sourceCase } = request;
+  const runId = readSentinelRunIdForRevision(path, revision);
+  const snapshot = readSentinelAssessmentRevision(path, revision)?.result
+    .sharedGraph.snapshot;
+  if (!runId || !snapshot) return unavailable;
+  const policy = readSentinelOperatingConstraints(path, runId)?.constraints;
+  const localAssets = new Set(
+    snapshot.nodes.filter(({ kind }) => kind === "asset").map(({ id }) => id),
+  );
+  const allows = (nodeId: string) =>
+    sentinelOperatingConstraintsAllow(policy, {
+      kind: "review_evidence",
+      nodeId,
+    }, snapshot);
+  if (!localAssets.has(asset) || !allows(asset)) return unavailable;
+  const allowsEndpoint = (id: string) => !localAssets.has(id) || allows(id);
+  try {
+    const { unavailable: sources, ...links } =
+      await readSharedSentinelAssetLinks(
+        baseDir,
+        asset,
+        offset,
+        limit,
+        signal,
+        snapshot,
+        false,
+        {
+          includeSourceDigests: true,
+          excludedSnapshot: path,
+          sourceCase,
+          allowsTopologyLink: (from, to) =>
+            allowsEndpoint(from) && allowsEndpoint(to),
+        },
+      );
+    return boundResult({
+      ...links,
+      source: "live_published_inventory",
+      caseEvidenceRevision: revision,
+      ...(sourceCase !== undefined &&
+        { unavailableSourceCount: sources.length }),
+    });
+  } catch {
+    return unavailable;
+  }
+}
+
 export function isSentinelNativeGraphRead(name: unknown) {
   return name === assessmentTool.name || name === graphOverviewTool.name ||
     name === SENTINEL_PROVENANCE_NODE_READ ||
@@ -4032,7 +4092,8 @@ export function isSentinelNativeGraphRead(name: unknown) {
     isSentinelInventoryFindingRead(name) ||
     isSentinelInventoryNeighborhoodRead(name) ||
     name === "sentinel_worker_trace_search" ||
-    name === "sentinel_worker_observation";
+    name === "sentinel_worker_observation" ||
+    name === SENTINEL_SHARED_ASSET_LINKS_READ;
 }
 
 /** Reopen native console graph tools from the same exact scoped saved case. */
@@ -4041,6 +4102,7 @@ export async function readScopedSentinelConsoleGraph(
   assessmentRevision: number,
   name: string,
   args: Record<string, unknown>,
+  sharedTopology?: { readonly baseDir?: string; readonly signal?: AbortSignal },
 ): Promise<string> {
   if (!isSentinelNativeGraphRead(name)) {
     return "Error: This graph tool is unavailable in Sentinel.";
@@ -4067,6 +4129,15 @@ export async function readScopedSentinelConsoleGraph(
   }
   if (name === "sentinel_worker_observation") {
     return inspectSentinelWorkerObservation(options, args, true);
+  }
+  if (name === SENTINEL_SHARED_ASSET_LINKS_READ) {
+    return await readScopedSentinelSharedTopology(
+      snapshotPath,
+      assessmentRevision,
+      args,
+      sharedTopology?.baseDir,
+      sharedTopology?.signal,
+    );
   }
   if (name === SENTINEL_PATH_READ && args.graph === "provenance") {
     return await queryPath(
@@ -4660,6 +4731,7 @@ function createAgent(
           (toolName === assessmentTool.name ||
             toolName === sentinelInventoryTool.name || provenanceRead ||
             inventoryGraphRead || toolName === "sentinel_worker_observation" ||
+            toolName === SENTINEL_SHARED_ASSET_LINKS_READ ||
             isSentinelWorkerFindingTool(toolName) ||
             isSentinelGraphFactTool(toolName) ||
             toolName === proposeWorkerGoalTool.name ||
@@ -4981,6 +5053,12 @@ function createAgent(
           ? readSentinelAssessment(options.snapshotPath)
           : undefined;
       const directGraph = !!selectedAssessment;
+      if (
+        name === SENTINEL_SHARED_ASSET_LINKS_READ && directTelemetryReader &&
+        !directGraph
+      ) {
+        return "Error: Shared topology requires a saved case revision.";
+      }
       const direct = directTelemetry || directGraph
         ? { name, args }
         : undefined;

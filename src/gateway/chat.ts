@@ -42,6 +42,7 @@ import {
   SENTINEL_ASSESSMENT_READ,
   sentinelScopedGraphReadActions,
 } from "./sentinel_agent.ts";
+import { SENTINEL_SHARED_ASSET_LINKS_READ } from "../sentinel/worker_goal_recovery.ts";
 import {
   readSentinelModelSettings,
   readSentinelWorkerSideContext,
@@ -984,6 +985,7 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
             revision,
             directRead.name,
             directRead.args,
+            { baseDir: config.sentinelSharedInventoryBaseDir, signal },
           )
           : await execute(args, {
             ...authority,
@@ -1044,7 +1046,16 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
                 owner,
                 { resultText: text, blocked: false },
               );
-              return !approved.blocked && sourceIsCurrent();
+              if (approved.blocked || !sourceIsCurrent()) return false;
+              if (source.name !== SENTINEL_SHARED_ASSET_LINKS_READ) return true;
+              return !!sourcePath && await readScopedSentinelConsoleGraph(
+                    sourcePath,
+                    revision,
+                    source.name,
+                    source.args,
+                    { baseDir: config.sentinelSharedInventoryBaseDir, signal },
+                  ) === text &&
+                sourceIsCurrent();
             },
           });
           return text;

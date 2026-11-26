@@ -114,6 +114,34 @@ Deno.test("Authenticated Sentinel chat reads exact approved cross-case graph fin
   const main = await setupCase("main", "Selected case finding", false);
   const approved = await setupCase("approved", secretLabel);
   const hidden = await setupCase("unregistered", hiddenLabel);
+  const topologyCase = "published-topology-fixture";
+  const topologyPath = resolveSentinelCasePath(baseDir, topologyCase);
+  const publishedTopology = {
+    version: 1,
+    nodes: [
+      { id: "peer-a", kind: "asset", label: "Peer A", aliases: ["a.example"] },
+      { id: "peer-c", kind: "asset", label: "Peer C", aliases: ["c.example"] },
+      {
+        id: "peer-a-only",
+        kind: "asset",
+        label: "Dependency for the first asset",
+      },
+      {
+        id: "peer-c-only",
+        kind: "asset",
+        label: "Dependency for the second asset",
+      },
+    ],
+    edges: [
+      { from: "peer-a", to: "peer-a-only", relation: "depends_on" },
+      { from: "peer-a", to: "peer-c", relation: "depends_on" },
+      { from: "peer-c", to: "peer-c-only", relation: "depends_on" },
+    ],
+  };
+  await Deno.mkdir(dirname(topologyPath), { recursive: true, mode: 0o700 });
+  await Deno.writeTextFile(topologyPath, JSON.stringify(publishedTopology), {
+    mode: 0o600,
+  });
   const membership = resolveSentinelCaseMembership(
     approved.state.result?.sharedGraph.snapshot,
     {
@@ -212,6 +240,7 @@ Deno.test("Authenticated Sentinel chat reads exact approved cross-case graph fin
     | "sentinel_provenance_node"
     | "sentinel_assessment"
     | "sentinel_worker_observation"
+    | "sentinel_shared_asset_links"
     | undefined;
   let revokeAssessmentDuringResponse = false;
   let forensicGraph = false;
@@ -388,6 +417,7 @@ Deno.test("Authenticated Sentinel chat reads exact approved cross-case graph fin
       session: ordinaryOwner,
       providerRegistry: registry,
       sentinelSnapshotPath: main.path,
+      sentinelSharedInventoryBaseDir: baseDir,
       resolveSentinelChatCase: (id) =>
         id === "approved" && constraintsAllowed ? approved.path : undefined,
       allowSentinelModelAccess: true,
@@ -645,6 +675,45 @@ Deno.test("Authenticated Sentinel chat reads exact approved cross-case graph fin
     );
 
     await turn("/sentinel case approved");
+    const topologyQuery = {
+      asset: "asset-a",
+      sourceCase: topologyCase,
+      limit: 1,
+    };
+    localGraph = "sentinel_shared_asset_links";
+    await turn("Read one authorized published dependency", topologyQuery);
+    const topology = JSON.parse(result);
+    assertEquals(topology.links[0].to, "peer-a-only");
+    assertEquals(topology.links[0].from, "asset-a");
+    assertEquals(topology.totalLinks, 1);
+    assertEquals(topology.nextOffset, null);
+    assertEquals(topology.caseEvidenceRevision, approved.revision);
+    assertEquals(topology.sourceSnapshots[0].caseId, topologyCase);
+    assert(!result.includes("peer-c"));
+    assert(
+      hooks.includes("PRE_TOOL_CALL") && hooks.includes("POST_TOOL_RESPONSE") &&
+        hooks.includes("PRE_OUTPUT"),
+    );
+    await turn("Reject a shared topology lookup for an excluded case asset", {
+      ...topologyQuery,
+      asset: "asset-c",
+    });
+    assertStringIncludes(result, "unavailable");
+
+    captureModelContext = true;
+    await turn("Use the currently published dependency in model context.");
+    assertStringIncludes(modelContext, "peer-a-only");
+    await Deno.writeTextFile(
+      topologyPath,
+      JSON.stringify({ ...publishedTopology, edges: [] }),
+    );
+    try {
+      captureModelContext = true;
+      await turn("Remove withdrawn publication contents from model context.");
+      assert(!modelContext.includes("peer-a-only"));
+    } finally {
+      await Deno.writeTextFile(topologyPath, JSON.stringify(publishedTopology));
+    }
     localGraph = "sentinel_assessment";
     await turn("Read neutral assessment task progress", {});
     assert(
@@ -1118,6 +1187,18 @@ Deno.test("Authenticated Sentinel chat reads exact approved cross-case graph fin
     assertStringIncludes(result, secretLabel);
     await turn("/sentinel-agent Try the excluded asset graph.", {
       node: "asset-c",
+    });
+    assertStringIncludes(result, "unavailable");
+    localGraph = "sentinel_shared_asset_links";
+    await turn(
+      "/sentinel-agent Read published topology for an authorized asset",
+      topologyQuery,
+    );
+    assertEquals(JSON.parse(result).totalLinks, 1);
+    assertStringIncludes(result, "peer-a-only");
+    await turn("/sentinel-agent Reject topology for an excluded asset", {
+      ...topologyQuery,
+      asset: "asset-c",
     });
     assertStringIncludes(result, "unavailable");
     localGraph = undefined;
@@ -1659,6 +1740,14 @@ Deno.test("Authenticated Sentinel chat reads exact approved cross-case graph fin
     assert(!modelContext.includes(visibleAlert.subject));
 
     localTelemetry = undefined;
+    localGraph = "sentinel_shared_asset_links";
+    await turn(
+      "Refresh the dependency before changing asset scope",
+      { ...topologyQuery, limit: 5 },
+    );
+    assertEquals(JSON.parse(result).totalLinks, 2);
+    assertStringIncludes(result, "peer-a-only");
+    localGraph = undefined;
     const observationSearch = "Worker observation scope fixture";
     const observationResult = new Map<
       string,
@@ -1733,6 +1822,19 @@ Deno.test("Authenticated Sentinel chat reads exact approved cross-case graph fin
     captureModelContext = true;
     await turn("Do not reuse the withdrawn worker observation.");
     assert(!modelContext.includes(withdrawnObservation.summary));
+    assert(!modelContext.includes("peer-a-only"));
+    localGraph = "sentinel_shared_asset_links";
+    await turn(
+      "Reject previously authorized shared topology after local revocation",
+      topologyQuery,
+    );
+    assertStringIncludes(result, "unavailable");
+    await turn("Keep reading the remaining approved asset topology", {
+      ...topologyQuery,
+      asset: "asset-c",
+    });
+    assertEquals(JSON.parse(result).totalLinks, 1);
+    assertStringIncludes(result, "peer-c-only");
 
     localGraph = "sentinel_worker_observation";
     for (const unleased of [false, true]) {

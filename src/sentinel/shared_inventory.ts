@@ -364,6 +364,7 @@ export async function readSharedSentinelAssetLinks(
     readonly includeSourceDigests?: boolean;
     readonly retainSourceSnapshots?: boolean;
     readonly sourceCase?: string;
+    readonly allowsTopologyLink?: (from: string, to: string) => boolean;
     readonly selectedFindings?: {
       readonly includesSource: (caseId: string) => boolean;
       readonly permits: (
@@ -480,6 +481,9 @@ export async function readSharedSentinelAssetLinks(
     if (selectedFindings) continue;
     for (const edge of edges) {
       if (edge.from !== anchor && edge.to !== anchor) continue;
+      const from = matches?.get(edge.from) ?? edge.from;
+      const to = matches?.get(edge.to) ?? edge.to;
+      if (provenance?.allowsTopologyLink?.(from, to) === false) continue;
       if (
         provenance?.includeSourceDigests && snapshot &&
         !sources.has(caseId)
@@ -491,8 +495,6 @@ export async function readSharedSentinelAssetLinks(
           snapshot,
         });
       }
-      const from = matches?.get(edge.from) ?? edge.from;
-      const to = matches?.get(edge.to) ?? edge.to;
       const key = JSON.stringify([from, edge.relation, to]);
       const linked = records.get(key) ?? { ...edge, from, to, caseIds: [] };
       linked.caseIds.push(caseId);
