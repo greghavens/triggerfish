@@ -20,7 +20,7 @@ import { createZenMuxProvider } from "./zenmux.ts";
 import { createZaiProvider } from "./zai.ts";
 import { createFireworksProvider } from "./fireworks.ts";
 import { createTriggerfishProvider } from "./triggerfish.ts";
-import { withRetry } from "./retry.ts";
+import { type RetryOptions, withRetry } from "./retry.ts";
 
 /** Provider block from triggerfish.yaml. */
 export interface ProvidersConfig {
@@ -81,40 +81,43 @@ export interface ModelsConfig {
 export function loadProvidersFromConfig(
   modelsConfig: ModelsConfig,
   registry: LlmProviderRegistry,
+  retryPolicy?: () => RetryOptions | undefined,
 ): void {
+  const retryProvider = (provider: LlmProvider) =>
+    withRetry(provider, retryPolicy);
   const log = createLogger("providers");
   const providers = modelsConfig.providers;
 
   if (providers.anthropic) {
-    registry.register(withRetry(createAnthropicProvider({
+    registry.register(retryProvider(createAnthropicProvider({
       model: providers.anthropic.model,
       apiKey: providers.anthropic.apiKey,
     })));
   }
 
   if (providers.openai) {
-    registry.register(withRetry(createOpenAiProvider({
+    registry.register(retryProvider(createOpenAiProvider({
       model: providers.openai.model,
       apiKey: providers.openai.apiKey,
     })));
   }
 
   if (providers.google) {
-    registry.register(withRetry(createGoogleProvider({
+    registry.register(retryProvider(createGoogleProvider({
       model: providers.google.model,
       apiKey: providers.google.apiKey,
     })));
   }
 
   if (providers.ollama) {
-    registry.register(withRetry(createLocalProvider({
+    registry.register(retryProvider(createLocalProvider({
       endpoint: providers.ollama.endpoint,
       model: providers.ollama.model,
     })));
   }
 
   if (providers.lmstudio) {
-    registry.register(withRetry(createLocalProvider({
+    registry.register(retryProvider(createLocalProvider({
       name: "lmstudio",
       endpoint: providers.lmstudio.endpoint ?? "http://localhost:1234",
       model: providers.lmstudio.model,
@@ -122,35 +125,35 @@ export function loadProvidersFromConfig(
   }
 
   if (providers.openrouter) {
-    registry.register(withRetry(createOpenRouterProvider({
+    registry.register(retryProvider(createOpenRouterProvider({
       model: providers.openrouter.model,
       apiKey: providers.openrouter.apiKey,
     })));
   }
 
   if (providers.zenmux) {
-    registry.register(withRetry(createZenMuxProvider({
+    registry.register(retryProvider(createZenMuxProvider({
       model: providers.zenmux.model,
       apiKey: providers.zenmux.apiKey,
     })));
   }
 
   if (providers.zai) {
-    registry.register(withRetry(createZaiProvider({
+    registry.register(retryProvider(createZaiProvider({
       model: providers.zai.model,
       apiKey: providers.zai.apiKey,
     })));
   }
 
   if (providers.fireworks) {
-    registry.register(withRetry(createFireworksProvider({
+    registry.register(retryProvider(createFireworksProvider({
       model: providers.fireworks.model,
       apiKey: providers.fireworks.apiKey,
     })));
   }
 
   if (providers.triggerfish) {
-    registry.register(withRetry(createTriggerfishProvider({
+    registry.register(retryProvider(createTriggerfishProvider({
       gatewayUrl: providers.triggerfish.gatewayUrl,
       licenseKey: providers.triggerfish.licenseKey,
     })));
@@ -195,7 +198,7 @@ export function loadProvidersFromConfig(
       if (overrideProvider) {
         registry.registerClassificationOverride(
           level as ClassificationLevel,
-          withRetry(overrideProvider),
+          retryProvider(overrideProvider),
         );
         log.info("Classification model override registered", {
           operation: "loadClassificationOverride",

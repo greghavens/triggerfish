@@ -1,3 +1,4 @@
+import { monitorProviderRegistry } from "../../../agent/providers/monitoring.ts";
 import { createApprovalAdvisor } from "../../../core/policy/approval_advice.ts";
 import { withReviewedToolRules } from "../../../core/policy/reviewed_tool_rules.ts";
 import { enableLiveProviderRoutes } from "../../../agent/providers/live_routes.ts";
@@ -89,9 +90,12 @@ export function initializeFactoryInfra(
   readonly hookRunner: ReturnType<typeof createHookRunner>;
   readonly spinePath: string;
 } {
-  const providers = createProviderRegistry();
+  const { registry: providers, retryPolicy } = monitorProviderRegistry(
+    createProviderRegistry(),
+    baseDir,
+  );
   const models = config.models as ModelsConfig;
-  loadProvidersFromConfig(models, providers);
+  loadProvidersFromConfig(models, providers, retryPolicy);
   const registry = enableLiveProviderRoutes(
     providers,
     baseDir,

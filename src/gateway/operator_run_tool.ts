@@ -1,4 +1,8 @@
 import {
+  executeOperatorModelMonitor,
+  modelMonitoringActions,
+} from "./operator_model_monitor.ts";
+import {
   executeReviewedRuleAction,
   reviewedRuleActions,
 } from "./operator_reviewed_rules.ts";
@@ -547,6 +551,7 @@ export const operatorRunTool: ToolDefinition = {
         "delete_company",
         "set_company_scope",
         "company_assets",
+        ...modelMonitoringActions,
         "live_model_route",
         "set_live_model_route",
         "reset_live_model_route",
@@ -1128,6 +1133,22 @@ export const operatorRunTool: ToolDefinition = {
       type: "string",
       description:
         "Approved provider in the replacement chain to use for subsequent calls",
+    },
+    modelRetryCount: {
+      type: "integer",
+      description: "Maximum provider retries per call.",
+    },
+    modelRetryDelayMs: {
+      type: "integer",
+      description: "Initial provider retry delay in milliseconds.",
+    },
+    modelRecordId: {
+      type: "integer",
+      description: "Exact record to delete or cursor for the next page.",
+    },
+    modelUsageDays: {
+      type: "integer",
+      description: "Number of UTC days to report.",
     },
     modelRouteClassification: {
       type: "string",
@@ -3251,6 +3272,30 @@ export function createOperatorRunToolExecutor(options: {
       )
     ) {
       return "Error: Supply only defined operator run fields.";
+    }
+    const monitoring = modelMonitoringActions.find((action) =>
+      action === args.action
+    );
+    if (monitoring) {
+      try {
+        const result = await executeOperatorModelMonitor(
+          options.baseDir,
+          options.confirm,
+          monitoring,
+          args,
+          context,
+        );
+        if (!result) return unavailable;
+        const classification = typeof result._classification === "string"
+          ? parseClassification(result._classification)
+          : undefined;
+        return safeProjection(
+          result,
+          classification?.ok ? classification.value : "INTERNAL",
+        );
+      } catch {
+        return unavailable;
+      }
     }
     const backgroundOwner = canFlowTo("INTERNAL", context?.ceiling ?? "PUBLIC")
       ? context?.authenticatedOwnerSessionId ?? null

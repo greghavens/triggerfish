@@ -154,6 +154,7 @@ async function runLlmProviderCall(
   const callOptions = {
     ...(ctx.signal ? { signal: ctx.signal } : {}),
     sessionId: ctx.sessionKey,
+    modelUsageClassification: taint,
   };
 
   const useStreaming = ctx.state.config.enableStreaming !== false &&

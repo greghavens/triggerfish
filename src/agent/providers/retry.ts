@@ -113,7 +113,6 @@ export async function invokeWithRetry<T>(
         attempt: i + 1,
         maxAttempts: opts.maxRetries + 1,
         delayMs,
-        err,
       });
       await retrySleep(delayMs, opts.signal);
     }
@@ -134,10 +133,15 @@ export async function invokeWithRetry<T>(
  */
 export function withRetry(
   provider: LlmProvider,
-  options?: RetryOptions,
+  options?: RetryOptions | (() => RetryOptions | undefined),
 ): LlmProvider {
-  const maxRetries = options?.maxRetries ?? DEFAULT_MAX_RETRIES;
-  const baseDelayMs = options?.baseDelayMs ?? DEFAULT_BASE_DELAY_MS;
+  function policy() {
+    const selected = typeof options === "function" ? options() : options;
+    return {
+      maxRetries: selected?.maxRetries ?? DEFAULT_MAX_RETRIES,
+      baseDelayMs: selected?.baseDelayMs ?? DEFAULT_BASE_DELAY_MS,
+    };
+  }
 
   const retryComplete = (
     messages: readonly LlmMessage[],
@@ -148,8 +152,7 @@ export function withRetry(
     return invokeWithRetry(
       () => provider.complete(messages, tools, opts),
       {
-        maxRetries,
-        baseDelayMs,
+        ...policy(),
         providerName: provider.name,
         operation: "complete",
         signal,
@@ -166,8 +169,7 @@ export function withRetry(
       return retryStreamConnection(
         () => provider.stream!(messages, tools, opts),
         {
-          maxRetries,
-          baseDelayMs,
+          ...policy(),
           providerName: provider.name,
           signal: opts.signal as AbortSignal | undefined,
         },
@@ -227,7 +229,6 @@ async function* retryStreamConnection(
         attempt: i + 1,
         maxAttempts: opts.maxRetries + 1,
         delayMs,
-        err,
       });
       await retrySleep(delayMs, opts.signal);
     }
