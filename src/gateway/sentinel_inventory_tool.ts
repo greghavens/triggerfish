@@ -62,7 +62,7 @@ export const sentinelInventoryTool: ToolDefinition = {
     assetQuery: {
       type: "object",
       description:
-        "Typed Boolean assets filter. Use {dsl: string} for textual expressions such as port>=443 AND tech=proxy, or {and:[...]}, {or:[...]}, {not:...}, or {field,op,value}. Text fields service, technology, url, title, ip, domain and registrationId accept contains/eq/ne. Numeric port and status accept eq/ne/gt/gte/lt/lte. Omit exact assetIds.",
+        "Typed Boolean assets filter. Use {dsl: string} for textual expressions such as port>=443 AND tech=proxy, or {and:[...]}, {or:[...]}, {not:...}, or {field,op,value}. Text fields service, technology, url, title, ip, domain and registrationId accept contains/eq/ne. Numeric port and status accept eq/ne/gt/gte/lt/lte. Use exact case_id or organization_id within the authorized inventory. Omit exact assetIds.",
     },
     assetText: {
       type: "string",
@@ -298,6 +298,7 @@ export function reopenSentinelAssignedInventory(
   }
   const page = {
     ...query,
+    caseId,
     scopeBinding: JSON.stringify([path, revision, assignmentId]),
   };
   const result = selector.view === "organizations"
@@ -462,8 +463,10 @@ export async function executeSentinelInventoryTool(
     if (view === "coverage" && state?.plan.inventoryCoverageEnabled === false) {
       return "Error: Inventory coverage is disabled for this Sentinel assessment.";
     }
+    const caseId = locateSentinelCase(path)?.caseId;
     const page = {
       ...query,
+      caseId,
       allowedAssetIds,
       scopeBinding: JSON.stringify([
         path,
@@ -471,7 +474,6 @@ export async function executeSentinelInventoryTool(
         options.assignedTaskId ?? null,
       ]),
     };
-    const caseId = locateSentinelCase(path)?.caseId ?? null;
     const result = view === "coverage" && state
       ? querySentinelAssetReviewCoverage(
         graph,
@@ -501,7 +503,7 @@ export async function executeSentinelInventoryTool(
     }
     const output = JSON.stringify({
       ...result,
-      caseId,
+      caseId: caseId ?? null,
       evidenceRevision: state?.revision ?? null,
       _classification: "INTERNAL",
     });

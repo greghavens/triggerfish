@@ -1463,7 +1463,7 @@ export const operatorRunTool: ToolDefinition = {
     assetQuery: {
       type: "object",
       description:
-        "Typed Boolean assets filter. Use {dsl: string} for textual expressions such as port>=443 AND tech=proxy, or {and:[...]}, {or:[...]}, {not:...}, or {field,op,value}. Text fields service, technology, url, title, ip, domain and registrationId accept contains/eq/ne. Numeric port and status accept eq/ne/gt/gte/lt/lte. Omit exact assetIds.",
+        "Typed Boolean assets filter. Use {dsl: string} for textual expressions such as port>=443 AND tech=proxy, or {and:[...]}, {or:[...]}, {not:...}, or {field,op,value}. Text fields service, technology, url, title, ip, domain and registrationId accept contains/eq/ne. Numeric port and status accept eq/ne/gt/gte/lt/lte. Use exact case_id or organization_id within the authorized inventory. Omit exact assetIds.",
     },
     subscriptionSettings: {
       type: "object",

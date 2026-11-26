@@ -1,6 +1,7 @@
 /** Typed properties of an observed asset and bounded Boolean inventory selectors. */
 import { isIP } from "node:net";
 import { redactCredentialText } from "../core/logger/redactor.ts";
+import { isSentinelCaseId } from "./cases.ts";
 
 const textFields = [
   "service",
@@ -21,6 +22,7 @@ const textFields = [
 ] as const;
 type TextField = typeof textFields[number];
 type NumericField = "port" | "status";
+type ContextField = "caseId" | "organizationId";
 
 export type SentinelAssetProperties =
   & { readonly [Field in TextField]?: readonly string[] }
@@ -30,6 +32,11 @@ export type SentinelAssetQuery =
   | { readonly and: readonly SentinelAssetQuery[] }
   | { readonly or: readonly SentinelAssetQuery[] }
   | { readonly not: SentinelAssetQuery }
+  | {
+    readonly field: ContextField;
+    readonly op: "eq";
+    readonly value: string;
+  }
   | {
     readonly field: TextField;
     readonly op: "contains" | "not_contains" | "eq" | "ne";
@@ -143,8 +150,11 @@ export function parseSentinelAssetProperties(
   return Object.freeze(out);
 }
 
-const dslFields = new Map<string, TextField | NumericField>([
+const dslFields = new Map<string, TextField | NumericField | ContextField>([
   ...textFields.map((field) => [field.toLowerCase(), field] as const),
+  ["case_id", "caseId"],
+  ["company_id", "organizationId"],
+  ["organization_id", "organizationId"],
   ["service_name", "service"],
   ["page_title", "title"],
   ["icp", "registrationId"],
@@ -209,6 +219,11 @@ function parseAssetSearchText(text: string): unknown {
         return;
       }
       const value = raw.startsWith('"') ? raw.slice(1, -1) : raw;
+      if (field === "caseId" || field === "organizationId") {
+        return op === "=" || op === "=="
+          ? { field, op: "eq", value }
+          : undefined;
+      }
       if (field === "port" || field === "status") {
         if (!/^\d+$/.test(value)) return;
         const numericOps = new Map([
@@ -271,6 +286,14 @@ export function parseSentinelAssetQuery(
     }
     const { field, op, value: operand } = item;
     if (keys.length !== 3) return;
+    if (field === "caseId" || field === "organizationId") {
+      const valid = field === "caseId"
+        ? isSentinelCaseId(operand)
+        : assetText(operand, 256) !== undefined;
+      return op === "eq" && valid && typeof operand === "string"
+        ? { field, op, value: operand }
+        : undefined;
+    }
     if (field === "port" || field === "status") {
       if (
         numberProperty(field, operand) &&
@@ -304,6 +327,7 @@ type QueryAsset = {
   readonly label?: string;
   readonly aliases?: readonly string[];
   readonly properties?: SentinelAssetProperties;
+  readonly organization?: { readonly id: string };
 };
 
 function retainedAssetUrls(asset: QueryAsset): URL[] {
@@ -356,14 +380,23 @@ export function sentinelAssetPropertyValues(
 export function matchesSentinelAssetQuery(
   asset: QueryAsset,
   expr: SentinelAssetQuery,
+  caseId?: string,
 ): boolean {
   if ("and" in expr) {
-    return expr.and.every((child) => matchesSentinelAssetQuery(asset, child));
+    return expr.and.every((child) =>
+      matchesSentinelAssetQuery(asset, child, caseId)
+    );
   }
   if ("or" in expr) {
-    return expr.or.some((child) => matchesSentinelAssetQuery(asset, child));
+    return expr.or.some((child) =>
+      matchesSentinelAssetQuery(asset, child, caseId)
+    );
   }
-  if ("not" in expr) return !matchesSentinelAssetQuery(asset, expr.not);
+  if ("not" in expr) return !matchesSentinelAssetQuery(asset, expr.not, caseId);
+  if (expr.field === "caseId") return expr.value === caseId;
+  if (expr.field === "organizationId") {
+    return expr.value === asset.organization?.id;
+  }
   if (expr.field === "port" || expr.field === "status") {
     const { field, op, value } = expr;
     const explicit = asset.properties?.[field] ?? [];

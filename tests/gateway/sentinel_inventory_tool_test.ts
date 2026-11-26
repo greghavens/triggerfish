@@ -446,12 +446,22 @@ Deno.test("Sentinel inventory enforces the real leased asset and stops flow on h
             view: "assets",
             assetQuery: { field: "port", op: "eq", value: 8443 },
           },
+          {
+            view: "assets",
+            assetQuery: { dsl: "case_id=main AND company_id=blue" },
+          },
+          {
+            view: "assets",
+            assetQuery: { dsl: "case_id=main AND organization_id=green" },
+          },
         ],
         undefined,
         lease,
       );
       assertEquals(JSON.parse(typed.resultFrames[0]).assets[0].id, "alpha");
       assertEquals(JSON.parse(typed.resultFrames[1]).assets, []);
+      assertEquals(JSON.parse(typed.resultFrames[2]).assets[0].id, "alpha");
+      assertEquals(JSON.parse(typed.resultFrames[3]).assets, []);
       assertEquals(
         JSON.parse(worker.resultFrames[0]).assets.map((
           { id }: { id: string },

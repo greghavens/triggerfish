@@ -2193,3 +2193,218 @@ Deno.test("Authenticated Sentinel chat reads exact approved cross-case graph fin
     await Deno.remove(baseDir, { recursive: true });
   }
 });
+
+Deno.test("Gateway inventory composes exact case and organization IDs inside reviewed membership", async () => {
+  const baseDir = await Deno.makeTempDir();
+  const caseId = "approved";
+  const path = resolveSentinelCasePath(baseDir, caseId);
+  let gateway: ReturnType<typeof createGatewayServer> | undefined;
+  let socket: WebSocket | undefined;
+  try {
+    await Deno.mkdir(dirname(path), { recursive: true });
+    await Deno.writeTextFile(
+      path,
+      JSON.stringify({
+        version: 1,
+        nodes: ["a", "b", "c"].map((suffix) => ({
+          kind: "asset",
+          id: `asset-${suffix}`,
+          label: `Asset ${suffix}`,
+          organization: suffix === "c"
+            ? { id: "hidden-ops", label: "Hidden Operations" }
+            : { id: "ops", label: "Operations" },
+        })),
+        edges: [],
+      }),
+    );
+    const state = startSentinelAssessment(path);
+    const membership = resolveSentinelCaseMembership(
+      state.result?.sharedGraph.snapshot,
+      {
+        caseId,
+        evidenceRevision: state.revision,
+        selector: { kind: "assets", assetIds: ["asset-a", "asset-b"] },
+      },
+    );
+    assert(membership && state.plan.runId);
+    assert(recordSentinelOperatingConstraints(path, {
+      runId: state.plan.runId,
+      evidenceRevision: state.revision,
+      expectedVersion: 0,
+      requestId: crypto.randomUUID(),
+      operatorScope: "owner",
+      constraints: { allowedAssetIds: membership.assetIds, deniedKinds: [] },
+      membership,
+    }));
+
+    let next: Record<string, unknown> | undefined;
+    let result = "";
+    const hooks = new Set<string>();
+    const registry = createProviderRegistry();
+    registry.register({
+      name: "inventory-context",
+      supportsStreaming: false,
+      complete(messages) {
+        const args = next;
+        next = undefined;
+        if (!args) {
+          result = String(
+            messages.findLast(({ role }) => role === "tool")?.content,
+          );
+        }
+        return Promise.resolve({
+          content: args ? "" : "Inventory query finished.",
+          usage: { inputTokens: 1, outputTokens: 1 },
+          toolCalls: args
+            ? [{
+              id: crypto.randomUUID(),
+              type: "function",
+              function: {
+                name: "operator_runs",
+                arguments: JSON.stringify(args),
+              },
+            }]
+            : [],
+        });
+      },
+    });
+    registry.setDefault("inventory-context");
+    const token = crypto.randomUUID();
+    gateway = createGatewayServer({
+      token,
+      port: 0,
+      chatSession: createChatSession({
+        session: createSession({
+          userId: "owner" as UserId,
+          channelId: "inventory-context" as ChannelId,
+        }),
+        providerRegistry: registry,
+        operatorRunExecutor: createOperatorRunToolExecutor({
+          baseDir,
+          confirm: () => Promise.resolve(false),
+        }),
+        hookRunner: {
+          evaluateHook(hook) {
+            hooks.add(hook);
+            return Promise.resolve({
+              allowed: true,
+              action: "ALLOW",
+              ruleId: null,
+              duration: 0,
+            });
+          },
+        },
+      }),
+    });
+    const { port } = await gateway.start();
+    const client = socket = new WebSocket(
+      `ws://127.0.0.1:${port}/chat?token=${token}`,
+    );
+    await new Promise<void>((resolve, reject) => {
+      client.addEventListener("open", () => resolve(), { once: true });
+      client.addEventListener("error", reject, { once: true });
+    });
+    const turn = async (args: Record<string, unknown>) => {
+      next = args;
+      result = "";
+      const done = Promise.withResolvers<void>();
+      const timer = setTimeout(
+        () => done.reject(new Error("No inventory result")),
+        3000,
+      );
+      const listen = ({ data }: MessageEvent) => {
+        if (JSON.parse(data).type === "turn_end") done.resolve();
+      };
+      client.addEventListener("message", listen);
+      try {
+        client.send(
+          JSON.stringify({
+            type: "message",
+            content: "Read reviewed inventory.",
+          }),
+        );
+        await done.promise;
+        return result;
+      } finally {
+        clearTimeout(timer);
+        client.removeEventListener("message", listen);
+      }
+    };
+    const request = {
+      action: "inventory",
+      kind: "sentinel",
+      id: caseId,
+      revision: state.revision,
+      scope: "membership",
+      limit: 1,
+      assetQuery: {
+        dsl: 'case_id=approved AND (company_id="ops" OR port=8443)',
+      },
+    };
+    const first = await turn(request);
+    assert(first.startsWith("{"), first);
+    const page = JSON.parse(first).page;
+    assertEquals(page.assets[0].id, "asset-a");
+    assert(page.nextCursor);
+    for (const hook of ["PRE_TOOL_CALL", "POST_TOOL_RESPONSE", "PRE_OUTPUT"]) {
+      assert(hooks.has(hook));
+    }
+    assertEquals(
+      JSON.parse(
+        await turn({
+          ...request,
+          cursor: page.nextCursor,
+          assetQuery: {
+            and: [
+              { field: "caseId", op: "eq", value: caseId },
+              {
+                or: [
+                  { field: "organizationId", op: "eq", value: "ops" },
+                  { field: "port", op: "eq", value: 8443 },
+                ],
+              },
+            ],
+          },
+        }),
+      ).page.assets[0].id,
+      "asset-b",
+    );
+    assertStringIncludes(
+      await turn({
+        ...request,
+        cursor: page.nextCursor,
+        assetQuery: { dsl: "case_id=approved AND organization_id=op" },
+      }),
+      "unavailable",
+    );
+    for (
+      const dsl of [
+        "case_id=unregistered AND organization_id=ops",
+        "case_id=approved AND organization_id=op",
+        "case_id=approved AND organization_id=hidden-ops",
+      ]
+    ) {
+      assertEquals(
+        JSON.parse(await turn({ ...request, assetQuery: { dsl } })).page.assets,
+        [],
+      );
+    }
+    assertStringIncludes(
+      await turn({ ...request, id: "unregistered" }),
+      "unavailable",
+    );
+    assertStringIncludes(
+      await turn({ ...request, revision: state.revision + 1 }),
+      "unavailable",
+    );
+  } finally {
+    if (socket?.readyState === WebSocket.OPEN) {
+      await new Promise<void>((resolve) => {
+        socket!.addEventListener("close", () => resolve(), { once: true });
+        socket!.close();
+      });
+    }
+    await gateway?.stop();
+    await Deno.remove(baseDir, { recursive: true });
+  }
+});

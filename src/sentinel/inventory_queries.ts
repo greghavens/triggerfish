@@ -37,6 +37,8 @@ interface PageOptions {
 export interface SentinelAssetInventoryOptions extends PageOptions {
   /** Trusted exact member IDs supplied by an authorized caller. */
   readonly allowedAssetIds?: readonly string[];
+  /** Case identity selected by the calling authorization boundary. */
+  readonly caseId?: string;
   readonly exactAssetIds?: readonly string[];
   readonly assetText?: string;
   readonly assetQuery?: SentinelAssetQuery;
@@ -222,7 +224,8 @@ function filterAssets(
     (assetType === undefined || node.assetType === assetType) &&
     (parentId === undefined || node.parentId === parentId) &&
     (alias === undefined || node.aliases?.includes(alias) === true) &&
-    (query === undefined || matchesSentinelAssetQuery(node, query)) &&
+    (query === undefined ||
+      matchesSentinelAssetQuery(node, query, options.caseId)) &&
     (text === undefined ||
       [node.label, ...(node.aliases ?? [])].some((value) =>
         value.normalize("NFC").toLowerCase().includes(text)
@@ -243,6 +246,9 @@ function filterAssets(
       ...(batch ? [{ exactAssetIds: batch }] : []),
       ...(text ? [{ assetText: text }] : []),
       ...(query ? [{ assetQuery: query }] : []),
+      ...(options.caseId && !options.scopeBinding
+        ? [{ caseId: options.caseId }]
+        : []),
     ],
   };
 }
@@ -836,6 +842,7 @@ function readPlannerInventoryQueryPage(
         limit,
         ...(typeof assetId === "string" && { onlyAsset: assetId }),
         ...scope.scopedQueryOptions,
+        caseId: scope.caseId,
       };
       const current = organizationView
         ? querySentinelOrganizations(scope.snapshot, options)

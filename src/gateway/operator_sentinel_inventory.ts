@@ -150,6 +150,7 @@ export function readOperatorSentinelInventory(
     }
     let options = optionsFor(args, path, revision);
     if (!options) return undefined;
+    options = { ...options, caseId };
     const saved = readSentinelAssessmentRevision(path, revision);
     const snapshot = saved?.result.sharedGraph.snapshot;
     if (!snapshot) return undefined;
