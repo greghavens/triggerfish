@@ -7623,7 +7623,9 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
                     task.nodeId === args.incidentId,
                 )
                 : step.tool === "sentinel_defense"
-                ? await readDefenseCoverage(readOptions, args)
+                ? await readDefenseCoverage(readOptions, args, {
+                  assignment: task,
+                })
                 : step.tool === "sentinel_saved_workflow_receipt"
                 ? readSentinelPrerequisiteWorkflowReceipt(
                   path,

@@ -540,7 +540,6 @@ Deno.test("Gateway traces a follow-up to an exact retained incident-member alert
         assert(!String(read?.content).includes(alternateAlert.subject));
         return Promise.resolve(completion("", "sentinel_defense", {
           upstreamCheck: checkId,
-          alertId,
         }));
       }
       if (!read) {
@@ -550,8 +549,10 @@ Deno.test("Gateway traces a follow-up to an exact retained incident-member alert
         }));
       }
       assertEquals(
-        JSON.parse(String(read.content)).matches[0].alertId,
-        alertId,
+        JSON.parse(String(read.content)).matches.map((
+          { alertId }: { alertId: string },
+        ) => alertId),
+        [alertId],
       );
       if (!isPlanner) {
         return Promise.resolve(
@@ -654,8 +655,9 @@ Deno.test("Gateway traces a follow-up to an exact retained incident-member alert
     assert(
       workerRead()?.steps.some(({ goalReceiptRead, tool }) =>
         tool === "sentinel_defense" && goalReceiptRead &&
-        "alertId" in goalReceiptRead.args &&
-        goalReceiptRead.args.alertId === alertId
+        "upstreamCheck" in goalReceiptRead.args &&
+        goalReceiptRead.args.upstreamCheck === checkId &&
+        !("alertId" in goalReceiptRead.args)
       ),
     );
     const report = readAdaptiveSentinel(path, state)?.modelPlannerHistory.find(
@@ -664,8 +666,9 @@ Deno.test("Gateway traces a follow-up to an exact retained incident-member alert
     const workerStepIndex = workerRead()?.steps.findIndex(
       ({ goalReceiptRead }) =>
         goalReceiptRead &&
-        "alertId" in goalReceiptRead.args &&
-        goalReceiptRead.args.alertId === alertId,
+        "upstreamCheck" in goalReceiptRead.args &&
+        goalReceiptRead.args.upstreamCheck === checkId &&
+        !("alertId" in goalReceiptRead.args),
     );
     assert(report && workerStepIndex !== undefined && workerStepIndex >= 0);
     const runId = state.plan.runId;
@@ -692,8 +695,10 @@ Deno.test("Gateway traces a follow-up to an exact retained incident-member alert
     await withArchivedPlannerRead(base, async (read) => {
       for (const selected of [plannerRead, workerTrace]) {
         assertEquals(
-          JSON.parse(await read(selected)).result.matches[0].alertId,
-          alertId,
+          JSON.parse(await read(selected)).result.matches.map((
+            { alertId }: { alertId: string },
+          ) => alertId),
+          [alertId],
         );
       }
     });
@@ -730,8 +735,10 @@ Deno.test("Gateway traces a follow-up to an exact retained incident-member alert
     await withArchivedPlannerRead(base, async (read) => {
       for (const selected of [plannerRead, workerTrace]) {
         assertEquals(
-          JSON.parse(await read(selected)).result.matches[0].alertId,
-          alertId,
+          JSON.parse(await read(selected)).result.matches.map((
+            { alertId }: { alertId: string },
+          ) => alertId),
+          [alertId],
         );
       }
       assert(recordSentinelOperatingConstraints(path, {
