@@ -52,7 +52,8 @@ Deno.test("gateway pins approved classification routes for the entire model turn
       if (
         hook === "PRE_OUTPUT" && withholdRouteOutput &&
         typeof context.input.content === "string" &&
-        context.input.content.includes('"baseline":')
+        (context.input.content.includes('"baseline":') ||
+          context.input.content.includes('"fixture-named-profile"'))
       ) {
         withheldOutputs++;
         return Promise.resolve({
@@ -64,8 +65,13 @@ Deno.test("gateway pins approved classification routes for the entire model turn
       }
       if (
         hook === "PRE_TOOL_CALL" && !allowRouteChanges &&
-        (context.input.tool_call as { args?: { action?: string } } | undefined)
-            ?.args?.action === "set_live_model_route"
+        ["set_live_model_route", "set_model_profile", "activate_model_profile"]
+          .includes(
+            (context.input.tool_call as
+              | { args?: { action?: string } }
+              | undefined)
+              ?.args?.action ?? "",
+          )
       ) {
         return Promise.resolve({
           allowed: false,
@@ -474,8 +480,113 @@ Deno.test("gateway pins approved classification routes for the entire model turn
       "first",
     );
 
+    const id = "fixture-named-profile";
+    const createNamed = {
+      action: "set_model_profile",
+      id,
+      requestId: crypto.randomUUID(),
+      expectedVersion: 0,
+      modelProfile: "second",
+      modelRouteModel: "second",
+    };
+    allowRouteChanges = false;
+    assert((await change(createNamed)).includes("blocked"));
+    assertEquals(reviews, 3);
+    allowRouteChanges = true;
+    assert((await change({
+      ...createNamed,
+      modelProfile: "unapproved",
+      modelRouteModel: "unapproved",
+    })).startsWith("Error:"));
+    assert(
+      (await change({ ...createNamed, apiKey: "synthetic-key" })).startsWith(
+        "Error:",
+      ),
+    );
+    assert((await change({
+      ...createNamed,
+      modelRouteClassification: "CONFIDENTIAL",
+    })).startsWith("Error:"));
+    revokeDuringReview = true;
+    assert((await change(createNamed)).startsWith("Error:"));
+    allowRouteChanges = true;
+    revokeDuringReview = false;
+    assertEquals(
+      JSON.parse(await change({ action: "model_profiles" })).profiles,
+      [],
+    );
+    const profileReceipt = await change(createNamed);
+    assertEquals(JSON.parse(profileReceipt).profile.version, 1);
+    const beforeClassificationCheck = classifiedResponses;
+    withholdRouteOutput = true;
+    assert(!(await change({ action: "model_profile", id })).includes(id));
+    assert(classifiedResponses > beforeClassificationCheck);
+    withholdRouteOutput = false;
+    assertEquals(await change(createNamed), profileReceipt);
+    assertEquals((await read()).version, 2);
+    const activation = {
+      action: "activate_model_profile",
+      id,
+      expectedVersion: 2,
+      modelProfileVersion: 1,
+      requestId: crypto.randomUUID(),
+    };
+    const activated = await change(activation);
+    assertEquals(JSON.parse(activated).edit.named, { id, version: 1 });
+    assertEquals(
+      await turn("New turn after named activation."),
+      "Answered by second.",
+    );
+    socket.close();
+    await gateway.stop();
+    gateway = makeGateway();
+    socket = await connect();
+    assertEquals(await change(activation), activated);
+    assertEquals(
+      await turn("New gateway with named model."),
+      "Answered by second.",
+    );
+
+    const remove = {
+      action: "delete_model_profile",
+      id,
+      requestId: crypto.randomUUID(),
+      expectedVersion: 1,
+    };
+    assert((await change(remove)).startsWith("Error:"));
+    const edited = JSON.parse(
+      await change({
+        ...createNamed,
+        requestId: crypto.randomUUID(),
+        expectedVersion: 1,
+        modelProfile: "first",
+        modelRouteModel: "first",
+      }),
+    );
+    assertEquals(edited.profile.version, 2);
+    assertEquals((await read()).named, { id, version: 2 });
+    assertEquals((await read()).version, 4);
+    assertEquals(
+      await turn("New turn after active named edit."),
+      "Answered by first.",
+    );
+    assert((await change(activation)).startsWith("Error:"));
+    await change({
+      ...reset,
+      requestId: crypto.randomUUID(),
+      expectedVersion: 4,
+    });
+    const deletion = { ...remove, expectedVersion: 2 };
+    const dropped = await change(deletion);
+    assertEquals(JSON.parse(dropped).profile.profile, null);
+    assertEquals(await change(deletion), dropped);
+    assertEquals(
+      JSON.parse(await change({ action: "model_profiles" })).profiles,
+      [],
+    );
+
     const resumeCommand = (id: string) => `/recover ${id} ${recoverPrompt}`;
-    async function interrupt(id: string) {
+    const interrupt = async (id: string) => {
       const control = interruption = {
         entered: Promise.withResolvers<void>(),
         release: Promise.withResolvers<void>(),
@@ -510,7 +621,7 @@ Deno.test("gateway pins approved classification routes for the entire model turn
         interruption = undefined;
         await gateway.stop();
       }
-    }
+    };
 
     const resumedId = crypto.randomUUID();
     await interrupt(resumedId);

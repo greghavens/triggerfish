@@ -6,6 +6,7 @@ import { inventoryConnectorTools } from "./operator_scopesentry_import.ts";
 import { readAgentProfile } from "../core/agent_profiles.ts";
 import { withAgentProfileRuntime } from "../agent/orchestrator/agent_profile_runtime.ts";
 import { isAgentProfileAction } from "./operator_agent_profiles.ts";
+import { namedModelProfileActions } from "./operator_model_profiles.ts";
 import { repositoryVisibilityDestinationMetadata } from "./sentinel_repository_visibility.ts";
 import { createHash } from "node:crypto";
 import {
@@ -348,12 +349,15 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
               | undefined;
             if (call?.name === operatorRunTool.name) {
               const action = call.args?.action;
+              const namedModelProfile = namedModelProfileActions.some((name) =>
+                name === action
+              );
               const selectedRouteClass = typeof action === "string" &&
-                  [
+                  (namedModelProfile || [
                     "live_model_route",
                     "set_live_model_route",
                     "reset_live_model_route",
-                  ].includes(action) &&
+                  ].includes(action)) &&
                   typeof call.args?.modelRouteClassification === "string"
                 ? parseClassification(call.args.modelRouteClassification)
                 : undefined;
@@ -387,6 +391,8 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
                       "worker_limit",
                       "assessment_concurrency",
                       "live_model_route",
+                      "model_profiles",
+                      "model_profile",
                       "finding_groups",
                       "finding_asset_tree",
                       "search_case_traces",
@@ -478,6 +484,7 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
                     namedRecordActions.some((name) => name === action) ||
                     reviewedRuleActions.some((name) => name === action) ||
                     isAgentProfileAction(action) ||
+                    namedModelProfile ||
                     action === "set_sentinel_tool_configuration" ||
                     action === "reset_sentinel_tool_configuration" ||
                     action === "set_company_scope" ||

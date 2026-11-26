@@ -11,6 +11,10 @@ import {
   modelMonitoringActions,
 } from "./operator_model_monitor.ts";
 import {
+  executeNamedModelProfileAction,
+  namedModelProfileActions,
+} from "./operator_model_profiles.ts";
+import {
   executeReviewedRuleAction,
   reviewedRuleActions,
 } from "./operator_reviewed_rules.ts";
@@ -565,6 +569,7 @@ export const operatorRunTool: ToolDefinition = {
         "set_company_scope",
         "company_assets",
         ...modelMonitoringActions,
+        ...namedModelProfileActions,
         ...notificationChannelActions,
         "live_model_route",
         "set_live_model_route",
@@ -1190,6 +1195,14 @@ export const operatorRunTool: ToolDefinition = {
     modelUsageDays: {
       type: "integer",
       description: "Number of UTC days to report.",
+    },
+    modelProfileVersion: {
+      type: "integer",
+      description: "Exact reviewed named model profile revision to activate.",
+    },
+    modelProfileAfter: {
+      type: "string",
+      description: "Cursor from the previous named model profiles page.",
     },
     modelRouteClassification: {
       type: "string",
@@ -3379,6 +3392,27 @@ export function createOperatorRunToolExecutor(options: {
           result,
           classification?.ok ? classification.value : "INTERNAL",
         );
+      } catch {
+        return unavailable;
+      }
+    }
+    const namedModel = namedModelProfileActions.find((action) =>
+      action === args.action
+    );
+    if (namedModel) {
+      try {
+        const result = await executeNamedModelProfileAction(
+          namedModel,
+          args,
+          options.liveModelRoutes,
+          context,
+          options.confirm,
+        );
+        if (!result) return unavailable;
+        const classification = parseClassification(result._classification);
+        return classification.ok
+          ? safeProjection(result, classification.value)
+          : unavailable;
       } catch {
         return unavailable;
       }

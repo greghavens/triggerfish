@@ -12,6 +12,32 @@ export interface LiveRouteEdit {
   readonly override: SelectedModelProfile | null;
   readonly effective: SelectedModelProfile;
   readonly previous: SelectedModelProfile;
+  readonly named?: { readonly id: string; readonly version: number };
+}
+
+export interface NamedModelProfile {
+  readonly id: string;
+  readonly classification: ClassificationLevel;
+  readonly requestId: string;
+  readonly version: number;
+  readonly profile: SelectedModelProfile | null;
+}
+
+export function readNamedModelProfile(
+  db: DatabaseSync,
+  id: string,
+): NamedModelProfile | undefined {
+  if (!hasNamedModelProfiles(db)) return;
+  const row = db.prepare(
+    "SELECT receipt FROM named_profiles WHERE id = ? ORDER BY version DESC LIMIT 1",
+  ).get(id);
+  return row && JSON.parse(String(row.receipt));
+}
+
+export function hasNamedModelProfiles(db: DatabaseSync): boolean {
+  return !!db.prepare(
+    "SELECT 1 FROM sqlite_schema WHERE name = 'named_profiles' AND type = 'table'",
+  ).get();
 }
 
 export function openLiveRouteJournal(baseDir: string, write = false) {
@@ -50,6 +76,14 @@ export function openLiveRouteJournal(baseDir: string, write = false) {
       requestId TEXT NOT NULL UNIQUE,
       receipt TEXT NOT NULL,
       PRIMARY KEY(classification, version)
+    ) STRICT;
+    CREATE TABLE IF NOT EXISTS named_profiles (
+      id TEXT NOT NULL,
+      version INTEGER NOT NULL,
+      classification TEXT NOT NULL,
+      requestId TEXT NOT NULL UNIQUE,
+      receipt TEXT NOT NULL,
+      PRIMARY KEY(id, version)
     ) STRICT`);
   }
   return db;
