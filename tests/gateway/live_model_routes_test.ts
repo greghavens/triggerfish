@@ -1,3 +1,4 @@
+import { createOperatorRunToolExecutor } from "../../src/gateway/operator_run_tool.ts";
 import { buildSubagentFactory } from "../../src/gateway/startup/factory/subagent.ts";
 import { createSchedulerService } from "../../src/scheduler/service.ts";
 import type { OrchestratorFactory } from "../../src/scheduler/service_types.ts";
@@ -5,7 +6,10 @@ import { assert, assertEquals } from "@std/assert";
 import { join } from "@std/path";
 import { createProviderRegistry } from "../../src/agent/llm.ts";
 import { createOrchestrator } from "../../src/agent/orchestrator/orchestrator.ts";
-import { enableLiveProviderRoutes } from "../../src/agent/providers/live_routes.ts";
+import {
+  enableLiveProviderRoutes,
+  liveProviderRouteSettings,
+} from "../../src/agent/providers/live_routes.ts";
 import { createPolicyEngine } from "../../src/core/policy/engine.ts";
 import { createHookRunner } from "../../src/core/policy/hooks/hooks.ts";
 import type { LlmProvider } from "../../src/core/types/llm.ts";
@@ -26,7 +30,50 @@ Deno.test("gateway pins approved classification routes for the entire model turn
   await Deno.mkdir(data, { mode: 0o700 });
   const routeFile = join(data, "model-routes.json");
   const approvals = { INTERNAL: ["first", "second"] };
-  const hooks = createHookRunner(createPolicyEngine());
+  const policy = createHookRunner(createPolicyEngine());
+  let allowRouteChanges = true;
+  let revokeDuringReview = false;
+  let reviews = 0;
+  let withholdRouteOutput = false;
+  let classifiedResponses = 0;
+  let withheldOutputs = 0;
+  const hooks: typeof policy = {
+    ...policy,
+    evaluateHook(hook, context) {
+      if (
+        hook === "POST_TOOL_RESPONSE" &&
+        context.input.tool_name === "operator_runs"
+      ) {
+        classifiedResponses++;
+      }
+      if (
+        hook === "PRE_OUTPUT" && withholdRouteOutput &&
+        typeof context.input.content === "string" &&
+        context.input.content.includes('"baseline":')
+      ) {
+        withheldOutputs++;
+        return Promise.resolve({
+          allowed: false,
+          action: "BLOCK",
+          ruleId: null,
+          duration: 0,
+        });
+      }
+      if (
+        hook === "PRE_TOOL_CALL" && !allowRouteChanges &&
+        (context.input.tool_call as { args?: { action?: string } } | undefined)
+            ?.args?.action === "set_live_model_route"
+      ) {
+        return Promise.resolve({
+          allowed: false,
+          action: "BLOCK",
+          ruleId: null,
+          duration: 0,
+        });
+      }
+      return policy.evaluateHook(hook, context);
+    },
+  };
   const requests: string[] = [];
 
   async function select(provider: string, model = provider) {
@@ -46,6 +93,31 @@ Deno.test("gateway pins approved classification routes for the entire model turn
     async complete(messages) {
       const input = messages.at(-1)?.content;
       requests.push(name);
+      const last = messages.at(-1);
+      if (
+        last?.role === "user" && typeof input === "string" &&
+        input.startsWith("{")
+      ) {
+        return {
+          content: "",
+          toolCalls: [{
+            type: "function",
+            id: "route-admin",
+            function: { name: "operator_runs", arguments: input },
+          }],
+          usage: { inputTokens: 1, outputTokens: 1 },
+        };
+      }
+      if (
+        last?.role === "tool" && "tool_call_id" in last &&
+        last.tool_call_id === "route-admin"
+      ) {
+        return {
+          content: String(input),
+          toolCalls: [],
+          usage: { inputTokens: 1, outputTokens: 1 },
+        };
+      }
       if (name === "first" && input === "Start on the current route.") {
         await select("second");
         return {
@@ -84,30 +156,65 @@ Deno.test("gateway pins approved classification routes for the entire model turn
     approvals,
   );
   const token = crypto.randomUUID();
-  const gateway = createGatewayServer({
-    port: 0,
-    token,
-    chatSession: createChatSession({
-      session,
-      hookRunner: hooks,
-      providerRegistry: ownerRoutes,
-      getSessionTaint: () => "INTERNAL",
-      targetClassification: "INTERNAL",
-      tools: [{ name: "fixture_check", description: "Check", parameters: {} }],
-      toolExecutor: () => Promise.resolve("A completed call."),
-    }),
-  });
+  function makeGateway() {
+    return createGatewayServer({
+      port: 0,
+      token,
+      chatSession: createChatSession({
+        session,
+        hookRunner: hooks,
+        providerRegistry: ownerRoutes,
+        getSessionTaint: () => "INTERNAL",
+        targetClassification: "INTERNAL",
+        operatorRunExecutor: createOperatorRunToolExecutor({
+          baseDir,
+          liveModelRoutes: liveProviderRouteSettings(
+            ownerRoutes,
+            baseDir,
+            approvals,
+          ),
+          confirm: () => {
+            reviews++;
+            if (revokeDuringReview) allowRouteChanges = false;
+            return Promise.resolve(true);
+          },
+        }),
+        tools: [{
+          name: "fixture_check",
+          description: "Check",
+          parameters: {},
+        }],
+        toolExecutor: () => Promise.resolve("A completed call."),
+      }),
+    });
+  }
   await select("first");
-  const { port } = await gateway.start();
-  const socket = new WebSocket(`ws://127.0.0.1:${port}/chat?token=${token}`);
+  let gateway = makeGateway();
+  async function connect() {
+    const { port } = await gateway.start();
+    const connection = new WebSocket(
+      `ws://127.0.0.1:${port}/chat?token=${token}`,
+    );
+    await new Promise<void>((resolve, reject) => {
+      connection.addEventListener("open", () => resolve(), { once: true });
+      connection.addEventListener("error", reject, { once: true });
+    });
+    return connection;
+  }
+  let socket = await connect();
+
   async function turn(content: string): Promise<string> {
     const done = Promise.withResolvers<string>();
     let answer = "";
+    let toolResult: string | undefined;
     const receive = ({ data }: MessageEvent) => {
       const event = JSON.parse(data);
       if (event.type === "response") answer = String(event.text);
       if (event.type === "error") answer = String(event.message);
-      if (event.type === "turn_end") done.resolve(answer);
+      if (event.type === "tool_result") toolResult = String(event.result);
+      if (event.type === "turn_end") {
+        done.resolve(content.startsWith("{") ? toolResult ?? answer : answer);
+      }
     };
     const timer = setTimeout(() => done.reject(new Error("No reply")), 3000);
     socket.addEventListener("message", receive);
@@ -120,10 +227,6 @@ Deno.test("gateway pins approved classification routes for the entire model turn
     }
   }
   try {
-    await new Promise<void>((resolve, reject) => {
-      socket.addEventListener("open", () => resolve(), { once: true });
-      socket.addEventListener("error", reject, { once: true });
-    });
     assertEquals(
       await turn("Start on the current route."),
       "Answered by first.",
@@ -206,6 +309,99 @@ Deno.test("gateway pins approved classification routes for the entire model turn
     );
     assertEquals(requests.splice(0), ["second", "second"]);
     assertEquals(registry().getForClassification("INTERNAL")?.name, "default");
+
+    await select("first");
+    const change = (args: Record<string, unknown>) =>
+      turn(JSON.stringify({
+        modelRouteClassification: "INTERNAL",
+        ...args,
+      }));
+    const read = async () =>
+      JSON.parse(await change({ action: "live_model_route" }));
+    const update = {
+      action: "set_live_model_route",
+      requestId: crypto.randomUUID(),
+      expectedVersion: 0,
+      modelProfile: "second",
+      modelRouteModel: "second",
+    };
+    const initial = await read();
+    assertEquals(initial.version, 0);
+    assertEquals(initial._classification, "INTERNAL");
+    assert(classifiedResponses > 0);
+    withholdRouteOutput = true;
+    assert(
+      !(await change({ action: "live_model_route" })).includes('"baseline":'),
+    );
+    assert(withheldOutputs > 0);
+    withholdRouteOutput = false;
+    assert(
+      (await change({ ...update, modelRouteClassification: "CONFIDENTIAL" }))
+        .startsWith("Error:"),
+    );
+    assert(
+      (await change({
+        ...update,
+        modelProfile: "unapproved",
+        modelRouteModel: "unapproved",
+      })).startsWith("Error:"),
+    );
+    assertEquals(reviews, 0);
+    allowRouteChanges = false;
+    assert((await change(update)).includes("blocked"));
+    assertEquals(reviews, 0);
+    allowRouteChanges = true;
+    revokeDuringReview = true;
+    assert((await change(update)).startsWith("Error:"));
+    assertEquals(reviews, 1);
+    allowRouteChanges = true;
+    revokeDuringReview = false;
+    assertEquals((await read()).version, 0);
+    const updateReceipt = await change(update);
+    assertEquals(JSON.parse(updateReceipt).edit.effective.provider, "second");
+    assertEquals(reviews, 2);
+    assertEquals(
+      await turn("New turn after owner update."),
+      "Answered by second.",
+    );
+    socket.close();
+    await gateway.stop();
+    gateway = makeGateway();
+    socket = await connect();
+    assertEquals(
+      await turn("New gateway after owner update."),
+      "Answered by second.",
+    );
+    assertEquals(await change(update), updateReceipt);
+    assertEquals(reviews, 2);
+    assert(
+      (await change({
+        ...update,
+        modelProfile: "first",
+        modelRouteModel: "first",
+      })).startsWith("Error:"),
+    );
+    assertEquals((await read()).version, 1);
+
+    const reset = {
+      action: "reset_live_model_route",
+      requestId: crypto.randomUUID(),
+      expectedVersion: 1,
+    };
+    const resetReceipt = await change(reset);
+    assertEquals(JSON.parse(resetReceipt).edit.effective.provider, "first");
+    assertEquals(await turn("New turn after reset."), "Answered by first.");
+    assertEquals(await change(reset), resetReceipt);
+    assertEquals(reviews, 3);
+    const independent = enableLiveProviderRoutes(
+      registry(),
+      baseDir,
+      approvals,
+    );
+    assertEquals(
+      independent.snapshotForTurn?.().getForClassification("INTERNAL")?.name,
+      "first",
+    );
   } finally {
     socket.close();
     await gateway.stop();

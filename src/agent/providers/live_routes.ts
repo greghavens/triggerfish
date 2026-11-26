@@ -4,10 +4,17 @@ import {
   isModelProfileName,
   isSelectedModelProfile,
   type ModelProfileAllowlists,
+  type SelectedModelProfile,
   selectedModelProvider,
 } from "../../core/model_profile_selection.ts";
 import type { ClassificationLevel } from "../../core/types/classification.ts";
 import type { LlmProvider, LlmProviderRegistry } from "../../core/types/llm.ts";
+
+import {
+  type LiveRouteEdit,
+  openLiveRouteJournal,
+  readLiveRouteEdits,
+} from "./live_route_journal.ts";
 
 const levels: readonly ClassificationLevel[] = [
   "PUBLIC",
@@ -70,6 +77,7 @@ export function enableLiveProviderRoutes(
     snapshotForTurn() {
       const allowed = asMap(allowlists);
       const selected = asMap(readOperatorRoutes(routeFile));
+      const edits = readLiveRouteEdits(baseDir);
       const classes = levels.filter((level) => Object.hasOwn(allowed, level));
       if (
         !classes.length || Object.keys(allowed).length !== classes.length ||
@@ -81,7 +89,8 @@ export function enableLiveProviderRoutes(
       );
       for (const level of classes) {
         const names = allowed[level];
-        const profile = selected[level];
+        const edit = edits.get(level);
+        const profile = edit?.override ?? selected[level];
         if (
           !Array.isArray(names) || !names.length ||
           !names.every(isModelProfileName) || !isSelectedModelProfile(profile)
@@ -102,4 +111,91 @@ export function enableLiveProviderRoutes(
       };
     },
   };
+}
+
+/** Inspect and edit exact class routes using the same source and admission as turns. */
+export function liveProviderRouteSettings(
+  registry: LlmProviderRegistry,
+  baseDir: string,
+  allowlists: ModelProfileAllowlists,
+) {
+  function read(classification: ClassificationLevel) {
+    const names = allowlists[classification];
+    if (
+      !Array.isArray(names) || !names.length || !names.every(isModelProfileName)
+    ) return;
+    const source = asMap(
+      readOperatorRoutes(join(baseDir, "data", "model-routes.json")),
+    );
+    const baseline = source[classification];
+    if (!isSelectedModelProfile(baseline)) return;
+    const saved = readLiveRouteEdits(baseDir).get(classification);
+    return {
+      baseline,
+      effective: saved?.override ?? baseline,
+      override: saved?.override ?? null,
+      version: saved?.version ?? 0,
+    };
+  }
+  function eligible(
+    profile: SelectedModelProfile,
+    classification: ClassificationLevel,
+  ) {
+    return selectedModelProvider(
+      registry,
+      profile,
+      classification,
+      allowlists,
+    ) !== undefined;
+  }
+  function commit(input: LiveRouteEdit) {
+    const db = openLiveRouteJournal(baseDir, true);
+    if (!db) return;
+    try {
+      db.exec("BEGIN IMMEDIATE");
+      try {
+        const duplicate = db.prepare(
+          "SELECT receipt FROM route_edits WHERE requestId = ?",
+        ).get(input.requestId);
+        if (duplicate) {
+          const saved = JSON.parse(String(duplicate.receipt)) as LiveRouteEdit;
+          db.exec("COMMIT");
+          return saved.classification === input.classification &&
+              saved.version === input.version &&
+              JSON.stringify(saved.override) ===
+                JSON.stringify(input.override) &&
+              eligible(saved.effective, saved.classification)
+            ? saved
+            : undefined;
+        }
+        const current = read(input.classification);
+        if (
+          !current || input.version !== current.version + 1 ||
+          !eligible(input.effective, input.classification) ||
+          current.effective.provider !== input.previous.provider ||
+          current.effective.model !== input.previous.model ||
+          (!input.override &&
+            (current.baseline.provider !== input.effective.provider ||
+              current.baseline.model !== input.effective.model))
+        ) {
+          db.exec("ROLLBACK");
+          return;
+        }
+        db.prepare("INSERT INTO route_edits VALUES (?, ?, ?, ?)").run(
+          input.classification,
+          input.version,
+          input.requestId,
+          JSON.stringify(input),
+        );
+        db.exec("COMMIT");
+        return input;
+      } catch (error) {
+        db.exec("ROLLBACK");
+        throw error;
+      }
+    } finally {
+      db.close();
+    }
+  }
+  return { read, eligible, commit };
 }

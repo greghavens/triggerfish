@@ -49,6 +49,17 @@ invalid, or revoked selections stop new turns while reload is enabled.
 Unlisted classifications retain their startup routes. Omit the allowlist to
 leave live reload disabled.
 
+In owner chat, use the `live_model_route` action of `operator_runs` to
+inspect a route. The `set_live_model_route` action takes the exact
+`modelRouteClassification`, `modelProfile`, and configured
+`modelRouteModel`, along with the inspected `expectedVersion` and a
+request UUID. `reset_live_model_route` takes the same classification,
+version, and request UUID fields and restores the approved file selection.
+Both changes require confirmation. An identical retry returns the saved
+receipt. A saved override takes priority over the file for that
+classification until reset.
+
+
 ```yaml
 models:
   # Which provider and model to use by default

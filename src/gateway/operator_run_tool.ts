@@ -141,10 +141,12 @@ import {
   type SelectedModelProfile,
 } from "../core/model_profile_selection.ts";
 import type { RecoveryToolCall } from "../core/types/orchestrator.ts";
+import type { liveProviderRouteSettings } from "../agent/providers/live_routes.ts";
 import {
   canFlowTo,
   type ClassificationLevel,
   maxClassification,
+  parseClassification,
 } from "../core/types/classification.ts";
 /** Owner-only root tool for exact Sentinel and admitted workflow runs. */
 import { dirname, join } from "@std/path";
@@ -356,6 +358,9 @@ export const operatorRunTool: ToolDefinition = {
         "worker_limit",
         "set_worker_limit",
         "assessment_concurrency",
+        "live_model_route",
+        "set_live_model_route",
+        "reset_live_model_route",
         "set_assessment_concurrency",
         "reset_assessment_concurrency",
         "reset_worker_limit",
@@ -761,6 +766,17 @@ export const operatorRunTool: ToolDefinition = {
       description:
         "Approved provider in the replacement chain to use for subsequent calls",
     },
+    modelRouteClassification: {
+      type: "string",
+      enum: ["PUBLIC", "INTERNAL", "CONFIDENTIAL", "RESTRICTED"],
+      description:
+        "Exact classification route selected for model administration",
+    },
+    modelRouteModel: {
+      type: "string",
+      description:
+        "Exact model name currently configured for the selected provider",
+    },
     modelProfile: {
       type: "string",
       description:
@@ -1038,6 +1054,9 @@ export interface OperatorRunToolContext {
     revision: number,
   ) => boolean;
   readonly authenticatedOwnerSessionId?: string;
+  readonly authorizeLiveModelRouteChange?: (
+    args: Record<string, unknown>,
+  ) => Promise<boolean>;
   readonly ownerRecoverySessionId?: string;
   readonly delegatedRecovery?: {
     readonly parent: SessionId;
@@ -1991,6 +2010,7 @@ export function createOperatorRunToolExecutor(options: {
     readonly configuredLimit: number;
     readonly onChanged?: () => void;
   };
+  readonly liveModelRoutes?: ReturnType<typeof liveProviderRouteSettings>;
   readonly profiles?: (
     ceiling: ClassificationLevel,
   ) => readonly EffectiveModelProfile[];
@@ -2483,6 +2503,99 @@ ${
         if (!edit) return unavailable;
         admission.onChanged?.();
         return safeProjection({ edit });
+      } catch {
+        return unavailable;
+      }
+    }
+    if (
+      action === "live_model_route" || action === "set_live_model_route" ||
+      action === "reset_live_model_route"
+    ) {
+      const routes = options.liveModelRoutes;
+      const {
+        modelRouteClassification,
+        modelProfile,
+        modelRouteModel,
+        expectedVersion,
+        requestId,
+      } = args;
+      const classification = typeof modelRouteClassification === "string"
+        ? parseClassification(modelRouteClassification)
+        : undefined;
+      const reading = action === "live_model_route";
+      const setting = action === "set_live_model_route";
+      if (
+        !routes || !context?.authenticatedOwnerSessionId ||
+        !classification?.ok ||
+        !canFlowTo(
+          maxClassification("INTERNAL", classification.value),
+          context.ceiling ?? "PUBLIC",
+        ) ||
+        Object.keys(args).some((key) =>
+          ![
+            "action",
+            "modelRouteClassification",
+            ...(reading ? [] : ["requestId", "expectedVersion"]),
+            ...(setting ? ["modelProfile", "modelRouteModel"] : []),
+          ].includes(key)
+        )
+      ) return unavailable;
+      const level = classification.value;
+      const label = maxClassification(level, "INTERNAL");
+      try {
+        const current = routes.read(level);
+        if (!current) return unavailable;
+        if (reading) {
+          return safeProjection({ ...current, classification: level }, label);
+        }
+        if (
+          !context.authorizeLiveModelRouteChange ||
+          typeof requestId !== "string" || !digestPattern.test(requestId) ||
+          typeof expectedVersion !== "number" ||
+          !Number.isSafeInteger(expectedVersion) ||
+          expectedVersion < 0 || expectedVersion >= Number.MAX_SAFE_INTEGER ||
+          expectedVersion > current.version ||
+          (setting && (typeof modelProfile !== "string" ||
+            (modelRouteModel !== undefined &&
+              typeof modelRouteModel !== "string")))
+        ) return unavailable;
+        const override = setting
+          ? {
+            provider: modelProfile as string,
+            ...(typeof modelRouteModel === "string" &&
+              { model: modelRouteModel }),
+          }
+          : null;
+        const effective = override ?? current.baseline;
+        if (!routes.eligible(effective, level)) return unavailable;
+        const edit = {
+          classification: level,
+          requestId: requestId.toLowerCase(),
+          version: expectedVersion + 1,
+          override,
+          effective,
+          previous: current.effective,
+        };
+        if (expectedVersion === current.version) {
+          if (
+            !await options.confirm(`Approve the exact live model route?
+${
+              JSON.stringify({
+                classification: level,
+                previous: current.effective,
+                next: effective,
+                reset: !override,
+                expectedVersion,
+                requestId: edit.requestId,
+              })
+            }`)
+          ) return "Error: The operator declined the run action.";
+        }
+        if (!await context.authorizeLiveModelRouteChange(args)) {
+          return unavailable;
+        }
+        const saved = routes.commit(edit);
+        return saved ? safeProjection({ edit: saved }, label) : unavailable;
       } catch {
         return unavailable;
       }

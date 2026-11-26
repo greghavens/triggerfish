@@ -1,3 +1,5 @@
+import { liveProviderRouteSettings } from "../../agent/providers/live_routes.ts";
+import type { ModelsConfig } from "../../agent/providers/config.ts";
 import { readSentinelAdmissionSettings } from "../sentinel_admission_settings.ts";
 import { selectSentinelDelegatedObservationRead } from "../../core/config_types.ts";
 import { createWorkflowObservationVerifier } from "../scheduled_observation_tool.ts";
@@ -88,6 +90,8 @@ export function buildMainChatSession(
   onSentinelAdmissionChanged?: () => void,
   goalWorkflowMonitor?: { stop?: () => void },
 ) {
+  const liveRouteAllowlist =
+    (bootstrap.config.models as ModelsConfig).live_route_allowlists;
   const modelsConfig = bootstrap.config.models as
     | Record<string, unknown>
     | undefined;
@@ -141,6 +145,13 @@ export function buildMainChatSession(
       confirm: (request) => toolInfra.state.activeConfirmPrompt(request),
       webContainmentConfigured:
         bootstrap.config.web?.domains?.sentinel_containment === true,
+      liveModelRoutes: liveRouteAllowlist
+        ? liveProviderRouteSettings(
+          toolInfra.registry,
+          bootstrap.baseDir,
+          liveRouteAllowlist,
+        )
+        : undefined,
       profiles: (ceiling) =>
         listEffectiveModelProfiles(toolInfra.registry, ceiling),
       sentinelProfiles: bootstrap.config.sentinel?.allow_model_access === true

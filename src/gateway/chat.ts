@@ -313,9 +313,20 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
               | undefined;
             if (call?.name === operatorRunTool.name) {
               const action = call.args?.action;
+              const selectedRouteClass = typeof action === "string" &&
+                  [
+                    "live_model_route",
+                    "set_live_model_route",
+                    "reset_live_model_route",
+                  ].includes(action) &&
+                  typeof call.args?.modelRouteClassification === "string"
+                ? parseClassification(call.args.modelRouteClassification)
+                : undefined;
               const meta = {
                 tool_name: operatorRunTool.name,
-                resource_classification: "INTERNAL",
+                resource_classification: selectedRouteClass?.ok
+                  ? maxClassification("INTERNAL", selectedRouteClass.value)
+                  : "INTERNAL",
                 operation_type: typeof action === "string" &&
                     [
                       "list",
@@ -333,6 +344,7 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
                       "tasks",
                       "worker_limit",
                       "assessment_concurrency",
+                      "live_model_route",
                       "finding_groups",
                       "finding_asset_tree",
                       "search_case_traces",
@@ -605,6 +617,15 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
       ceiling: ownerTargetClassification,
       inputClassification: taint(),
       authenticatedOwnerSessionId: session.id,
+      async authorizeLiveModelRouteChange(args) {
+        if (!isCurrent()) return false;
+        const allowed = await authorizeSavedToolCalls(
+          [{ name: operatorRunTool.name, args }],
+          policy,
+          session,
+        );
+        return allowed && isCurrent();
+      },
       ...(config.recoverAgentTurn && { ownerRecoverySessionId: session.id }),
       ...(config.runSubagentRecoveryCommand && {
         delegatedRecovery: {
