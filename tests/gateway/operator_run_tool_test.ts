@@ -786,11 +786,24 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
       await turn(displayRequest);
       assertEquals(confirmations.length, displayApprovals);
       denied = undefined;
+      duringConfirmation = () => {
+        denied = "PRE_TOOL_CALL";
+      };
+      assertStringIncludes((await turn(displayRequest)).result, "unavailable");
+      duringConfirmation = undefined;
+      denied = undefined;
+      assertEquals(confirmations.length, displayApprovals + 1);
+      const unchangedDisplay = JSON.parse(
+        (await turn({ action: "list", kind: "sentinel" })).result,
+      )
+        .runs.find((run: { ref: { id: string } }) => run.ref.id === exact.id);
+      assertEquals(unchangedDisplay.label, started.label);
+      assertEquals(unchangedDisplay.details.pinnedAt, undefined);
       const display = JSON.parse((await turn(displayRequest)).result);
       assertEquals(display.display.title, displayRequest.title);
       assertEquals(display.display.version, 1);
       assert(typeof display.display.pinnedAt === "string");
-      assertEquals(confirmations.length, displayApprovals + 1);
+      assertEquals(confirmations.length, displayApprovals + 2);
       assertStringIncludes(
         (await turn({ ...displayRequest, requestId: crypto.randomUUID() }))
           .result,
@@ -818,7 +831,7 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
           JSON.parse((await reconnected(displayRequest)).result),
           display,
         );
-        assertEquals(confirmations.length, displayApprovals + 1);
+        assertEquals(confirmations.length, displayApprovals + 2);
         assertEquals(
           JSON.parse(
             (await reconnected({ action: "inspect", ...exact })).result,

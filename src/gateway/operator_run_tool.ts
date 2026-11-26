@@ -4167,6 +4167,7 @@ ${
         const { title, pinned, runId, expectedVersion, requestId } = args;
         if (
           !context?.authenticatedOwnerSessionId ||
+          !context.authorizeOwnerRunCall ||
           !canFlowTo("INTERNAL", context.ceiling ?? "PUBLIC") ||
           !canFlowTo(context.inputClassification ?? "PUBLIC", "INTERNAL") ||
           ref?.kind !== "sentinel" || ref.revision === undefined ||
@@ -4218,6 +4219,11 @@ ${
             }`,
           )
         ) return "Error: The operator declined the run action.";
+        if (
+          !preview.saved &&
+          (!await context.authorizeOwnerRunCall(args) ||
+            !await controller.inspect(ref))
+        ) return unavailable;
         const committed = preview.saved
           ? preview
           : changeSentinelRunDisplay(path, change, true);
