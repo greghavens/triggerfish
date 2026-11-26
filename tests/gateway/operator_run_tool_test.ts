@@ -339,14 +339,16 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
             call?.args?.action === "finding_groups" ||
             call?.args?.action === "finding_asset_tree" ||
             call?.args?.action === "list_trace_workers" ||
-            call?.args?.action === "worker_trace_result")
+            call?.args?.action === "worker_trace_result" ||
+            call?.args?.action === "archive_catalog")
         ) {
           assertEquals(input.operation_type, "read");
           assertEquals(auditInput?.operation_type, "read");
         }
         if (
           denyArchiveTarget && hook === "PRE_TOOL_CALL" && runTool &&
-          call?.args?.action === "archive" &&
+          (call?.args?.action === "archive" ||
+            call?.args?.action === "archive_history") &&
           call.args.id === denyArchiveTarget
         ) {
           return Promise.resolve({
@@ -5771,6 +5773,64 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
         dirname(childPath),
         join(baseDir, "detached-batch-parent"),
       );
+      await withGateway(async (reconnected) => {
+        const lookup = {
+          action: "archive_catalog",
+          query: "ARCHIVE-BATCH-LEAF",
+          archiveStatus: "succeeded",
+          archiveId: restoreLeaf.archiveId,
+        };
+        const exact = JSON.parse((await reconnected(lookup)).result);
+        assertEquals(exact.archives, [{
+          archiveId: restoreLeaf.archiveId,
+          identity: batch.outcomes[2].receipt.identity,
+          status: "succeeded",
+          createdAt: batch.outcomes[2].receipt.createdAt,
+          updatedAt: batch.outcomes[2].receipt.updatedAt,
+        }]);
+        assertEquals(exact.nextCursor, null);
+        assertEquals(exact._classification, "INTERNAL");
+        assertEquals(readSentinelAssessment(leafPath), undefined);
+        const first = {
+          action: "archive_catalog",
+          archiveStatus: "succeeded",
+          limit: 1,
+        };
+        const firstPage = JSON.parse((await reconnected(first)).result);
+        assertEquals(firstPage.archives[0].archiveId, restoreParent.archiveId);
+        assert(firstPage.nextCursor);
+        const continuation = { ...first, cursor: firstPage.nextCursor };
+        const secondPage = JSON.parse((await reconnected(continuation)).result);
+        assertEquals(secondPage.archives[0].archiveId, restoreLeaf.archiveId);
+        assertStringIncludes(
+          (await reconnected({ ...continuation, query: "different" })).result,
+          "unavailable",
+        );
+        assertEquals(
+          JSON.parse(
+            (await reconnected({
+              ...lookup,
+              archiveStatus: "failed",
+            })).result,
+          ).archives,
+          [],
+        );
+        denyArchiveTarget = archiveLeaf.id;
+        try {
+          assertEquals(
+            JSON.parse((await reconnected(lookup)).result).archives,
+            [],
+          );
+          const next = JSON.parse((await reconnected(continuation)).result);
+          assert(
+            next.archives.every(({ archiveId }: { archiveId: string }) =>
+              archiveId !== restoreLeaf.archiveId
+            ),
+          );
+        } finally {
+          denyArchiveTarget = undefined;
+        }
+      }, reopenedWorkflows);
       const restoreBatch = {
         action: "restore_runs",
         requestId: crypto.randomUUID(),

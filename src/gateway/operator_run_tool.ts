@@ -309,6 +309,7 @@ import { executeOperatorInventoryWithdrawal } from "./operator_inventory_withdra
 import { executeOperatorAssetWithdrawal } from "./operator_asset_withdrawal.ts";
 import { executeOperatorRunArchive } from "./operator_run_archive.ts";
 import { executeOperatorRunArchiveBatch } from "./operator_run_archive_batch.ts";
+import { executeOperatorArchiveCatalog } from "./operator_run_archive_catalog.ts";
 import { readOperatorSentinelInventory } from "./operator_sentinel_inventory.ts";
 import { createOperatorSentinelRuns } from "./operator_sentinel_runs.ts";
 import {
@@ -404,6 +405,7 @@ export const operatorRunTool: ToolDefinition = {
         "archive",
         "restore",
         "archive_history",
+        "archive_catalog",
         "archive_runs",
         "restore_runs",
         "approval_history",
@@ -693,6 +695,11 @@ export const operatorRunTool: ToolDefinition = {
     archiveId: {
       type: "string",
       description: "Exact UUID of an existing workspace run archive",
+    },
+    archiveStatus: {
+      type: "string",
+      enum: ["pending", "succeeded", "failed"],
+      description: "Optional archive catalog status filter.",
     },
     before: {
       type: "integer",
@@ -3566,6 +3573,19 @@ ${
             display: committed.display,
           })
           : unavailable;
+      }
+      if (action === "archive_catalog") {
+        if (
+          !context?.authenticatedOwnerSessionId ||
+          !context.authorizeOwnerRunCall ||
+          !canFlowTo("INTERNAL", context.ceiling ?? "PUBLIC")
+        ) return unavailable;
+        const result = await executeOperatorArchiveCatalog(
+          options.baseDir,
+          args,
+          context.authorizeOwnerRunCall,
+        );
+        return result ? safeProjection(result) : unavailable;
       }
       if (action === "archive_runs" || action === "restore_runs") {
         const ceiling = context?.ceiling ?? "PUBLIC";

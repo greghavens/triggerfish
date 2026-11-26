@@ -394,6 +394,32 @@ export function openRunArchiveActions(path: string, now = Date.now) {
       return row && project(row);
     },
 
+    listSentinelArchiveCatalog(
+      query: string,
+      status: RunArchiveActionRecord["status"] | undefined,
+      archiveId: string | undefined,
+      before = Number.MAX_SAFE_INTEGER,
+    ) {
+      return db.prepare(`
+        SELECT * FROM run_archive_actions
+        WHERE kind = 'sentinel' AND action = 'archive' AND sequence < ?
+          AND instr(lower(identityId), ?) > 0
+          AND (? IS NULL OR status = ?)
+          AND (? IS NULL OR archiveId = ?)
+        ORDER BY sequence DESC LIMIT 32
+      `).all(
+        before,
+        query,
+        status ?? null,
+        status ?? null,
+        archiveId ?? null,
+        archiveId ?? null,
+      ).map((row) => ({
+        sequence: Number(row.sequence),
+        record: project(row),
+      }));
+    },
+
     list(identity: RunArchiveIdentity, limit = 20, before?: number) {
       const scope = validatedIdentity(identity, false);
       if (
