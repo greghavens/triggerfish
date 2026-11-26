@@ -45,8 +45,11 @@ export function monitorProviderRegistry(
       error?: unknown,
     ) {
       try {
-        const hard = error instanceof Error && "status" in error &&
-          (error.status === 401 || error.status === 402);
+        const status = error instanceof Error && "status" in error &&
+            typeof error.status === "number"
+          ? error.status
+          : undefined;
+        const hard = status === 401 || status === 402;
         monitor.record(
           classification(options),
           provider.name,
@@ -59,6 +62,7 @@ export function monitorProviderRegistry(
             : isTransientModelAvailabilityError(error)
             ? "transient"
             : undefined,
+          status,
         );
       } catch {
         // Optional measurements cannot change the result of a provider call.

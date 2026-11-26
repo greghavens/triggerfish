@@ -44,6 +44,7 @@ Deno.test("gateway reviews model retry edits and keeps monitoring metadata class
   let denyRollup = false;
   let exerciseFailure = () => Promise.resolve();
   const inputClassification = "INTERNAL";
+  const providerSecret = "fixture-only-provider-error-credential";
   let attempts = 0;
   let failingAttempts = 0;
   let socket: WebSocket | undefined;
@@ -86,7 +87,11 @@ Deno.test("gateway reviews model retry edits and keeps monitoring metadata class
       complete() {
         failingAttempts++;
         return Promise.reject(
-          Object.assign(new Error("synthetic-only"), { status: 401 }),
+          Object.assign(new Error(providerSecret), {
+            status: 401,
+            body: providerSecret,
+            endpoint: providerSecret,
+          }),
         );
       },
     });
@@ -238,6 +243,42 @@ Deno.test("gateway reviews model retry edits and keeps monitoring metadata class
       modelRouteModel: "fault-test",
       modelRouteClassification: "RESTRICTED",
     };
+    const failedRecords = JSON.parse(
+      await turn({
+        action: "model_call_records",
+        ...failing,
+      }),
+    );
+    assertEquals(failedRecords.records.length, 1);
+    const failed = failedRecords.records[0];
+    assertEquals(failed.outcome, "failed");
+    assertEquals(failed.failureReason, "hard");
+    assertEquals(failed.httpStatus, 401);
+    assertEquals(Object.keys(failed).sort(), [
+      "classification",
+      "elapsed",
+      "failureReason",
+      "httpStatus",
+      "id",
+      "inputTokens",
+      "model",
+      "outcome",
+      "outputTokens",
+      "provider",
+      "recordedAt",
+    ]);
+    const readFailure = {
+      action: "model_call_record",
+      ...failing,
+      modelRecordId: failed.id,
+    };
+    assertEquals(JSON.parse(await turn(readFailure)).record, failed);
+    assert(!JSON.stringify(failedRecords).includes(providerSecret));
+    assert(
+      !new TextDecoder().decode(
+        await Deno.readFile(join(baseDir, "model-monitor.db")),
+      ).includes(providerSecret),
+    );
     const health = { action: "model_health", ...failing };
     const cooling = JSON.parse(await turn(health)).health;
     assertEquals(cooling.failures, 1);
@@ -420,11 +461,17 @@ Deno.test("gateway reviews model retry edits and keeps monitoring metadata class
       "unavailable",
     );
     assertEquals(JSON.parse(await turn(read)).record, records[0]);
+    assertStringIncludes(await turn(readFailure), "unavailable");
+    assertStringIncludes(
+      await turn({ ...failing, action: "model_call_records" }),
+      "unavailable",
+    );
     socket?.close();
     await gateway.stop();
     gateway = makeGateway("RESTRICTED");
     await connect();
     assertEquals(JSON.parse(await turn(health)).health, cooling);
+    assertEquals(JSON.parse(await turn(readFailure)).record, failed);
     await exerciseFailure();
     assertEquals(failingAttempts, 1);
     assertEquals(

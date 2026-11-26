@@ -82,6 +82,35 @@ export function modelMonitor(baseDir: string) {
           outputTokens INTEGER NOT NULL, PRIMARY KEY(classification, provider, model, day)
         );
       `);
+      const columns = () =>
+        db.prepare("PRAGMA table_info(model_calls)").all().map(({ name }) =>
+          name
+        );
+      const migrate = [
+        [
+          "failureReason",
+          "TEXT CHECK (failureReason IN ('transient', 'hard', 'other'))",
+        ],
+        ["httpStatus", "INTEGER CHECK (httpStatus BETWEEN 400 AND 599)"],
+      ];
+      const existingColumns = columns();
+      if (migrate.some(([column]) => !existingColumns.includes(column))) {
+        db.exec("BEGIN IMMEDIATE");
+        try {
+          const current = columns();
+          for (const [column, definition] of migrate) {
+            if (!current.includes(column)) {
+              db.exec(
+                `ALTER TABLE model_calls ADD COLUMN ${column} ${definition}`,
+              );
+            }
+          }
+          db.exec("COMMIT");
+        } catch (error) {
+          db.exec("ROLLBACK");
+          throw error;
+        }
+      }
       return action(db);
     } finally {
       db.close();
@@ -143,6 +172,7 @@ export function modelMonitor(baseDir: string) {
       elapsed: number,
       usage?: LlmUsage,
       availability?: "transient" | "hard",
+      httpStatus?: number,
     ) {
       const time = Date.now();
       const input = count(usage?.inputTokens);
@@ -155,7 +185,12 @@ export function modelMonitor(baseDir: string) {
           ON CONFLICT(classification) DO UPDATE SET id=id+1 RETURNING id
         `).get(classification)?.id,
         );
-        db.prepare("INSERT INTO model_calls VALUES (?,?,?,?,?,?,?,?,?)")
+        db.prepare(`
+          INSERT INTO model_calls (
+            classification,id,provider,model,outcome,elapsed,inputTokens,
+            outputTokens,recordedAt,failureReason,httpStatus
+          ) VALUES (?,?,?,?,?,?,?,?,?,?,?)
+        `)
           .run(
             classification,
             id,
@@ -166,6 +201,12 @@ export function modelMonitor(baseDir: string) {
             input,
             output,
             time,
+            outcome === "failed" ? availability ?? "other" : null,
+            outcome === "failed" && typeof httpStatus === "number" &&
+              Number.isSafeInteger(httpStatus) && httpStatus >= 400 &&
+              httpStatus <= 599
+              ? httpStatus
+              : null,
           );
         db.prepare("DELETE FROM model_calls WHERE classification=? AND id <= ?")
           .run(classification, id - retainRecords);
@@ -264,7 +305,7 @@ export function modelMonitor(baseDir: string) {
     ) {
       return access((db) =>
         db.prepare(`
-        SELECT * FROM model_calls WHERE classification=? AND provider=? AND model=? AND id<?
+        SELECT classification,id,provider,model,outcome,elapsed,inputTokens,outputTokens,recordedAt,failureReason,httpStatus FROM model_calls WHERE classification=? AND provider=? AND model=? AND id<?
         ORDER BY id DESC LIMIT ?
       `).all(classification, provider, model, before, limit)
       );
@@ -313,7 +354,7 @@ export function modelMonitor(baseDir: string) {
     ) {
       return access((db) =>
         db.prepare(
-          "SELECT * FROM model_calls WHERE classification=? AND provider=? AND model=? AND id=?",
+          "SELECT classification,id,provider,model,outcome,elapsed,inputTokens,outputTokens,recordedAt,failureReason,httpStatus FROM model_calls WHERE classification=? AND provider=? AND model=? AND id=?",
         ).get(classification, provider, model, id)
       );
     },

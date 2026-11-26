@@ -8,6 +8,17 @@ import {
 import { modelMonitor } from "../core/model_monitor.ts";
 import type { OperatorRunToolContext } from "./operator_run_tool.ts";
 
+function modelCallMetadata(record: Record<string, unknown>) {
+  const { failureReason, httpStatus, ...metadata } = record;
+  return {
+    ...metadata,
+    ...(failureReason === "hard" || failureReason === "transient" ||
+      failureReason === "other") && { failureReason },
+    ...(typeof httpStatus === "number" && Number.isSafeInteger(httpStatus) &&
+      httpStatus >= 400 && httpStatus <= 599) && { httpStatus },
+  };
+}
+
 export const modelMonitoringActions = [
   "model_retry_policy",
   "set_model_retry_policy",
@@ -248,7 +259,7 @@ export async function executeOperatorModelMonitor(
     );
     return {
       _classification,
-      records: records.slice(0, 20),
+      records: records.slice(0, 20).map(modelCallMetadata),
       ...(records.length > 20 && { nextBefore: records[19].id }),
     };
   }
@@ -260,7 +271,9 @@ export async function executeOperatorModelMonitor(
       modelRouteModel,
       modelRecordId,
     );
-    return record ? { _classification, record } : undefined;
+    return record
+      ? { _classification, record: modelCallMetadata(record) }
+      : undefined;
   }
   if (
     !exactInteger(modelRecordId, 1, Number.MAX_SAFE_INTEGER) ||
