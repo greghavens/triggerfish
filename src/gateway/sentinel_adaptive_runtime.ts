@@ -10,7 +10,10 @@ import {
   projectPlannerReadCheckpoint,
   reopenPlannerReadCheckpoint,
 } from "../sentinel/planner_read_checkpoint.ts";
-import { reopenSentinelPlannerLocalFinding } from "./sentinel_worker_findings.ts";
+import {
+  readSentinelFindingReceiptScope,
+  reopenSentinelPlannerLocalFinding,
+} from "./sentinel_worker_findings.ts";
 import { readSentinelPlannerGraphFacts } from "./sentinel_graph_fact_tool.ts";
 import type { TelemetryAlert } from "../sentinel/telemetry.ts";
 import { resolveWorkerNarrativeAlert } from "../sentinel/worker_narrative_alerts.ts";
@@ -1600,6 +1603,65 @@ function projectReviewedFindingStep(
     : projectSentinelTraceMetadata(step, includeReadResults);
 }
 
+function findingFollowupOrigins(
+  path: string,
+  revision: number,
+  tasks: readonly AdaptiveTask[],
+): ReadonlyMap<string, string> {
+  const origins = new Map<string, string>();
+  const followups = tasks.filter((task) => task.plannerRound?.findingFollowup);
+  const caseId = locateSentinelCase(path)?.caseId;
+  if (!followups.length || !caseId || !hasSentinelWorkerFindingJournal(path)) {
+    return origins;
+  }
+  const assignmentScope = readSentinelFindingReceiptScope(path, revision);
+  if (!assignmentScope) return origins;
+  const journal = openSentinelWorkerFindingStore(path);
+  try {
+    for (const task of followups) {
+      const binding = task.plannerRound!.findingFollowup!;
+      if (binding.assignedRevision !== revision) continue;
+      const report = journal.readFindingReport(binding.findingId, revision);
+      const finding = report?.finding;
+      if (
+        !report || !finding || finding.caseId !== caseId ||
+        finding.runId !== assignmentScope.runId ||
+        finding.targetId !== task.nodeId ||
+        finding.evidenceRevision !== binding.sourceRevision ||
+        finding.evidenceId !== binding.evidenceId ||
+        finding.snapshotDigest !== binding.snapshotDigest ||
+        finding.taskId !== binding.sourceTaskId ||
+        (binding.reportVersion !== 1 &&
+          !report.amendments.some(({ version }) =>
+            version === binding.reportVersion
+          ))
+      ) continue;
+      const analyst = "analyst" in finding
+        ? createHash("sha256").update(JSON.stringify(finding.analyst)).digest(
+          "hex",
+        )
+        : undefined;
+      if (analyst !== binding.sourceAnalystSha256) continue;
+      const sourceScope = readSentinelFindingReceiptScope(
+        path,
+        binding.sourceRevision,
+      );
+      if (
+        sourceScope?.runId !== finding.runId ||
+        [assignmentScope, sourceScope].some((scope) =>
+          !scope.allowsRecord(finding) ||
+          !scope.allows(finding.evidenceId) ||
+          !scope.allows(finding.graphFindingId, "review_finding")
+        )
+      ) continue;
+      origins.set(task.id, finding.graphFindingId);
+    }
+  } finally {
+    journal.close();
+  }
+  return origins;
+}
+
 export function readHistoricalAdaptiveSentinel(
   snapshotPath: string,
   evidenceNumber: number,
@@ -1700,6 +1762,11 @@ export function readHistoricalAdaptiveSentinel(
           includeWorkerReadResults,
         ),
         modelReviews,
+        findingFollowupOrigins: findingFollowupOrigins(
+          snapshotPath,
+          evidenceNumber,
+          tasks,
+        ),
         assetDiscoveries: assetDiscoveryProvenance(snapshotPath, modelReviews),
         remediationRechecks: committedRecheckProvenance(
           snapshotPath,
@@ -2599,6 +2666,11 @@ export function readAdaptiveSentinel(
         state.revision,
       ),
       modelReviews,
+      findingFollowupOrigins: findingFollowupOrigins(
+        snapshotPath,
+        state.revision,
+        tasks,
+      ),
       remediationRechecks: committedRecheckProvenance(
         snapshotPath,
         goalFor(state).id,

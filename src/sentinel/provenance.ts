@@ -105,6 +105,11 @@ type ProvenanceNode =
     readonly reason?: string;
     readonly plannerRound?: AdaptivePlannerRound;
     readonly peerFinding?: Omit<AdaptivePeerFindingCitation, "mappingSources">;
+    readonly findingFollowupOrigin?: {
+      readonly sourceRevision: number;
+      readonly reportVersion: number;
+      readonly snapshotDigest: string;
+    };
     readonly priorAssignedTarget?: AdaptivePriorAssignedTargetCitation;
     readonly factSatisfaction?: AdaptiveFactSatisfaction;
     readonly githubWorkflowRead?: SentinelGitHubWorkflowReadReceipt;
@@ -197,6 +202,7 @@ export interface AdaptiveProvenanceView {
   }[];
   readonly remediationRechecks?: readonly RemediationRecheckProvenance[];
   readonly graphFacts?: readonly SentinelWorkerGraphFact[];
+  readonly findingFollowupOrigins?: ReadonlyMap<string, string>;
   readonly workerNarrative?: WorkerNarrativeProvenance;
   readonly workflowObservations?: readonly AdaptiveWorkflowObservation[];
   readonly assetDiscoveries?: readonly SentinelAssetDiscoveryRecord[];
@@ -1881,6 +1887,34 @@ function addAdaptive(
 
     for (const raw of list(task.evidenceIds, "adaptive task evidence")) {
       const reference = text(raw, "adaptive task evidence ID");
+      const followup = task.plannerRound?.findingFollowup;
+      const graphFindingId = view.findingFollowupOrigins?.get(task.id);
+      const graphFinding = graphFindingId && imported.get(graphFindingId);
+      if (followup?.findingId === reference && graphFinding) {
+        const { sourceRevision, reportVersion, snapshotDigest } = followup;
+        const originRef = derivedRef(
+          "observation",
+          origin,
+          `${reference}:report:${reportVersion}`,
+        );
+        if (!index.hasNode(originRef)) {
+          index.addNode({
+            id: originRef,
+            sourceId: reference,
+            kind: "observation",
+            origin,
+            label: "Reviewed finding report",
+            findingFollowupOrigin: {
+              sourceRevision,
+              reportVersion,
+              snapshotDigest,
+            },
+          });
+          index.addEdge(originRef, graphFinding.ref, "references");
+        }
+        index.addEdge(originRef, id, "prompted");
+        continue;
+      }
       const evidence = imported.get(reference);
       if (evidence?.kind === "evidence") {
         index.addEdge(evidence.ref, id, "prompted");

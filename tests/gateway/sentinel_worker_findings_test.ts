@@ -12183,6 +12183,37 @@ Deno.test("Reviewed Sentinel finding follow-up preserves the originating report 
       id === saved.taskId
     );
     assertEquals(task?.plannerRound?.findingFollowup, saved.findingFollowup);
+    await withTidepool(baseDir, async (_list, provenance) => {
+      const graph = (await provenance(state.revision)).provenance;
+      const original = graph.nodes.find((node) =>
+        "findingFollowupOrigin" in node && node.sourceId === record.id
+      );
+      const importedFinding = graph.nodes.find((node) =>
+        node.origin === "imported" && node.sourceId === record.graphFindingId
+      );
+      const investigation = graph.nodes.find((node) =>
+        node.kind === "task" && node.sourceId === saved.taskId
+      );
+      assert(original && "findingFollowupOrigin" in original);
+      assert(importedFinding && investigation);
+      assertEquals(original.findingFollowupOrigin, {
+        sourceRevision: state.revision,
+        reportVersion: saved.findingFollowup.reportVersion,
+        snapshotDigest: record.snapshotDigest,
+      });
+      assert(
+        graph.edges.some(({ from, to, relation }) =>
+          from === original.id && to === importedFinding.id &&
+          relation === "references"
+        ),
+      );
+      assert(
+        graph.edges.some(({ from, to, relation }) =>
+          from === original.id && to === investigation.id &&
+          relation === "prompted"
+        ),
+      );
+    });
     const stale = { ...input, requestId: crypto.randomUUID() };
     await withFindingAssignmentGateway(baseDir, async () => {
       const graph = JSON.parse(await Deno.readTextFile(path));
