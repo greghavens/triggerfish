@@ -320,6 +320,7 @@ import {
   reopenSentinelProvenanceNode,
   reopenSentinelProvenanceSearch,
   reopenSentinelWorkerTraceSearch,
+  reporterNativeWorkflowBinding,
   searchSentinelProvenance,
   searchSentinelWorkerTraces,
   type SentinelReadTrace,
@@ -8873,24 +8874,51 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
               if (
                 !await authorize(scope, step.tool, page.args)
               ) return unavailable;
+              const binding = () =>
+                reporterNativeWorkflowBinding({
+                  snapshotPath: path,
+                  assessmentRevision: ref.revision,
+                  assignedTaskId: task.id,
+                }, ref.revision!);
+              const native = task.kind === "report_finding"
+                ? binding()
+                : undefined;
+              const currentNative = () =>
+                isDeepStrictEqual(binding(), native) &&
+                context.authorizeSentinelCaseRead?.(ref.id, ref.revision!) !==
+                  false;
+              const authorizeNative = async () =>
+                !native || !!await readAuthorizedCaseEvidence(
+                  ref.id,
+                  path,
+                  ref.revision!,
+                  native.evidenceId,
+                  context,
+                  currentNative,
+                );
+              if (!await authorizeNative()) return unavailable;
               const text = reopenSentinelWorkerTraceSearch(
                 path,
                 ref.revision,
                 task.id,
                 page,
+                native,
               );
               if (
                 !text ||
                 createHash("sha256").update(text).digest("hex") !==
                   page.sha256 ||
                 !await authorize(scope, step.tool, page.args, text) ||
-                (task.kind === "report_finding" &&
+                (task.kind === "report_finding" && (
+                  !await authorizeNative() || !currentNative() ||
                   reopenSentinelWorkerTraceSearch(
                       path,
                       ref.revision,
                       task.id,
                       page,
-                    ) !== text)
+                      native,
+                    ) !== text
+                ))
               ) return unavailable;
               const current = readHistoricalAdaptiveSentinel(
                 path,

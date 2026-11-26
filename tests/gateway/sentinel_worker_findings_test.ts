@@ -10214,6 +10214,7 @@ async function verifyReceiptFamily(
     | "stop-after-result"
     | "goal-pass"
     | "goal-stop"
+    | "reporter-history"
     | "mixed-assignment" = false,
 ) {
   const baseDir = await Deno.makeTempDir();
@@ -10268,7 +10269,14 @@ async function verifyReceiptFamily(
   const native = family === "native workflow result";
   const workflow = native || family === "workflow result" || repeatedRun ||
     olderRun;
-  const reader = native ? nativeWorkflowReader(undefined, caseId) : undefined;
+  let reporterAccess = true;
+  let reporterProbes = 0;
+  const reader = native
+    ? nativeWorkflowReader(() => {
+      if (manual === "reporter-history") reporterProbes++;
+      return reporterAccess;
+    }, caseId)
+    : undefined;
   const nativeRuns = [
     {
       id: 1,
@@ -10552,6 +10560,12 @@ async function verifyReceiptFamily(
       title: `${family} control gap`,
       summary: "The retained verification reports a failed control.",
     };
+    type Trace = Parameters<
+      NonNullable<
+        Parameters<ReturnType<typeof createSentinelSubagent>["execute"]>[3]
+      >
+    >[0];
+    const publication: Trace[] = [];
     const outcome = await workerTurn(
       path,
       lease,
@@ -10564,6 +10578,12 @@ async function verifyReceiptFamily(
       undefined,
       baseDir,
       reader,
+      manual === "reporter-history"
+        ? {
+          prompt: "Verify the exact retained native evidence and report it.",
+          options: [undefined, (step) => publication.push(step), true],
+        }
+        : undefined,
     );
     assertStringIncludes(
       outcome.results[1][0],
@@ -10582,6 +10602,252 @@ async function verifyReceiptFamily(
     assertEquals(finding.evidenceId, node);
     assertEquals(finding.taskId, lease.assignedTaskId);
     assertEquals(JSON.parse(outcome.results[3][1]).record, finding);
+    if (manual === "reporter-history") {
+      const adaptive = openSentinelAdaptiveStore(
+        join(dirname(path), "sentinel-adaptive.db"),
+      );
+      try {
+        const revision = adaptiveRevision(state);
+        assert(
+          adaptive.recordModelReviewProgress(
+            revision,
+            lease.assignedTaskId,
+            lease.assignedTaskLeaseToken,
+            publication,
+          ),
+        );
+        advanceAdaptiveSentinel(path, state);
+        advanceAdaptiveSentinel(path, state);
+        const claimed = adaptive.claimModelReview(
+          revision,
+          MODEL_ASSIGNMENT_REASON,
+          ({ kind }) => kind === "report_finding",
+        );
+        assert(claimed);
+        const sourceIndex = publication.findIndex(({ tool, target, outcome }) =>
+          tool === report && target === finding.id && outcome === "returned"
+        );
+        assert(sourceIndex >= 0);
+        const query = {
+          task: lease.assignedTaskId,
+          stepIndices: [sourceIndex],
+        };
+        const traceName = "sentinel_worker_trace_search";
+        const prompt = "Cite the exact originating finding publication.";
+        type Checkpoint = NonNullable<
+          NonNullable<
+            Parameters<ReturnType<typeof createSentinelSubagent>["execute"]>[5]
+          >["resume"]
+        >;
+        let checkpoint: Checkpoint | undefined;
+        let resumedHistory = "";
+        let offers = 0;
+        let denyHook: "PRE_TOOL_CALL" | "POST_TOOL_RESPONSE" | undefined;
+        let revokeOnOutput = false;
+        const hooks: string[] = [];
+        const emitted: ChatEvent[] = [];
+        const buildReporter = (replaying: boolean) => {
+          const providers = createProviderRegistry();
+          providers.register({
+            name: "native-reporter-fixture",
+            supportsStreaming: false,
+            complete(messages) {
+              const result = messages.findLast(({ role }) => role === "tool");
+              if (replaying) resumedHistory = JSON.stringify(messages);
+              else if (!result) offers++;
+              return Promise.resolve({
+                content: replaying || result
+                  ? "The publication was reviewed."
+                  : "",
+                usage: { inputTokens: 1, outputTokens: 1 },
+                toolCalls: replaying || result ? [] : [{
+                  id: "native-reporter-read",
+                  type: "function",
+                  function: {
+                    name: traceName,
+                    arguments: JSON.stringify(query),
+                  },
+                }],
+              });
+            },
+          });
+          providers.setDefault("native-reporter-fixture");
+          return createSentinelSubagent({
+            snapshotPath: path,
+            assessmentRevision: state.revision,
+            assignedTaskId: claimed.task.id,
+            assignedTaskLeaseToken: claimed.token,
+            readRetainedWorkflow: reader,
+            providerRegistry: providers,
+            allowModelAccess: true,
+            hookRunner: {
+              evaluateHook(hook, { input }) {
+                const name = String(
+                  input.tool_name ??
+                    (input.tool_call as { name?: string } | undefined)?.name,
+                );
+                if (
+                  name === traceName || name === "sentinel_live_workflow_status"
+                ) hooks.push(`${hook}:${name}`);
+                if (
+                  revokeOnOutput && hook === "PRE_OUTPUT" &&
+                  typeof input.content === "string" &&
+                  input.content.includes(finding.id)
+                ) {
+                  reporterAccess = false;
+                }
+                const allowed = !(name === "sentinel_live_workflow_status" &&
+                  hook === denyHook);
+                return Promise.resolve({
+                  allowed,
+                  action: allowed ? "ALLOW" : "BLOCK",
+                  ruleId: null,
+                  duration: 0,
+                });
+              },
+            },
+          });
+        };
+        const abort = new AbortController();
+        const reporterSteps: Trace[] = [];
+        await buildReporter(false).execute(
+          prompt,
+          (event) => emitted.push(event),
+          abort.signal,
+          (step) => reporterSteps.push(step),
+          true,
+          {
+            workerBoundary: () => ({}),
+            onToolBatchCheckpoint(value) {
+              checkpoint = value;
+              abort.abort();
+              return Promise.resolve();
+            },
+          },
+        );
+        assert(checkpoint);
+        const result = checkpoint.history.findLast(({ role }) =>
+          role === "tool"
+        )?.content;
+        assert(typeof result === "string");
+        assertStringIncludes(result, finding.id);
+        assert(!result.includes("repositoryId"));
+        assert(hooks.includes(`PRE_TOOL_CALL:${traceName}`));
+        assert(hooks.includes(`POST_TOOL_RESPONSE:${traceName}`));
+        assert(hooks.includes("PRE_TOOL_CALL:sentinel_live_workflow_status"));
+        assert(
+          hooks.includes("POST_TOOL_RESPONSE:sentinel_live_workflow_status"),
+        );
+        const resumeOptions = { resume: checkpoint };
+        denyHook = "PRE_TOOL_CALL";
+        const beforePre = reporterProbes;
+        await buildReporter(true).execute(
+          prompt,
+          () => {},
+          undefined,
+          undefined,
+          undefined,
+          resumeOptions,
+        );
+        assertEquals(reporterProbes, beforePre);
+        assertEquals(resumedHistory, "");
+        denyHook = "POST_TOOL_RESPONSE";
+        await buildReporter(true).execute(
+          prompt,
+          () => {},
+          undefined,
+          undefined,
+          undefined,
+          resumeOptions,
+        );
+        assertEquals(resumedHistory, "");
+        denyHook = undefined;
+        reporterAccess = false;
+        await buildReporter(true).execute(
+          prompt,
+          () => {},
+          undefined,
+          undefined,
+          undefined,
+          resumeOptions,
+        );
+        assertEquals(resumedHistory, "");
+        reporterAccess = true;
+        const replayed: string[] = [];
+        await buildReporter(true).execute(
+          prompt,
+          () => {},
+          undefined,
+          ({ tool }) => replayed.push(tool),
+          undefined,
+          resumeOptions,
+        );
+        assertStringIncludes(resumedHistory, finding.id);
+        assertEquals(replayed, []);
+        assertEquals(offers, 1);
+        revokeOnOutput = true;
+        emitted.length = 0;
+        await buildReporter(false).execute(
+          prompt,
+          (event) => emitted.push(event),
+        );
+        assertEquals(reporterAccess, false);
+        assert(!JSON.stringify(emitted).includes(finding.id));
+
+        assert(adaptive.recordModelReviewProgress(
+          revision,
+          claimed.task.id,
+          claimed.token,
+          reporterSteps,
+        ));
+        const receipt = reporterSteps[0]?.workerTracePage;
+        assert(receipt, JSON.stringify(reporterSteps));
+        const {
+          reporterNativeWorkflowBinding,
+          reopenSentinelWorkerTraceSearch,
+        } = await import("../../src/gateway/sentinel_agent.ts");
+        const binding = reporterNativeWorkflowBinding({
+          snapshotPath: path,
+          assignedTaskId: claimed.task.id,
+        }, state.revision);
+        assert(binding);
+        assertEquals(
+          reopenSentinelWorkerTraceSearch(
+            path,
+            state.revision,
+            claimed.task.id,
+            receipt,
+            binding,
+          ),
+          result,
+        );
+        const readOwner = {
+          action: "worker_trace_result",
+          kind: "sentinel",
+          id: caseId,
+          revision: state.revision,
+          taskId: claimed.task.id,
+          stepIndices: [0],
+        };
+        await withFindingAssignmentGateway(
+          baseDir,
+          () => Promise.resolve(false),
+          async (turn) => {
+            assertStringIncludes(await turn(readOwner), "unavailable");
+            reporterAccess = true;
+            const owner = JSON.parse(await turn(readOwner));
+            assertEquals(owner.result, JSON.parse(result));
+          },
+          undefined,
+          undefined,
+          undefined,
+          reader,
+        );
+        return;
+      } finally {
+        adaptive.close();
+      }
+    }
     if (manual === "mixed-assignment") {
       await verifyConnectorMixedAssignment(
         baseDir,
@@ -14843,3 +15109,6 @@ Deno.test("A leased reporter opens only its original finding publication step", 
 
 Deno.test("A leased reporter reauthorizes both endpoints of its retained original topology source", () =>
   testScopedReporterRestart(false, false, undefined, false, "relationship"));
+
+Deno.test("A leased reporter reauthorizes a retained native workflow publication on resume", () =>
+  verifyReceiptFamily("native workflow result", "reporter-history"));

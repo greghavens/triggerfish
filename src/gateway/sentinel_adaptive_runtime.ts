@@ -7288,7 +7288,7 @@ export function createSentinelModelPlanner(
         const reportInstructions = [
           "Write a defensive report for the exact findingId in this assignment.",
           "Open the finding using sentinel_worker_findings with receiptId, read the current report version using sentinel_finding_recheck_context, and open the finding's traffic attachment list for its evidenceVersion.",
-          "Use sentinel_worker_trace_search to find the committed original publication step when its evidence is in the current local case graph.",
+          "Use sentinel_worker_trace_search to find the committed original publication step when its exact evidence remains authorized.",
           "Use only verified retained evidence. Save the title and summary with sentinel_update_finding_report using both versions and a request UUID. Then return JSON with summary and an empty followUps array.",
         ].join("\n");
         const input = {

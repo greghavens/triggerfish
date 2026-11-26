@@ -3752,12 +3752,7 @@ function validateSavedGoalState(
   return expected === result;
 }
 
-/** A report assignment may see only the publication step for its original finding. */
-function reporterFindingTrace(
-  options: ProvenanceScope,
-  revision: number,
-  args: SentinelWorkerTraceSearchArgs,
-) {
+function reporterFindingBinding(options: ProvenanceScope, revision: number) {
   if (!options.assignedTaskId) return;
   const { snapshotPath: path } = options;
   const history = readHistoricalAdaptiveSentinel(path, revision);
@@ -3780,18 +3775,59 @@ function reporterFindingTrace(
     !policy.allows(finding.graphFindingId, "review_finding") ||
     (options.assignedTaskLeaseToken &&
       !liveProgressConsumer(options, revision)) ||
-    args.liveProgress ||
-    (args.task !== undefined && args.task !== finding.taskId)
-  ) return [];
+    !reporter.evidenceIds?.length
+  ) return null;
 
   const snapshot = readSentinelAssessmentRevision(path, revision)?.result
     .sharedGraph.snapshot;
   const evidence = snapshot?.nodes.find(({ id }) => id === finding.evidenceId);
   if (
     !snapshot || evidence?.kind !== "evidence" || evidence.executionSource ||
-    evidence.nativeWorkflowSource ||
     finding.snapshotDigest !== digestSentinelSnapshot(snapshot)
+  ) return null;
+  return { history, finding, policy, snapshot, evidence };
+}
+
+export function reporterNativeWorkflowBinding(
+  options: ProvenanceScope,
+  revision: number,
+) {
+  const binding = reporterFindingBinding(options, revision);
+  if (!binding?.evidence.nativeWorkflowSource) return;
+  const { finding, evidence } = binding;
+  return {
+    evidenceId: evidence.id,
+    assetId: finding.targetId,
+    producerTaskId: finding.taskId,
+    source: evidence.nativeWorkflowSource,
+  };
+}
+
+type ReporterNativeWorkflowBinding = NonNullable<
+  ReturnType<typeof reporterNativeWorkflowBinding>
+>;
+
+/** A report assignment may see only the publication step for its original finding. */
+function reporterFindingTrace(
+  options: ProvenanceScope,
+  revision: number,
+  args: SentinelWorkerTraceSearchArgs,
+  native?: ReporterNativeWorkflowBinding,
+) {
+  const binding = reporterFindingBinding(options, revision);
+  if (binding === undefined) return;
+  if (!binding) return [];
+  const { history, finding, policy, snapshot, evidence } = binding;
+  if (
+    args.liveProgress ||
+    (args.task !== undefined && args.task !== finding.taskId) ||
+    (evidence.nativeWorkflowSource && (
+      native?.evidenceId !== evidence.id ||
+      native.assetId !== finding.targetId ||
+      !isDeepStrictEqual(native.source, evidence.nativeWorkflowSource)
+    ))
   ) return [];
+  const path = options.snapshotPath;
   if (evidence.relationshipSources?.length) {
     const location = locateSentinelCase(path);
     if (!location) return [];
@@ -3834,7 +3870,11 @@ function reporterFindingTrace(
     }
   }
   const source = history.tasks.find(({ id }) => id === finding.taskId);
-  if (source?.nodeId !== finding.targetId) return [];
+  if (
+    !source || (source.nodeId !== finding.targetId &&
+      !(evidence.nativeWorkflowSource && source.kind === "review_evidence" &&
+        source.nodeId === finding.evidenceId))
+  ) return [];
   const complete = history.modelReviews.find(({ taskId }) =>
     taskId === source.id
   );
@@ -3866,8 +3906,9 @@ function workerTraceMatches(
   graph: NonNullable<ReturnType<typeof readSentinelProvenance>>["graph"],
   args: SentinelWorkerTraceSearchArgs,
   workerRead = options.assignedTaskLeaseToken !== undefined,
+  native?: ReporterNativeWorkflowBinding,
 ) {
-  const reporter = reporterFindingTrace(options, revision, args);
+  const reporter = reporterFindingTrace(options, revision, args, native);
   if (reporter) return reporter;
   let eligibleTasks: ReadonlySet<string> | undefined;
   if (workerRead) {
@@ -4014,6 +4055,7 @@ function validateSavedWorkerTracePage(
   revision: number,
   args: SentinelWorkerTraceSearchArgs,
   result: string,
+  native?: ReporterNativeWorkflowBinding,
 ) {
   if (args.revision !== undefined && args.revision !== revision) return false;
   const retained = readAgentProvenance(options, revision);
@@ -4025,7 +4067,7 @@ function validateSavedWorkerTracePage(
   const steps = args.liveProgress
     ? consumer &&
       peerProgressMatches(options.snapshotPath, revision, consumer, args)
-    : workerTraceMatches(options, revision, retained.graph, args);
+    : workerTraceMatches(options, revision, retained.graph, args, true, native);
   if (!steps || saved.totalSteps > steps.length) return false;
   const allowed = new Map(
     steps.map((
@@ -4043,6 +4085,7 @@ export function reopenSentinelWorkerTraceSearch(
   revision: number,
   taskId: string | undefined,
   saved: NonNullable<ReturnType<typeof readSentinelWorkerTracePageReference>>,
+  native?: ReporterNativeWorkflowBinding,
 ) {
   const options = {
     snapshotPath: path,
@@ -4053,7 +4096,14 @@ export function reopenSentinelWorkerTraceSearch(
   if ("error" in retained) return;
   const steps = saved.args.liveProgress
     ? taskId && peerProgressMatches(path, revision, taskId, saved.args)
-    : workerTraceMatches(options, revision, retained.graph, saved.args, true);
+    : workerTraceMatches(
+      options,
+      revision,
+      retained.graph,
+      saved.args,
+      true,
+      native,
+    );
   if (!steps || saved.totalSteps > steps.length) return;
   const page = saved.rows.map((row) =>
     steps.find(({ taskId, index }) =>
@@ -4074,6 +4124,7 @@ export function searchSentinelWorkerTraces(
   options: ProvenanceScope,
   args: Record<string, unknown>,
   workerRead = options.assignedTaskLeaseToken !== undefined,
+  native?: ReporterNativeWorkflowBinding,
 ): string {
   const {
     query = "",
@@ -4146,6 +4197,7 @@ export function searchSentinelWorkerTraces(
         provenance.graph,
         filters,
         workerRead,
+        native,
       );
     if (!steps) {
       return "Error: Peer progress requires a current assignment lease and exact asset.";
@@ -5531,6 +5583,38 @@ function createAgent(
         ].includes(name))
     )
     : availableTools;
+  async function authorizeReporterNativeSource(turn: ActiveTurn) {
+    const revision = options.assessmentRevision;
+    if (!reporter || revision === undefined) return;
+    const selected = reporterNativeWorkflowBinding(options, revision);
+    if (!selected) return;
+    const current = () =>
+      !turn.signal.aborted && isDeepStrictEqual(
+        reporterNativeWorkflowBinding(options, revision),
+        selected,
+      );
+    const evidence = await readNativeExecutionEvidence(
+      options,
+      turn,
+      session,
+      revision,
+      selected.evidenceId,
+      selected.assetId,
+      current,
+    );
+    if (!evidence || !current()) return;
+    const approved = await enforcePostToolResponse(
+      liveWorkflowStatusTool.name,
+      config,
+      session,
+      {
+        resultText: executionTracePayloadResponse(evidence.payload),
+        blocked: false,
+      },
+    );
+    return !approved.blocked && current() ? selected : undefined;
+  }
+
   const mutationTools = new Set([
     sentinelIncidentRecommendationToolName,
     sentinelPublishGraphFact.name,
@@ -6323,7 +6407,15 @@ function createAgent(
           const live = revision !== undefined &&
             liveProgressConsumer(options, revision);
           if (name === "PRE_TOOL_CALL") {
-            if (!args || args.liveProgress || !live || !turn) {
+            if (
+              !args || args.liveProgress || !live || !turn ||
+              revision === undefined ||
+              (args.revision !== undefined && args.revision !== revision)
+            ) {
+              return { ...result, allowed: false, action: "BLOCK" };
+            }
+            const binding = reporterNativeWorkflowBinding(options, revision);
+            if (binding && args.task && args.task !== binding.producerTaskId) {
               return { ...result, allowed: false, action: "BLOCK" };
             }
             turn.reporterTraceCalls.set(JSON.stringify(args), args);
@@ -6462,20 +6554,25 @@ function createAgent(
             toolName === SENTINEL_WORKER_TRACE_SEARCH &&
             typeof response === "string" && response.startsWith("{")
           ) {
+            const native = await authorizeReporterNativeSource(turn);
             const args = [...turn.reporterTraceCalls.values()].find((args) =>
-              searchSentinelWorkerTraces(options, args) === response
+              searchSentinelWorkerTraces(options, args, true, native) ===
+                response
             );
             if (!args) return { ...result, allowed: false, action: "BLOCK" };
             if (JSON.parse(response).steps.length) {
               turn.approvedReporterTraces.set(response, args);
             }
           }
-          if (
-            name === "PRE_OUTPUT" &&
-            [...turn.approvedReporterTraces].some(([approved, args]) =>
-              searchSentinelWorkerTraces(options, args) !== approved
-            )
-          ) return { ...result, allowed: false, action: "BLOCK" };
+          if (name === "PRE_OUTPUT" && turn.approvedReporterTraces.size) {
+            const native = await authorizeReporterNativeSource(turn);
+            if (
+              [...turn.approvedReporterTraces].some(([approved, args]) =>
+                searchSentinelWorkerTraces(options, args, true, native) !==
+                  approved
+              )
+            ) return { ...result, allowed: false, action: "BLOCK" };
+          }
         }
         if (
           active && name === "PRE_OUTPUT" && result.allowed &&
@@ -8103,6 +8200,7 @@ function createAgent(
           args,
           options.assignedTaskLeaseToken !== undefined ||
             options.plannerExecutionEvidenceRunId !== undefined,
+          await authorizeReporterNativeSource(turn),
         );
       }
       if (
@@ -10851,6 +10949,7 @@ function createAgent(
                         revision,
                         args,
                         saved,
+                        await authorizeReporterNativeSource(turn),
                       )
                     ) return false;
                     continue;
