@@ -1,3 +1,5 @@
+import { readLinkedSentinelWorkerReview } from "./sentinel_linked_worker_reviews.ts";
+import type { SentinelPeerWorkerReviewReference } from "../sentinel/linked_case_sources.ts";
 import { redactCredentialText } from "../core/logger/redactor.ts";
 import { readSentinelWorkerEvidenceScope } from "./sentinel_worker_evidence_scope.ts";
 import { INCONCLUSIVE_RECHECK_TOOL } from "../sentinel/recheck_inconclusive.ts";
@@ -3932,6 +3934,36 @@ function automaticReviewScope(snapshotPath: string, revision: number) {
     allowed(task) && !decisionHold(task);
 }
 
+function currentLinkedWorkerReview(
+  path: string,
+  state: State,
+  reference: SentinelPeerWorkerReviewReference,
+) {
+  const snapshot = state.result?.sharedGraph.snapshot;
+  const location = locateSentinelCase(path);
+  const sources = state.plan.linkedCaseSources;
+  if (
+    !snapshot || !location || !sources ||
+    !caseOperatingScope(path, state.revision)({
+      kind: "review_evidence",
+      nodeId: reference.asset,
+    })
+  ) return false;
+  return isDeepStrictEqual(
+    reference,
+    readLinkedSentinelWorkerReview(
+      location.baseDir,
+      sources,
+      snapshot,
+      {
+        sourceCase: reference.sourceCase,
+        taskId: reference.sourceTaskId,
+        asset: reference.asset,
+      },
+    )?.reference,
+  );
+}
+
 function decisionAllowsClaim(snapshotPath: string, revision: number) {
   const decisionHold = decisionHoldScope(snapshotPath, revision);
   const allowed = caseOperatingScope(snapshotPath, revision);
@@ -3939,6 +3971,15 @@ function decisionAllowsClaim(snapshotPath: string, revision: number) {
     allowed(task) &&
     (task.reason === OPERATOR_ASSIGNMENT_REASON || !decisionHold(task)) &&
     reviewedSourcesVisible(snapshotPath, revision, task, true) &&
+    (!task.plannerRound?.peerWorkerReview || (() => {
+      const latest = readSentinelAssessment(snapshotPath);
+      return latest?.revision === revision &&
+        currentLinkedWorkerReview(
+          snapshotPath,
+          latest,
+          task.plannerRound.peerWorkerReview,
+        );
+    })()) &&
     (!task.plannerRound?.findingFollowup || (() => {
       const current = readSentinelAssessment(snapshotPath);
       const source = task.plannerRound.findingFollowup;
@@ -6403,6 +6444,7 @@ export function createSentinelModelPlanner(
           recheckNote: task.plannerRound?.recheckNote,
           findingFollowup: task.plannerRound?.findingFollowup,
           sourceEvidence: task.plannerRound?.sourceEvidence,
+          peerWorkerReview: task.plannerRound?.peerWorkerReview,
           ...(question && { operatorQuestion: question }),
           committedObservation: task.plannerRound?.committedObservation,
           peerFindingCitations: task.plannerRound?.peerFindingCitations?.map(
@@ -7513,6 +7555,10 @@ export function createSentinelModelPlanner(
       let presentedGraphFacts: typeof graphFacts = [];
       const presentedCancellations = new Map<string, string>();
       const presentedAnalystObservations = new Map<number, string>();
+      const peerWorkerReviews = new Map<
+        string,
+        SentinelPeerWorkerReviewReference
+      >();
       let presentedFindingRechecks: typeof findingRechecks = [];
       const openedRecheckFindings = new Map<string, string>();
       const openedPassingRechecks = new Map<string, string>();
@@ -7742,6 +7788,13 @@ export function createSentinelModelPlanner(
             : []),
           "A trafficReference in operatorAssetHints identifies an exact retained source or ordered set of sources. Reopen it only with the case-scoped traffic reader and use it only for the anchored asset.",
           "For a follow-up supported by githubWorkflowReads, use sourceTaskId, sourceKind model_review and sourceWorkflowResultSha256. Keep the exact target.",
+          ...(state.plan.linkedCaseSources?.some(({ workerReviews }) =>
+              workerReviews?.length
+            )
+            ? [
+              "For a trace supported by a reviewed linked worker result, open sentinel_shared_worker_review with the exact sourceCase, taskId and matching local asset, then copy its reference into peerWorkerReview on a depth-one trace.",
+            ]
+            : []),
           ...(state.plan.linkedCaseSources
             ? [
               "Use sentinel_shared_asset_discoveries to inspect approved discoveries from the selected source case revisions. A source link grants no graph access.",
@@ -7794,6 +7847,35 @@ export function createSentinelModelPlanner(
         );
         const inputs = {
           ...(heartbeat && { wakeReason: "idle_planner_check" }),
+          ...(state.plan.linkedCaseSources && location && {
+            approvedPeerWorkerReviews: state.plan.linkedCaseSources.flatMap((
+              source,
+            ) =>
+              (source.workerReviews ?? []).flatMap(({ taskId }) => {
+                const read = readLinkedSentinelWorkerReview(
+                  location.baseDir,
+                  [source],
+                  snapshot,
+                  {
+                    sourceCase: source.caseId,
+                    taskId,
+                  },
+                );
+                return read &&
+                    currentLinkedWorkerReview(
+                      snapshotPath,
+                      state,
+                      read.reference,
+                    )
+                  ? [{
+                    sourceCase: source.caseId,
+                    taskId,
+                    asset: read.reference.asset,
+                  }]
+                  : [];
+              })
+            ),
+          }),
           ...(state.plan.linkedCaseSources && {
             approvedDiscoverySources: state.plan.linkedCaseSources.map(
               ({ caseId, revision }) => ({ caseId, revision }),
@@ -8238,6 +8320,7 @@ export function createSentinelModelPlanner(
               workerTracePage,
               recheckFindingIds,
               peerFinding,
+              peerWorkerReview,
             },
           ) => {
             if (signal.aborted || recordedReads >= 32) return;
@@ -8307,8 +8390,15 @@ export function createSentinelModelPlanner(
                         ))) &&
                       { goalReceiptRead }),
                     recheckFindingIds,
+                    peerWorkerReview,
                   },
                 );
+                if (recorded && outcome === "returned" && peerWorkerReview) {
+                  peerWorkerReviews.set(
+                    JSON.stringify(peerWorkerReview),
+                    peerWorkerReview,
+                  );
+                }
                 if (
                   recorded && outcome === "returned" &&
                   tool === "sentinel_defense" && goalReceiptRead &&
@@ -8526,6 +8616,18 @@ export function createSentinelModelPlanner(
           return !signal.aborted && !!current?.active && !current.paused &&
             matchesRound(current);
         };
+        const checkedWorkerReviews = new Set<string>();
+        for (const [key, reference] of peerWorkerReviews) {
+          if (
+            await worker.authorizeLinkedWorkerReview?.(
+              reference,
+              signal,
+              authorizeCurrent,
+            )
+          ) {
+            checkedWorkerReviews.add(key);
+          }
+        }
         const checkedPeers = new Map<
           string,
           NonNullable<ReturnType<typeof readLinkedFindingProof>>
@@ -8781,6 +8883,9 @@ export function createSentinelModelPlanner(
                       asset,
                       ids,
                     ),
+                  (reference) =>
+                    checkedWorkerReviews.has(JSON.stringify(reference)) &&
+                    currentLinkedWorkerReview(snapshotPath, current, reference),
                 );
               const existingById = new Map(
                 currentTasks.map((task) => [task.id, task]),
@@ -8873,6 +8978,7 @@ export function createSentinelModelPlanner(
                 {
                   analystObservationHintId,
                   sourceEvidence,
+                  peerWorkerReview,
                   cancelledTaskRequestId,
                   sourceKind,
                   upstreamCheckId,
@@ -8892,7 +8998,13 @@ export function createSentinelModelPlanner(
                 },
               ) => ({
                 ...task,
-                plannerRound: sourceEvidence
+                plannerRound: peerWorkerReview
+                  ? {
+                    identity: roundIdentity,
+                    attempt: claim,
+                    peerWorkerReview,
+                  }
+                  : sourceEvidence
                   ? { identity: roundIdentity, attempt: claim, sourceEvidence }
                   : {
                     ...plannerRound,

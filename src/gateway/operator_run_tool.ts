@@ -1,4 +1,8 @@
 import {
+  readLinkedSentinelWorkerReview,
+  readLocalSentinelReview,
+} from "./sentinel_linked_worker_reviews.ts";
+import {
   listSentinelInteractiveTurns,
   readSentinelInteractiveTurn,
   stopSentinelInteractiveTurn,
@@ -988,7 +992,7 @@ export const operatorRunTool: ToolDefinition = {
     sourceCases: {
       type: "array",
       description:
-        "Up to four distinct {caseId, revision} source cases for the linked Sentinel child. Sources select only already-approved shared discoveries.",
+        "Up to four distinct {caseId, revision, workerReviewTaskIds?} source cases for the linked Sentinel child. Exact completed worker review selectors require owner review.",
     },
     inventoryCoverageEnabled: {
       type: "boolean",
@@ -10433,6 +10437,66 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
             return safeProjection({ ...selected, read });
           }
           const authorize = context?.authorizeSentinelTraceRead;
+          if (includeResult && read.peerWorkerReview) {
+            const reference = read.peerWorkerReview;
+            const revision = ref.revision;
+            const selector = {
+              sourceCase: reference.sourceCase,
+              taskId: reference.sourceTaskId,
+              asset: reference.asset,
+            };
+            const lookup = () => {
+              const snapshot = readSentinelAssessmentRevision(path, revision)
+                ?.result.sharedGraph.snapshot;
+              const sources = readSentinelLinkedSourcesForRevision(
+                path,
+                revision,
+              );
+              const policy = readSentinelFindingReceiptScope(path, revision);
+              if (
+                !snapshot || !sources || !policy?.allows(reference.asset) ||
+                context?.authorizeSentinelCaseRead?.(ref.id, revision) === false
+              ) return;
+              return readLinkedSentinelWorkerReview(
+                options.baseDir,
+                sources,
+                snapshot,
+                selector,
+              );
+            };
+            const saved = lookup();
+            const result = saved && { _classification: "INTERNAL", ...saved };
+            const text = result && JSON.stringify(result);
+            const pinned = {
+              caseId: ref.id,
+              revision,
+              plannerIdentity: plannerIdentity as string,
+              attempt: attempt as number,
+            };
+            if (
+              read.outcome !== "returned" || !text ||
+              !context?.authorizeOwnerRunCall || !authorize ||
+              !isDeepStrictEqual(reference, saved?.reference) ||
+              createHash("sha256").update(text).digest("hex") !==
+                read.resultSha256 ||
+              !await authorize(pinned, read.tool, selector) ||
+              !await context.authorizeOwnerRunCall({
+                kind: "sentinel",
+                id: reference.sourceCase,
+                revision: reference.sourceRevision,
+                action: "node",
+                node: `observation:adaptive:review:${reference.sourceTaskId}`,
+              }) ||
+              !await context.authorizeSavedResponse(
+                read.tool,
+                text,
+                "INTERNAL",
+              ) ||
+              !await authorize(pinned, read.tool, selector, text) ||
+              !isDeepStrictEqual(saved, lookup())
+            ) return unavailable;
+            return safeProjection({ ...selected, read, result });
+          }
           const inventory = includeResult &&
             read.tool === "sentinel_case_inventory" &&
             read.plannerCoverageResult;
@@ -13125,8 +13189,12 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
           for (const selected of sourceCases) {
             if (
               !selected || typeof selected !== "object" ||
-              Array.isArray(selected) || Object.keys(selected).length !== 2
-            ) return;
+              Array.isArray(selected) || Object.keys(selected).some((key) =>
+                !["caseId", "revision", "workerReviewTaskIds"].includes(key)
+              )
+            ) {
+              return;
+            }
             const source = reference(
               "sentinel",
               selected.caseId,
@@ -13135,7 +13203,9 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
             if (
               !source || source.revision === undefined ||
               source.id === targetId || !await controller.inspect(source)
-            ) return;
+            ) {
+              return;
+            }
             const sourcePath = resolveSentinelCasePath(
               options.baseDir,
               source.id,
@@ -13144,12 +13214,55 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
               sourcePath,
               source.revision,
             );
-            if (!runId) return;
-            sources.push({
+            if (!runId) {
+              return;
+            }
+            const binding = {
               caseId: source.id,
               revision: source.revision,
               runId,
-            });
+            };
+            const ids = selected.workerReviewTaskIds;
+            if (ids === undefined) {
+              sources.push(binding);
+              continue;
+            }
+            const authorizeSource = context?.authorizeOwnerRunCall;
+            if (
+              !authorizeSource || !Array.isArray(ids) || ids.length < 1 ||
+              ids.length > 4 || new Set(ids).size !== ids.length
+            ) {
+              return;
+            }
+            const workerReviews = [];
+            for (const taskId of ids) {
+              if (
+                typeof taskId !== "string" ||
+                !/^adaptive:[a-f0-9]{64}$/.test(taskId) ||
+                !await authorizeSource({
+                  ...source,
+                  action: "node",
+                  node: `observation:adaptive:review:${taskId}`,
+                })
+              ) {
+                return;
+              }
+              const read = readLocalSentinelReview(sourcePath, binding, taskId);
+              if (
+                !read || !await context.authorizeSavedResponse(
+                  operatorRunTool.name,
+                  safeProjection({ ...read.binding, summary: read.summary }),
+                  "INTERNAL",
+                ) || !isDeepStrictEqual(
+                  read.binding,
+                  readLocalSentinelReview(sourcePath, binding, taskId)?.binding,
+                )
+              ) {
+                return;
+              }
+              workerReviews.push(read.binding);
+            }
+            sources.push({ ...binding, workerReviews });
           }
           return parseSentinelLinkedCaseSources(sources);
         };

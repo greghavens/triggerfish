@@ -1,4 +1,8 @@
 import {
+  parseSentinelPeerWorkerReview,
+  type SentinelPeerWorkerReviewReference,
+} from "./linked_case_sources.ts";
+import {
   isSentinelHintTrafficSelection,
   type SentinelHintTrafficReference,
   sentinelHintTrafficReferences,
@@ -995,6 +999,7 @@ export interface AdaptivePlannerRound {
     readonly sha256: string;
   };
   readonly findingFollowup?: AdaptiveFindingFollowup;
+  readonly peerWorkerReview?: SentinelPeerWorkerReviewReference;
   readonly passingRecheckId?: string;
   readonly passingRecheckForFindingId?: string;
   readonly recheckFindingId?: string;
@@ -1056,6 +1061,7 @@ export interface AdaptivePlannerInputManifest {
 
 /** Metadata from one completed tool call in a dispatched planner attempt. */
 export interface AdaptivePlannerRead {
+  readonly peerWorkerReview?: SentinelPeerWorkerReviewReference;
   readonly graphOverviewProjection?:
     SentinelReviewStep["graphOverviewProjection"];
   readonly plannerCoverageResult?: SentinelReviewStep["plannerCoverageResult"];
@@ -1533,6 +1539,7 @@ export interface AdaptiveTaskNote {
 type RelationshipTaskIdentity = Pick<
   AdaptivePlannerRound,
   | "sourceEvidence"
+  | "peerWorkerReview"
   | "graphFactOnly"
   | "graphFactId"
   | "graphRelationship"
@@ -1585,6 +1592,13 @@ function normalizePlannerRead(read: AdaptivePlannerRead): AdaptivePlannerRead {
       !/^[a-f0-9]{64}$/.test(read.resultSha256))
   ) throw new Error("Invalid Sentinel planner read digest");
   const target = optionalText(read.target, "planner read target", 4096);
+  const peerWorkerReview = parseSentinelPeerWorkerReview(read.peerWorkerReview);
+  if (
+    read.peerWorkerReview !== undefined && (
+      read.tool !== "sentinel_shared_worker_review" || !peerWorkerReview ||
+      !read.resultSha256
+    )
+  ) throw new Error("Invalid scoped planner worker review read");
   if (
     read.sourceSnapshots !== undefined &&
     (!Array.isArray(read.sourceSnapshots) || read.sourceSnapshots.length > 32)
@@ -1939,6 +1953,7 @@ function normalizePlannerRead(read: AdaptivePlannerRead): AdaptivePlannerRead {
       },
     }),
     ...(trafficLinks && { trafficLinks }),
+    ...(peerWorkerReview && { peerWorkerReview }),
     ...(linkedTrafficPayload && { linkedTrafficPayload }),
     ...(trafficArgs && traffic &&
       { trafficRead: { ...trafficArgs, sha256: traffic.sha256 } }),
@@ -2234,6 +2249,9 @@ export function sentinelAdaptiveTaskId(
           request.plannerRound.assignmentQuestion.sha256,
         ]]
         : []),
+      ...(receipt.peerWorkerReview
+        ? [["peer_worker_review", receipt.peerWorkerReview]]
+        : []),
       ...(request.plannerRound?.findingFollowup
         ? [[
           "finding_followup",
@@ -2426,6 +2444,7 @@ function normalizePlannerRound(round: AdaptivePlannerRound | undefined) {
     priorAssignedTargetCitations,
     carriedAssignedTargetCitations,
     findingFollowup,
+    peerWorkerReview,
     sourceEvidence,
     assignmentQuestion,
     cancelledTaskRequestId,
@@ -2530,6 +2549,15 @@ function normalizePlannerRound(round: AdaptivePlannerRound | undefined) {
       )
     )
   ) throw new Error("Invalid Sentinel reviewed assignment sources");
+  if (
+    peerWorkerReview !== undefined && (
+      !/^[a-f0-9]{64}(?::|$)/.test(identity) ||
+      !parseSentinelPeerWorkerReview(peerWorkerReview) ||
+      Object.keys(round).some((key) =>
+        !["identity", "attempt", "peerWorkerReview"].includes(key)
+      )
+    )
+  ) throw new Error("Invalid reviewed peer worker result");
   if (
     findingFollowup !== undefined && (
       !/^operator:[a-f0-9-]{36}$/.test(identity) ||
@@ -2686,6 +2714,8 @@ function normalizePlannerRound(round: AdaptivePlannerRound | undefined) {
         },
       }),
     ...(sourceEvidence && { sourceEvidence }),
+    ...(peerWorkerReview &&
+      { peerWorkerReview: parseSentinelPeerWorkerReview(peerWorkerReview) }),
     ...(assignmentQuestion && { assignmentQuestion }),
     ...(findingFollowup && {
       findingFollowup: {
@@ -2790,6 +2820,16 @@ function normalizeTask(revision: string, request: AdaptiveTaskRequest) {
     plannerRound?.sourceEvidence &&
     (identity.kind !== "trace" || identity.depth !== 1)
   ) throw new Error("Reviewed assignment evidence requires a one-hop trace");
+  if (
+    plannerRound?.peerWorkerReview &&
+    (identity.kind !== "trace" || identity.depth !== 1 ||
+      plannerRound.peerWorkerReview.asset !== identity.nodeId ||
+      request.prerequisites?.length)
+  ) {
+    throw new Error(
+      "Peer worker review requires independent exact local trace",
+    );
+  }
   if (
     plannerRound?.findingFollowup &&
     (identity.kind !== "trace" || identity.depth !== 1 ||

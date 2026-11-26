@@ -1,3 +1,8 @@
+import { readLinkedSentinelWorkerReview } from "./sentinel_linked_worker_reviews.ts";
+import {
+  parseSentinelPeerWorkerReview,
+  type SentinelPeerWorkerReviewReference,
+} from "../sentinel/linked_case_sources.ts";
 import {
   parseSentinelFindingReview,
   sentinelPlannerFindingToolName,
@@ -423,6 +428,7 @@ export interface SentinelLiveWorkflowDestination {
 }
 
 export type SentinelReadTrace = SentinelReviewStep & {
+  readonly peerWorkerReview?: SentinelPeerWorkerReviewReference;
   readonly recheckFindingIds?: readonly string[];
   readonly resultSha256?: string;
   readonly recheckContext?: SentinelReviewStep["recheckContext"];
@@ -475,6 +481,11 @@ type ReviewedFindingSource =
   import("../sentinel/adaptive_store.ts").AdaptiveReviewedAssignmentSource;
 
 export interface SentinelAgent {
+  readonly authorizeLinkedWorkerReview?: (
+    reference: SentinelPeerWorkerReviewReference,
+    signal: AbortSignal,
+    isCurrent: () => boolean,
+  ) => Promise<boolean>;
   readonly canRequestWorkerControl?: boolean;
   readonly authorizeReviewedFindingSource?: (
     assetId: string,
@@ -1024,6 +1035,29 @@ const plannerFindingReviewTool: ToolDefinition = {
       description,
     }]),
   ),
+};
+
+const sharedWorkerReviewTool: ToolDefinition = {
+  name: "sentinel_shared_worker_review",
+  description:
+    "Read an exact reviewed linked worker summary for an authorized matching local asset.",
+  parameters: {
+    sourceCase: {
+      type: "string",
+      required: true,
+      description: "Exact selected source case",
+    },
+    taskId: {
+      type: "string",
+      required: true,
+      description: "Exact reviewed source assignment",
+    },
+    asset: {
+      type: "string",
+      required: true,
+      description: "Exact corresponding local asset",
+    },
+  },
 };
 
 function isPlannerWorkerControl(name: unknown): boolean {
@@ -4739,6 +4773,9 @@ function createAgent(
       sentinelPublishGraphFact,
       priorAssignedEvidenceTool,
       savedWorkflowReceiptTool,
+      ...(readAssignedModelReview(options)?.plannerRound?.peerWorkerReview
+        ? [sharedWorkerReviewTool]
+        : []),
       intermediateWorkflowObservationTool,
       ...sentinelFindingWriteTools.filter(({ name }) =>
         name !== INCONCLUSIVE_RECHECK_TOOL ||
@@ -4760,6 +4797,11 @@ function createAgent(
     ? [
       ...tools,
       ...plannerTodoTools,
+      ...(linkedFindingSources(options)?.some(({ workerReviews }) =>
+          workerReviews?.length
+        )
+        ? [sharedWorkerReviewTool]
+        : []),
       ...(canRequestWorkerControl
         ? [plannerStopTool, plannerSteerTool, plannerFindingReviewTool]
         : []),
@@ -5170,7 +5212,8 @@ function createAgent(
             toolName === SENTINEL_GOAL_STATE_READ ||
             toolName === SENTINEL_INCIDENT_ALERTS_READ ||
             toolName === SENTINEL_DEFENSE_READ || traffic || plannerTodo ||
-            digestRead || plannerControl || plannerFinding);
+            digestRead || plannerControl || plannerFinding ||
+            toolName === sharedWorkerReviewTool.name);
         const selectedDirectRead = (!!directTelemetryReader &&
           (toolName === SENTINEL_DEFENSE_READ ||
             toolName === SENTINEL_INCIDENT_ALERTS_READ)) ||
@@ -5525,6 +5568,35 @@ function createAgent(
               readAssignedModelReview(options)?.evidenceIds?.[0] ||
             call.args.recheckId !== undefined)
         ) return { ...result, allowed: false, action: "BLOCK" };
+        if (
+          result.allowed && name === "POST_TOOL_RESPONSE" &&
+          toolName === sharedWorkerReviewTool.name && turn &&
+          typeof context.input.tool_response === "string" &&
+          context.input.tool_response.startsWith("{")
+        ) {
+          const reference = parseSentinelPeerWorkerReview(
+            JSON.parse(context.input.tool_response).reference,
+          );
+          const allowed = reference &&
+            (canReadPlannerCase
+              ? currentPlannerReceiptScope(turn, reference.asset)
+              : isDeepStrictEqual(
+                reference,
+                readAssignedModelReview(options)?.plannerRound
+                  ?.peerWorkerReview,
+              ));
+          if (
+            !reference || !allowed ||
+            !isDeepStrictEqual(
+              reference,
+              linkedWorkerReview({
+                sourceCase: reference.sourceCase,
+                taskId: reference.sourceTaskId,
+                asset: reference.asset,
+              })?.reference,
+            )
+          ) return { ...result, allowed: false, action: "BLOCK" };
+        }
         if (
           result.allowed && name === "POST_TOOL_RESPONSE" &&
           (toolName === caseExecutionEvidenceTool.name || plannerTodo ||
@@ -6921,6 +6993,36 @@ function createAgent(
             options.plannerExecutionEvidenceRunId !== undefined,
         );
       }
+      if (name === sharedWorkerReviewTool.name) {
+        const { sourceCase, taskId, asset } = args;
+        const current = () => {
+          if (typeof asset !== "string") return false;
+          if (canReadPlannerCase) {
+            return currentPlannerReceiptScope(turn, asset);
+          }
+          const bound = readAssignedModelReview(options)?.plannerRound
+            ?.peerWorkerReview;
+          return bound?.asset === asset && bound.sourceCase === sourceCase &&
+            bound.sourceTaskId === taskId;
+        };
+        if (
+          Object.keys(args).length !== 3 ||
+          typeof sourceCase !== "string" || typeof taskId !== "string" ||
+          typeof asset !== "string" || !current()
+        ) return "Error: The linked worker review is unavailable.";
+        const ready = () => linkedWorkerReview({ sourceCase, taskId, asset });
+        const result = ready();
+        if (
+          !result ||
+          !await authorizeLinkedWorkerReview(
+            result.reference,
+            turn.signal,
+            current,
+          ) ||
+          !isDeepStrictEqual(result, ready())
+        ) return "Error: The linked worker review is unavailable.";
+        return boundResult({ _classification: "INTERNAL", ...result });
+      }
       if (name === "sentinel_worker_observation") {
         if (canReadPlannerCase && !currentPlannerReceiptScope(turn)) {
           return "Error: The worker observation scope is unavailable.";
@@ -7042,18 +7144,6 @@ function createAgent(
           : undefined;
       if (turn?.requiresLiveAssignment && !assignedReview) return;
       const failed = result.startsWith("Error:");
-      if (
-        canRequestWorkerControl && turn && !failed &&
-        name === SENTINEL_PROVENANCE_NODE_READ &&
-        currentPlannerReceiptScope(turn) &&
-        result.startsWith("{")
-      ) {
-        const evidence = JSON.parse(result).node;
-        if (
-          evidence?.kind === "evidence" && typeof evidence.id === "string" &&
-          evidence.id === args.node
-        ) turn.plannerFindingEvidence.set(evidence.id, result);
-      }
       if (
         turn && !failed && name === SENTINEL_ASSIGNED_EXECUTION_EVIDENCE &&
         typeof args.node === "string"
@@ -7757,8 +7847,14 @@ function createAgent(
               options.assessmentRevision,
             )
             : undefined;
+        const peerWorkerReview =
+          !failed && name === sharedWorkerReviewTool.name &&
+            result.startsWith("{")
+            ? parseSentinelPeerWorkerReview(JSON.parse(result).reference)
+            : undefined;
         turn.trace?.({
           tool: name,
+          ...(peerWorkerReview && { peerWorkerReview }),
           ...(recheckFindingIds?.length && { recheckFindingIds }),
           ...(typeof target === "string" && { target: target.slice(0, 256) }),
           outcome: failed ? "error" : "returned",
@@ -8025,6 +8121,87 @@ function createAgent(
     return !result.blocked && isCurrent();
   }
 
+  function linkedWorkerReview(
+    query: { sourceCase: string; taskId: string; asset: string },
+  ) {
+    const rev = options.assessmentRevision;
+    const location = locateSentinelCase(options.snapshotPath);
+    const sources = linkedFindingSources(options);
+    const local = rev === undefined
+      ? undefined
+      : readSentinelAssessmentRevision(options.snapshotPath, rev)?.result
+        .sharedGraph.snapshot;
+    if (!location || !sources || !local) return;
+    return readLinkedSentinelWorkerReview(
+      location.baseDir,
+      sources,
+      local,
+      query,
+    );
+  }
+
+  async function authorizeLinkedWorkerReview(
+    reference: SentinelPeerWorkerReviewReference,
+    signal: AbortSignal,
+    isCurrent: () => boolean,
+  ) {
+    const { sourceCase, sourceRevision, sourceTaskId, asset } = reference;
+    const lookup = () =>
+      linkedWorkerReview({ sourceCase, taskId: sourceTaskId, asset });
+    const saved = lookup();
+    if (
+      !saved || !isDeepStrictEqual(reference, saved.reference) ||
+      signal.aborted || !isCurrent()
+    ) return false;
+    const sourceConfig = {
+      ...config,
+      hookRunner: {
+        evaluateHook: (
+          hook: Parameters<HookRunner["evaluateHook"]>[0],
+          context: Parameters<HookRunner["evaluateHook"]>[1],
+        ) => {
+          const scope = {
+            case_id: sourceCase,
+            evidence_revision: sourceRevision,
+            assignment_id: sourceTaskId,
+            resource_classification: "INTERNAL",
+            operation_type: "read",
+          };
+          return options.hookRunner.evaluateHook(hook, {
+            ...context,
+            input: { ...context.input, ...scope },
+            auditInput: { ...context.auditInput, ...scope },
+          });
+        },
+      },
+    };
+    if (
+      !await authorizeSavedToolCalls(
+        [{
+          name: SENTINEL_PROVENANCE_NODE_READ,
+          args: {
+            node: `observation:adaptive:review:${sourceTaskId}`,
+          },
+        }],
+        sourceConfig,
+        session,
+        undefined,
+        signal,
+      ) || signal.aborted || !isCurrent()
+    ) return false;
+    const post = await enforcePostToolResponse(
+      SENTINEL_PROVENANCE_NODE_READ,
+      sourceConfig,
+      session,
+      {
+        resultText: boundResult({ _classification: "INTERNAL", ...saved }),
+        blocked: false,
+      },
+    );
+    return !post.blocked && !signal.aborted && isCurrent() &&
+      isDeepStrictEqual(saved, lookup());
+  }
+
   async function authorizeLinkedFinding(
     caseId: string,
     assetId: string,
@@ -8121,7 +8298,8 @@ function createAgent(
       }))
       : undefined;
   return {
-    ...(canReadPlannerCase && { authorizeLinkedFinding }),
+    ...(canReadPlannerCase &&
+      { authorizeLinkedFinding, authorizeLinkedWorkerReview }),
     ...((options.assignedTaskId || canReadPlannerCase) &&
       { authorizeReviewedFindingSource }),
     ...(canRequestWorkerControl && { canRequestWorkerControl }),

@@ -1,3 +1,7 @@
+import {
+  parseSentinelPeerWorkerReview,
+  type SentinelPeerWorkerReviewReference,
+} from "./linked_case_sources.ts";
 /** Derive bounded defensive work from graph evidence and prior worker observations. */
 import { createHash } from "node:crypto";
 import type { readSentinelAssessment } from "./assessment_store.ts";
@@ -834,10 +838,14 @@ export function validateSentinelPlanSuggestions(
     asset: string,
     ids: readonly string[],
   ) => readonly AdaptiveReviewedAssignmentSource[] | undefined,
+  approvesPeerWorkerReview?: (
+    reference: SentinelPeerWorkerReviewReference,
+  ) => boolean,
 ):
   | (AdaptiveTaskRequest & {
     analystObservationHintId?: number;
     sourceEvidence?: readonly AdaptiveReviewedAssignmentSource[];
+    peerWorkerReview?: SentinelPeerWorkerReviewReference;
     cancelledTaskRequestId?: string;
     sourceKind?: AdaptiveSourceKind;
     workerSources?: readonly AdaptiveWorkerSource[];
@@ -879,6 +887,7 @@ export function validateSentinelPlanSuggestions(
   const tasks: (AdaptiveTaskRequest & {
     analystObservationHintId?: number;
     sourceEvidence?: readonly AdaptiveReviewedAssignmentSource[];
+    peerWorkerReview?: SentinelPeerWorkerReviewReference;
     cancelledTaskRequestId?: string;
     sourceKind?: AdaptiveSourceKind;
     workerSources?: readonly AdaptiveWorkerSource[];
@@ -938,6 +947,18 @@ export function validateSentinelPlanSuggestions(
       !Array.isArray(dependencies) || dependencies.length > 4 ||
       dependencies.some((dependency) =>
         !Number.isSafeInteger(dependency) || !accepted.has(dependency)
+      )
+    ) continue;
+    const peerWorkerReview = item.peerWorkerReview !== undefined
+      ? parseSentinelPeerWorkerReview(item.peerWorkerReview)
+      : undefined;
+    if (
+      item.peerWorkerReview !== undefined && (
+        !peerWorkerReview || peerWorkerReview.asset !== nodeId ||
+        kind !== "trace" || item.depth !== 1 ||
+        Object.keys(item).some((key) =>
+          !["kind", "nodeId", "depth", "peerWorkerReview"].includes(key)
+        ) || !approvesPeerWorkerReview?.(peerWorkerReview)
       )
     ) continue;
     let sourceEvidence;
@@ -1249,6 +1270,7 @@ export function validateSentinelPlanSuggestions(
       const id = sentinelAdaptiveTaskId(revision, {
         ...task,
         ...(sourceEvidence && { plannerRound: { sourceEvidence } }),
+        ...(peerWorkerReview && { peerWorkerReview }),
         ...(futureWorkflowOutcome && { futureWorkflowOutcome }),
         ...(committed && requiredWorkflowOutcome && {
           requiredWorkflowOutcome,
@@ -1292,6 +1314,7 @@ export function validateSentinelPlanSuggestions(
       tasks.push({
         ...task,
         ...(sourceEvidence && { sourceEvidence }),
+        ...(peerWorkerReview && { peerWorkerReview }),
         ...(typeof analystObservationHintId === "number" &&
           { analystObservationHintId }),
         ...(typeof cancelledTaskRequestId === "string" &&

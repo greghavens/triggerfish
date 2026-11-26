@@ -646,6 +646,27 @@ function reportedAssetEdges(graph: Snapshot, assets: readonly Asset[]) {
 }
 
 /** Revalidate source-local endpoints and attribution for an archived asset page. */
+export function mappedArchivedSentinelAsset(
+  local: Snapshot,
+  archived: Snapshot,
+  sourceAsset: string,
+) {
+  const localAssets = snapshotAssets(local);
+  const sourceAssets = snapshotAssets(archived);
+  const target = matchCaseAssets(localAssets, sourceAssets).get(sourceAsset);
+  if (target === undefined || target !== sourceAsset) return target;
+  // Equal case-local IDs alone do not establish a shared asset.
+  const source = sourceAssets.find(({ id }) => id === sourceAsset);
+  const localOwners = assetIdentityIndex(localAssets);
+  const sourceOwners = assetIdentityIndex(sourceAssets);
+  return source?.aliases?.some((key) =>
+      key !== sourceAsset && sourceOwners.get(key) === sourceAsset &&
+      localOwners.get(key) === target
+    )
+    ? target
+    : undefined;
+}
+
 export function indexArchivedSentinelAssetSource(
   local: Snapshot,
   archived: Snapshot,
