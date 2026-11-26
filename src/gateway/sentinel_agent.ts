@@ -1587,6 +1587,28 @@ interface IncidentRecommendationPage {
   readonly next: number | null;
 }
 
+function rememberIncidentRecommendationPage(
+  turn: ActiveTurn,
+  args: Record<string, unknown>,
+  result: string,
+) {
+  const page = sentinelIncidentAlertsArgs(args);
+  if (!page || !result.startsWith("{")) return;
+  const { incidentId, offset, nextOffset, alerts } = JSON.parse(result);
+  if (
+    incidentId === page.incidentId && Array.isArray(alerts) &&
+    alerts.length > 0 &&
+    offset === (page.offset ?? 0) &&
+    (nextOffset === null || nextOffset === offset + alerts.length)
+  ) {
+    turn.incidentRecommendationPages.set(offset, {
+      args: page,
+      digest: createHash("sha256").update(result).digest("hex"),
+      next: nextOffset,
+    });
+  }
+}
+
 interface ActiveTurn {
   readonly incidentRecommendationPages: Map<number, IncidentRecommendationPage>;
   readonly controller: AbortController;
@@ -8368,21 +8390,7 @@ function createAgent(
           !failed && name === SENTINEL_INCIDENT_ALERTS_READ &&
           readAssignedModelReview(options)?.kind === "review_incident"
         ) {
-          const page = sentinelIncidentAlertsArgs(args);
-          if (page && result.startsWith("{")) {
-            const { offset, nextOffset, alerts } = JSON.parse(result);
-            if (
-              Array.isArray(alerts) && alerts.length > 0 &&
-              offset === (page.offset ?? 0) &&
-              (nextOffset === null || nextOffset === offset + alerts.length)
-            ) {
-              turn.incidentRecommendationPages.set(offset, {
-                args: page,
-                digest: createHash("sha256").update(result).digest("hex"),
-                next: nextOffset,
-              });
-            }
-          }
+          rememberIncidentRecommendationPage(turn, args, result);
         }
         if (githubWorkflowRead && turn.traceStepCount < 16) {
           turn.stagedWorkflow = {
@@ -10193,9 +10201,25 @@ function createAgent(
                   );
                   if (
                     !saved || !args || redactCredentialText(saved) !== saved ||
-                    await config.toolExecutor!(call.name, args) !== saved ||
+                    (call.name === SENTINEL_INCIDENT_ALERTS_READ
+                        ? queryIncidentAlerts(
+                          options,
+                          args,
+                          task.kind === "review_incident",
+                          {
+                            assignment: task,
+                          },
+                        )
+                        : await config.toolExecutor!(call.name, args)) !==
+                      saved ||
                     signal.aborted || !readAssignedModelReview(options)
                   ) return false;
+                  if (
+                    call.name === SENTINEL_INCIDENT_ALERTS_READ &&
+                    task.kind === "review_incident"
+                  ) {
+                    rememberIncidentRecommendationPage(turn, args, saved);
+                  }
                   if (call.name === SENTINEL_DEFENSE_READ) {
                     rememberNarrativeAlertRead(turn, args, saved, stepIndex);
                   }
