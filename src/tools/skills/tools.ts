@@ -148,11 +148,11 @@ export function buildSkillAdministrationToolDefinitions(): readonly ToolDefiniti
   }, {
     name: "inspect_skill_revision",
     description:
-      "Preview one exact approved workspace skill revision. SKILL.revision.md supplies an optional replacement body, and SKILL.revision.description supplies an optional one-line description, beside the approved SKILL.md. The preview preserves all other metadata and leaves the proposed text inactive.",
+      "Preview one exact workspace skill revision from a previously approved or withdrawn draft. SKILL.revision.md supplies an optional replacement body, and SKILL.revision.description supplies an optional one-line description, beside the approved SKILL.md. The preview preserves all other metadata and leaves the proposed text inactive.",
     parameters: {
       skill_name: {
         type: "string",
-        description: "Exact approved workspace skill name",
+        description: "Exact previously approved workspace skill name",
         required: true,
       },
     },
@@ -163,14 +163,19 @@ export function buildSkillAdministrationToolDefinitions(): readonly ToolDefiniti
     parameters: {
       skill_name: {
         type: "string",
-        description: "Exact approved workspace skill name",
+        description: "Exact previously approved workspace skill name",
         required: true,
       },
       source_digest: {
         type: "string",
         description:
-          "Currently approved digest returned by inspect_skill_revision",
+          "Previously approved source digest returned by inspect_skill_revision",
         required: true,
+      },
+      source_withdrawal_id: {
+        type: "string",
+        description:
+          "Exact source withdrawal receipt from the preview, required when the source was withdrawn.",
       },
       revision_digest: {
         type: "string",
@@ -413,22 +418,29 @@ async function executeRevisionAction(
     skill_name: skillName,
     source_digest: source,
     revision_digest: digest,
+    source_withdrawal_id: withdrawal,
   } = input;
   if (
     !validSkillSelector(skillName) ||
     Object.keys(input).some((key) =>
       key !== "skill_name" &&
-      (inspection || (key !== "source_digest" && key !== "revision_digest"))
+      (inspection ||
+        (key !== "source_digest" && key !== "revision_digest" &&
+          key !== "source_withdrawal_id"))
     ) ||
     (!inspection &&
       (typeof source !== "string" || !/^[a-f0-9]{64}$/.test(source) ||
-        typeof digest !== "string" || !/^[a-f0-9]{64}$/.test(digest)))
+        typeof digest !== "string" || !/^[a-f0-9]{64}$/.test(digest))) ||
+    (withdrawal !== undefined &&
+      (typeof withdrawal !== "string" ||
+        !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(withdrawal)))
   ) return "Error: Select an exact skill and both reviewed digests.";
   const revision = await ctx.skillLoader.inspectRevision(skillName);
   if (
     !revision ||
     (!inspection &&
-      (revision.skill.contentHash !== source || revision.digest !== digest))
+      (revision.skill.contentHash !== source || revision.digest !== digest ||
+        revision.sourceApproval.withdrawal?.receiptId !== withdrawal))
   ) {
     return "Error: The approved source or proposed skill revision is unavailable.";
   }
@@ -447,6 +459,9 @@ async function executeRevisionAction(
       skill_name: skillName,
       source_approval: revision.sourceApproval,
       source_digest: revision.skill.contentHash,
+      ...(revision.sourceApproval.withdrawal && {
+        source_withdrawal_id: revision.sourceApproval.withdrawal.receiptId,
+      }),
       revision_digest: revision.digest,
       reviewable: scan.ok,
       ...(scan.ok &&
@@ -468,7 +483,10 @@ async function executeRevisionAction(
     typeof digest !== "string"
   ) return "Error: The confirmation channel is unavailable.";
   const confirmed = await ctx.getConfirmPrompt()(
-    `Stage a pending revision for workspace skill '${skillName}'? Approved SHA-256 ${source}. Proposed SHA-256 ${digest}.`,
+    `Stage a pending revision for workspace skill '${skillName}'? Approved SHA-256 ${source}. Proposed SHA-256 ${digest}.` +
+      (typeof withdrawal === "string"
+        ? ` Source withdrawal ${withdrawal}.`
+        : ""),
   );
   if (!confirmed) return "The owner declined the skill revision.";
   if (!applicable() || !await dispatch.reauthorizeOwnerApproval()) {
@@ -479,6 +497,7 @@ async function executeRevisionAction(
     source,
     digest,
     applicable,
+    typeof withdrawal === "string" ? withdrawal : undefined,
   );
   return staged
     ? JSON.stringify({

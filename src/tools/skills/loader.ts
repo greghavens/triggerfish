@@ -133,6 +133,7 @@ export interface SkillLoader {
     sourceDigest: string,
     revisionDigest: string,
     isCurrentOwner: () => boolean,
+    sourceWithdrawalId?: string,
   ) => Promise<SkillDraftRevision | undefined>;
   readonly withdrawDraft?: (
     name: string,
@@ -439,7 +440,9 @@ async function readExactRevision(
   registry: SkillDraftApprovals,
 ): Promise<SkillDraftRevision | undefined> {
   const draft = await readExactDraft(workspace, name, registry);
-  if (!draft?.skill.draftApproval) return undefined;
+  if (!draft) return;
+  const sourceApproval = draft.approvals?.get(draft.skill.contentHash);
+  if (!sourceApproval) return;
   const replacementBody = readWorkspaceSkillText(
     workspace,
     draft.skill.path,
@@ -474,7 +477,7 @@ async function readExactRevision(
   if (draft.approvals?.has(digest)) return undefined;
   return {
     skill: draft.skill,
-    sourceApproval: draft.skill.draftApproval,
+    sourceApproval,
     sourceContent: draft.content,
     replacementBody,
     replacementDescription,
@@ -495,7 +498,8 @@ function replaceDraftIfCurrent(
     const approvals = registry.list(workspace).get(revision.skill.name);
     const active = approvals?.get(revision.skill.contentHash);
     return active?.receiptId === revision.sourceApproval.receiptId &&
-      !active.withdrawal &&
+      active.withdrawal?.receiptId ===
+        revision.sourceApproval.withdrawal?.receiptId &&
       !approvals?.has(revision.digest) &&
       readWorkspaceSkillText(workspace, path, "SKILL.md") ===
         revision.sourceContent &&
@@ -675,6 +679,7 @@ export function createSkillLoader(options: SkillLoaderOptions): SkillLoader {
         sourceDigest: string,
         revisionDigest: string,
         isCurrentOwner: () => boolean,
+        sourceWithdrawalId?: string,
       ) {
         const revision = await readExactRevision(
           approvals.workspace,
@@ -683,6 +688,8 @@ export function createSkillLoader(options: SkillLoaderOptions): SkillLoader {
         );
         return revision?.skill.contentHash === sourceDigest &&
             revision.digest === revisionDigest &&
+            revision.sourceApproval.withdrawal?.receiptId ===
+              sourceWithdrawalId &&
             replaceDraftIfCurrent(
               approvals.workspace,
               revision,

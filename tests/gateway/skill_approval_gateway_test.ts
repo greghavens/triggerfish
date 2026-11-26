@@ -695,6 +695,8 @@ Deno.test("Owner withdrawal retires only the approved workspace skill digest and
     assert(authored.ok);
     const file = join(authored.value.path, "SKILL.md");
     const original = await Deno.readTextFile(file);
+    const corrected = "Review only the verified retained service status.";
+    const revisionFile = join(authored.value.path, "SKILL.revision.md");
     const selector = { skill_name: skillName };
     const read = { ...selector, type: "USER_PROVIDED" };
     assert(
@@ -721,6 +723,8 @@ Deno.test("Owner withdrawal retires only the approved workspace skill digest and
     let digest = "";
     let approval: Record<string, unknown>;
     let withdrawal: Record<string, unknown>;
+    let preparedBeforeWithdrawal: Record<string, unknown>;
+    let correctedDigest = "";
     await withGateway(dir, confirm, () => blocked, async (turn, sessionId) => {
       digest = JSON.parse((await turn("inspect_skill_draft", selector)).result)
         .digest;
@@ -762,6 +766,16 @@ Deno.test("Owner withdrawal retires only the approved workspace skill digest and
         JSON.parse((await turn("read_skill", read)).result).found,
         true,
       );
+      await Deno.writeTextFile(revisionFile, corrected);
+      const proposed = JSON.parse(
+        (await turn("inspect_skill_revision", selector)).result,
+      );
+      preparedBeforeWithdrawal = {
+        ...selector,
+        source_digest: proposed.source_digest,
+        revision_digest: proposed.revision_digest,
+      };
+      assertEquals(proposed.source_withdrawal_id, undefined);
       outcome = "allow";
       blocked = "PRE_OUTPUT";
       const allowed = await turn("withdraw_skill", exact);
@@ -812,6 +826,75 @@ Deno.test("Owner withdrawal retires only the approved workspace skill digest and
         false,
       );
       assertEquals(reviews, prior);
+      assertStringIncludes(
+        (await turn("stage_skill_revision", preparedBeforeWithdrawal)).result,
+        "revision is unavailable",
+      );
+      assertEquals(reviews, prior);
+      const correction = JSON.parse(
+        (await turn("inspect_skill_revision", selector)).result,
+      );
+      assertEquals(correction.source_withdrawal_id, withdrawal.receiptId);
+      assertEquals(correction.source_approval, { ...approval, withdrawal });
+      assertEquals(
+        correction.revision_digest,
+        preparedBeforeWithdrawal.revision_digest,
+      );
+      const stage = {
+        ...preparedBeforeWithdrawal,
+        source_withdrawal_id: correction.source_withdrawal_id,
+      };
+      assertStringIncludes(
+        (await turn("stage_skill_revision", {
+          ...stage,
+          source_withdrawal_id: crypto.randomUUID(),
+        })).result,
+        "revision is unavailable",
+      );
+      assertEquals(reviews, prior);
+      const staged = JSON.parse(
+        (await turn("stage_skill_revision", stage)).result,
+      );
+      assertEquals(staged.status, "PENDING_APPROVAL");
+      assertEquals(staged.source_approval, correction.source_approval);
+      correctedDigest = staged.revision_digest;
+      assertEquals(reviews, prior + 1);
+      assertEquals(
+        JSON.parse((await turn("read_skill", read)).result).found,
+        false,
+      );
+    });
+    await withGateway(dir, confirm, () => blocked, async (turn) => {
+      const pending = JSON.parse(
+        (await turn("inspect_skill_draft", selector)).result,
+      );
+      assertEquals(pending.approval, null);
+      assertEquals(pending.approval_history, [{ ...approval, withdrawal }]);
+      const fresh = JSON.parse(
+        (await turn("approve_skill", {
+          ...selector,
+          digest: correctedDigest,
+        })).result,
+      ).approval;
+      assert(fresh.receiptId !== approval.receiptId);
+      const active = JSON.parse((await turn("read_skill", read)).result);
+      assertEquals(active.approval_receipt_id, fresh.receiptId);
+      assertStringIncludes(active.content, corrected);
+      const revised = await Deno.readTextFile(file);
+      await Deno.writeTextFile(file, original);
+      assertStringIncludes(
+        (await turn("approve_skill", { ...selector, digest })).result,
+        "approval was withdrawn",
+      );
+      assertEquals(
+        JSON.parse((await turn("read_skill", read)).result).found,
+        false,
+      );
+      await Deno.writeTextFile(file, revised);
+      assertEquals(
+        JSON.parse((await turn("read_skill", read)).result).found,
+        true,
+      );
     });
   } finally {
     await Deno.remove(dir, { recursive: true });
