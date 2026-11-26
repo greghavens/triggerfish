@@ -76,6 +76,71 @@ export interface SentinelFindingTrafficLink
   readonly recordedAt: string;
 }
 
+export interface SentinelFindingTrafficAnnotationChange {
+  readonly linkId: string;
+  readonly reportVersion: number;
+  readonly evidenceVersion: string;
+  readonly requestId: string;
+  readonly evidenceRole?: TrafficEvidenceRole;
+  readonly evidenceNote?: string;
+}
+
+export interface SentinelFindingTrafficAnnotation
+  extends SentinelFindingTrafficAnnotationChange {
+  readonly id: string;
+  readonly recordedAt: string;
+}
+
+const annotationTable = "traffic_link_annotations";
+const linkIdPattern = /^finding-traffic-link:[a-f0-9]{64}$/;
+
+export function parseSentinelFindingTrafficAnnotationChange(
+  input: Readonly<Record<string, unknown>>,
+): SentinelFindingTrafficAnnotationChange | undefined {
+  const { linkId, reportVersion, evidenceVersion, requestId } = input;
+  const annotation = sentinelTrafficEvidenceAnnotation(input);
+  if (
+    typeof linkId !== "string" || !linkIdPattern.test(linkId) ||
+    typeof reportVersion !== "number" || !positive(reportVersion) ||
+    typeof evidenceVersion !== "string" || !digest.test(evidenceVersion) ||
+    typeof requestId !== "string" || !uuid.test(requestId) ||
+    !annotation || !Object.keys(annotation).length
+  ) return;
+  return {
+    linkId,
+    reportVersion,
+    evidenceVersion,
+    requestId: requestId.toLowerCase(),
+    ...annotation,
+  };
+}
+
+function annotationId(serialized: string): string {
+  return "finding-traffic-annotation:" +
+    createHash("sha256").update(serialized).digest("hex");
+}
+
+/** Verify a retained amendment, including its canonical redacted payload and digest. */
+export function decodeSentinelTrafficLinkAnnotation(
+  raw: Readonly<Record<string, unknown>>,
+): SentinelFindingTrafficAnnotation {
+  const input = parseSentinelFindingTrafficAnnotationChange(
+    JSON.parse(String(raw.input)),
+  );
+  const serialized = JSON.stringify(input);
+  if (
+    !input || raw.input !== serialized || input.linkId !== raw.link_id ||
+    input.requestId !== raw.request_id || annotationId(serialized) !== raw.id ||
+    typeof raw.recorded_at !== "number" ||
+    !Number.isSafeInteger(raw.recorded_at)
+  ) throw new Error("Invalid Sentinel traffic annotation receipt");
+  return {
+    ...input,
+    id: String(raw.id),
+    recordedAt: new Date(raw.recorded_at).toISOString(),
+  };
+}
+
 export interface SentinelFindingTrafficLinkFilter {
   readonly id?: string;
   readonly findingId?: string;
@@ -173,6 +238,26 @@ function createRequestAliases(db: DatabaseSync) {
   `);
 }
 
+function hasAnnotations(db: DatabaseSync): boolean {
+  return db.prepare(
+    "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = ?",
+  ).get(annotationTable) !== undefined;
+}
+
+function trafficEvidenceVersion(
+  revision: number,
+  findingId: string,
+  ids: readonly string[],
+  annotationIds: readonly string[],
+) {
+  return createHash("sha256").update(JSON.stringify([
+    revision,
+    findingId,
+    ids,
+    ...(annotationIds.length ? [annotationIds] : []),
+  ])).digest("hex");
+}
+
 function initialize(db: DatabaseSync, readOnly: boolean) {
   const validate = () => {
     const app = db.prepare("PRAGMA application_id").get()?.application_id;
@@ -263,7 +348,118 @@ function openLinks(snapshotPath: string, readOnly: boolean, now: () => number) {
     };
   }
 
+  function annotationsForLink(
+    linkId: string,
+  ): SentinelFindingTrafficAnnotation[] {
+    if (!hasAnnotations(db)) return [];
+    return db.prepare(
+      "SELECT * FROM traffic_link_annotations WHERE link_id = ? ORDER BY rowid LIMIT 17",
+    ).all(linkId).map(decodeSentinelTrafficLinkAnnotation);
+  }
+
+  function exportAnnotations(
+    revision: number,
+  ): SentinelFindingTrafficAnnotation[] {
+    if (!hasAnnotations(db)) return [];
+    const rows = db.prepare(
+      `SELECT annotation.* FROM traffic_link_annotations AS annotation
+      WHERE link_id IN (SELECT id FROM traffic_links WHERE revision = ?)
+      ORDER BY annotation.rowid LIMIT ?`,
+    ).all(revision, maxLinks + 1);
+    if (rows.length > maxLinks) {
+      throw new Error("Invalid Sentinel traffic annotation journal size");
+    }
+    return rows.map(decodeSentinelTrafficLinkAnnotation);
+  }
+
+  function evidenceVersion(
+    revision: number,
+    findingId: string,
+    assetId?: string,
+  ) {
+    const matching = `FROM traffic_links
+      WHERE revision = ? AND finding_id = ?
+        AND (? IS NULL OR json_extract(input, '$.assetId') = ?)`;
+    const params = [
+      revision,
+      findingId,
+      assetId ?? null,
+      assetId ?? null,
+    ] as const;
+    const ids = db.prepare(`SELECT id ${matching} ORDER BY id`).all(...params)
+      .map(({ id }) => String(id));
+    const edits = hasAnnotations(db)
+      ? db.prepare(`SELECT id FROM traffic_link_annotations
+          WHERE link_id IN (SELECT id ${matching}) ORDER BY id`).all(...params)
+        .map(({ id }) => String(id))
+      : [];
+    return {
+      digest: trafficEvidenceVersion(revision, findingId, ids, edits),
+      count: ids.length,
+    };
+  }
+
   return {
+    annotationsForLink,
+    evidenceVersion,
+    exportAnnotations,
+    reviewAnnotation(
+      link: SentinelFindingTrafficLink,
+      change: SentinelFindingTrafficAnnotationChange,
+      commit: boolean,
+    ) {
+      const input = parseSentinelFindingTrafficAnnotationChange({ ...change });
+      if (!input) return;
+      return transaction(db, () => {
+        const row = db.prepare("SELECT * FROM traffic_links WHERE id = ?").get(
+          input.linkId,
+        );
+        if (!row || JSON.stringify(decode(row)) !== JSON.stringify(link)) {
+          return;
+        }
+        const serialized = JSON.stringify(input);
+        if (hasAnnotations(db)) {
+          const retry = db.prepare(
+            "SELECT link_id, input FROM traffic_link_annotations WHERE request_id = ?",
+          ).get(input.requestId);
+          if (retry) {
+            const amendment =
+              retry.link_id === link.id && retry.input === serialized
+                ? annotationsForLink(link.id).find(({ requestId }) =>
+                  requestId === input.requestId
+                )
+                : undefined;
+            return amendment && { saved: true, amendment };
+          }
+          const count = Number(
+            db.prepare("SELECT count(*) AS count FROM traffic_link_annotations")
+              .get()?.count,
+          );
+          if (count >= maxLinks || annotationsForLink(link.id).length >= 16) {
+            return;
+          }
+        }
+        if (
+          input.evidenceVersion !==
+            evidenceVersion(link.evidenceRevision, link.findingId).digest
+        ) return;
+        if (!commit) return { saved: false, amendment: undefined };
+        const id = annotationId(serialized);
+        const time = now();
+        db.exec(`CREATE TABLE IF NOT EXISTS traffic_link_annotations (
+          id TEXT PRIMARY KEY, request_id TEXT NOT NULL UNIQUE,
+          link_id TEXT NOT NULL REFERENCES traffic_links(id),
+          input TEXT NOT NULL, recorded_at INTEGER NOT NULL
+        ) STRICT;
+        CREATE INDEX IF NOT EXISTS traffic_link_annotations_link ON traffic_link_annotations(link_id);`);
+        db.prepare("INSERT INTO traffic_link_annotations VALUES (?,?,?,?,?)")
+          .run(id, input.requestId, input.linkId, serialized, time);
+        return {
+          saved: true,
+          amendment: { ...input, id, recordedAt: new Date(time).toISOString() },
+        };
+      });
+    },
     readAssignmentRequest(
       scope: {
         readonly caseId: string;
@@ -416,17 +612,6 @@ function openLinks(snapshotPath: string, readOnly: boolean, now: () => number) {
         offset,
       ).map(decode);
     },
-    evidenceLinkIds(revision: number, findingId: string, assetId?: string) {
-      return db.prepare(`SELECT id FROM traffic_links
-        WHERE revision = ? AND finding_id = ?
-          AND (? IS NULL OR json_extract(input, '$.assetId') = ?) ORDER BY id`)
-        .all(
-          revision,
-          findingId,
-          assetId ?? null,
-          assetId ?? null,
-        ).map(({ id }) => String(id));
-    },
     exportRevision(
       evidenceRevision: number,
     ): readonly SentinelFindingTrafficLink[] {
@@ -496,15 +681,32 @@ export function sentinelFindingTrafficEvidenceVersion(
   findingId: string,
   assetId?: string,
 ) {
-  const ids = readFindingTrafficLinks(
+  return readFindingTrafficLinks(
     snapshotPath,
-    (links) => links.evidenceLinkIds(revision, findingId, assetId),
+    (links) => links.evidenceVersion(revision, findingId, assetId),
+  ) ??
+    { digest: trafficEvidenceVersion(revision, findingId, [], []), count: 0 };
+}
+
+export function exportSentinelTrafficLinkAnnotations(
+  snapshotPath: string,
+  revision: number,
+) {
+  return readFindingTrafficLinks(
+    snapshotPath,
+    (links) => links.exportAnnotations(revision),
   ) ?? [];
-  return {
-    digest: createHash("sha256")
-      .update(JSON.stringify([revision, findingId, ids])).digest("hex"),
-    count: ids.length,
-  };
+}
+
+export function readSentinelTrafficLinkAnnotations(
+  snapshotPath: string,
+  linkIds: readonly string[],
+) {
+  if (!linkIds.length) return [];
+  return readFindingTrafficLinks(
+    snapshotPath,
+    (links) => linkIds.flatMap(links.annotationsForLink),
+  ) ?? [];
 }
 
 function readFindingTrafficLinks<T>(

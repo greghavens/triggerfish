@@ -21,7 +21,10 @@ import {
 } from "./assessment_store.ts";
 import { locateSentinelCase } from "./cases.ts";
 import { encodeSentinelFindingZip } from "./finding_export_zip.ts";
-import { exportSentinelFindingTrafficLinks } from "./finding_traffic_links.ts";
+import {
+  exportSentinelFindingTrafficLinks,
+  exportSentinelTrafficLinkAnnotations,
+} from "./finding_traffic_links.ts";
 import { loadSentinelGraph, sentinelFindingSeverities } from "./graph.ts";
 import {
   hasSentinelWorkerFindingJournal,
@@ -382,6 +385,10 @@ export function renderScopedSentinelFindings(
     path,
     assessment.revision,
   );
+  const annotationsByLink = Map.groupBy(
+    exportSentinelTrafficLinkAnnotations(path, assessment.revision),
+    ({ linkId }) => linkId,
+  );
   const journal = runId && hasSentinelWorkerFindingJournal(path)
     ? openSentinelWorkerFindingStore(path)
     : undefined;
@@ -436,6 +443,11 @@ export function renderScopedSentinelFindings(
         { requestId: _requestId, evidenceNote, ...link },
       ) => ({
         ...link,
+        ...(annotationsByLink.has(link.id) && {
+          annotations: annotationsByLink.get(link.id)!.map((
+            { requestId: _requestId, ...item },
+          ) => item),
+        }),
         ...(evidenceNote !== undefined &&
           { evidenceNote: redactCredentialText(evidenceNote) }),
       }));
@@ -585,11 +597,16 @@ export function renderScopedSentinelFindings(
               markdownText(record.id)
             } · ${markdownText(record.title)}`
           ),
-          ...row.trafficLinks.map((link) =>
+          ...row.trafficLinks.flatMap((link) => [
             `- ${markdownText(link.id)} · ${markdownText(link.trafficId)} · ${
               markdownText(link.trafficDigest)
-            }`
-          ),
+            }`,
+            ...(link.annotations ?? []).map((item) =>
+              `  - ${markdownText(item.id)} · ${
+                markdownText(item.evidenceRole ?? "")
+              } ${markdownText(item.evidenceNote ?? "")}`
+            ),
+          ]),
         ]),
         "",
       ].join("\n");

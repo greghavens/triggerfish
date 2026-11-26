@@ -4149,7 +4149,7 @@ Deno.test("Sentinel schedules one scoped report worker from a committed finding 
     assertEquals(offeredAttachments, 1);
     assert(attachmentHooks.includes("PRE_TOOL_CALL"));
     assert(attachmentHooks.includes("POST_TOOL_RESPONSE"));
-    await withTidepool(baseDir, async (_list, provenance) => {
+    await withTidepool(baseDir, async (_list, provenance, request) => {
       const exported = await provenance(state.revision);
       const links = exported.findingTrafficLinks ?? [];
       assertEquals(links.length, 1);
@@ -4165,6 +4165,48 @@ Deno.test("Sentinel schedules one scoped report worker from a committed finding 
       );
       assertEquals(links[0].evidenceRole, attachment.evidenceRole);
       assertEquals(links[0].evidenceNote, attachment.evidenceNote);
+      assert(saved);
+      const evidenceVersion =
+        sentinelFindingTrafficEvidenceVersion(path, state.revision, finding.id)
+          .digest;
+      let annotationId: string | undefined;
+      await withFindingAssignmentGateway(
+        baseDir,
+        () => Promise.resolve(true),
+        async (turn) => {
+          const outcome = JSON.parse(
+            await turn({
+              action: "annotate_finding_traffic",
+              kind: "sentinel",
+              id: "main",
+              revision: state.revision,
+              receiptId: finding.id,
+              trafficLinkId: links[0].id,
+              reportVersion: saved.reports[0].version,
+              evidenceVersion,
+              evidenceRole: "verification",
+              evidenceNote: "Reviewed the verification evidence.",
+              requestId: crypto.randomUUID(),
+            }),
+          );
+          annotationId = outcome.amendment.id;
+        },
+      );
+      const report = await request("export", {
+        caseId: "main",
+        revision: state.revision,
+        format: "findings-json",
+        findingIds: [finding.id],
+      });
+      assertEquals(report.type, "export");
+      const [exportedLink] =
+        JSON.parse(String(report.content)).findings[0].trafficLinks;
+      assertEquals(exportedLink.id, links[0].id);
+      assertEquals(exportedLink.trafficDigest, traffic.digest);
+      assertEquals(exportedLink.evidenceRole, attachment.evidenceRole);
+      assertEquals(exportedLink.annotations[0].id, annotationId);
+      assertEquals(exportedLink.annotations[0].evidenceRole, "verification");
+      assertEquals(exportedLink.annotations[0].requestId, undefined);
     });
   } finally {
     planner?.stop();

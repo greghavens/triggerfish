@@ -2,12 +2,14 @@
 import type { ToolDefinition } from "../core/types/tool.ts";
 import {
   readSentinelAssessmentRevision,
+  readSentinelOperatingConstraints,
   withSentinelAssessmentWriteLock,
 } from "../sentinel/assessment_store.ts";
 import { isSentinelCaseId, locateSentinelCase } from "../sentinel/cases.ts";
 import {
   listSentinelFindingTrafficLinks,
   openSentinelFindingTrafficLinks,
+  parseSentinelFindingTrafficAnnotationChange,
   sentinelFindingTrafficEvidenceVersion,
   type SentinelFindingTrafficLinkInput,
   sentinelTrafficEvidenceAnnotation,
@@ -570,5 +572,100 @@ export async function attachOperatorSentinelFindingTraffic(
   const committed = inspect(preview);
   return committed && "link" in committed && committed.link
     ? JSON.stringify({ _classification: "INTERNAL", link: committed.link })
+    : unavailable;
+}
+
+/** Amend descriptive metadata while retaining the original attachment and payload. */
+export async function annotateOperatorSentinelFindingTraffic(
+  snapshotPath: string,
+  revision: number,
+  args: Record<string, unknown>,
+  confirm: (prompt: string) => Promise<boolean>,
+): Promise<string> {
+  const { receiptId } = args;
+  const change = parseSentinelFindingTrafficAnnotationChange({
+    ...args,
+    linkId: args.trafficLinkId,
+  });
+  const caseId = locateSentinelCase(snapshotPath)?.caseId;
+  if (
+    !caseId || !change || typeof receiptId !== "string" ||
+    !findingPattern.test(receiptId)
+  ) return unavailable;
+  const inspect = (approvedRunId?: string) =>
+    withSentinelAssessmentWriteLock(snapshotPath, (state) => {
+      const runId = state?.plan.runId;
+      if (
+        !runId || !state.active || state.revision !== revision ||
+        (approvedRunId !== undefined && approvedRunId !== runId) ||
+        !hasSentinelWorkerFindingJournal(snapshotPath)
+      ) return;
+      const [link] = listSentinelFindingTrafficLinks(snapshotPath, {
+        id: change.linkId,
+        findingId: receiptId,
+        evidenceRevision: revision,
+        limit: 1,
+      });
+      if (!link || link.caseId !== caseId) return;
+      const findings = openSentinelWorkerFindingStore(snapshotPath);
+      try {
+        const report = findings.readFindingReport(receiptId, revision);
+        if (
+          !report || report.finding.caseId !== caseId ||
+          report.finding.runId !== runId ||
+          report.finding.targetId !== link.assetId ||
+          readSentinelOperatingConstraints(snapshotPath, runId, revision)
+              ?.constraints.allowedAssetIds?.includes(link.assetId) === false ||
+          !state.result?.sharedGraph.snapshot?.nodes.some(({ id, kind }) =>
+            kind === "asset" && id === link.assetId
+          )
+        ) return;
+        const evidence = readSentinelTrafficReceipt(snapshotPath, revision, {
+          evidenceId: link.trafficId,
+          digest: link.trafficDigest,
+        }, link.assetId);
+        if (evidence?.family !== link.trafficSource) return;
+        const links = openSentinelFindingTrafficLinks(snapshotPath);
+        try {
+          const replay = links.reviewAnnotation(link, change, false);
+          if (!replay) return;
+          if (replay.saved) return { runId, link, amendment: replay.amendment };
+          if (report.version !== change.reportVersion) return;
+          const result = approvedRunId
+            ? links.reviewAnnotation(link, change, true)
+            : replay;
+          return result && { runId, link, amendment: result.amendment };
+        } finally {
+          links.close();
+        }
+      } finally {
+        findings.close();
+      }
+    });
+  const preview = inspect();
+  if (!preview) return unavailable;
+  if (preview.amendment) {
+    return JSON.stringify({
+      _classification: "INTERNAL",
+      amendment: preview.amendment,
+    });
+  }
+  if (
+    !await confirm(
+      `Amend retained traffic annotation for ${receiptId} in case ${caseId}, revision ${revision}?\n${
+        JSON.stringify({
+          assetId: preview.link.assetId,
+          trafficDigest: preview.link.trafficDigest,
+          ...change,
+        })
+      }`,
+    )
+  ) return "Error: The operator declined the traffic annotation.";
+  const committed = inspect(preview.runId);
+  return committed?.amendment
+    ? JSON.stringify({
+      _classification: "INTERNAL",
+      amendment: committed.amendment,
+    })
     : unavailable;
 }

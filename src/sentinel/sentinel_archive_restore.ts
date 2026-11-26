@@ -1,3 +1,4 @@
+import { decodeSentinelTrafficLinkAnnotation } from "./finding_traffic_links.ts";
 import {
   parseSentinelModelRoute,
   validSentinelModelRouteHistory,
@@ -222,7 +223,8 @@ function checkedDatabase<T>(
           family === "sentinel-goal-completion.db" &&
             name === "goal_evidence_submissions" ||
           family === "sentinel-finding-traffic-links.db" &&
-            version === 2 && name === "traffic_link_request_aliases"
+            version === 2 && (name === "traffic_link_request_aliases" ||
+              name === "traffic_link_annotations")
         : name === family || name.startsWith(family + "_") ||
           family === "assessment" && name === "sentinel_operating_constraints");
     const tables = new Set<string>();
@@ -598,6 +600,32 @@ function validateAuxiliary(
         "request_id",
         "link_id",
       ]);
+    }
+    if (tables.has("traffic_link_annotations")) {
+      requireColumns(db, "traffic_link_annotations", [
+        "id",
+        "request_id",
+        "link_id",
+        "input",
+        "recorded_at",
+      ]);
+      if (
+        db.prepare(`SELECT 1 FROM traffic_link_annotations AS edit
+        LEFT JOIN traffic_links AS link ON link.id = edit.link_id
+        WHERE link.id IS NULL
+          OR json_extract(edit.input, '$.linkId') IS NOT edit.link_id
+          OR json_extract(edit.input, '$.requestId') IS NOT edit.request_id
+          OR json_type(edit.input, '$.reportVersion') IS NOT 'integer'
+          OR json_type(edit.input, '$.evidenceVersion') IS NOT 'text'
+        LIMIT 1`).get()
+      ) throw new Error("Invalid archived Sentinel traffic annotation binding");
+      const amendments = db.prepare(
+        "SELECT * FROM traffic_link_annotations LIMIT 4097",
+      ).all();
+      if (amendments.length > 4096) {
+        throw new Error("Invalid archived Sentinel traffic annotation count");
+      }
+      for (const row of amendments) decodeSentinelTrafficLinkAnnotation(row);
     }
     const scoped = name === "sentinel-worker-findings.db"
       ? { table: "receipts", column: "input", hasRun: true }

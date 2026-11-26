@@ -237,6 +237,11 @@ const evidenceStoreSchemas: Partial<
         columns: ["request_id", "link_id"],
         optionalTable: true,
       },
+      {
+        name: "traffic_link_annotations",
+        columns: ["id", "request_id", "link_id", "input", "recorded_at"],
+        optionalTable: true,
+      },
     ],
   },
 };

@@ -340,6 +340,13 @@ Use an empty category string to clear the label. Each approved correction
 appends a report version while earlier versions keep their original
 metadata and evidence.
 
+Use `operator_runs annotate_finding_traffic` to review a role or note
+correction on an existing retained traffic link. Provide the exact finding,
+link, report version, and current `evidenceVersion` from `finding_traffic`.
+Each amendment has its own receipt and changes the evidence version.
+Authorized reads and saved finding exports show the amendment history
+and the original attachment.
+
 ### Archive and restore a named assessment
 
 The authenticated owner agent can use `operator_runs` to archive a stopped

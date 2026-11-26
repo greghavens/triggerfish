@@ -1581,6 +1581,75 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
         trafficLink,
       ]);
       const followLink = { ...trafficAction, trafficLinkId: trafficLink.id };
+      const openingVersion =
+        JSON.parse((await turn(trafficAction)).result).page.evidenceVersion;
+      const annotateTraffic = {
+        ...followLink,
+        action: "annotate_finding_traffic",
+        evidenceVersion: openingVersion,
+        reportVersion: 1,
+        evidenceRole: "supporting",
+        evidenceNote: "Reclassified this retained comparison.",
+        requestId: crypto.randomUUID(),
+      };
+      const beforeAnnotation = confirmations.length;
+      denied = "PRE_TOOL_CALL";
+      await turn(annotateTraffic);
+      assertEquals(confirmations.length, beforeAnnotation);
+      denied = undefined;
+      assertStringIncludes(
+        (await turn({ ...annotateTraffic, ...exact })).result,
+        "unavailable",
+      );
+      const annotated =
+        JSON.parse((await turn(annotateTraffic)).result).amendment;
+      assertEquals(annotated.evidenceRole, "supporting");
+      assertEquals(annotated.evidenceNote, annotateTraffic.evidenceNote);
+      assertEquals(annotated.evidenceVersion, openingVersion);
+      assertEquals(confirmations.length, beforeAnnotation + 1);
+      await withGateway(async (reconnected) => {
+        assertEquals(
+          JSON.parse((await reconnected(annotateTraffic)).result).amendment,
+          annotated,
+        );
+        assertEquals(confirmations.length, beforeAnnotation + 1);
+        assertStringIncludes(
+          (await reconnected({
+            ...annotateTraffic,
+            requestId: crypto.randomUUID(),
+          })).result,
+          "unavailable",
+        );
+        const updated =
+          JSON.parse((await reconnected(trafficAction)).result).page;
+        assertEquals(updated.links, [trafficLink]);
+        assertEquals(updated.annotations, [annotated]);
+        assert(updated.evidenceVersion !== openingVersion);
+        const reviewed = JSON.parse((await reconnected(followLink)).result);
+        assertEquals(reviewed.link, trafficLink);
+        assertEquals(reviewed.annotations, [annotated]);
+        assertStringIncludes(
+          (await reconnected({
+            ...receiptAction,
+            action: "amend_finding_report",
+            evidenceVersion: openingVersion,
+            reportVersion: 1,
+            title: "Stale traffic report",
+            summary: "This report must not replace newer attachment metadata.",
+            requestId: crypto.randomUUID(),
+          })).result,
+          "unavailable",
+        );
+        assertEquals(confirmations.length, beforeAnnotation + 1);
+        denied = "POST_TOOL_RESPONSE";
+        assertEquals(
+          (await reconnected(followLink)).result,
+          "Tool response withheld by policy.",
+        );
+        denied = "PRE_OUTPUT";
+        assertEquals((await reconnected(followLink)).response, undefined);
+        denied = undefined;
+      });
       const trafficResult = (await turn(followLink)).result;
       assertEquals(JSON.parse(trafficResult).receipt.digest, traffic.digest);
       assert(!trafficResult.includes(trafficSecret));

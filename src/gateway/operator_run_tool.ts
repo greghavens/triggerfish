@@ -292,13 +292,17 @@ import { executeOperatorRunArchive } from "./operator_run_archive.ts";
 import { readOperatorSentinelInventory } from "./operator_sentinel_inventory.ts";
 import { createOperatorSentinelRuns } from "./operator_sentinel_runs.ts";
 import {
+  annotateOperatorSentinelFindingTraffic,
   attachOperatorSentinelFindingTraffic,
   executeSentinelFindingTrafficTool,
   reopenSentinelLinkedTrafficPayload,
   sentinelFindingTrafficAttachTool,
   sentinelFindingTrafficListTool,
 } from "./sentinel_finding_traffic_tool.ts";
-import { listSentinelFindingTrafficLinks } from "../sentinel/finding_traffic_links.ts";
+import {
+  listSentinelFindingTrafficLinks,
+  readSentinelTrafficLinkAnnotations,
+} from "../sentinel/finding_traffic_links.ts";
 import { readSentinelTrafficReceipt } from "../sentinel/traffic_receipts.ts";
 import {
   executeSentinelTrafficTool,
@@ -417,6 +421,7 @@ export const operatorRunTool: ToolDefinition = {
         "finding_traffic_candidates",
         "topology_source",
         "attach_finding_traffic",
+        "annotate_finding_traffic",
         "facts",
         "save_digest",
         "list_digests",
@@ -8000,6 +8005,35 @@ ${
           options.confirm,
         );
       }
+      if (action === "annotate_finding_traffic") {
+        if (
+          ref.kind !== "sentinel" || ref.revision === undefined ||
+          !context?.authenticatedOwnerSessionId ||
+          !canFlowTo("INTERNAL", context.ceiling ?? "PUBLIC") ||
+          !canFlowTo(context.inputClassification ?? "PUBLIC", "INTERNAL") ||
+          Object.keys(args).some((key) =>
+            ![
+              "action",
+              "kind",
+              "id",
+              "revision",
+              "receiptId",
+              "trafficLinkId",
+              "reportVersion",
+              "evidenceVersion",
+              "evidenceRole",
+              "evidenceNote",
+              "requestId",
+            ].includes(key)
+          ) || !await controller.inspect(ref)
+        ) return unavailable;
+        return await annotateOperatorSentinelFindingTraffic(
+          resolveSentinelCasePath(options.baseDir, ref.id),
+          ref.revision,
+          args,
+          options.confirm,
+        );
+      }
       if (action === "attach_finding_traffic") {
         if (
           ref.kind !== "sentinel" || ref.revision === undefined ||
@@ -8093,9 +8127,14 @@ ${
             ? undefined
             : projectSentinelTrafficBlob(receipt, payloadPart, offset);
           if (typeof payload === "string") return payload;
+          const annotations = readSentinelTrafficLinkAnnotations(
+            snapshotPath,
+            [link.id],
+          );
           return safeProjection({
             run: ref,
             link,
+            ...(annotations.length && { annotations }),
             receipt: projectSentinelTrafficReceipt(receipt, link.assetId),
             ...(payload && { payload }),
           });
@@ -8112,9 +8151,15 @@ ${
           },
           new Set(),
         );
-        return response.startsWith("Error:") ? response : safeProjection({
+        if (response.startsWith("Error:")) return response;
+        const page = JSON.parse(response);
+        const annotations = readSentinelTrafficLinkAnnotations(
+          snapshotPath,
+          page.links.map(({ id }: { id: string }) => id),
+        );
+        return safeProjection({
           run: ref,
-          page: JSON.parse(response),
+          page: { ...page, ...(annotations.length && { annotations }) },
         });
       }
       if (
