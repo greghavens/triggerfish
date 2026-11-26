@@ -299,6 +299,14 @@ function admitPlans(configuration: readonly OperatorWorkflowPlan[]) {
   return plans;
 }
 
+export interface OperatorWorkflowGoalSelection {
+  readonly planId: string;
+  readonly caseId: string;
+  readonly runId: string;
+  readonly revision: number;
+  readonly goalId: string;
+}
+
 /** Create a local registry view containing only runs started through this adapter. */
 export function createOperatorWorkflowRuns(
   registry: WorkflowRunRegistry,
@@ -314,6 +322,32 @@ export function createOperatorWorkflowRuns(
     : undefined;
   const runs = new Map<string, AdmittedRun>();
   let active = 0;
+
+  function goalEnrollmentBinding(selection: OperatorWorkflowGoalSelection) {
+    const plan = plans.get(selection.planId);
+    if (
+      !journal || !verifyEvidence || plan?.classification !== "INTERNAL" ||
+      plan.requirements.size !== 1 || !plan.steps.length
+    ) return;
+    const requirement = plan.requirements.get(plan.steps[0].name);
+    if (
+      !requirement || !("goal_id" in requirement) ||
+      requirement.case !== selection.caseId ||
+      requirement.run_id !== selection.runId ||
+      requirement.revision !== selection.revision ||
+      requirement.goal_id !== selection.goalId
+    ) return;
+    const admissionRequestId = createHash("sha256").update(JSON.stringify([
+      "operator-workflow-goal-enrollment-v1",
+      plan.id,
+      plan.fingerprint,
+      requirement.case,
+      requirement.run_id,
+      requirement.revision,
+      requirement.goal_id,
+    ])).digest("hex");
+    return { ...selection, fingerprint: plan.fingerprint, admissionRequestId };
+  }
 
   function project(run: AdmittedRun): OperatorWorkflowRun {
     const current = registry.getActiveRun(run.id);
@@ -815,6 +849,113 @@ export function createOperatorWorkflowRuns(
   }
 
   return {
+    goalEnrollmentBinding,
+    goalEnrollment(
+      requestId: string,
+      selection: OperatorWorkflowGoalSelection,
+    ) {
+      const expected = goalEnrollmentBinding(selection);
+      const saved = journal?.goalEnrollment(requestId);
+      if (!saved) return;
+      if (
+        !expected ||
+        saved.planId !== expected.planId ||
+        saved.fingerprint !== expected.fingerprint ||
+        saved.admissionRequestId !== expected.admissionRequestId
+      ) {
+        throw new Error("Conflicting workflow goal enrollment");
+      }
+      const workflow = journal?.readRequest(saved.admissionRequestId);
+      return { ...saved, ...(workflow && { workflowRunId: workflow.runId }) };
+    },
+    enrollGoal(
+      requestId: string,
+      selection: OperatorWorkflowGoalSelection,
+      fingerprint: string,
+    ) {
+      const prior = this.goalEnrollment(requestId, selection);
+      if (prior) return prior;
+      const expected = goalEnrollmentBinding(selection);
+      if (!expected || expected.fingerprint !== fingerprint) return;
+      const enrollment = {
+        ...expected,
+        requestId,
+        enrolledAt: new Date().toISOString(),
+      };
+      return journal?.enrollGoal(enrollment)
+        ? enrollment
+        : this.goalEnrollment(requestId, selection);
+    },
+    startGoalEnrollmentMonitor(intervalMs = 500) {
+      if (
+        !journal || !verifyEvidence ||
+        ![...plans.values()].some((plan) =>
+          plan.requirements.size === 1 &&
+          [...plan.requirements.values()].some((proof) => "goal_id" in proof)
+        )
+      ) return { stop() {} };
+      let stopped = false;
+      let running = false;
+      const tick = async () => {
+        if (stopped || running) return;
+        running = true;
+        try {
+          for (const entry of journal.goalEnrollments()) {
+            if (stopped) break;
+            const binding = goalEnrollmentBinding({
+              planId: entry.planId,
+              caseId: entry.caseId,
+              runId: entry.runId,
+              revision: entry.revision,
+              goalId: entry.goalId,
+            });
+            if (
+              binding?.admissionRequestId !== entry.admissionRequestId ||
+              binding.fingerprint !== entry.fingerprint
+            ) continue;
+            const prior = journal.readRequest(entry.admissionRequestId);
+            if (
+              prior &&
+              (prior.completedAt || prior.status !== "running" ||
+                runs.has(prior.runId))
+            ) continue;
+            const proof = await resolveEvidence({
+              case: entry.caseId,
+              run_id: entry.runId,
+              revision: entry.revision,
+              goal_id: entry.goalId,
+            });
+            if (
+              stopped || !proof || !("goalId" in proof) ||
+              Date.parse(proof.completedAt) <= Date.parse(entry.enrolledAt)
+            ) continue;
+            try {
+              if (prior) resumeInterrupted(prior.runId, "INTERNAL", false);
+              else {this.start(
+                  entry.planId,
+                  "INTERNAL",
+                  entry.admissionRequestId,
+                );}
+            } catch {
+              // A later poll reopens the exact durable admission.
+            }
+          }
+        } catch {
+          // Local evidence or journal access may be temporarily unavailable.
+        } finally {
+          running = false;
+        }
+      };
+      const timer = setInterval(() => void tick(), intervalMs);
+      Deno.unrefTimer(timer);
+      void tick();
+      return {
+        stop() {
+          stopped = true;
+          clearInterval(timer);
+        },
+      };
+    },
     recoverWaiting() {
       if (!journal || !verifyEvidence) return [];
       const recovered: string[] = [];

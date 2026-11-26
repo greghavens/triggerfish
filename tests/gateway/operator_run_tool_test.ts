@@ -70,13 +70,20 @@ import {
 } from "../../src/gateway/sentinel_adaptive_runtime.ts";
 import { createOperatorRunToolExecutor } from "../../src/gateway/operator_run_tool.ts";
 import { startSentinelAssessmentCoordinator } from "../../src/gateway/sentinel_assessment_service.ts";
-import { registerSentinelGoalCompletion } from "../../src/gateway/sentinel_goal_completion.ts";
+import {
+  ensureSentinelFormalGoalContract,
+  registerSentinelGoalCompletion,
+  reportSentinelGoalCompletion,
+} from "../../src/gateway/sentinel_goal_completion.ts";
+import { createWorkflowObservationVerifier } from "../../src/gateway/scheduled_observation_tool.ts";
+import { digestSentinelGoalProposal } from "../../src/sentinel/formal_goals.ts";
 import { GoalCompletionStore } from "../../src/core/goal_completion.ts";
 import { createOperatorWorkflowJournal } from "../../src/gateway/operator_workflow_journal.ts";
 import { createOperatorWorkflowRuns } from "../../src/gateway/operator_workflow_runs.ts";
 import { createGatewayServer } from "../../src/gateway/server/server.ts";
 import { renderSentinelProvenanceJson } from "../../src/sentinel/assessment_export.ts";
 import {
+  applySentinelFormalGoals,
   readSentinelAssessment,
   readSentinelAssessmentRevision,
   readSentinelEmptyCreationDigest,
@@ -4531,6 +4538,171 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
             coordinator.stop();
           }
         }, reopenedWorkflows);
+      }
+
+      const enrollmentCase = "exact-goal-workflow";
+      const enrollmentPath = resolveSentinelCasePath(baseDir, enrollmentCase);
+      await Deno.mkdir(dirname(enrollmentPath), { recursive: true });
+      await Deno.writeTextFile(
+        enrollmentPath,
+        JSON.stringify({
+          ...childGraph,
+          nodes: [...childGraph.nodes, {
+            kind: "evidence",
+            id: "verified-record",
+            label: "Verified review record",
+          }],
+          edges: [{
+            from: "verified-record",
+            to: "child-asset",
+            relation: "observed_on",
+          }],
+        }),
+      );
+      const formal = [{
+        id: "local-check",
+        title: "Review the verified record",
+        policy: "automatic" as const,
+        criteria: [{
+          id: "record",
+          description: "Verify the exact published record",
+          source: "graph_evidence" as const,
+          reference: "verified-record",
+        }],
+      }];
+      const enrolledState = applySentinelFormalGoals(enrollmentPath, {
+        mode: "start",
+        requestId: crypto.randomUUID(),
+        goals: formal,
+        proposalDigest: digestSentinelGoalProposal(formal),
+      }).state;
+      const goalContract = ensureSentinelFormalGoalContract(
+        enrollmentPath,
+        enrolledState,
+      );
+      const enrollmentRunId = enrolledState.plan.runId;
+      assert(goalContract && enrollmentRunId);
+      const goalEnrollmentRequirement = {
+        case: enrollmentCase,
+        run_id: enrollmentRunId,
+        revision: enrolledState.revision,
+        goal_id: formal[0].id,
+      };
+      const enrolledPlan = {
+        id: "future-verified-local-report",
+        classification: "INTERNAL" as const,
+        steps: [
+          { id: "verified-record", satisfiedBy: goalEnrollmentRequirement },
+          { id: "record-report" },
+        ],
+      };
+      const latePlan = { ...enrolledPlan, id: "late-local-report" };
+      const enrollmentJournal = join(baseDir, "goal-enrollment-workflows.db");
+      const workflowVerifier = createWorkflowObservationVerifier(baseDir);
+      const buildGoalAdapter = () =>
+        createOperatorWorkflowRuns(
+          createWorkflowRunRegistry(),
+          [enrolledPlan, latePlan],
+          enrollmentJournal,
+          workflowVerifier,
+        );
+      const pendingAdapter = buildGoalAdapter();
+      const enrollment = {
+        action: "enroll_goal_workflow",
+        kind: "sentinel",
+        id: enrollmentCase,
+        runId: enrollmentRunId,
+        revision: enrolledState.revision,
+        goalId: formal[0].id,
+        targetId: enrolledPlan.id,
+        requestId: crypto.randomUUID(),
+      };
+      const pendingMonitor = pendingAdapter.startGoalEnrollmentMonitor(50);
+      try {
+        await withGateway(async (ownerTurn) => {
+          const beforeEnrollment = confirmations.length;
+          denied = "PRE_TOOL_CALL";
+          await ownerTurn(enrollment);
+          denied = undefined;
+          assertEquals(confirmations.length, beforeEnrollment);
+          assertStringIncludes(
+            (await ownerTurn({ ...enrollment, goalId: "unmatched" })).result,
+            "unavailable",
+          );
+          approved = false;
+          assertStringIncludes(
+            (await ownerTurn(enrollment)).result,
+            "operator declined",
+          );
+          approved = true;
+          assertEquals(pendingAdapter.list(), []);
+          const saved =
+            JSON.parse((await ownerTurn(enrollment)).result).enrollment;
+          const reviewedCount = confirmations.length;
+          assertEquals(
+            JSON.parse((await ownerTurn(enrollment)).result).enrollment,
+            saved,
+          );
+          assertEquals(confirmations.length, reviewedCount);
+          assertEquals(saved.workflowRunId, undefined);
+          assertEquals(pendingAdapter.list(), []);
+        }, pendingAdapter);
+      } finally {
+        pendingMonitor.stop();
+      }
+      assert(
+        reportSentinelGoalCompletion(enrollmentPath, goalContract.scope, [{
+          criterionId: "local-check/record",
+          evidence: [{
+            source: "graph_evidence",
+            reference: "verified-record",
+            detail: "Reviewed the exact published evidence.",
+          }],
+        }]).assessmentCompleted,
+      );
+      const recoveredGoalAdapter = buildGoalAdapter();
+      const recoveredMonitor = recoveredGoalAdapter.startGoalEnrollmentMonitor(
+        50,
+      );
+      try {
+        await withGateway(async (ownerTurn) => {
+          await until(() =>
+            recoveredGoalAdapter.list()[0]?.status === "completed"
+          );
+          const run = recoveredGoalAdapter.list()[0];
+          const restoredEnrollment =
+            JSON.parse((await ownerTurn(enrollment)).result).enrollment;
+          assertEquals(restoredEnrollment.workflowRunId, run.runId);
+          const trace = JSON.parse(
+            (await ownerTurn({
+              action: "traces",
+              kind: "workflow",
+              id: run.runId,
+            })).result,
+          ).page;
+          const proof = trace.events.find(({ event }: { event: string }) =>
+            event === "step_satisfied"
+          );
+          assertEquals(
+            proof.evidence,
+            await workflowVerifier(goalEnrollmentRequirement),
+          );
+          const approvalCount = confirmations.length;
+          assertStringIncludes(
+            (await ownerTurn({
+              ...enrollment,
+              targetId: latePlan.id,
+              requestId: crypto.randomUUID(),
+            })).result,
+            "unavailable",
+          );
+          assertEquals(confirmations.length, approvalCount);
+          assertEquals(recoveredGoalAdapter.list().map(({ runId }) => runId), [
+            run.runId,
+          ]);
+        }, recoveredGoalAdapter);
+      } finally {
+        recoveredMonitor.stop();
       }
 
       const cancelRegistry = createWorkflowRunRegistry();

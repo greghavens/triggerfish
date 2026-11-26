@@ -86,6 +86,7 @@ export function buildMainChatSession(
   isTidepoolCallRef: { value: boolean },
   isOwnerTurnRef: { value: boolean },
   onSentinelAdmissionChanged?: () => void,
+  goalWorkflowMonitor?: { stop?: () => void },
 ) {
   const modelsConfig = bootstrap.config.models as
     | Record<string, unknown>
@@ -104,6 +105,9 @@ export function buildMainChatSession(
     ),
   );
   workflows.recoverWaiting();
+  if (goalWorkflowMonitor) {
+    goalWorkflowMonitor.stop = workflows.startGoalEnrollmentMonitor().stop;
+  }
   return assembleChatSession({
     customToolsBaseDir: bootstrap.baseDir,
     enableOwnerContextCompaction:
@@ -418,6 +422,7 @@ export async function startServicesAndChannels(
   const caseManagerRef: {
     current?: ReturnType<typeof startSentinelCaseManager>;
   } = {};
+  const goalWorkflowMonitor: { stop?: () => void } = {};
   const chatSession = buildMainChatSession(
     bootstrap,
     coreInfra,
@@ -425,6 +430,7 @@ export async function startServicesAndChannels(
     isTidepoolCallRef,
     isOwnerTurnRef,
     () => caseManagerRef.current?.refresh(),
+    goalWorkflowMonitor,
   );
   bootstrap.log.info("Main session created");
   toolInfra.mcpBroadcastRefs.chatSession = chatSession;
@@ -446,6 +452,7 @@ export async function startServicesAndChannels(
     isTidepoolCallRef,
     (id) => caseManagerRef.current?.coordinatorState(id),
   ).catch((error) => {
+    goalWorkflowMonitor.stop?.();
     releaseCaseAdmission?.();
     throw error;
   });
@@ -747,6 +754,7 @@ export async function startServicesAndChannels(
     sentinelAssessment: {
       stop() {
         topologySync.stop();
+        goalWorkflowMonitor.stop?.();
         caseManager.stop();
         stopMainAdaptive();
         sentinelAssessment.stop();

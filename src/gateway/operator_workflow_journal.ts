@@ -36,6 +36,18 @@ interface WorkflowStepEvidenceSource {
   readonly resultSha256: string;
 }
 
+export interface WorkflowGoalEnrollment {
+  readonly requestId: string;
+  readonly planId: string;
+  readonly fingerprint: string;
+  readonly caseId: string;
+  readonly runId: string;
+  readonly revision: number;
+  readonly goalId: string;
+  readonly enrolledAt: string;
+  readonly admissionRequestId: string;
+}
+
 export interface WorkflowGoalCompletionEvidence {
   readonly caseId: string;
   readonly runId: string;
@@ -312,7 +324,54 @@ export function createOperatorWorkflowJournal(path: string) {
       runId,
     );
   }
+  function enrollmentTable(db: DatabaseSync) {
+    return db.prepare(
+      "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'workflow_goal_enrollments'",
+    ).get() !== undefined;
+  }
   return {
+    goalEnrollment(requestId: string): WorkflowGoalEnrollment | undefined {
+      return query((db) => {
+        if (!enrollmentTable(db)) return;
+        const row = db.prepare(
+          "SELECT record FROM workflow_goal_enrollments WHERE requestId = ?",
+        ).get(requestId);
+        return row && JSON.parse(String(row.record)) as WorkflowGoalEnrollment;
+      });
+    },
+    goalEnrollments(): WorkflowGoalEnrollment[] {
+      return query((db) =>
+        !enrollmentTable(db) ? [] : db.prepare(
+          "SELECT record FROM workflow_goal_enrollments ORDER BY rowid LIMIT 256",
+        ).all()
+          .map(({ record }) =>
+            JSON.parse(String(record)) as WorkflowGoalEnrollment
+          )
+      );
+    },
+    enrollGoal(entry: WorkflowGoalEnrollment): boolean {
+      return query((db) =>
+        commit(db, () => {
+          db.exec(`CREATE TABLE IF NOT EXISTS workflow_goal_enrollments (
+          requestId TEXT PRIMARY KEY, admissionRequestId TEXT NOT NULL UNIQUE, record TEXT NOT NULL
+        ) STRICT`);
+          if (
+            Number(
+              db.prepare(
+                "SELECT COUNT(*) AS count FROM workflow_goal_enrollments",
+              ).get()?.count,
+            ) >= 256
+          ) return false;
+          return db.prepare(
+            "INSERT OR IGNORE INTO workflow_goal_enrollments VALUES (?, ?, ?)",
+          ).run(
+            entry.requestId,
+            entry.admissionRequestId,
+            JSON.stringify(entry),
+          ).changes === 1;
+        })
+      );
+    },
     stepEvidence(
       runId: string,
       stepId: string,

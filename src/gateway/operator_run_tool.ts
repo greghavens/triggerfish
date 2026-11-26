@@ -424,6 +424,7 @@ export const operatorRunTool: ToolDefinition = {
         "pause_runs",
         "resume_runs",
         "retry_graph_tasks",
+        "enroll_goal_workflow",
         "completed_graph_followup",
         "set_case_membership",
         "traces",
@@ -3730,6 +3731,71 @@ ${
             ? "applied"
             : "dismissed",
         });
+      }
+      if (action === "enroll_goal_workflow") {
+        const { runId, requestId, goalId, targetId } = args;
+        const workflows = options.workflows;
+        if (
+          !workflows || ref.kind !== "sentinel" || ref.revision === undefined ||
+          !canFlowTo("INTERNAL", context?.ceiling ?? "INTERNAL") ||
+          typeof runId !== "string" || !digestPattern.test(runId) ||
+          typeof requestId !== "string" || !digestPattern.test(requestId) ||
+          typeof goalId !== "string" ||
+          !/^[a-z0-9][a-z0-9_-]{0,63}$/.test(goalId) ||
+          typeof targetId !== "string" ||
+          Object.keys(args).some((key) =>
+            ![
+              "action",
+              "kind",
+              "id",
+              "revision",
+              "runId",
+              "targetId",
+              "goalId",
+              "requestId",
+            ].includes(key)
+          ) || !await controller.inspect(ref)
+        ) return unavailable;
+        const selection = {
+          caseId: ref.id,
+          revision: ref.revision,
+          runId: runId.toLowerCase(),
+          goalId,
+          planId: targetId,
+        };
+        const request = requestId.toLowerCase();
+        const prior = workflows.goalEnrollment(request, selection);
+        if (prior) return safeProjection({ enrollment: prior });
+        const binding = workflows.goalEnrollmentBinding(selection);
+        if (!binding) return unavailable;
+        const path = resolveSentinelCasePath(options.baseDir, ref.id);
+        const eligible = () => {
+          const state = readSentinelAssessment(path);
+          return state?.active && state.plan.runId === selection.runId &&
+            state.revision === selection.revision &&
+            state.plan.activeFormalGoalIds?.includes(selection.goalId) &&
+            state.plan.formalGoals?.some((goal) =>
+              goal.id === selection.goalId &&
+              goal.criteria.every(({ source }) => source === "graph_evidence")
+            );
+        };
+        if (!eligible()) return unavailable;
+        if (
+          !await options.confirm(
+            `Enroll this exact local workflow for future goal completion?\n${
+              JSON.stringify({ requestId: request, ...binding })
+            }`,
+          )
+        ) {
+          return "Error: The operator declined the run action.";
+        }
+        if (!eligible()) return unavailable;
+        const enrollment = workflows.enrollGoal(
+          request,
+          selection,
+          binding.fingerprint,
+        );
+        return enrollment ? safeProjection({ enrollment }) : unavailable;
       }
       if (action === "completed_graph_followup") {
         const { runId, requestId, taskKind, node } = args;
