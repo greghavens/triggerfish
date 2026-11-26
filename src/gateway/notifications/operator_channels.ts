@@ -1,8 +1,10 @@
 import type {
   ManagedNotificationChannel,
   ManagedNotificationChannels,
+  ManagedSentinelIncidentScope,
 } from "../../core/managed_notification_channels.ts";
 import { canFlowTo } from "../../core/types/classification.ts";
+import { isSentinelCaseId } from "../../sentinel/cases.ts";
 import type { OperatorRunToolContext } from "../operator_run_tool.ts";
 
 export const notificationChannelActions = [
@@ -16,6 +18,9 @@ type Action = typeof notificationChannelActions[number];
 
 export interface OperatorNotificationChannels {
   readonly store: ManagedNotificationChannels;
+  readonly readSentinelIncidentScope?: (
+    caseId: string,
+  ) => ManagedSentinelIncidentScope | undefined;
   readonly sendWebhook: (
     channel: ManagedNotificationChannel,
     body: string,
@@ -31,10 +36,16 @@ const testMessage = JSON.stringify({
 
 function parseChannelSettings(raw: unknown) {
   if (!raw || typeof raw !== "object") return;
-  const { name, destinationOrigin, endpointRef, classification, enabled } =
-    raw as Record<string, unknown>;
+  const {
+    name,
+    destinationOrigin,
+    endpointRef,
+    classification,
+    enabled,
+    sentinelIncidents,
+  } = raw as Record<string, unknown>;
   if (
-    Object.keys(raw).length !== 5 ||
+    Object.keys(raw).length !== (sentinelIncidents === undefined ? 5 : 6) ||
     typeof name !== "string" || !/^[a-zA-Z0-9 _.-]{1,64}$/.test(name) ||
     typeof destinationOrigin !== "string" ||
     typeof endpointRef !== "string" ||
@@ -48,12 +59,30 @@ function parseChannelSettings(raw: unknown) {
   } catch {
     return;
   }
+  let scope: ManagedSentinelIncidentScope | undefined;
+  if (sentinelIncidents !== undefined) {
+    if (!sentinelIncidents || typeof sentinelIncidents !== "object") return;
+    const { caseId, runId, afterRevision } = sentinelIncidents as Record<
+      string,
+      unknown
+    >;
+    if (
+      Object.keys(sentinelIncidents).length !== 3 ||
+      !isSentinelCaseId(caseId) ||
+      typeof runId !== "string" || !/^[a-f0-9-]{36}$/i.test(runId) ||
+      typeof afterRevision !== "number" ||
+      !Number.isSafeInteger(afterRevision) ||
+      afterRevision < 1 || classification !== "INTERNAL"
+    ) return;
+    scope = { caseId, runId, afterRevision };
+  }
   return {
     name,
     destinationOrigin,
     endpointRef,
     classification,
     enabled,
+    ...(scope && { sentinelIncidents: scope }),
   } as const;
 }
 
@@ -172,6 +201,16 @@ export async function executeOperatorNotificationChannel(
     !await confirm(`Approve ${action} ${JSON.stringify(channel)}?`) ||
     !await authorize(args)
   ) return;
+  if (action === "set_notification_channel" && channel.sentinelIncidents) {
+    const scope = channel.sentinelIncidents;
+    const observed = config.readSentinelIncidentScope?.(scope.caseId);
+    if (
+      !observed || observed.runId !== scope.runId ||
+      observed.afterRevision !== scope.afterRevision ||
+      context.authorizeSentinelCaseRead?.(scope.caseId, scope.afterRevision) ===
+        false
+    ) return;
+  }
   const updated = await store.amend(channel, expectedVersion);
   return updated ? { channel: updated } : undefined;
 }

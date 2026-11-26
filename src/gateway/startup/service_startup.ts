@@ -1,3 +1,7 @@
+import {
+  createSentinelIncidentDelivery,
+  readSentinelIncidentScope,
+} from "../notifications/sentinel_incidents.ts";
 import { createManagedNotificationChannels } from "../../core/managed_notification_channels.ts";
 import { createNotificationWebhookTransport } from "../notifications/webhook_transport.ts";
 import { createDomainPolicy } from "../../tools/web/policy.ts";
@@ -85,6 +89,25 @@ import {
 } from "./services/chat_session.ts";
 import { registerTidepoolTopicHandlers } from "./services/tidepool_topics.ts";
 
+function configuredNotificationChannels(
+  bootstrap: BootstrapResult,
+  coreInfra: CoreInfraResult,
+  toolInfra: ToolInfraResult,
+) {
+  return {
+    store: createManagedNotificationChannels(coreInfra.storage),
+    sendWebhook: createNotificationWebhookTransport(
+      toolInfra.mainKeychain,
+      createDomainPolicy(buildDomainSecurityConfig(bootstrap.config)),
+    ),
+    readSentinelIncidentScope:
+      bootstrap.config.sentinel?.notify_incident_increases === true
+        ? (caseId: string) =>
+          readSentinelIncidentScope(bootstrap.baseDir, caseId)
+        : undefined,
+  };
+}
+
 /** Create the main chat session from assembled infrastructure. */
 export function buildMainChatSession(
   bootstrap: BootstrapResult,
@@ -134,13 +157,11 @@ export function buildMainChatSession(
       coreInfra.enhancedSessionManager.get(id as SessionId),
     operatorRunExecutor: createOperatorRunToolExecutor({
       baseDir: bootstrap.baseDir,
-      notificationChannels: {
-        store: createManagedNotificationChannels(coreInfra.storage),
-        sendWebhook: createNotificationWebhookTransport(
-          toolInfra.mainKeychain,
-          createDomainPolicy(buildDomainSecurityConfig(bootstrap.config)),
-        ),
-      },
+      notificationChannels: configuredNotificationChannels(
+        bootstrap,
+        coreInfra,
+        toolInfra,
+      ),
       resumeScheduledExecution: coreInfra.schedulerService
         ?.resumeScheduledExecution,
       readLiveWorkflow,
@@ -718,10 +739,18 @@ export async function startServicesAndChannels(
         return outcome;
       }
       : undefined;
+  const notifyManagedIncidentIncrease = notifyIncidentIncrease
+    ? createSentinelIncidentDelivery(
+      bootstrap.baseDir,
+      configuredNotificationChannels(bootstrap, coreInfra, toolInfra),
+      toolInfra.hookRunner,
+    )
+    : undefined;
   const sentinelAssessment = startSentinelAssessmentCoordinator({
     snapshotPath,
     webContainmentConfigured,
     notifyIncidentIncrease: notifyIncidentIncrease?.("main"),
+    notifyManagedIncidentIncrease,
     advanceAdaptive(state) {
       advanceAdaptiveSentinel(snapshotPath, state);
       modelPlanner?.advance(state);
@@ -763,6 +792,7 @@ export async function startServicesAndChannels(
         snapshotPath: casePath,
         webContainmentConfigured,
         notifyIncidentIncrease: notifyIncidentIncrease?.(caseId),
+        notifyManagedIncidentIncrease,
         advanceAdaptive(state) {
           advanceAdaptiveSentinel(casePath, state);
           planner?.advance(state);

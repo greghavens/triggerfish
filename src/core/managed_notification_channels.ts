@@ -1,6 +1,19 @@
 import type { StorageProvider } from "./storage/provider.ts";
 import type { ClassificationLevel } from "./types/classification.ts";
 
+export interface ManagedSentinelIncidentScope {
+  readonly caseId: string;
+  readonly runId: string;
+  readonly afterRevision: number;
+}
+
+export interface ManagedSentinelIncidentSource {
+  readonly kind: "sentinel_incident_increase";
+  readonly caseId: string;
+  readonly runId: string;
+  readonly revision: number;
+}
+
 export interface ManagedNotificationChannel {
   readonly id: string;
   readonly version: number;
@@ -11,6 +24,7 @@ export interface ManagedNotificationChannel {
   readonly classification: ClassificationLevel;
   readonly enabled: boolean;
   readonly retired?: true;
+  readonly sentinelIncidents?: ManagedSentinelIncidentScope;
 }
 
 export interface ManagedNotificationDelivery {
@@ -18,6 +32,7 @@ export interface ManagedNotificationDelivery {
   readonly channelId: string;
   readonly channelVersion: number;
   readonly createdAt: string;
+  readonly source?: ManagedSentinelIncidentSource;
   readonly state: "in_flight" | "delivered" | "blocked" | "uncertain";
 }
 
@@ -94,6 +109,7 @@ export function createManagedNotificationChannels(storage: StorageProvider) {
       transport: (
         stillCurrent: () => Promise<boolean>,
       ) => Promise<"delivered" | "blocked" | "uncertain">,
+      source?: ManagedNotificationDelivery["source"],
     ): Promise<ManagedNotificationDelivery | undefined> {
       const key = deliveryPrefix + channel.id + ":" + id;
       const existing = await load<ManagedNotificationDelivery>(key);
@@ -113,6 +129,7 @@ export function createManagedNotificationChannels(storage: StorageProvider) {
         channelId: channel.id,
         channelVersion: channel.version,
         createdAt: new Date().toISOString(),
+        ...(source && { source }),
         state: "in_flight",
       };
       const claimed = JSON.stringify(claim);

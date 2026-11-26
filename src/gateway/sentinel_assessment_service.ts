@@ -1,5 +1,6 @@
 /** Refresh a persisted Sentinel assessment and optionally start isolated reviews. */
 
+import type { ManagedSentinelIncidentSource } from "../core/managed_notification_channels.ts";
 import { subscribeCommittedEvidence } from "../core/evidence_task_progression.ts";
 import { locateSentinelCase } from "../sentinel/cases.ts";
 import {
@@ -47,6 +48,10 @@ export interface SentinelAssessmentCoordinatorOptions {
   readonly notifyIncidentIncrease?: (revision: number) => Promise<
     void | "delivered" | "queued"
   >;
+  readonly notifyManagedIncidentIncrease?: (
+    source: ManagedSentinelIncidentSource,
+    isCurrent: () => boolean,
+  ) => Promise<void>;
   readonly onError?: (error: unknown) => void;
 }
 
@@ -228,6 +233,7 @@ export function startSentinelAssessmentCoordinator(
     }
   }
 
+  let managedNotification: string | undefined;
   function tick() {
     if (stopped) return;
     try {
@@ -278,6 +284,29 @@ export function startSentinelAssessmentCoordinator(
             report(error);
           },
         ).catch(report);
+      }
+      const notifyManaged = options.notifyManagedIncidentIncrease;
+      const notificationKey = JSON.stringify([
+        state.plan.runId,
+        state.revision,
+      ]);
+      if (
+        notifyManaged && caseId && state.plan.runId &&
+        notificationKey !== managedNotification
+      ) {
+        managedNotification = notificationKey;
+        void notifyManaged({
+          kind: "sentinel_incident_increase",
+          caseId,
+          runId: state.plan.runId,
+          revision: state.revision,
+        }, () => !stopped && managedNotification === notificationKey)
+          .catch((error) => {
+            if (managedNotification === notificationKey) {
+              managedNotification = undefined;
+            }
+            report(error);
+          });
       }
       options.advanceAdaptive?.(state);
       if (active) {

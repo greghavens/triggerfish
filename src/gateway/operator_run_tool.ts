@@ -940,7 +940,7 @@ export const operatorRunTool: ToolDefinition = {
     notificationChannelSettings: {
       type: "object",
       description:
-        "Complete webhook settings: name, destinationOrigin, endpointRef, classification and enabled. Use only an existing notification secret reference.",
+        "Complete webhook settings: name, destinationOrigin, endpointRef, classification and enabled. Use only an existing notification secret reference. Optionally subscribe to incident increases with sentinelIncidents {caseId, runId, afterRevision} matching an active assessment.",
     },
     expectedVersion: {
       type: "integer",
