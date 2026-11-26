@@ -24,7 +24,9 @@ import { encodeSentinelFindingZip } from "./finding_export_zip.ts";
 import {
   exportSentinelFindingTrafficLinks,
   exportSentinelTrafficLinkAnnotations,
+  readSentinelTrafficCompositionHistory,
 } from "./finding_traffic_links.ts";
+import { composeFindingTrafficLinks } from "./finding_traffic_composition.ts";
 import { loadSentinelGraph, sentinelFindingSeverities } from "./graph.ts";
 import {
   hasSentinelWorkerFindingJournal,
@@ -389,6 +391,10 @@ export function renderScopedSentinelFindings(
     exportSentinelTrafficLinkAnnotations(path, assessment.revision),
     ({ linkId }) => linkId,
   );
+  const trafficCompositionByFinding = Map.groupBy(
+    readSentinelTrafficCompositionHistory(path, assessment.revision),
+    ({ findingId }) => findingId,
+  );
   const journal = runId && hasSentinelWorkerFindingJournal(path)
     ? openSentinelWorkerFindingStore(path)
     : undefined;
@@ -437,7 +443,8 @@ export function renderScopedSentinelFindings(
         ) continue;
         if (records.length >= MAX_FINDING_EXPORT_COUNT) return;
       }
-      const trafficLinks = attachments.filter((
+      const composition = trafficCompositionByFinding.get(id) ?? [];
+      const retainedTrafficLinks = attachments.filter((
         { findingId, caseId: sourceCase },
       ) => findingId === id && sourceCase === caseId).map((
         { requestId: _requestId, evidenceNote, ...link },
@@ -451,6 +458,21 @@ export function renderScopedSentinelFindings(
         ...(evidenceNote !== undefined &&
           { evidenceNote: redactCredentialText(evidenceNote) }),
       }));
+      const activeIds = composeFindingTrafficLinks(
+        retainedTrafficLinks.map(({ id }) => id),
+        composition,
+      );
+      const activeRank = new Map(activeIds.map((id, rank) => [id, rank]));
+      const trafficLinks = retainedTrafficLinks.map((link) => ({
+        ...link,
+        ...(!activeRank.has(link.id) && { withdrawn: true }),
+      })).sort((left, right) =>
+        (activeRank.get(left.id) ?? Number.MAX_SAFE_INTEGER) -
+        (activeRank.get(right.id) ?? Number.MAX_SAFE_INTEGER)
+      );
+      const trafficLinkSetHistory = composition.map((
+        { requestId: _requestId, ...item },
+      ) => item);
       if (imported) {
         records.push({
           id,
@@ -462,6 +484,7 @@ export function renderScopedSentinelFindings(
           controlIds: imported.controls,
           evidenceIds: imported.evidence,
           trafficLinks,
+          ...(trafficLinkSetHistory.length && { trafficLinkSetHistory }),
         });
         continue;
       }
@@ -511,6 +534,7 @@ export function renderScopedSentinelFindings(
         })),
         rechecks,
         trafficLinks,
+        ...(trafficLinkSetHistory.length && { trafficLinkSetHistory }),
       });
     }
   } finally {
@@ -597,10 +621,15 @@ export function renderScopedSentinelFindings(
               markdownText(record.id)
             } · ${markdownText(record.title)}`
           ),
+          ...(row.trafficLinkSetHistory ?? []).map((receipt) =>
+            `- ${markdownText(receipt.id)} · ${
+              t(receipt.operation === "withdraw" ? "Withdrawn" : "Reordered")
+            }`
+          ),
           ...row.trafficLinks.flatMap((link) => [
             `- ${markdownText(link.id)} · ${markdownText(link.trafficId)} · ${
               markdownText(link.trafficDigest)
-            }`,
+            }${link.withdrawn ? ` · ${t("Withdrawn")}` : ""}`,
             ...(link.sourceHint
               ? [
                 `  - operator-hint:${link.sourceHint.id} · ${

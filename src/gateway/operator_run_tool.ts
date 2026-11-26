@@ -299,6 +299,7 @@ import { createOperatorSentinelRuns } from "./operator_sentinel_runs.ts";
 import {
   annotateOperatorSentinelFindingTraffic,
   attachOperatorSentinelFindingTraffic,
+  editOperatorSentinelFindingTrafficSet,
   executeSentinelFindingTrafficTool,
   reopenSentinelLinkedTrafficPayload,
   sentinelFindingTrafficAttachTool,
@@ -306,6 +307,7 @@ import {
 } from "./sentinel_finding_traffic_tool.ts";
 import {
   listSentinelFindingTrafficLinks,
+  readSentinelTrafficCompositionHistory,
   readSentinelTrafficLinkAnnotations,
 } from "../sentinel/finding_traffic_links.ts";
 import { readSentinelTrafficReceipt } from "../sentinel/traffic_receipts.ts";
@@ -427,6 +429,8 @@ export const operatorRunTool: ToolDefinition = {
         "topology_source",
         "attach_finding_traffic",
         "annotate_finding_traffic",
+        "reorder_finding_traffic",
+        "withdraw_finding_traffic",
         "facts",
         "save_digest",
         "list_digests",
@@ -534,6 +538,17 @@ export const operatorRunTool: ToolDefinition = {
     incidentId: {
       type: "string",
       description: "Exact saved Sentinel incident candidate ID",
+    },
+    trafficLinkIds: {
+      type: "array",
+      description:
+        "Complete ordered list of active links for reorder_finding_traffic.",
+      items: { type: "string" },
+    },
+    includeWithdrawn: {
+      type: "boolean",
+      description:
+        "Open immutable attachment metadata by exact ID even if withdrawn.",
     },
     trafficLinkId: {
       type: "string",
@@ -8131,6 +8146,37 @@ ${
           options.confirm,
         );
       }
+      if (
+        action === "reorder_finding_traffic" ||
+        action === "withdraw_finding_traffic"
+      ) {
+        if (
+          ref.kind !== "sentinel" || ref.revision === undefined ||
+          !context?.authenticatedOwnerSessionId ||
+          !canFlowTo("INTERNAL", context.ceiling ?? "PUBLIC") ||
+          !canFlowTo(context.inputClassification ?? "PUBLIC", "INTERNAL") ||
+          Object.keys(args).some((key) =>
+            ![
+              "action",
+              "kind",
+              "id",
+              "revision",
+              "receiptId",
+              "trafficLinkId",
+              "trafficLinkIds",
+              "reportVersion",
+              "evidenceVersion",
+              "requestId",
+            ].includes(key)
+          ) || !await controller.inspect(ref)
+        ) return unavailable;
+        return await editOperatorSentinelFindingTrafficSet(
+          resolveSentinelCasePath(options.baseDir, ref.id),
+          ref.revision,
+          args,
+          options.confirm,
+        );
+      }
       if (action === "annotate_finding_traffic") {
         if (
           ref.kind !== "sentinel" || ref.revision === undefined ||
@@ -8196,11 +8242,16 @@ ${
           limit,
           offset,
           payloadPart,
+          includeWithdrawn,
         } = args;
         if (
           ref.kind !== "sentinel" || ref.revision === undefined ||
           !canFlowTo("INTERNAL", context?.ceiling ?? "INTERNAL") ||
           (payloadPart !== undefined && trafficLinkId === undefined) ||
+          (includeWithdrawn !== undefined &&
+            (includeWithdrawn !== true || !trafficLinkId ||
+              payloadPart !== undefined ||
+              !context?.authenticatedOwnerSessionId)) ||
           typeof receiptId !== "string" ||
           !/^worker-finding:[a-f0-9]{64}$/.test(receiptId) ||
           (recheckId !== undefined &&
@@ -8221,6 +8272,7 @@ ${
               "recheckId",
               "trafficLinkId",
               "payloadPart",
+              "includeWithdrawn",
               "limit",
               "offset",
             ].includes(key)
@@ -8234,6 +8286,7 @@ ${
             evidenceRevision: ref.revision,
             findingId: receiptId,
             recheckId,
+            ...(includeWithdrawn === true && { includeWithdrawn }),
             limit: 1,
           });
           if (link?.caseId !== ref.id) return unavailable;
@@ -8261,6 +8314,16 @@ ${
             run: ref,
             link,
             ...(annotations.length && { annotations }),
+            ...(includeWithdrawn === true && {
+              withdrawal: readSentinelTrafficCompositionHistory(
+                snapshotPath,
+                ref.revision,
+                receiptId,
+              )
+                .find((item) =>
+                  item.operation === "withdraw" && item.linkId === link.id
+                ) ?? null,
+            }),
             receipt: projectSentinelTrafficReceipt(receipt, link.assetId),
             ...(payload && { payload }),
           });

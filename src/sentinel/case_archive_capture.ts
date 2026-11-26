@@ -243,6 +243,19 @@ const evidenceStoreSchemas: Partial<
         columns: ["id", "request_id", "link_id", "input", "recorded_at"],
         optionalTable: true,
       },
+      {
+        name: "traffic_link_composition",
+        columns: [
+          "sequence",
+          "id",
+          "request_id",
+          "revision",
+          "finding_id",
+          "input",
+          "recorded_at",
+        ],
+        optionalTable: true,
+      },
     ],
   },
 };

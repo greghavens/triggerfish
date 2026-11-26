@@ -1422,6 +1422,8 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
     let originalTopology: unknown;
     let trafficLinkId!: string;
     let preArchiveTraffic: unknown;
+    let withdrawnLinkId!: string;
+    let archivedTrafficWithdrawal: unknown;
     let preArchiveReportHistory: { nextCursor: string; versions: unknown };
     let preArchiveLinkedPayload: unknown;
     let ownerAmendment: Record<string, unknown>;
@@ -2047,6 +2049,33 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
       workerRecheck.id,
     );
     assertEquals(JSON.parse(plannerTrafficResult).links[0].id, trafficLinkId);
+    await withGateway(baseDir, async (turn) => {
+      const list = { ...trafficScope, action: "finding_traffic" };
+      const second = JSON.parse(
+        await turn({
+          ...trafficScope,
+          action: "attach_finding_traffic",
+          evidenceId: traffic.evidenceId,
+          digest: traffic.digest,
+          reportVersion: 2,
+          evidenceRole: "supporting",
+          requestId: crypto.randomUUID(),
+        }),
+      ).link;
+      withdrawnLinkId = second.id;
+      const shown = JSON.parse(await turn(list)).page;
+      archivedTrafficWithdrawal = JSON.parse(
+        await turn({
+          ...trafficScope,
+          action: "withdraw_finding_traffic",
+          trafficLinkId: withdrawnLinkId,
+          reportVersion: 2,
+          evidenceVersion: shown.evidenceVersion,
+          requestId: crypto.randomUUID(),
+        }),
+      ).amendment;
+      assert(archivedTrafficWithdrawal);
+    });
     assert(stopSentinelAssessment(path));
     const archiveId = crypto.randomUUID();
     const request = { action: "archive", ...exact, requestId: archiveId };
@@ -2557,6 +2586,17 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
         trafficLinkId,
       });
       assertEquals(JSON.parse(reopenedTraffic), preArchiveTraffic);
+      const withdrawn = {
+        ...trafficScope,
+        action: "finding_traffic",
+        trafficLinkId: withdrawnLinkId,
+      };
+      assertStringIncludes(await turn(withdrawn), "unavailable");
+      const historical = JSON.parse(
+        await turn({ ...withdrawn, includeWithdrawn: true }),
+      );
+      assertEquals(historical.withdrawal, archivedTrafficWithdrawal);
+      assertEquals(historical.link.id, withdrawnLinkId);
       assertEquals(
         JSON.parse(await turn(findingPayload())),
         preArchiveLinkedPayload,

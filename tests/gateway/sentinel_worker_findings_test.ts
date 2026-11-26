@@ -4170,6 +4170,7 @@ Deno.test("Sentinel schedules one scoped report worker from a committed finding 
         sentinelFindingTrafficEvidenceVersion(path, state.revision, finding.id)
           .digest;
       let annotationId: string | undefined;
+      let withdrawalId: string | undefined;
       await withFindingAssignmentGateway(
         baseDir,
         () => Promise.resolve(true),
@@ -4190,6 +4191,25 @@ Deno.test("Sentinel schedules one scoped report worker from a committed finding 
             }),
           );
           annotationId = outcome.amendment.id;
+          const latestVersion = sentinelFindingTrafficEvidenceVersion(
+            path,
+            state.revision,
+            finding.id,
+          ).digest;
+          const withdrawal = JSON.parse(
+            await turn({
+              action: "withdraw_finding_traffic",
+              kind: "sentinel",
+              id: "main",
+              revision: state.revision,
+              receiptId: finding.id,
+              trafficLinkId: links[0].id,
+              reportVersion: saved.reports[0].version,
+              evidenceVersion: latestVersion,
+              requestId: crypto.randomUUID(),
+            }),
+          ).amendment;
+          withdrawalId = withdrawal.id;
         },
       );
       const report = await request("export", {
@@ -4199,8 +4219,14 @@ Deno.test("Sentinel schedules one scoped report worker from a committed finding 
         findingIds: [finding.id],
       });
       assertEquals(report.type, "export");
-      const [exportedLink] =
-        JSON.parse(String(report.content)).findings[0].trafficLinks;
+      const exportedFinding = JSON.parse(String(report.content)).findings[0];
+      const [exportedLink] = exportedFinding.trafficLinks;
+      assertEquals(exportedLink.withdrawn, true);
+      assertEquals(exportedFinding.trafficLinkSetHistory[0].id, withdrawalId);
+      assertEquals(
+        exportedFinding.trafficLinkSetHistory[0].requestId,
+        undefined,
+      );
       assertEquals(exportedLink.id, links[0].id);
       assertEquals(exportedLink.trafficDigest, traffic.digest);
       assertEquals(exportedLink.evidenceRole, attachment.evidenceRole);

@@ -1,3 +1,4 @@
+import { decodeSentinelTrafficComposition } from "./finding_traffic_composition.ts";
 import { decodeSentinelTrafficLinkAnnotation } from "./finding_traffic_links.ts";
 import {
   parseSentinelModelRoute,
@@ -224,7 +225,8 @@ function checkedDatabase<T>(
             name === "goal_evidence_submissions" ||
           family === "sentinel-finding-traffic-links.db" &&
             version === 2 && (name === "traffic_link_request_aliases" ||
-              name === "traffic_link_annotations")
+              name === "traffic_link_annotations" ||
+              name === "traffic_link_composition")
         : name === family || name.startsWith(family + "_") ||
           family === "assessment" && name === "sentinel_operating_constraints");
     const tables = new Set<string>();
@@ -626,6 +628,41 @@ function validateAuxiliary(
         throw new Error("Invalid archived Sentinel traffic annotation count");
       }
       for (const row of amendments) decodeSentinelTrafficLinkAnnotation(row);
+    }
+    if (tables.has("traffic_link_composition")) {
+      requireColumns(db, "traffic_link_composition", [
+        "sequence",
+        "id",
+        "request_id",
+        "revision",
+        "finding_id",
+        "input",
+        "recorded_at",
+      ]);
+      const rows = db.prepare(
+        "SELECT * FROM traffic_link_composition LIMIT 4097",
+      ).all();
+      if (rows.length > 4096) {
+        throw new Error("Invalid archived Sentinel traffic set size");
+      }
+      const exactLink = db.prepare(
+        "SELECT id FROM traffic_links WHERE id = ? AND revision = ? AND finding_id = ?",
+      );
+      for (const row of rows) {
+        const edit = decodeSentinelTrafficComposition(row);
+        const ids = edit.operation === "withdraw"
+          ? [edit.linkId]
+          : edit.linkIds;
+        if (
+          edit.caseId !== caseId || edit.evidenceRevision > revision ||
+          (edit.evidenceRevision === revision && edit.runId !== runId) ||
+          ids.some((id) =>
+            !exactLink.get(id, edit.evidenceRevision, edit.findingId)
+          )
+        ) {
+          throw new Error("Foreign Sentinel archive traffic set scope");
+        }
+      }
     }
     const scoped = name === "sentinel-worker-findings.db"
       ? { table: "receipts", column: "input", hasRun: true }

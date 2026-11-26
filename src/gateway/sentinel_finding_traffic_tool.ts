@@ -16,6 +16,7 @@ import {
   sentinelTrafficEvidenceAnnotation,
   sentinelTrafficEvidenceRoles,
 } from "../sentinel/finding_traffic_links.ts";
+import { parseSentinelTrafficComposition } from "../sentinel/finding_traffic_composition.ts";
 import {
   readSentinelTrafficReceipt,
   type SentinelTrafficSource,
@@ -699,5 +700,107 @@ export async function annotateOperatorSentinelFindingTraffic(
       _classification: "INTERNAL",
       amendment: committed.amendment,
     })
+    : unavailable;
+}
+
+export async function editOperatorSentinelFindingTrafficSet(
+  snapshotPath: string,
+  revision: number,
+  args: Record<string, unknown>,
+  confirm: (prompt: string) => Promise<boolean>,
+): Promise<string> {
+  const { receiptId } = args;
+  const caseId = locateSentinelCase(snapshotPath)?.caseId;
+  if (
+    !caseId || typeof receiptId !== "string" || !findingPattern.test(receiptId)
+  ) return unavailable;
+  const inspect = (approvedRunId?: string) =>
+    withSentinelAssessmentWriteLock(snapshotPath, (state) => {
+      const runId = state?.plan.runId;
+      if (
+        !runId || !state.active || state.revision !== revision ||
+        (approvedRunId !== undefined && approvedRunId !== runId) ||
+        !hasSentinelWorkerFindingJournal(snapshotPath)
+      ) return;
+      const proposal = parseSentinelTrafficComposition({
+        caseId,
+        runId,
+        evidenceRevision: revision,
+        findingId: receiptId,
+        reportVersion: args.reportVersion,
+        evidenceVersion: args.evidenceVersion,
+        requestId: args.requestId,
+        operation: args.action === "reorder_finding_traffic"
+          ? "reorder"
+          : "withdraw",
+        linkId: args.trafficLinkId,
+        linkIds: args.trafficLinkIds,
+      });
+      if (!proposal) return;
+      const findings = openSentinelWorkerFindingStore(snapshotPath);
+      try {
+        const report = findings.readFindingReport(receiptId, revision);
+        const target = report?.finding.targetId;
+        if (
+          !report || !target || report.finding.caseId !== caseId ||
+          report.finding.runId !== runId ||
+          readSentinelOperatingConstraints(snapshotPath, runId, revision)
+              ?.constraints.allowedAssetIds?.includes(target) === false ||
+          !state.result?.sharedGraph.snapshot?.nodes.some(({ id, kind }) =>
+            kind === "asset" && id === target
+          )
+        ) return;
+        const links = openSentinelFindingTrafficLinks(snapshotPath);
+        try {
+          const prior = links.reviewComposition(proposal, false);
+          if (!prior) return;
+          if (prior.saved) {
+            return { proposal, amendment: prior.amendment, target };
+          }
+          if (proposal.reportVersion !== report.version) return;
+          const ids = proposal.operation === "withdraw"
+            ? [proposal.linkId]
+            : proposal.linkIds;
+          for (const id of ids) {
+            if (
+              !links.list({
+                id,
+                findingId: receiptId,
+                evidenceRevision: revision,
+                assetId: target,
+                limit: 1,
+              }).length
+            ) return;
+          }
+          const committed = approvedRunId
+            ? links.reviewComposition(proposal, true)
+            : prior;
+          return committed &&
+            { proposal, amendment: committed.amendment, target };
+        } finally {
+          links.close();
+        }
+      } finally {
+        findings.close();
+      }
+    });
+  const preview = inspect();
+  if (!preview) return unavailable;
+  if (preview.amendment) {
+    return JSON.stringify({
+      _classification: "INTERNAL",
+      amendment: preview.amendment,
+    });
+  }
+  if (
+    !await confirm(
+      `Review this exact retained traffic set change?\n${
+        JSON.stringify({ targetAssetId: preview.target, ...preview.proposal })
+      }`,
+    )
+  ) return "Error: The operator declined the traffic set change.";
+  const saved = inspect(preview.proposal.runId)?.amendment;
+  return saved
+    ? JSON.stringify({ _classification: "INTERNAL", amendment: saved })
     : unavailable;
 }

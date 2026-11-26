@@ -6,6 +6,15 @@ import { createHash } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import { redactCredentialText } from "../core/logger/redactor.ts";
 import { locateSentinelCase } from "./cases.ts";
+import {
+  composeFindingTrafficLinks,
+  decodeSentinelTrafficComposition,
+  parseSentinelTrafficComposition,
+  type SentinelTrafficCompositionChange,
+  type SentinelTrafficCompositionReceipt,
+  trafficCompositionReceiptId,
+  trafficCompositionTable,
+} from "./finding_traffic_composition.ts";
 import { assertOperatorSourceDirectoryInfo } from "./source_snapshot_lock.ts";
 import {
   type SentinelTrafficSource,
@@ -150,6 +159,7 @@ export interface SentinelFindingTrafficLinkFilter {
   readonly evidenceRevision?: number;
   readonly limit?: number;
   readonly offset?: number;
+  readonly includeWithdrawn?: boolean;
 }
 
 function exactText(value: unknown): value is string {
@@ -246,10 +256,10 @@ function createRequestAliases(db: DatabaseSync) {
   `);
 }
 
-function hasAnnotations(db: DatabaseSync): boolean {
+function hasTable(db: DatabaseSync, table: string): boolean {
   return db.prepare(
     "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = ?",
-  ).get(annotationTable) !== undefined;
+  ).get(table) !== undefined;
 }
 
 function trafficEvidenceVersion(
@@ -257,12 +267,14 @@ function trafficEvidenceVersion(
   findingId: string,
   ids: readonly string[],
   annotationIds: readonly string[],
+  compositionIds: readonly string[] = [],
 ) {
   return createHash("sha256").update(JSON.stringify([
     revision,
     findingId,
     ids,
     ...(annotationIds.length ? [annotationIds] : []),
+    ...(compositionIds.length ? [{ compositionIds }] : []),
   ])).digest("hex");
 }
 
@@ -359,7 +371,7 @@ function openLinks(snapshotPath: string, readOnly: boolean, now: () => number) {
   function annotationsForLink(
     linkId: string,
   ): SentinelFindingTrafficAnnotation[] {
-    if (!hasAnnotations(db)) return [];
+    if (!hasTable(db, annotationTable)) return [];
     return db.prepare(
       "SELECT * FROM traffic_link_annotations WHERE link_id = ? ORDER BY rowid LIMIT 17",
     ).all(linkId).map(decodeSentinelTrafficLinkAnnotation);
@@ -368,7 +380,7 @@ function openLinks(snapshotPath: string, readOnly: boolean, now: () => number) {
   function exportAnnotations(
     revision: number,
   ): SentinelFindingTrafficAnnotation[] {
-    if (!hasAnnotations(db)) return [];
+    if (!hasTable(db, annotationTable)) return [];
     const rows = db.prepare(
       `SELECT annotation.* FROM traffic_link_annotations AS annotation
       WHERE link_id IN (SELECT id FROM traffic_links WHERE revision = ?)
@@ -378,6 +390,25 @@ function openLinks(snapshotPath: string, readOnly: boolean, now: () => number) {
       throw new Error("Invalid Sentinel traffic annotation journal size");
     }
     return rows.map(decodeSentinelTrafficLinkAnnotation);
+  }
+
+  function compositionEdits(
+    revision: number,
+    findingId?: string,
+  ): SentinelTrafficCompositionReceipt[] {
+    if (!hasTable(db, trafficCompositionTable)) return [];
+    const rows = db.prepare(`SELECT * FROM traffic_link_composition
+      WHERE revision = ? AND (? IS NULL OR finding_id = ?)
+      ORDER BY sequence LIMIT ?`).all(
+      revision,
+      findingId ?? null,
+      findingId ?? null,
+      maxLinks + 1,
+    );
+    if (rows.length > maxLinks) {
+      throw new Error("Invalid Sentinel traffic composition journal size");
+    }
+    return rows.map(decodeSentinelTrafficComposition);
   }
 
   function evidenceVersion(
@@ -396,18 +427,95 @@ function openLinks(snapshotPath: string, readOnly: boolean, now: () => number) {
     ] as const;
     const ids = db.prepare(`SELECT id ${matching} ORDER BY id`).all(...params)
       .map(({ id }) => String(id));
-    const edits = hasAnnotations(db)
+    const edits = hasTable(db, annotationTable)
       ? db.prepare(`SELECT id FROM traffic_link_annotations
           WHERE link_id IN (SELECT id ${matching}) ORDER BY id`).all(...params)
         .map(({ id }) => String(id))
       : [];
+    const changes = compositionEdits(revision, findingId);
+    const idsInScope = new Set(ids);
+    const scopedChanges = assetId === undefined
+      ? changes
+      : changes.filter((change) =>
+        change.operation === "withdraw"
+          ? idsInScope.has(change.linkId)
+          : change.linkIds.some((id) => idsInScope.has(id))
+      );
     return {
-      digest: trafficEvidenceVersion(revision, findingId, ids, edits),
-      count: ids.length,
+      digest: trafficEvidenceVersion(
+        revision,
+        findingId,
+        ids,
+        edits,
+        scopedChanges.map(({ id }) => id),
+      ),
+      count: composeFindingTrafficLinks(ids, scopedChanges).length,
     };
   }
 
   return {
+    compositionEdits,
+    reviewComposition(raw: SentinelTrafficCompositionChange, commit: boolean) {
+      const input = parseSentinelTrafficComposition(raw);
+      if (!input || input.caseId !== caseId) return;
+      return transaction(db, () => {
+        const serialized = JSON.stringify(input);
+        if (hasTable(db, trafficCompositionTable)) {
+          const retry = db.prepare(
+            "SELECT * FROM traffic_link_composition WHERE request_id = ?",
+          ).get(input.requestId);
+          if (retry) {
+            return retry.input === serialized
+              ? {
+                saved: true,
+                amendment: decodeSentinelTrafficComposition(retry),
+              }
+              : undefined;
+          }
+          if (
+            Number(
+              db.prepare(
+                "SELECT count(*) AS count FROM traffic_link_composition",
+              ).get()?.count,
+            ) >= maxLinks
+          ) return;
+        }
+        const { evidenceRevision: revision, findingId } = input;
+        const ids = db.prepare(
+          `SELECT id FROM traffic_links WHERE revision = ? AND finding_id = ?
+          ORDER BY rowid DESC`,
+        ).all(revision, findingId).map(({ id }) => String(id));
+        const active = composeFindingTrafficLinks(
+          ids,
+          compositionEdits(revision, findingId),
+        );
+        if (
+          input.evidenceVersion !==
+            evidenceVersion(revision, findingId).digest ||
+          (input.operation === "withdraw"
+            ? !active.includes(input.linkId)
+            : input.linkIds.length !== active.length ||
+              input.linkIds.some((id) => !active.includes(id)))
+        ) return;
+        if (!commit) return { saved: false, amendment: undefined };
+        const id = trafficCompositionReceiptId(serialized);
+        const time = now();
+        db.exec(`CREATE TABLE IF NOT EXISTS traffic_link_composition (
+          sequence INTEGER PRIMARY KEY,
+          id TEXT NOT NULL UNIQUE, request_id TEXT NOT NULL UNIQUE,
+          revision INTEGER NOT NULL, finding_id TEXT NOT NULL,
+          input TEXT NOT NULL, recorded_at INTEGER NOT NULL
+        ) STRICT;
+        CREATE INDEX IF NOT EXISTS traffic_link_composition_scope ON traffic_link_composition(revision, finding_id);`);
+        db.prepare(`INSERT INTO traffic_link_composition
+          (id, request_id, revision, finding_id, input, recorded_at) VALUES (?,?,?,?,?,?)`)
+          .run(id, input.requestId, revision, findingId, serialized, time);
+        return {
+          saved: true,
+          amendment: { ...input, id, recordedAt: new Date(time).toISOString() },
+        };
+      });
+    },
     annotationsForLink,
     evidenceVersion,
     exportAnnotations,
@@ -426,7 +534,7 @@ function openLinks(snapshotPath: string, readOnly: boolean, now: () => number) {
           return;
         }
         const serialized = JSON.stringify(input);
-        if (hasAnnotations(db)) {
+        if (hasTable(db, annotationTable)) {
           const retry = db.prepare(
             "SELECT link_id, input FROM traffic_link_annotations WHERE request_id = ?",
           ).get(input.requestId);
@@ -585,6 +693,7 @@ function openLinks(snapshotPath: string, readOnly: boolean, now: () => number) {
         evidenceRevision,
         limit = 20,
         offset = 0,
+        includeWithdrawn = false,
       } = filter;
       if (
         id !== undefined &&
@@ -600,7 +709,9 @@ function openLinks(snapshotPath: string, readOnly: boolean, now: () => number) {
         !positive(limit) || limit > 100 ||
         !Number.isSafeInteger(offset) || offset < 0
       ) throw new Error("Invalid Sentinel finding traffic link filter");
-      return db.prepare(`SELECT * FROM traffic_links
+      const compose = !includeWithdrawn &&
+        hasTable(db, trafficCompositionTable);
+      const rows = db.prepare(`SELECT * FROM traffic_links
         WHERE (? IS NULL OR finding_id = ?) AND (? IS NULL OR revision = ?)
           AND (? IS NULL OR json_extract(input, '$.assetId') = ?)
           AND (? IS NULL OR id = ?)
@@ -616,9 +727,46 @@ function openLinks(snapshotPath: string, readOnly: boolean, now: () => number) {
         id ?? null,
         recheckId ?? null,
         recheckId ?? null,
-        limit,
-        offset,
-      ).map(decode);
+        compose ? maxLinks + 1 : limit,
+        compose ? 0 : offset,
+      );
+      if (!compose) return rows.map(decode);
+      if (rows.length > maxLinks) {
+        throw new Error("Invalid Sentinel traffic link journal size");
+      }
+      const byRevision = Map.groupBy(rows, ({ revision }) => Number(revision));
+      const active = new Set<string>();
+      const exactOrder = new Map<string, number>();
+      for (const [revision, entries] of byRevision) {
+        const edits = Map.groupBy(
+          compositionEdits(revision, findingId),
+          (item) => item.findingId,
+        );
+        for (
+          const [finding, group] of Map.groupBy(
+            entries,
+            ({ finding_id }) => String(finding_id),
+          )
+        ) {
+          const ids = composeFindingTrafficLinks(
+            group.map(({ id }) => String(id)),
+            edits.get(finding) ?? [],
+          );
+          for (const [index, id] of ids.entries()) {
+            active.add(id);
+            if (findingId !== undefined && evidenceRevision !== undefined) {
+              exactOrder.set(id, index);
+            }
+          }
+        }
+      }
+      const selected = rows.filter(({ id }) => active.has(String(id)));
+      if (exactOrder.size) {
+        selected.sort((left, right) =>
+          exactOrder.get(String(left.id))! - exactOrder.get(String(right.id))!
+        );
+      }
+      return selected.slice(offset, offset + limit).map(decode);
     },
     exportRevision(
       evidenceRevision: number,
@@ -694,6 +842,17 @@ export function sentinelFindingTrafficEvidenceVersion(
     (links) => links.evidenceVersion(revision, findingId, assetId),
   ) ??
     { digest: trafficEvidenceVersion(revision, findingId, [], []), count: 0 };
+}
+
+export function readSentinelTrafficCompositionHistory(
+  snapshotPath: string,
+  revision: number,
+  findingId?: string,
+) {
+  return readFindingTrafficLinks(
+    snapshotPath,
+    (links) => links.compositionEdits(revision, findingId),
+  ) ?? [];
 }
 
 export function exportSentinelTrafficLinkAnnotations(

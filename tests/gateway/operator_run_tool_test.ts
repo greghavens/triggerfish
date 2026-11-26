@@ -1746,6 +1746,135 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
         assertEquals((await reconnected(followLink)).response, undefined);
         denied = undefined;
       });
+      const secondLink = JSON.parse(
+        (await turn({
+          ...attachTraffic,
+          evidenceId: nextCandidatePage.receipts[0].evidenceId,
+          digest: nextCandidatePage.receipts[0].digest,
+          evidenceNote: "Temporary attachment used to review ordering.",
+          requestId: crypto.randomUUID(),
+        })).result,
+      ).link;
+      const unordered = JSON.parse((await turn(trafficAction)).result).page;
+      assertEquals(unordered.links.map(({ id }: { id: string }) => id), [
+        secondLink.id,
+        trafficLink.id,
+      ]);
+      const reorderTraffic = {
+        ...trafficAction,
+        action: "reorder_finding_traffic",
+        reportVersion: 1,
+        evidenceVersion: unordered.evidenceVersion,
+        trafficLinkIds: [trafficLink.id, secondLink.id],
+        requestId: crypto.randomUUID(),
+      };
+      const beforeReorder = confirmations.length;
+      denied = "PRE_TOOL_CALL";
+      await turn(reorderTraffic);
+      assertEquals(confirmations.length, beforeReorder);
+      denied = undefined;
+      for (
+        const change of [
+          { ...reorderTraffic, trafficLinkIds: [trafficLink.id] },
+          {
+            ...reorderTraffic,
+            trafficLinkIds: [trafficLink.id, trafficLink.id],
+          },
+          { ...reorderTraffic, ...exact },
+        ]
+      ) assertStringIncludes((await turn(change)).result, "unavailable");
+      assertEquals(confirmations.length, beforeReorder);
+      const orderDecision =
+        JSON.parse((await turn(reorderTraffic)).result).amendment;
+      const ordered = JSON.parse((await turn(trafficAction)).result).page;
+      assertEquals(
+        ordered.links.map(({ id }: { id: string }) => id),
+        reorderTraffic.trafficLinkIds,
+      );
+      assert(ordered.evidenceVersion !== unordered.evidenceVersion);
+      const orderedPage =
+        JSON.parse((await turn({ ...trafficAction, limit: 1 })).result).page;
+      assertEquals(orderedPage.links[0].id, trafficLink.id);
+      assertEquals(orderedPage.nextOffset, 1);
+      const orderedTail = JSON.parse(
+        (await turn({
+          ...trafficAction,
+          limit: 1,
+          offset: orderedPage.nextOffset,
+        })).result,
+      ).page;
+      assertEquals(orderedTail.links[0].id, secondLink.id);
+      assertEquals(orderedTail.nextOffset, null);
+      await withGateway(async (reconnected) => {
+        assertEquals(
+          JSON.parse((await reconnected(reorderTraffic)).result).amendment,
+          orderDecision,
+        );
+        assertEquals(confirmations.length, beforeReorder + 1);
+        const withdrawal = {
+          ...trafficAction,
+          action: "withdraw_finding_traffic",
+          trafficLinkId: secondLink.id,
+          reportVersion: 1,
+          evidenceVersion: ordered.evidenceVersion,
+          requestId: crypto.randomUUID(),
+        };
+        assertStringIncludes(
+          (await reconnected({
+            ...withdrawal,
+            evidenceVersion: unordered.evidenceVersion,
+          })).result,
+          "unavailable",
+        );
+        const decision =
+          JSON.parse((await reconnected(withdrawal)).result).amendment;
+        assertEquals(decision.linkId, secondLink.id);
+        const active =
+          JSON.parse((await reconnected(trafficAction)).result).page;
+        assertEquals(active.links.map(({ id }: { id: string }) => id), [
+          trafficLink.id,
+        ]);
+        assert(active.evidenceVersion !== ordered.evidenceVersion);
+        assertEquals(
+          JSON.parse((await reconnected(withdrawal)).result).amendment,
+          decision,
+        );
+        const exactWithdrawn = {
+          ...trafficAction,
+          trafficLinkId: secondLink.id,
+        };
+        assertStringIncludes(
+          (await reconnected(exactWithdrawn)).result,
+          "unavailable",
+        );
+        const retained = JSON.parse(
+          (await reconnected({ ...exactWithdrawn, includeWithdrawn: true }))
+            .result,
+        );
+        assertEquals(retained.link, secondLink);
+        assertEquals(retained.withdrawal, decision);
+        assertStringIncludes(
+          (await reconnected({
+            ...exactWithdrawn,
+            includeWithdrawn: true,
+            payloadPart: "response_body",
+          })).result,
+          "unavailable",
+        );
+        denied = "POST_TOOL_RESPONSE";
+        assertEquals(
+          (await reconnected({ ...exactWithdrawn, includeWithdrawn: true }))
+            .result,
+          "Tool response withheld by policy.",
+        );
+        denied = "PRE_OUTPUT";
+        assertEquals(
+          (await reconnected({ ...exactWithdrawn, includeWithdrawn: true }))
+            .response,
+          undefined,
+        );
+        denied = undefined;
+      });
       const trafficResult = (await turn(followLink)).result;
       assertEquals(JSON.parse(trafficResult).receipt.digest, traffic.digest);
       assert(!trafficResult.includes(trafficSecret));
@@ -2182,8 +2311,10 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
       ).link;
       assert(newerLink && newerLink.id !== trafficLink.id);
       assertEquals(
-        JSON.parse((await turn(trafficAction)).result).page.links.length,
-        2,
+        JSON.parse((await turn(trafficAction)).result).page.links.map((
+          { id }: { id: string },
+        ) => id),
+        [trafficLink.id, newerLink.id],
       );
       assertEquals(JSON.parse((await turn(linkStep)).result).result, linkPage);
       for (const hook of ["PRE_TOOL_CALL", "POST_TOOL_RESPONSE"] as const) {
