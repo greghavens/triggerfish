@@ -34,6 +34,7 @@ import { enforceSkillClassificationCeiling } from "./enforcer.ts";
 import { computeSkillHash, verifySkillIntegrity } from "./integrity.ts";
 import { createLogger } from "../../core/logger/logger.ts";
 import { fenceExternalMetadata } from "../../core/security/prompt_fencing.ts";
+import { redactCredentialText } from "../../core/logger/redactor.ts";
 import type { ConversationRecord } from "../../core/conversation/conversation_types.ts";
 
 const log = createLogger("skill-tools");
@@ -130,6 +131,13 @@ export function buildSkillAdministrationToolDefinitions(): readonly ToolDefiniti
     parameters: {
       ...buildReadSkillDef().parameters,
       limit: { type: "integer", description: "Maximum entries, from 1 to 50" },
+    },
+  }, {
+    name: "list_unavailable_skill_requests",
+    description:
+      "Count authorized requests for skills that were unavailable when requested in the current owner conversation.",
+    parameters: {
+      limit: { type: "integer", description: "Maximum groups, from 1 to 50" },
     },
   }, {
     name: "inspect_skill_document",
@@ -317,6 +325,70 @@ async function executeSkillUsage(
     if (calls.length >= limit) break;
   }
   return JSON.stringify({ calls, _classification: taint });
+}
+
+async function executeUnavailableSkillRequests(
+  ctx: SkillToolContext,
+  input: Record<string, unknown>,
+  dispatch?: ToolExecutionContext,
+): Promise<string> {
+  const isCurrentOwner = dispatch?.isCurrentInteractiveOwner;
+  if (
+    !isCurrentOwner?.() || !ctx.loadOwnerSkillHistory || !ctx.getSessionTaint
+  ) {
+    return "Error: Skill history requires the active owner session.";
+  }
+  const { limit = 25 } = input;
+  if (
+    Object.keys(input).some((key) => key !== "limit") ||
+    typeof limit !== "number" || !Number.isSafeInteger(limit) ||
+    limit < 1 || limit > 50
+  ) return "Error: Invalid unavailable skill request limit.";
+
+  const history = await ctx.loadOwnerSkillHistory();
+  if (!isCurrentOwner()) return "Error: The owner session is no longer active.";
+  const taint = ctx.getSessionTaint();
+  const groups = new Map<string, {
+    skill_name: string;
+    type: SkillType;
+    calls: number;
+    last_requested_at: string;
+  }>();
+  for (const row of history.toReversed()) {
+    const selector = row.tool_args?.skill_name;
+    const type = row.tool_args?.type;
+    if (
+      row.role !== "tool_call" || row.tool_name !== "read_skill" ||
+      !validSkillSelector(selector) ||
+      redactCredentialText(selector) !== selector ||
+      (type !== "BUNDLED" && type !== "USER_PROVIDED") ||
+      !canFlowTo(row.classification, taint)
+    ) continue;
+    try {
+      const receipt = JSON.parse(row.content);
+      if (
+        receipt?.found !== false || receipt.type !== type ||
+        receipt.skill_name !== selector
+      ) continue;
+    } catch {
+      continue;
+    }
+    const key = type + "/" + selector;
+    const prior = groups.get(key);
+    if (prior) prior.calls++;
+    else {
+      groups.set(key, {
+        skill_name: selector,
+        type,
+        calls: 1,
+        last_requested_at: row.timestamp,
+      });
+    }
+  }
+  const unavailable = [...groups.entries()].sort(([left, a], [right, b]) =>
+    b.calls - a.calls || left.localeCompare(right)
+  ).slice(0, limit).map(([, group]) => group);
+  return JSON.stringify({ unavailable, _classification: taint });
 }
 
 async function executeListSkills(
@@ -741,6 +813,9 @@ export function createSkillToolExecutor(
     }
     if (name === "list_skill_usage") {
       return await executeSkillUsage(ctx, input, context);
+    }
+    if (name === "list_unavailable_skill_requests") {
+      return await executeUnavailableSkillRequests(ctx, input, context);
     }
     const inspecting = name === "inspect_skill_document";
     if (name !== "read_skill" && !inspecting) return null;

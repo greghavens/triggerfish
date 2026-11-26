@@ -380,6 +380,7 @@ export async function dispatchApprovedToolCall(
     call.name === customToolManageName ||
     call.name === "list_skills" || call.name === "inspect_skill_document" ||
     call.name === "list_skill_usage" ||
+    call.name === "list_unavailable_skill_requests" ||
     chatGoalMutation(call.name, call.args) ||
     (call.name === "managed_goal_state" &&
       (call.args.action === "cite" || call.args.action === "status")) ||

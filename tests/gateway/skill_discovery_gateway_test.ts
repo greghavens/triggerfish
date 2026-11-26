@@ -56,10 +56,11 @@ Deno.test("Owner gateway discovers live skill grants and blocks pending draft ac
   assert(tools.some(({ name }) => name === "list_skills"));
   assert(tools.some(({ name }) => name === "inspect_skill_document"));
   assert(tools.some(({ name }) => name === "list_skill_usage"));
+  assert(tools.some(({ name }) => name === "list_unavailable_skill_requests"));
   assert(
     !filterToolsForRole(tools, false).some(({ name }) =>
       name === "list_skills" || name === "inspect_skill_document" ||
-      name === "list_skill_usage"
+      name === "list_skill_usage" || name === "list_unavailable_skill_requests"
     ),
   );
   assert(
@@ -390,6 +391,37 @@ Deno.test("Owner gateway discovers live skill grants and blocks pending draft ac
         _classification: "INTERNAL",
       },
     );
+    const unavailable = {
+      type: "USER_PROVIDED",
+      skill_name: "fixture-missing",
+    };
+    await turn("read_skill", unavailable);
+    await turn("read_skill", unavailable);
+    deny = "PRE_TOOL_CALL";
+    const beforeReport = historyLoads;
+    await turn("list_unavailable_skill_requests", {});
+    assertEquals(historyLoads, beforeReport);
+    deny = "POST_TOOL_RESPONSE";
+    await turn("read_skill", unavailable);
+    assertEquals(
+      (await turn("list_unavailable_skill_requests", {})).result,
+      "Tool response withheld by policy.",
+    );
+    deny = "PRE_OUTPUT";
+    assert(
+      !(await turn("list_unavailable_skill_requests", {})).messages.includes(
+        "response",
+      ),
+    );
+    deny = undefined;
+    const report = JSON.parse(
+      (await turn("list_unavailable_skill_requests", { limit: 1 })).result,
+    );
+    assertEquals(report.unavailable.length, 1);
+    assertEquals(report.unavailable[0].skill_name, unavailable.skill_name);
+    assertEquals(report.unavailable[0].type, unavailable.type);
+    assertEquals(report.unavailable[0].calls, 2);
+    assertEquals(report._classification, "INTERNAL");
   } finally {
     if (socket.readyState < WebSocket.CLOSING) {
       const closed = Promise.withResolvers<void>();

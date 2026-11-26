@@ -57,6 +57,7 @@ export const OWNER_ONLY_TOOLS: ReadonlySet<string> = new Set([
   "list_skills",
   "inspect_skill_document",
   "list_skill_usage",
+  "list_unavailable_skill_requests",
   "inspect_skill_draft",
   "inspect_skill_creation",
   "create_skill",

@@ -19,7 +19,10 @@ export function withAgentProfileRuntime(
       return false;
     }
     if (!settings.skills) return true;
-    if (name === "list_skills" || name === "skill_discover") return false;
+    if (
+      name === "list_skills" || name === "skill_discover" ||
+      name === "list_unavailable_skill_requests"
+    ) return false;
     return (name !== "read_skill" && name !== "inspect_skill_document" &&
       name !== "list_skill_usage") ||
       !args ||
