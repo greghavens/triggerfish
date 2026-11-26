@@ -8,7 +8,7 @@ export function isCustomToolName(name: unknown): name is string {
 }
 
 export interface CustomToolApprovalReview {
-  readonly action: "apply" | "retire";
+  readonly action: "apply" | "retire" | "test";
   readonly name: string;
 }
 
@@ -16,7 +16,8 @@ export function parseCustomToolApprovalReview(
   action: unknown,
   name: unknown,
 ): CustomToolApprovalReview | undefined {
-  return (action === "apply" || action === "retire") && isCustomToolName(name)
+  return (action === "apply" || action === "retire" || action === "test") &&
+      isCustomToolName(name)
     ? { action, name }
     : undefined;
 }

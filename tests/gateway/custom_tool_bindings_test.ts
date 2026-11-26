@@ -183,7 +183,10 @@ Deno.test("Owner publishes and revises one local diagnostic alias through exact 
       receipt(id: string) {
         return inbox.list().records.find((record) => record.id === id);
       },
-      async approve(approved: boolean, action: "apply" | "retire" = "apply") {
+      async approve(
+        approved: boolean,
+        action: "apply" | "retire" | "test" = "apply",
+      ) {
         let pending;
         for (let attempt = 0; attempt < 100 && !pending; attempt++) {
           pending = inbox.list().records.find((record) =>
@@ -231,6 +234,69 @@ Deno.test("Owner publishes and revises one local diagnostic alias through exact 
       gateway.turn(admin, { action: "apply", name: alias, revision });
     const initial = await inspect();
     assertEquals(initial.replacing, false);
+    const test = (revision: string) =>
+      gateway.turn(admin, { action: "test", name: alias, revision });
+    blocked = { hook: "PRE_TOOL_CALL", tool: admin };
+    assertStringIncludes((await test(initial.revision)).text, "blocked");
+    assertEquals(actual, []);
+    blocked = undefined;
+    const declinedTest = test(initial.revision);
+    await gateway.approve(false, "test");
+    assertStringIncludes((await declinedTest).text, "denied");
+    assertEquals(actual, []);
+
+    const staleTest = test(initial.revision);
+    await stage("config");
+    await gateway.approve(true, "test");
+    assertStringIncludes((await staleTest).text, "unavailable");
+    assertEquals(actual, []);
+    await stage("providers");
+
+    blocked = { hook: "PRE_TOOL_CALL", tool: "healthcheck" };
+    const deniedDiagnostic = test(initial.revision);
+    await gateway.approve(true, "test");
+    assertStringIncludes((await deniedDiagnostic).text, "blocked");
+    assertEquals(actual, []);
+
+    blocked = { hook: "POST_TOOL_RESPONSE", tool: "healthcheck" };
+    const privateDiagnostic = test(initial.revision);
+    await gateway.approve(true, "test");
+    assert(
+      !JSON.stringify((await privateDiagnostic).frames).includes(
+        "Healthcheck Report",
+      ),
+    );
+    assertEquals(actual, [["providers"]]);
+
+    blocked = { hook: "PRE_OUTPUT" };
+    const blockedDiagnosticOutput = test(initial.revision);
+    await gateway.approve(true, "test");
+    assert(
+      !JSON.stringify((await blockedDiagnosticOutput).frames).includes(
+        "Healthcheck Report",
+      ),
+    );
+    assertEquals(actual, [["providers"], ["providers"]]);
+
+    blocked = undefined;
+    const acceptedTest = test(initial.revision);
+    const testApproval = await gateway.approve(true, "test");
+    assertStringIncludes(
+      (await acceptedTest).text,
+      "[OK] providers: Default provider: custom-tool-fixture",
+    );
+    assertEquals(gateway.receipt(testApproval)?.customTool, {
+      action: "test",
+      name: alias,
+    });
+    assertEquals(actual, [["providers"], ["providers"], ["providers"]]);
+    assert(!aliasAdvertised);
+    assertStringIncludes((await gateway.turn(alias)).text, "unavailable");
+    assertEquals(
+      JSON.parse((await gateway.turn(admin, { action: "list" })).text).bindings,
+      [],
+    );
+    actual.length = 0;
     const denied = apply(initial.revision);
     await gateway.approve(false);
     assertStringIncludes((await denied).text, "denied");

@@ -23,19 +23,19 @@ interface Binding {
 export const customToolManage: ToolDefinition = {
   name: customToolManageName,
   description:
-    "Review an exact operator-staged diagnostic binding with inspect, list active bindings, or request approval to apply the reviewed revision. Read status for an active revision to retire.",
+    "Review an exact operator-staged diagnostic binding with inspect, list active bindings, or request approval to test or apply the reviewed revision. Testing does not register the tool. Read status for an active revision to retire.",
   parameters: {
     action: {
       type: "string",
       description: "Management operation",
-      enum: ["list", "inspect", "apply", "status", "retire"],
+      enum: ["list", "inspect", "test", "apply", "status", "retire"],
       required: true,
     },
     name: { type: "string", description: "Exact staged custom tool name." },
     revision: {
       type: "string",
       description:
-        "Revision returned by inspect for apply, or status for retire.",
+        "Revision returned by inspect for test or apply, or status for retire.",
     },
   },
 };
@@ -171,6 +171,22 @@ export function createCustomToolBindings(baseDir: string) {
 
   return {
     read,
+    reviewedDiagnostic(
+      args: Record<string, unknown>,
+      context?: ToolExecutionContext,
+    ) {
+      const selected = parseCustomToolMutation(customToolManageName, args);
+      if (
+        selected?.action !== "test" || !context?.toolApprovalRequestId ||
+        !context.isCurrentInteractiveOwner?.()
+      ) return;
+      try {
+        const current = withStore((db) => review(db, selected.name));
+        if (current?.revision === selected.revision) return current.binding;
+      } catch {
+        return;
+      }
+    },
     definitions(): ToolDefinition[] {
       try {
         if (!privateFile(databasePath)) return [];
@@ -218,7 +234,7 @@ export function createCustomToolBindings(baseDir: string) {
             : "Error: The custom tool binding is unavailable.";
         }
         const approval = context?.toolApprovalRequestId;
-        if (!mutation || !approval) {
+        if (!mutation || mutation.action === "test" || !approval) {
           return "Error: Custom tool changes require the exact reviewed revision and owner approval.";
         }
         return withStore((db) => {

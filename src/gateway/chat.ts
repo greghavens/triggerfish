@@ -447,7 +447,9 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
               : "Error: Owner context compaction is unavailable.",
           );
         }
-        if (customTools && name === customToolManage.name) {
+        const testCustomTool = name === customToolManage.name &&
+          input.action === "test";
+        if (customTools && name === customToolManage.name && !testCustomTool) {
           if (
             owner && (input.action === "inspect" || input.action === "apply") &&
             isCustomToolName(input.name) && existingTool(input.name)
@@ -458,27 +460,42 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
           }
           return Promise.resolve(customTools.manage(input, context));
         }
-        if (customTools && isCustomToolName(name) && !existingTool(name)) {
-          const binding =
-            owner && permitsDiagnostics && !Object.keys(input).length
-              ? customTools.read(name)
-              : undefined;
-          if (!binding) {
+        if (
+          customTools &&
+          (testCustomTool || (isCustomToolName(name) && !existingTool(name)))
+        ) {
+          const binding = () => {
+            if (!owner || !permitsDiagnostics) return;
+            if (testCustomTool) {
+              return isCustomToolName(input.name) && !existingTool(input.name)
+                ? customTools.reviewedDiagnostic(input, context)
+                : undefined;
+            }
+            if (Object.keys(input).length === 0) return customTools.read(name);
+          };
+          const selected = binding();
+          if (!selected) {
             return Promise.resolve(
-              "Error: The custom tool binding is unavailable.",
+              testCustomTool
+                ? "Error: The reviewed diagnostic proposal is unavailable."
+                : "Error: The custom tool binding is unavailable.",
             );
           }
           return orchestrator.executeOperatorTool({
             name: "healthcheck",
-            args: { components: [binding.component] },
+            args: { components: [selected.component] },
           }, {
             session: getSession(),
             targetClassification: ownerTargetClassification,
             suppressToolEvents: true,
-          }).then((result) => result.ok
-            ? result.value
-            : "Error: The underlying operation is blocked."
-          );
+          }).then((result) => {
+            if (testCustomTool && !binding()) {
+              return "Error: The reviewed diagnostic proposal changed during testing.";
+            }
+            return result.ok
+              ? result.value
+              : "Error: The underlying operation is blocked.";
+          });
         }
         if (name === operatorRunTool.name && config.operatorRunExecutor) {
           return owner
