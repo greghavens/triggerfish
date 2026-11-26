@@ -129,7 +129,12 @@ export type AssessmentPlan =
 
 type FormalGoalPlan = Pick<
   AssessmentPlan,
-  "goal" | "impactAsset" | "traceNode" | "evidenceNode" | "depth"
+  | "goal"
+  | "impactAsset"
+  | "traceNode"
+  | "evidenceNode"
+  | "depth"
+  | "inventoryCoverageEnabled"
 >;
 
 export interface SentinelFormalGoalApproval {
@@ -1727,14 +1732,32 @@ function normalizeFormalGoalPlan(
   if (
     !raw || typeof raw !== "object" || Array.isArray(raw) ||
     Object.keys(raw).some((key) =>
-      !["goal", "impactAsset", "traceNode", "evidenceNode", "depth"].includes(
-        key,
-      )
+      ![
+        "goal",
+        "impactAsset",
+        "traceNode",
+        "evidenceNode",
+        "depth",
+        "inventoryCoverageEnabled",
+      ].includes(key)
     )
   ) {
     throw new Error("Invalid approved Sentinel goal plan");
   }
-  const { goal, impactAsset, traceNode, evidenceNode, depth } = raw;
+  const {
+    goal,
+    impactAsset,
+    traceNode,
+    evidenceNode,
+    depth,
+    inventoryCoverageEnabled,
+  } = raw;
+  if (
+    inventoryCoverageEnabled !== undefined &&
+    typeof inventoryCoverageEnabled !== "boolean"
+  ) {
+    throw new Error("Invalid Sentinel inventory coverage setting");
+  }
   for (
     const [value, max] of [
       [goal, 500],
@@ -1753,7 +1776,14 @@ function normalizeFormalGoalPlan(
   if (depth !== undefined && (!Number.isSafeInteger(depth) || depth < 0)) {
     throw new Error("Invalid approved Sentinel goal plan depth");
   }
-  return { goal: goal?.trim(), impactAsset, traceNode, evidenceNode, depth };
+  return {
+    goal: goal?.trim(),
+    impactAsset,
+    traceNode,
+    evidenceNode,
+    depth,
+    inventoryCoverageEnabled,
+  };
 }
 
 export interface SentinelWorkerGoalProposal {
@@ -1946,6 +1976,9 @@ function formalGoalApprovalBinding(approval: SentinelFormalGoalApproval) {
     ? undefined
     : normalizeSentinelOperatingConstraints(approval.initialConstraints);
   const patch = normalizeFormalGoalPlan(approval.plan);
+  if (mode !== "start" && patch.inventoryCoverageEnabled !== undefined) {
+    throw new Error("Inventory coverage settings require a new assessment");
+  }
   const planChanges = JSON.parse(JSON.stringify(patch)) as FormalGoalPlan;
   const binding = createHash("sha256").update(JSON.stringify([
     mode,

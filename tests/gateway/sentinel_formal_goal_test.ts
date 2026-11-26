@@ -552,3 +552,124 @@ Deno.test("authenticated Sentinel chat drafts, approves and extends independentl
     await Deno.remove(directory, { recursive: true });
   }
 });
+
+Deno.test("reviewed standalone Sentinel admission binds optional inventory coverage", async () => {
+  const directory = await Deno.makeTempDir();
+  const path = resolveSentinelCasePath(directory);
+  await Deno.mkdir(dirname(path), { recursive: true });
+  await Deno.writeTextFile(
+    path,
+    JSON.stringify({ version: 1, nodes: [], edges: [] }),
+  );
+  const command = (inventoryCoverageEnabled: unknown) =>
+    `assessment goals start ${
+      JSON.stringify({
+        requestId: "reviewed-coverage",
+        objective: "Review the published service record.",
+        goals: [goal("inventory", "future-evidence")],
+        inventoryCoverageEnabled,
+      })
+    }`;
+
+  async function connected(
+    check: (turn: (content: string) => Promise<string>) => Promise<void>,
+  ) {
+    const registry = createProviderRegistry();
+    const token = crypto.randomUUID();
+    const gateway = createGatewayServer({
+      port: 0,
+      token,
+      chatSession: createChatSession({
+        session: createSession({
+          userId: "owner" as UserId,
+          channelId: "test" as ChannelId,
+        }),
+        providerRegistry: registry,
+        hookRunner: createHookRunner(createPolicyEngine()),
+        sentinelSnapshotPath: path,
+        allowSentinelModelAccess: true,
+      }),
+    });
+    const { port } = await gateway.start();
+    const socket = new WebSocket(`ws://127.0.0.1:${port}/chat?token=${token}`);
+    try {
+      await new Promise<void>((resolve, reject) => {
+        socket.addEventListener("open", () => resolve(), { once: true });
+        socket.addEventListener("error", reject, { once: true });
+      });
+      const turn = (content: string) => {
+        const done = Promise.withResolvers<string>();
+        let response = "";
+        let failure: string | undefined;
+        const timer = setTimeout(
+          () => done.reject(new Error("Missing turn end")),
+          3000,
+        );
+        const receive = ({ data }: MessageEvent) => {
+          const event = JSON.parse(data);
+          if (event.type === "response") response = event.text;
+          if (event.type === "error") failure = event.message;
+          if (event.type === "turn_end") {
+            if (failure) done.reject(new Error(failure));
+            else done.resolve(response);
+          }
+        };
+        socket.addEventListener("message", receive);
+        socket.send(JSON.stringify({ type: "message", content }));
+        return done.promise.finally(() => {
+          clearTimeout(timer);
+          socket.removeEventListener("message", receive);
+        });
+      };
+      await turn("/sentinel on");
+      await check(turn);
+    } finally {
+      socket.close();
+      await gateway.stop();
+    }
+  }
+
+  try {
+    await connected(async (turn) => {
+      await assertRejects(
+        () => turn(command("false")),
+        Error,
+        "Choose whether inventory coverage",
+      );
+      assertEquals(readSentinelAssessment(path), undefined);
+      const saved = JSON.parse(await turn(command(false)));
+      assertEquals(saved.duplicate, false);
+      assertEquals(saved.inventoryCoverageEnabled, false);
+      assertEquals(
+        readSentinelAssessment(path)?.plan.inventoryCoverageEnabled,
+        false,
+      );
+      const amendment = `assessment goals add ${
+        JSON.stringify({
+          requestId: "invalid-coverage-amendment",
+          goal: goal("followup", "future-evidence"),
+          inventoryCoverageEnabled: true,
+        })
+      }`;
+      await assertRejects(
+        () => turn(amendment),
+        Error,
+        "when starting an assessment",
+      );
+    });
+    await connected(async (turn) => {
+      const saved = JSON.parse(await turn("assessment goals status"));
+      assertEquals(saved.inventoryCoverageEnabled, false);
+      const replay = JSON.parse(await turn(command(false)));
+      assertEquals(replay.duplicate, true);
+      assertEquals(replay.inventoryCoverageEnabled, false);
+      await assertRejects(() => turn(command(true)), Error, "already used");
+      assertEquals(
+        readSentinelAssessment(path)?.revision,
+        replay.appliedRevision,
+      );
+    });
+  } finally {
+    await Deno.remove(directory, { recursive: true });
+  }
+});

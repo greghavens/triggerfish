@@ -137,6 +137,11 @@ export async function handleSentinelFormalGoalChat(
       revision: state?.revision,
       runId: state?.plan.runId,
       active: state?.active ?? false,
+      ...(state &&
+        {
+          inventoryCoverageEnabled:
+            state.plan.inventoryCoverageEnabled !== false,
+        }),
       paused: state?.paused ?? false,
       completion: readSentinelGoalCompletion(path) ?? null,
       history: readSentinelAssessmentHistory(path),
@@ -181,8 +186,20 @@ export async function handleSentinelFormalGoalChat(
     mode !== "start" && input.goal !== undefined ? [input.goal] : input.goals,
   );
   const requestId = operatorText(input.requestId, 64, "a unique request ID");
+  const { inventoryCoverageEnabled } = input;
+  if (
+    inventoryCoverageEnabled !== undefined &&
+    (mode !== "start" || typeof inventoryCoverageEnabled !== "boolean")
+  ) {
+    throw new Error(
+      "Choose whether inventory coverage is enabled when starting an assessment.",
+    );
+  }
   const plan = mode === "start"
-    ? { goal: operatorText(input.objective, 500, "an objective") }
+    ? {
+      goal: operatorText(input.objective, 500, "an objective"),
+      inventoryCoverageEnabled,
+    }
     : undefined;
   if (signal.aborted) throw new Error("Goal approval was cancelled.");
   if (
@@ -215,6 +232,9 @@ export async function handleSentinelFormalGoalChat(
     appliedRevision: applied.appliedRevision,
     active: applied.state.active,
     paused: applied.state.paused,
+    ...(mode === "start" && {
+      inventoryCoverageEnabled: inventoryCoverageEnabled !== false,
+    }),
     formalGoals: applied.state.plan.formalGoals,
     activeFormalGoalIds: applied.state.plan.activeFormalGoalIds,
     ...(initialConstraints && {
