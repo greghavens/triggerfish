@@ -10933,7 +10933,11 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
                 ...("evidenceVersion" in selected && {
                   evidenceVersion: selected.evidenceVersion,
                 }),
-                ...findingReportMetadata(report.amendments, version),
+                ...findingReportMetadata(
+                  report.amendments,
+                  version,
+                  report.finding,
+                ),
                 remediation,
                 ...(reportEvidence && { reportEvidence }),
                 title: selected.title,

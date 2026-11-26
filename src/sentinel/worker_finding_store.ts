@@ -45,6 +45,8 @@ export interface SentinelWorkerFindingInput
   extends SentinelWorkerFindingReceiptScope {
   readonly title: string;
   readonly summary: string;
+  readonly severity?: typeof sentinelFindingSeverities[number];
+  readonly findingCategory?: string;
 }
 
 export interface SentinelFindingTrafficPublication {
@@ -210,16 +212,40 @@ export function normalizeFindingReportCategory(
   return value.trim();
 }
 
+/** Normalize optional worker classification without accepting analyst disposition. */
+export function initialFindingMetadata(
+  { severity, findingCategory }: {
+    severity?: unknown;
+    findingCategory?: unknown;
+  },
+) {
+  const parsedSeverity = sentinelFindingSeverities.find((value) =>
+    value === severity
+  );
+  const category = normalizeFindingReportCategory(findingCategory);
+  if (
+    (severity !== undefined && !parsedSeverity) ||
+    (findingCategory !== undefined && !category)
+  ) return;
+  return {
+    ...(parsedSeverity && { severity: parsedSeverity }),
+    ...(category && { findingCategory: category }),
+  };
+}
+
 export function findingReportMetadata(
   amendments: readonly SentinelWorkerFindingReportAmendment[],
   version = Number.MAX_SAFE_INTEGER,
+  initial?: Pick<SentinelWorkerFindingInput, "severity" | "findingCategory">,
 ) {
-  const severity = amendments.findLast((item) =>
-    item.version <= version && item.severity !== undefined
-  )?.severity;
-  const findingCategory = amendments.findLast((item) =>
-    item.version <= version && item.findingCategory !== undefined
-  )?.findingCategory;
+  const severity =
+    amendments.findLast((item) =>
+      item.version <= version && item.severity !== undefined
+    )?.severity ?? initial?.severity;
+  const findingCategory =
+    amendments.findLast((item) =>
+      item.version <= version && item.findingCategory !== undefined
+    )?.findingCategory ?? initial?.findingCategory;
   const disposition = amendments.findLast((item) =>
     item.version <= version && item.disposition !== undefined
   )?.disposition;
@@ -341,13 +367,15 @@ function normalizeScope(scope: SentinelWorkerFindingReceiptScope) {
 }
 
 function normalizeFinding(raw: SentinelWorkerFindingInput) {
-  if (!bounded(raw.title, 256) || !bounded(raw.summary, 4096)) {
+  const metadata = initialFindingMetadata(raw);
+  if (!metadata || !bounded(raw.title, 256) || !bounded(raw.summary, 4096)) {
     throw new Error("Invalid Sentinel worker finding text");
   }
   return {
     ...normalizeScope(raw),
     title: raw.title,
     summary: raw.summary,
+    ...metadata,
     kind: "finding" as const,
   };
 }
@@ -937,7 +965,7 @@ export function openSentinelWorkerFindingStore(
       version: latest?.version ?? 1,
       title: latest?.title ?? finding.title,
       summary: latest?.summary ?? finding.summary,
-      ...findingReportMetadata(amendments),
+      ...findingReportMetadata(amendments, latest?.version, finding),
       amendments,
     };
   }
@@ -1024,10 +1052,9 @@ export function openSentinelWorkerFindingStore(
         ? "operator" as const
         : "worker" as const,
       recordedAt: item.recordedAt,
-      ...(item.kind === "report_amendment" && item.severity !== undefined &&
+      ...(item.severity !== undefined &&
         { severity: item.severity }),
-      ...(item.kind === "report_amendment" &&
-        item.findingCategory !== undefined &&
+      ...(item.findingCategory !== undefined &&
         { findingCategory: item.findingCategory }),
       ...(item.kind === "report_amendment" && item.disposition !== undefined &&
         { disposition: item.disposition }),

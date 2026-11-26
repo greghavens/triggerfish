@@ -48,6 +48,7 @@ import {
 import {
   findingReportMetadata,
   hasSentinelWorkerFindingJournal,
+  initialFindingMetadata,
   normalizeFindingReportCategory,
   openSentinelWorkerFindingStore,
   readSentinelCaseFindingReceipts,
@@ -211,6 +212,15 @@ export const sentinelFindingWriteTools: readonly ToolDefinition[] = [
       requestId: exactId,
       title: summary,
       summary,
+      severity: {
+        type: "string",
+        enum: [...sentinelFindingSeverities],
+        description: "Optional initial severity of the verified control gap",
+      },
+      findingCategory: {
+        type: "string",
+        description: "Optional short defensive finding category",
+      },
       trafficRefs: {
         type: "array",
         description:
@@ -608,6 +618,7 @@ export function executeSentinelWorkerFindingTool(
                     ...findingReportMetadata(
                       report.amendments,
                       baseline.reportVersion,
+                      report.finding,
                     ),
                   },
                 }
@@ -756,8 +767,10 @@ export function executeSentinelWorkerFindingTool(
           const graphId = initial ? graphFindingId : previous?.graphFindingId;
           const control = initial ? controlId : previous?.controlId;
           const title = args.title;
+          const classification = initial ? initialFindingMetadata(args) : {};
           if (
-            typeof graphId !== "string" || typeof control !== "string" ||
+            !classification || typeof graphId !== "string" ||
+            typeof control !== "string" ||
             initial && typeof title !== "string" || !initial &&
               (!previous || previous.caseId !== caseId ||
                 previous.runId !== state.plan.runId ||
@@ -893,7 +906,7 @@ export function executeSentinelWorkerFindingTool(
             }
             if (
               JSON.stringify([
-                    { ...receipt, title },
+                    { ...receipt, title, ...classification },
                     ...attachments.map(({ staged }) => ({
                       caseId,
                       asset,
@@ -904,7 +917,7 @@ export function executeSentinelWorkerFindingTool(
             ) return;
             const stagedItems = attachments.map(({ staged }) => staged);
             const staged = store.stageTrafficFinding(
-              { ...receipt, title },
+              { ...receipt, title, ...classification },
               selected.batch ? stagedItems : stagedItems[0],
             );
             if (!staged) return;
@@ -955,7 +968,10 @@ export function executeSentinelWorkerFindingTool(
             return saved && { _classification: "INTERNAL", ...saved };
           }
           const record = initial && typeof title === "string"
-            ? store.recordFinding({ ...receipt, title }, notify)
+            ? store.recordFinding(
+              { ...receipt, title, ...classification },
+              notify,
+            )
             : previous && store.recordRecheck({
               ...receipt,
               findingId: previous.id,

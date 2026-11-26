@@ -6036,13 +6036,18 @@ async function verifyInitialTrafficPublication(
   path: string,
   state: State,
   source: ReturnType<typeof assignedLease>,
-  input: Record<string, unknown>,
+  findingInput: Record<string, unknown>,
   traffic: readonly { revision: number; evidenceId: string; digest: string }[],
   assetId: string,
   neighbor: { evidenceId: string; digest: string },
   mode: "resume" | "revoked" | "stale",
   hinted: boolean | "set",
 ) {
+  const input = {
+    ...findingInput,
+    severity: "high",
+    findingCategory: "Control coverage",
+  };
   const ref = {
     kind: "sentinel",
     id: "retained-finding",
@@ -6141,6 +6146,11 @@ async function verifyInitialTrafficPublication(
       tool(report, {
         ...input,
         ...selectedArgs([...refs.slice(0, -1), stale]),
+      }),
+      tool(report, {
+        ...input,
+        findingCategory: `Bearer ${"c".repeat(32)}`,
+        ...selectedArgs(refs),
       }),
       ...(hintId !== undefined
         ? [tool(report, {
@@ -6357,6 +6367,8 @@ async function verifyInitialTrafficPublication(
     attached.map(({ sourceStep }) => sourceStep?.stepIndex),
     traffic.map((_, index) => index + 1),
   );
+  assertEquals(recovered.record.severity, input.severity);
+  assertEquals(recovered.record.findingCategory, input.findingCategory);
   assertEquals(recovered.record.runId, state.plan.runId);
   assertEquals(recovered.record.targetId, assetId);
   assertEquals(readSentinelWorkerFindingHistory(path), [recovered.record]);
@@ -6388,6 +6400,24 @@ async function verifyInitialTrafficPublication(
     revision: ref.revision,
     receiptId: recovered.record.id,
   };
+  const readInitialClassification = () =>
+    withFindingAssignmentGateway(
+      baseDir,
+      () => Promise.resolve(false),
+      async (turn) => {
+        const { report } = JSON.parse(
+          await turn({
+            ...reportRef,
+            action: "finding_report",
+            reportVersion: 1,
+          }),
+        );
+        assertEquals(report.severity, input.severity);
+        assertEquals(report.findingCategory, input.findingCategory);
+        assertEquals(report.disposition, undefined);
+      },
+    );
+  await readInitialClassification();
   let baseline: unknown;
   if (hinted && !batch) {
     await withFindingAssignmentGateway(
@@ -6457,6 +6487,7 @@ async function verifyInitialTrafficPublication(
   const liveTidepoolLinks = await readTidepoolLinks();
   assertEquals(liveTidepoolLinks.toSorted(byId), attached.toSorted(byId));
   await restoreArchive();
+  await readInitialClassification();
   const traceQuery = {
     action: "worker_trace_result",
     kind: ref.kind,

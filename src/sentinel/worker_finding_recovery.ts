@@ -8,6 +8,7 @@ import {
 } from "./recheck_inconclusive.ts";
 import {
   hasSentinelWorkerFindingJournal,
+  initialFindingMetadata,
   openSentinelWorkerFindingStore,
   readSentinelStagedTrafficFinding,
   readSentinelWorkerFindingWriteReceipt,
@@ -135,8 +136,13 @@ export function sentinelFindingMutationArguments(
     ? [...fields[name], "trafficRefs"] as const
     : fields[name];
   const { requestId } = input;
+  const classification = name === "sentinel_report_finding"
+    ? initialFindingMetadata(input)
+    : {};
   if (
-    Object.keys(input).length !== keys.length + 1 ||
+    !classification ||
+    Object.keys(input).length !==
+      keys.length + Object.keys(classification).length + 1 ||
     typeof requestId !== "string" ||
     !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(requestId)
   ) return;
@@ -167,7 +173,7 @@ export function sentinelFindingMutationArguments(
     }
     args[key] = value;
   }
-  return { ...args, requestId: requestId.toLowerCase() };
+  return { ...args, ...classification, requestId: requestId.toLowerCase() };
 }
 
 export function lookupSentinelPendingTrafficFinding(
@@ -195,6 +201,7 @@ export function lookupSentinelPendingTrafficFinding(
     ...Object.fromEntries(
       fields.sentinel_report_finding.map((key) => [key, staged.finding[key]]),
     ),
+    ...initialFindingMetadata(staged.finding),
     requestId,
     ...(Array.isArray(staged.traffic)
       ? {
@@ -311,6 +318,7 @@ export function lookupSentinelFindingMutation(
     ...Object.fromEntries(
       fields[name].map((key) => [key, Reflect.get(receipt, key)]),
     ),
+    ...(receipt.kind === "finding" && initialFindingMetadata(receipt)),
     ...(receipt.kind === "report_amendment" &&
       receipt.evidenceVersion !== undefined &&
       { evidenceVersion: receipt.evidenceVersion }),
