@@ -1,4 +1,5 @@
 import { isDeepStrictEqual } from "node:util";
+import { createHash } from "node:crypto";
 import { canFlowTo } from "../core/types/classification.ts";
 import {
   readSentinelLocalUsageSteps,
@@ -6,6 +7,7 @@ import {
 } from "../sentinel/local_tool_usage.ts";
 import type { OperatorRunToolContext } from "./operator_run_tool.ts";
 import { readSentinelFindingReceiptScope } from "./sentinel_worker_findings.ts";
+import { readProjectedSentinelTrafficReceipt } from "./sentinel_traffic_tool.ts";
 
 /** Authorize every counted step before returning an exact local-tool rollup. */
 export async function readAuthorizedSentinelLocalToolUsage(
@@ -35,6 +37,7 @@ export async function readAuthorizedSentinelLocalToolUsage(
       scope.runId,
       args.includeRetainedTopology === true,
       args.includeRetainedFindingSources === true,
+      args.includeRetainedTrafficMetadata === true,
     );
     if (
       !rows ||
@@ -65,6 +68,8 @@ export async function readAuthorizedSentinelLocalToolUsage(
       };
     const selector = "goalReceiptRead" in step
       ? step.goalReceiptRead.args
+      : "trafficRead" in step
+      ? step.trafficRead.args
       : "taskId" in step
       ? {}
       : { revision };
@@ -78,23 +83,41 @@ export async function readAuthorizedSentinelLocalToolUsage(
       !currentCase() || !await authorizeTrace(scope, step.tool, selector) ||
       !currentCase()
     ) return;
-    const text = "goalReceiptRead" in step
-      ? await reopenLinked?.(step)
-      : metadata;
+    const reopen = async () => {
+      if ("goalReceiptRead" in step) return await reopenLinked?.(step);
+      if ("trafficRead" in step) {
+        const result = readProjectedSentinelTrafficReceipt(
+          path,
+          caseId,
+          revision,
+          step.trafficRead.args,
+          "assignedTarget" in step ? step.assignedTarget : undefined,
+        );
+        const text = result && JSON.stringify(result);
+        return text && createHash("sha256").update(text).digest("hex") ===
+            step.trafficRead.sha256
+          ? text
+          : undefined;
+      }
+      return metadata;
+    };
+    const text = await reopen();
     if (
       !text || !currentCase() ||
       !await authorizeTrace(scope, step.tool, selector, text) || !currentCase()
     ) return;
     if (
-      "goalReceiptRead" in step && (text !== await reopenLinked?.(step) ||
+      ("goalReceiptRead" in step || "trafficRead" in step) &&
+      (text !== await reopen() ||
         !currentCase())
     ) return;
     const role = "taskId" in step ? "worker" : "planner";
-    const group = groups.get(step.tool) ??
+    const groupKey = role + "/" + step.tool;
+    const group = groups.get(groupKey) ??
       { role, tool: step.tool, calls: 0, failed: 0 };
     group.calls++;
     if (step.outcome === "error") group.failed++;
-    groups.set(step.tool, group);
+    groups.set(groupKey, group);
   }
   if (!await owner(args) || !isDeepStrictEqual(load(), selected)) return;
   return { runId: selected.runId, totals: [...groups.values()] };

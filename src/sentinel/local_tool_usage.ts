@@ -2,6 +2,7 @@
 /// <reference path="../core/sqlite_types.d.ts" />
 import { dirname, join } from "@std/path";
 import { DatabaseSync } from "node:sqlite";
+import { sentinelTrafficReadArgs } from "./traffic_recovery.ts";
 import { parseSentinelPinnedFindingRead } from "./worker_goal_recovery.ts";
 
 interface Step {
@@ -22,8 +23,32 @@ export type SentinelLinkedUsageStep = Step & {
   };
 };
 
+function trafficBinding(row: Record<string, unknown>, revision: number) {
+  const args = sentinelTrafficReadArgs({
+    revision: row.trafficRevision,
+    evidenceId: row.trafficEvidence,
+    digest: row.trafficDigest,
+  });
+  return args?.revision === revision && typeof row.trafficSha === "string" &&
+      /^[a-f0-9]{64}$/.test(row.trafficSha)
+    ? { args, sha256: row.trafficSha }
+    : undefined;
+}
+
+export type SentinelTrafficUsageStep =
+  & Step
+  & {
+    readonly tool: "sentinel_traffic_get";
+    readonly trafficRead: NonNullable<ReturnType<typeof trafficBinding>>;
+  }
+  & (
+    | { readonly plannerIdentity: string; readonly attempt: number }
+    | { readonly taskId: string; readonly assignedTarget: string }
+  );
+
 export type SentinelLocalUsageStep =
   | SentinelLinkedUsageStep
+  | SentinelTrafficUsageStep
   | (
     & Step
     & (
@@ -46,6 +71,7 @@ export function readSentinelLocalUsageSteps(
   runId: string,
   includeRetainedTopology = false,
   includeRetainedFindingSources = false,
+  includeRetainedTrafficMetadata = false,
 ): readonly SentinelLocalUsageStep[] | undefined {
   const path = join(dirname(snapshotPath), "sentinel-adaptive.db");
   try {
@@ -77,14 +103,21 @@ export function readSentinelLocalUsageSteps(
     if (table("adaptive_model_reads") && table("adaptive_model_history")) {
       const rows = db.prepare(`
         SELECT trace.identity, trace.attempt, step.key AS ordinal,
+          json_extract(step.value, '$.tool') AS tool,
+          json_extract(step.value, '$.trafficRead.revision') AS trafficRevision,
+          json_extract(step.value, '$.trafficRead.evidenceId') AS trafficEvidence,
+          json_extract(step.value, '$.trafficRead.digest') AS trafficDigest,
+          json_extract(step.value, '$.trafficRead.sha256') AS trafficSha,
           json_extract(step.value, '$.outcome') AS outcome
         FROM adaptive_model_reads trace
         JOIN adaptive_model_history history USING(identity, attempt)
         JOIN json_each(trace.plannerReads) step
         WHERE (trace.identity = ? OR substr(trace.identity, 1, length(?) + 1) = ? || ':')
-          AND json_extract(step.value, '$.tool') = 'sentinel_graph_overview'
+          AND (json_extract(step.value, '$.tool') = 'sentinel_graph_overview'
+            OR (? AND json_extract(step.value, '$.tool') = 'sentinel_traffic_get'
+              AND json_extract(step.value, '$.outcome') = 'returned'))
         ORDER BY trace.identity, trace.attempt, ordinal LIMIT ?
-      `).all(key, key, key, budget + 1);
+      `).all(key, key, key, Number(includeRetainedTrafficMetadata), budget + 1);
       for (const row of rows) {
         if (
           typeof row.identity !== "string" ||
@@ -94,6 +127,19 @@ export function readSentinelLocalUsageSteps(
           !Number.isSafeInteger(row.ordinal) ||
           (row.outcome !== "returned" && row.outcome !== "error")
         ) return;
+        if (row.tool === "sentinel_traffic_get") {
+          const trafficRead = trafficBinding(row, revision);
+          if (!trafficRead) return;
+          retained.push({
+            tool: row.tool,
+            plannerIdentity: row.identity,
+            attempt: row.attempt,
+            ordinal: row.ordinal,
+            outcome: row.outcome,
+            trafficRead,
+          });
+          continue;
+        }
         retained.push({
           tool: "sentinel_graph_overview",
           plannerIdentity: row.identity,
@@ -155,19 +201,25 @@ export function readSentinelLocalUsageSteps(
         json_extract(step.value, '$.goalReceiptRead.args.sourceAsset') AS sourceAsset,
         json_extract(step.value, '$.goalReceiptRead.args.finding') AS findingId,
         json_extract(step.value, '$.goalReceiptRead.args.snapshotDigest') AS snapshotDigest,
-        json_extract(step.value, '$.goalReceiptRead.sha256') AS digest
+        json_extract(step.value, '$.goalReceiptRead.sha256') AS digest,
+        json_extract(step.value, '$.trafficRead.revision') AS trafficRevision,
+        json_extract(step.value, '$.trafficRead.evidenceId') AS trafficEvidence,
+        json_extract(step.value, '$.trafficRead.digest') AS trafficDigest,
+        json_extract(step.value, '$.trafficRead.sha256') AS trafficSha
       FROM selected JOIN json_each(selected.steps) step
       WHERE selected.rank = 1
         AND (json_extract(step.value, '$.tool') = 'sentinel_assigned_target'
           OR (json_extract(step.value, '$.outcome') = 'returned' AND (
             (? AND json_extract(step.value, '$.tool') = 'sentinel_shared_topology_source')
             OR (? AND json_extract(step.value, '$.tool') = 'sentinel_shared_finding_source')
+            OR (? AND json_extract(step.value, '$.tool') = 'sentinel_traffic_get')
           )))
       ORDER BY selected.id, ordinal LIMIT ?
     `).all(
       key,
       Number(includeRetainedTopology),
       Number(includeRetainedFindingSources),
+      Number(includeRetainedTrafficMetadata),
       budget + 1 - retained.length,
     );
     for (const row of rows) {
@@ -177,6 +229,19 @@ export function readSentinelLocalUsageSteps(
         typeof row.ordinal !== "number" || !Number.isSafeInteger(row.ordinal) ||
         (row.outcome !== "returned" && row.outcome !== "error")
       ) return;
+      if (row.tool === "sentinel_traffic_get") {
+        const trafficRead = trafficBinding(row, revision);
+        if (!trafficRead) return;
+        retained.push({
+          tool: row.tool,
+          taskId: row.id,
+          assignedTarget: row.nodeId,
+          ordinal: row.ordinal,
+          outcome: row.outcome,
+          trafficRead,
+        });
+        continue;
+      }
       if (row.tool === "sentinel_shared_topology_source") {
         if (
           typeof row.target !== "string" ||

@@ -186,6 +186,7 @@ async function withGateway(
       denyWorkerSourceAfter: boolean;
       denyTopologySourceHook?: string;
       denyFindingSourceHook?: string;
+      denyTrafficReceiptHook?: string;
       workerSourceHooks: string[];
       afterWorkerObservation?: () => void;
       workflowMetadataCalls: number;
@@ -215,6 +216,7 @@ async function withGateway(
     denyWorkerSourceAfter: false,
     denyTopologySourceHook: undefined as string | undefined,
     denyFindingSourceHook: undefined as string | undefined,
+    denyTrafficReceiptHook: undefined as string | undefined,
     workerSourceHooks: [] as string[],
     afterWorkerObservation: undefined as (() => void) | undefined,
     workflowMetadataCalls: 0,
@@ -269,6 +271,8 @@ async function withGateway(
           hook === policy.denyTopologySourceHook) &&
         !(input.tool_name === "sentinel_shared_finding_source" &&
           hook === policy.denyFindingSourceHook) &&
+        !(input.tool_name === "sentinel_traffic_get" &&
+          hook === policy.denyTrafficReceiptHook) &&
         !(policy.denyArchive && hook === "PRE_TOOL_CALL" &&
           ["archive", "purge_archive", "purge_archives"].includes(
             String(call?.args?.action),
@@ -5595,6 +5599,102 @@ async function verifyPlannerArchive(
       assertEquals(observed.receipts.length, 1);
       assertEquals(JSON.parse(responses[11]).receipt, observed.receipts[0]);
       assert(!responses.slice(10).join("").includes(trafficSecret));
+      const receipt = readSentinelTrafficReceiptPage(path, state.revision)
+        ?.receipts[0];
+      assert(receipt);
+      const journal = openSentinelAdaptiveStore(
+        join(dirname(path), "sentinel-adaptive.db"),
+      );
+      try {
+        const reason = "Review exact assigned retained traffic metadata.";
+        const assigned = journal.sync(revision, [{
+          kind: "trace",
+          nodeId: receipt.assetIds[0],
+          depth: 16,
+          reason,
+        }], revision).find(({ reason: label }) => label === reason);
+        assert(assigned);
+        const excluded = new Set(
+          journal.list(revision).filter(({ id }) => id !== assigned.id).map((
+            { id },
+          ) => id),
+        );
+        const work = journal.claim(revision, 60, excluded);
+        assert(
+          work &&
+            journal.complete({
+              taskId: assigned.id,
+              leaseToken: work.leaseToken,
+              observation: {},
+            }),
+        );
+        const lease = journal.claimModelReview(
+          revision,
+          reason,
+          ({ id }) => id === assigned.id,
+        );
+        assert(lease);
+        const worker = createProviderRegistry();
+        worker.register({
+          name: "traffic-usage-worker",
+          supportsStreaming: false,
+          complete(messages) {
+            const toolResponse = messages.findLast(({ role }) =>
+              role === "tool"
+            );
+            return Promise.resolve({
+              content: toolResponse
+                ? "Reviewed retained traffic metadata."
+                : "",
+              usage: { inputTokens: 1, outputTokens: 1 },
+              toolCalls: toolResponse ? [] : [{
+                id: "traffic-usage-read",
+                type: "function",
+                function: {
+                  name: "sentinel_traffic_get",
+                  arguments: JSON.stringify(plannerCalls[11].args),
+                },
+              }],
+            });
+          },
+        });
+        worker.setDefault("traffic-usage-worker");
+        const beforeWorkerHooks = plannerHooks.length;
+        const reads: Parameters<
+          typeof journal.recordModelReviewProgress
+        >[3][number][] = [];
+        await createSentinelSubagent({
+          providerRegistry: worker,
+          snapshotPath: path,
+          assessmentRevision: state.revision,
+          assignedTaskId: assigned.id,
+          assignedTaskLeaseToken: lease.token,
+          allowModelAccess: true,
+          hookRunner: hooks,
+        }).execute(
+          reason,
+          () => {},
+          undefined,
+          (step) => reads.push(step),
+          true,
+          {
+            workerBoundary: () => ({}),
+          },
+        );
+        assert(reads[0]?.trafficRead);
+        assertEquals(plannerHooks.splice(beforeWorkerHooks), [
+          "PRE_TOOL_CALL",
+          "POST_TOOL_RESPONSE",
+        ]);
+        assert(
+          journal.finishModelReview(revision, assigned.id, lease.token, {
+            note: reason,
+            steps: reads,
+          }),
+        );
+      } finally {
+        journal.close();
+      }
     } else if (mode === "telemetry") {
       assertEquals(observed.matches[0].evidenceIds, [
         "saved-audit-event",
@@ -5812,8 +5912,34 @@ async function verifyPlannerArchive(
       revision: state.revision,
       runId: state.plan.runId,
     };
+    const trafficUsageQuery = {
+      ...run,
+      action: "case_local_tool_usage",
+      includeRetainedTrafficMetadata: true,
+    };
+    let originalTrafficUsage: unknown;
     const archiveId = crypto.randomUUID();
     await withGateway(baseDir, async (turn) => {
+      if (mode === "traffic") {
+        const text = await turn(trafficUsageQuery);
+        assert(text.startsWith("{"), text);
+        const saved = JSON.parse(text);
+        originalTrafficUsage = saved;
+        assertEquals(
+          saved.totals.filter(({ tool }: { tool: string }) =>
+            tool === "sentinel_traffic_get"
+          ),
+          ["planner", "worker"].map((role) => ({
+            role,
+            tool: "sentinel_traffic_get",
+            calls: 1,
+            failed: 0,
+          })),
+        );
+        assert(!text.includes(trafficSecret));
+        assert(!text.includes('"evidenceId"'));
+        assert(!text.includes('"sentinel_traffic_search"'));
+      }
       assertEquals(
         JSON.parse(
           await turn({
@@ -6076,6 +6202,20 @@ async function verifyPlannerArchive(
         assert(!(await turn(check)).includes("saved-audit-event"));
         assert(!(await turn(exactAlert)).includes("saved-audit-event"));
         policy.denyRunResponse = false;
+      }
+      if (mode === "traffic") {
+        assertEquals(
+          JSON.parse(await turn(trafficUsageQuery)),
+          originalTrafficUsage,
+        );
+        for (const hook of ["PRE_TOOL_CALL", "POST_TOOL_RESPONSE"]) {
+          policy.denyTrafficReceiptHook = hook;
+          const denied = await turn(trafficUsageQuery);
+          assertStringIncludes(denied, "unavailable");
+          assert(!denied.includes("totals"));
+        }
+        policy.denyTrafficReceiptHook = undefined;
+        policy.workerSourceHooks.splice(0);
       }
       if (mode === "digests") {
         const archivedScope = {

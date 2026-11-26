@@ -1209,6 +1209,11 @@ export const operatorRunTool: ToolDefinition = {
       description:
         "Include currently authorized linked finding receipts in the exact case tool usage report.",
     },
+    includeRetainedTrafficMetadata: {
+      type: "boolean",
+      description:
+        "Include currently authorized retained traffic metadata reads in the exact case usage report.",
+    },
     toolUsageAfter: {
       type: "string",
       description: "Cursor from the prior retained tool usage totals page.",
@@ -1810,7 +1815,8 @@ export function sentinelOperatorCaseReadParameterAllowed(
 ): boolean {
   if (
     parameter === "includeRetainedTopology" ||
-    parameter === "includeRetainedFindingSources"
+    parameter === "includeRetainedFindingSources" ||
+    parameter === "includeRetainedTrafficMetadata"
   ) {
     return action === "case_local_tool_usage";
   }
@@ -9011,6 +9017,7 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
       if (action === "case_local_tool_usage") {
         const includeTopology = args.includeRetainedTopology;
         const includeFindings = args.includeRetainedFindingSources;
+        const includeTraffic = args.includeRetainedTrafficMetadata;
         if (
           ref.kind !== "sentinel" || ref.revision === undefined ||
           typeof args.runId !== "string" || !digestPattern.test(args.runId) ||
@@ -9018,6 +9025,8 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
             typeof includeTopology !== "boolean") ||
           (includeFindings !== undefined &&
             typeof includeFindings !== "boolean") ||
+          (includeTraffic !== undefined &&
+            typeof includeTraffic !== "boolean") ||
           Object.keys(args).some((key) =>
             ![
               "action",
@@ -9027,6 +9036,7 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
               "runId",
               "includeRetainedTopology",
               "includeRetainedFindingSources",
+              "includeRetainedTrafficMetadata",
             ].includes(key)
           ) ||
           !await controller.inspect(ref)
