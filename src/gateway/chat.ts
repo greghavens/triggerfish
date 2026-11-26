@@ -1,3 +1,6 @@
+import { readAgentProfile } from "../core/agent_profiles.ts";
+import { withAgentProfileRuntime } from "../agent/orchestrator/agent_profile_runtime.ts";
+import { isAgentProfileAction } from "./operator_agent_profiles.ts";
 import { repositoryVisibilityDestinationMetadata } from "./sentinel_repository_visibility.ts";
 import { createHash } from "node:crypto";
 import {
@@ -359,6 +362,10 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
                       "list",
                       "profiles",
                       "model_route",
+                      "agent_profiles",
+                      "agent_profile",
+                      "agent_profile_history",
+                      "preview_agent_prompt",
                       "sentinel_tool_configuration",
                       "inspect",
                       "graph",
@@ -456,7 +463,8 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
               return config.hookRunner.evaluateHook(hook, {
                 ...context,
                 input: { ...context.input, ...meta },
-                auditInput: action === "set_sentinel_tool_configuration" ||
+                auditInput: isAgentProfileAction(action) ||
+                    action === "set_sentinel_tool_configuration" ||
                     action === "reset_sentinel_tool_configuration" ||
                     action === "set_company_scope" ||
                     action === "preview_membership" ||
@@ -913,8 +921,23 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
       },
     };
   }
+  let activeAgentProfileId: string | undefined;
+  const runtimeConfig = withAgentProfileRuntime(orchestratorConfig, () => {
+    if (
+      !config.customToolsBaseDir || !activeAgentProfileId ||
+      state.activeSessionId !== state.ownerSessionId
+    ) return;
+    try {
+      return readAgentProfile(
+        config.customToolsBaseDir,
+        activeAgentProfileId,
+      ) ?? null;
+    } catch {
+      return null;
+    }
+  });
   const orchestrator = createOrchestrator({
-    ...orchestratorConfig,
+    ...runtimeConfig,
     toolApprovalContext: {
       isCurrent: (id) =>
         state.activeSessionId === id && state.sessionStates.has(id),
@@ -1665,6 +1688,53 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
       }
     },
     async executeAgentTurn(content, sendEvent, signal) {
+      if (
+        typeof content === "string" && /^\/agent-profile(?:\s|$)/.test(content)
+      ) {
+        const release = await acquireTurnMutex(state);
+        try {
+          if (signal?.aborted) return;
+          const command = /^\/agent-profile ([a-z][a-z0-9_-]{0,63})$/.exec(
+            content,
+          );
+          const id = command?.[1];
+          if (
+            !config.customToolsBaseDir || !id ||
+            state.activeSessionId !== state.ownerSessionId
+          ) {
+            sendEvent({
+              type: "error",
+              message: "Use /agent-profile <id> or /agent-profile off.",
+            });
+            return;
+          }
+          if (
+            id !== "off" && !readAgentProfile(config.customToolsBaseDir, id)
+          ) {
+            sendEvent({
+              type: "error",
+              message: "The agent profile is unavailable.",
+            });
+            return;
+          }
+          activeAgentProfileId = id === "off" ? undefined : id;
+          sendEvent({
+            type: "response",
+            text: activeAgentProfileId
+              ? "Agent profile selected."
+              : "Agent profile cleared.",
+            taint: getSessionTaint(),
+          });
+        } catch {
+          sendEvent({
+            type: "error",
+            message: "The agent profile is unavailable.",
+          });
+        } finally {
+          release();
+        }
+        return;
+      }
       if (
         typeof content === "string" &&
         /^\/sentinel-recheck(?:\s|$)/.test(content)

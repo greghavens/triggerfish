@@ -159,7 +159,8 @@ async function executeIteration(
 
 /** Resolve the effective iteration limit from orchestrator config. */
 function resolveMaxIterations(state: OrchestratorState): number {
-  return state.config.maxIterations ?? MAX_TOOL_ITERATIONS;
+  return state.config.getMaxIterations?.() ?? state.config.maxIterations ??
+    MAX_TOOL_ITERATIONS;
 }
 
 /**
@@ -171,11 +172,13 @@ function resolveMaxIterations(state: OrchestratorState): number {
 async function forceTextOnlyResponse(
   ctx: AgentLoopContext,
 ): Promise<Result<ProcessMessageResult, string>> {
+  const wrapup = ctx.state.config.getIterationWrapupPrompt?.();
   ctx.history.push({
     role: "user",
     content:
       "[SYSTEM] Iteration limit reached. Respond NOW with your findings " +
-      "based on the information gathered so far. Do not attempt any more tool calls.",
+      "based on the information gathered so far. Do not attempt any more tool calls." +
+      (wrapup ? "\n" + wrapup : ""),
   });
   const taint = ctx.state.config.getSessionTaint?.() ?? "PUBLIC";
   const provider = ctx.state.config.providerRegistry

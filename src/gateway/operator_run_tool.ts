@@ -1,4 +1,8 @@
 import {
+  executeAgentProfileAction,
+  isAgentProfileAction,
+} from "./operator_agent_profiles.ts";
+import {
   parseSentinelCompanyScopeUpdate,
   readSentinelCompanyScopes,
   recordSentinelCompanyScope,
@@ -568,6 +572,12 @@ export const operatorRunTool: ToolDefinition = {
         "hint",
         "profiles",
         "model_route",
+        "agent_profiles",
+        "agent_profile",
+        "agent_profile_history",
+        "preview_agent_prompt",
+        "set_agent_profile",
+        "delete_agent_profile",
         "sentinel_tool_configuration",
         "set_sentinel_tool_configuration",
         "reset_sentinel_tool_configuration",
@@ -1289,6 +1299,15 @@ export const operatorRunTool: ToolDefinition = {
       type: "object",
       description:
         "Typed Boolean assets filter. Use {and:[...]}, {or:[...]}, {not:...}, or {field,op,value}. Text fields service, technology, url, title, ip, domain and registrationId accept contains/eq/ne. Numeric port and status accept eq/ne/gt/gte/lt/lte. Omit exact assetIds.",
+    },
+    profileSettings: {
+      type: "object",
+      description:
+        "Named agent definition with role, prompt, wrap-up settings, and optional tool and skill allowlists.",
+    },
+    promptVariables: {
+      type: "object",
+      description: "Bounded sample substitutions for a prompt preview.",
     },
     builtinTool: {
       type: "string",
@@ -3178,6 +3197,14 @@ export function createOperatorRunToolExecutor(options: {
           canFlowTo(classification, context?.ceiling ?? "PUBLIC"));
     }
     const action = args.action;
+    if (isAgentProfileAction(action)) {
+      return await executeAgentProfileAction(
+        options.baseDir,
+        args,
+        context,
+        options.confirm,
+      );
+    }
     if (
       action === "sentinel_tool_configuration" ||
       action === "set_sentinel_tool_configuration" ||

@@ -207,7 +207,8 @@ export async function callLlmAndRecordUsage(
   ctx: AgentLoopContext,
   iterations: number,
 ): Promise<LlmCallOutcome> {
-  const maxIter = ctx.state.config.maxIterations ?? MAX_TOOL_ITERATIONS;
+  const maxIter = ctx.state.config.getMaxIterations?.() ??
+    ctx.state.config.maxIterations ?? MAX_TOOL_ITERATIONS;
   ctx.state.emit({
     type: "llm_start",
     iteration: iterations,

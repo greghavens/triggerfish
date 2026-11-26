@@ -208,7 +208,8 @@ async function handleNoToolCallsIteration(
   const needsRecovery = quality.isEmptyOrJunk || quality.isLeakedIntent ||
     quality.hasTrailingIntent || quality.isTruncated ||
     quality.isDenseNarration;
-  const maxIter = ctx.state.config.maxIterations ?? MAX_TOOL_ITERATIONS;
+  const maxIter = ctx.state.config.getMaxIterations?.() ??
+    ctx.state.config.maxIterations ?? MAX_TOOL_ITERATIONS;
   if (needsRecovery && iter.iteration < maxIter) {
     const nudgeResult = attemptRecoveryNudge(ctx, iter.completion, quality);
     if (nudgeResult) return nudgeResult;
@@ -427,7 +428,8 @@ async function handleToolCallsIteration(
       ...(reasoningBlocks ? { reasoningBlocks } : {}),
     });
   }
-  const maxIter = ctx.state.config.maxIterations ?? MAX_TOOL_ITERATIONS;
+  const maxIter = ctx.state.config.getMaxIterations?.() ??
+    ctx.state.config.maxIterations ?? MAX_TOOL_ITERATIONS;
 
   let batchResult;
   try {

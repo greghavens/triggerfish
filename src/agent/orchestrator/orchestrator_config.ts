@@ -162,6 +162,9 @@ export interface OrchestratorConfig {
     tools: readonly ToolDefinition[],
     isOwner: boolean,
   ) => readonly ToolDefinition[];
+  /** Resolve the current reviewed turn budget and final response guidance. */
+  readonly getMaxIterations?: () => number | undefined;
+  readonly getIterationWrapupPrompt?: () => string | undefined;
   /** Optional settings snapshot for a registered tool, held through dispatch. */
   readonly configureToolCall?: (
     name: string,

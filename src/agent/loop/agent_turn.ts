@@ -423,7 +423,8 @@ export async function orchestrateAgentTurn(
       !Number.isSafeInteger(resume.completedIterations) ||
       resume.completedIterations < 1 ||
       resume.completedIterations >
-        (state.config.maxIterations ?? MAX_TOOL_ITERATIONS))
+        (state.config.getMaxIterations?.() ?? state.config.maxIterations ??
+          MAX_TOOL_ITERATIONS))
   ) return { ok: false, error: "Invalid agent turn checkpoint" };
 
   let turnState = state;
