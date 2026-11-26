@@ -23,10 +23,15 @@ import { createSentinelSubagent } from "../../src/gateway/sentinel_agent.ts";
 import type { BootstrapResult } from "../../src/gateway/startup/bootstrap.ts";
 import { createTidepoolSentinelHandler } from "../../src/gateway/startup/services/tidepool_sentinel.ts";
 import {
+  applySentinelFormalGoals,
   readSentinelAssessment,
   refreshSentinelAssessment,
   startSentinelAssessment,
 } from "../../src/sentinel/assessment_store.ts";
+import {
+  digestSentinelGoalProposal,
+  type SentinelFormalGoal,
+} from "../../src/sentinel/formal_goals.ts";
 import { sentinelAssessmentModelRouting } from "../../src/gateway/sentinel_model_routing.ts";
 import { openSentinelAssetDiscoveryStore } from "../../src/sentinel/asset_discovery_store.ts";
 import { openSentinelAdaptiveStore } from "../../src/sentinel/adaptive_store.ts";
@@ -865,6 +870,7 @@ async function verifyPausedGraphWorker(
   cold: boolean,
   denySavedRead = false,
   stopAt?: "running" | "paused",
+  pinnedTemplate = false,
 ) {
   const baseDir = await Deno.makeTempDir();
   const caseId = cold ? "portable-worker" : "main";
@@ -878,6 +884,8 @@ async function verifyPausedGraphWorker(
   const sourceCalls = new Map<string, number>();
   let heldStep = false;
   let reused = false;
+  let pinnedDenied = false;
+  let blockedTraceHandlerReturns = 0;
   let peerCompleted = false;
   const provider = (id: string) => {
     const registry = createProviderRegistry();
@@ -887,6 +895,15 @@ async function verifyPausedGraphWorker(
       supportsStreaming: false,
       async complete(messages) {
         const saved = messages.findLast(({ role }) => role === "tool");
+        if (pinnedTemplate && id === "held-graph" && reused) {
+          assert(/blocked|denied/i.test(String(saved?.content)));
+          pinnedDenied = true;
+          return {
+            content: '{"summary":"Reviewed under the pinned template."}',
+            usage,
+            toolCalls: [],
+          };
+        }
         if (!saved) {
           sourceCalls.set(id, (sourceCalls.get(id) ?? 0) + 1);
           return {
@@ -904,7 +921,23 @@ async function verifyPausedGraphWorker(
           if (!heldStep) {
             heldStep = true;
             await release.promise;
-          } else reused = true;
+          } else {
+            reused = true;
+            if (pinnedTemplate) {
+              return {
+                content: "",
+                usage,
+                toolCalls: [{
+                  id: "pinned-block-after-resume",
+                  type: "function",
+                  function: {
+                    name: "sentinel_trace",
+                    arguments: JSON.stringify({ node: id }),
+                  },
+                }],
+              };
+            }
+          }
         } else {
           peerStarted = true;
           await releasePeer.promise;
@@ -927,6 +960,11 @@ async function verifyPausedGraphWorker(
   const workerPool = createSentinelWorkerPool(2);
   const hookRunner: HookRunner = {
     evaluateHook(hook, { input }) {
+      if (
+        hook === "POST_TOOL_RESPONSE" && input.tool_name === "sentinel_trace"
+      ) {
+        blockedTraceHandlerReturns++;
+      }
       if (
         enforceReadRevocation && hook === "PRE_TOOL_CALL" &&
         input.tool_name === "sentinel_assigned_target"
@@ -999,9 +1037,40 @@ async function verifyPausedGraphWorker(
         edges: [],
       }),
     );
-    const initial = startSentinelAssessment(path, {
-      goal: "Review two graph assets.",
-    });
+    const goals: SentinelFormalGoal[] = [{
+      id: "held-service",
+      title: "Assess retained service controls",
+      policy: "operator",
+      criteria: [{
+        id: "retained-record",
+        description: "Review the known service configuration.",
+        source: "graph_evidence",
+        reference: "future-configuration",
+      }],
+    }];
+    const initial = pinnedTemplate
+      ? applySentinelFormalGoals(path, {
+        mode: "start",
+        requestId: "pinned-worker-restart",
+        proposalDigest: digestSentinelGoalProposal(goals),
+        goals,
+        plan: {
+          goal: "Review two graph assets.",
+          childDescription: "Retained service review fixture.",
+          assessmentTemplate: {
+            id: crypto.randomUUID(),
+            version: 1,
+            digest: "a".repeat(64),
+            interceptRules: [{
+              tool: "sentinel_trace",
+              effect: "block",
+              enabled: true,
+              assetId: "held-graph",
+            }],
+          },
+        },
+      }).state
+      : startSentinelAssessment(path, { goal: "Review two graph assets." });
     advanceAdaptiveSentinel(path, initial);
     const first = startPlanner();
     first.advance(initial);
@@ -1269,6 +1338,14 @@ async function verifyPausedGraphWorker(
         taskId === held.id && status === "completed"
       ) === true
     );
+    if (pinnedTemplate) {
+      assertEquals(pinnedDenied, true);
+      assertEquals(blockedTraceHandlerReturns, 0);
+      assertEquals(
+        readSentinelAssessment(path)?.plan.assessmentTemplate,
+        initial.plan.assessmentTemplate,
+      );
+    }
   } finally {
     release.resolve();
     releasePeer.resolve();
@@ -1282,6 +1359,12 @@ async function verifyPausedGraphWorker(
 
 Deno.test("Owner gateway pauses and resumes one graph worker from its committed checkpoint", () =>
   verifyPausedGraphWorker(false));
+
+Deno.test("Portable resumed Sentinel worker reauthorizes its checkpoint under the same pinned template", () =>
+  verifyPausedGraphWorker(true, false, undefined, true));
+
+Deno.test("Portable resumed Sentinel worker protects a pinned template checkpoint after read revocation", () =>
+  verifyPausedGraphWorker(true, true, undefined, true));
 
 Deno.test("Owner gateway restores a portable paused graph worker before reusing its checkpoint", () =>
   verifyPausedGraphWorker(true));

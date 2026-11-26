@@ -6360,9 +6360,35 @@ function createAgent(
           const draft = validatePlannerFindingReview(active, args);
           return draft && { binding: draft.digest };
         }
-        if (!isPlannerWorkerControl(name)) return;
-        const scope = validatePlannerWorkerControl(active, name, args);
-        return scope && { assignmentId: scope.taskId };
+        if (isPlannerWorkerControl(name)) {
+          const scope = validatePlannerWorkerControl(active, name, args);
+          return scope && { assignmentId: scope.taskId };
+        }
+        // Other planner tools may require an approval through the exact
+        // reviewed template pinned to this case and planning round.
+        if (
+          !toolNames.has(name) || !active.plannerRound ||
+          !currentPlannerReceiptScope(active) ||
+          active.plannerRoundIsCurrent?.() !== true
+        ) return;
+        const template = readSentinelAssessment(options.snapshotPath)
+          ?.plan.assessmentTemplate;
+        if (
+          !template?.interceptRules?.some((rule) =>
+            rule.enabled && rule.effect === "ask" &&
+            (rule.tool === undefined || rule.tool === name) &&
+            rule.assetId === undefined
+          )
+        ) return;
+        return {
+          binding: createHash("sha256").update(JSON.stringify([
+            options.assessmentRevision,
+            active.plannerRound,
+            template.id,
+            template.version,
+            template.digest,
+          ])).digest("hex"),
+        };
       },
       isCurrent() {
         return !!active && currentPlannerReceiptScope(active) &&

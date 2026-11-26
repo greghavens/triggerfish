@@ -6,7 +6,12 @@ import { resolveSentinelCasePath } from "../../src/sentinel/cases.ts";
 import { createWorkflowRunRegistry } from "../../src/workflow/registry.ts";
 import { createProviderRegistry } from "../../src/agent/llm.ts";
 import { createPolicyEngine } from "../../src/core/policy/engine.ts";
-import { createHookRunner } from "../../src/core/policy/hooks/hooks.ts";
+import {
+  createHookRunner,
+  type HookRunner,
+} from "../../src/core/policy/hooks/hooks.ts";
+import { createToolApprovalService } from "../../src/core/tool_approval_service.ts";
+import type { ApprovalInboxRecord } from "../../src/core/approval_inbox.ts";
 import {
   type ChannelId,
   createSession,
@@ -22,6 +27,7 @@ import { readSentinelGoalCompletion } from "../../src/gateway/sentinel_goal_comp
 import {
   advanceAdaptiveSentinel,
   createSentinelModelPlanner,
+  readAdaptiveSentinel,
 } from "../../src/gateway/sentinel_adaptive_runtime.ts";
 import { startSentinelAssessmentCoordinator } from "../../src/gateway/sentinel_assessment_service.ts";
 import { createGatewayServer } from "../../src/gateway/server/server.ts";
@@ -937,8 +943,14 @@ Deno.test("authenticated Sentinel chat drafts, approves and extends independentl
 
 async function withSentinelGoalSocket(
   path: string,
-  check: (turn: (content: string) => Promise<string>) => Promise<void>,
+  check: (
+    turn: (content: string) => Promise<string>,
+    approval: (
+      args: Record<string, unknown>,
+    ) => Promise<Record<string, unknown>>,
+  ) => Promise<void>,
   configure?: (registry: ReturnType<typeof createProviderRegistry>) => void,
+  hookRunner = createHookRunner(createPolicyEngine()),
 ) {
   const registry = createProviderRegistry();
   configure?.(registry);
@@ -952,7 +964,7 @@ async function withSentinelGoalSocket(
         channelId: "test" as ChannelId,
       }),
       providerRegistry: registry,
-      hookRunner: createHookRunner(createPolicyEngine()),
+      hookRunner,
       sentinelSnapshotPath: path,
       allowSentinelModelAccess: true,
     }),
@@ -989,7 +1001,27 @@ async function withSentinelGoalSocket(
       });
     };
     await turn("/sentinel on");
-    await check(turn);
+    await check(turn, (args) => {
+      const requestId = crypto.randomUUID();
+      const done = Promise.withResolvers<Record<string, unknown>>();
+      const timer = setTimeout(
+        () => done.reject(new Error("Missing approval response")),
+        3000,
+      );
+      const receive = ({ data }: MessageEvent) => {
+        const event = JSON.parse(data);
+        if (
+          event.type === "approval_inbox_result" &&
+          event.requestId === requestId
+        ) done.resolve(event);
+      };
+      socket.addEventListener("message", receive);
+      socket.send(JSON.stringify({ ...args, requestId }));
+      return done.promise.finally(() => {
+        clearTimeout(timer);
+        socket.removeEventListener("message", receive);
+      });
+    });
   } finally {
     socket.close();
     await gateway.stop();
@@ -1511,5 +1543,266 @@ Deno.test("reviewed standalone Sentinel admission binds the exact workspace cate
     });
   } finally {
     await Deno.remove(directory, { recursive: true });
+  }
+});
+
+Deno.test("An admitted template binds planner and leased-worker approvals after the template changes", async () => {
+  const baseDir = await Deno.makeTempDir();
+  const path = resolveSentinelCasePath(baseDir);
+  const approvalInbox = createToolApprovalService(
+    join(baseDir, "approvals.db"),
+  );
+  const templateId = crypto.randomUUID();
+  const overview = "sentinel_graph_overview";
+  const assignedTarget = "sentinel_assigned_target";
+  const trace = "sentinel_trace";
+  const asset = "approved-service";
+  const policyCalls: {
+    hook: string;
+    tool?: unknown;
+    run?: unknown;
+    assignment?: unknown;
+  }[] = [];
+  const hookRunner: HookRunner = {
+    toolApprovalInbox: approvalInbox,
+    evaluateHook(hook, { input }) {
+      if (
+        input.tool_name === overview || input.tool_name === trace ||
+        input.tool_name === assignedTarget
+      ) {
+        policyCalls.push({
+          hook,
+          tool: input.tool_name,
+          run: input.run_id,
+          assignment: input.assignment_id,
+        });
+      }
+      return Promise.resolve({
+        allowed: true,
+        action: "ALLOW",
+        ruleId: null,
+        duration: 0,
+      });
+    },
+  };
+  const template = {
+    action: "set_assessment_template",
+    templateId,
+    templateVersion: 0,
+    requestId: crypto.randomUUID(),
+    title: "Retained service controls",
+    childDescription: "Review the published service case.",
+    childGoal: "Verify the published service configuration.",
+    interceptRules: [
+      { tool: overview, effect: "ask", enabled: true },
+      { tool: assignedTarget, effect: "ask", enabled: true, assetId: asset },
+      { tool: trace, effect: "block", enabled: true },
+    ],
+  };
+  let planner: ReturnType<typeof createSentinelModelPlanner> | undefined;
+  try {
+    await Deno.mkdir(dirname(path), { recursive: true });
+    await Deno.writeTextFile(
+      path,
+      JSON.stringify({
+        version: 1,
+        nodes: [{ id: asset, kind: "asset", label: "Approved service" }],
+        edges: [],
+      }),
+    );
+    assert(
+      await executeAssessmentTemplates(
+        baseDir,
+        template,
+        async () => true,
+        async () => true,
+      ),
+    );
+    await withSentinelGoalSocket(
+      path,
+      async (turn, inbox) => {
+        const admitted = JSON.parse(
+          await turn(
+            `assessment goals start ${
+              JSON.stringify({
+                requestId: "planner-worker-template",
+                template: { id: templateId, version: 1 },
+                goals: [goal("configuration", "unresolved-proof")],
+                inventoryCoverageEnabled: false,
+              })
+            }`,
+          ),
+        );
+        const state = readSentinelAssessment(path);
+        assert(state?.plan.runId);
+        assertEquals(
+          admitted.assessmentTemplate.interceptRules,
+          template.interceptRules,
+        );
+        assert(
+          await executeAssessmentTemplates(
+            baseDir,
+            {
+              ...template,
+              templateVersion: 1,
+              requestId: crypto.randomUUID(),
+              interceptRules: [],
+            },
+            async () => true,
+            async () => true,
+          ),
+        );
+        assert(
+          await executeAssessmentTemplates(
+            baseDir,
+            {
+              action: "withdraw_assessment_template",
+              templateId,
+              templateVersion: 2,
+              requestId: crypto.randomUUID(),
+            },
+            async () => true,
+            async () => true,
+          ),
+        );
+        assertEquals(
+          readSentinelAssessment(path)?.plan.assessmentTemplate,
+          admitted.assessmentTemplate,
+        );
+
+        let workerId: string | undefined;
+        const approvedResults = new Set<string>();
+        const workerFactory: Parameters<typeof createSentinelModelPlanner>[1] =
+          (
+            current,
+            task,
+            token,
+            role,
+          ) => {
+            const registry = createProviderRegistry();
+            const name = role === "planner" ? "planner" : "leased-worker";
+            const reviewTool = role === "planner" ? overview : assignedTarget;
+            if (task) workerId = task;
+            registry.register({
+              name,
+              supportsStreaming: false,
+              complete(messages, tools) {
+                const usage = { inputTokens: 1, outputTokens: 1 };
+                const results = messages.filter(({ role }) => role === "tool")
+                  .map(({ content }) => String(content));
+                if (results.length) {
+                  assertMatch(
+                    results[0],
+                    role === "planner"
+                      ? /nodes|counts|nodeKinds/
+                      : /approved-service/,
+                  );
+                  assertMatch(results[1], /blocked|denied/i);
+                  approvedResults.add(name);
+                  return Promise.resolve({
+                    content: name === "planner"
+                      ? JSON.stringify([{ kind: "impact", nodeId: asset }])
+                      : '{"summary":"Reviewed the exact approved graph."}',
+                    usage,
+                    toolCalls: [],
+                  });
+                }
+                for (const name of [reviewTool, trace]) {
+                  assert(JSON.stringify(tools).includes(name));
+                }
+                return Promise.resolve({
+                  content: "",
+                  usage,
+                  toolCalls: [
+                    {
+                      id: "template-overview",
+                      type: "function",
+                      function: { name: reviewTool, arguments: "{}" },
+                    },
+                    {
+                      id: "template-trace",
+                      type: "function",
+                      function: {
+                        name: trace,
+                        arguments: JSON.stringify({ node: asset }),
+                      },
+                    },
+                  ],
+                });
+              },
+            });
+            registry.setDefault(name);
+            return createSentinelSubagent({
+              snapshotPath: path,
+              assessmentRevision: current.revision,
+              plannerExecutionEvidenceRunId: role === "planner"
+                ? current.plan.runId
+                : undefined,
+              assignedTaskId: task,
+              assignedTaskLeaseToken: token,
+              allowModelAccess: true,
+              providerRegistry: registry,
+              hookRunner,
+            });
+          };
+        planner = createSentinelModelPlanner(path, workerFactory);
+        advanceAdaptiveSentinel(path, state);
+        planner.advance(state);
+        const approve = async (assignment?: string) => {
+          let pending: ApprovalInboxRecord | undefined;
+          for (let attempt = 0; !pending && attempt < 100; attempt++) {
+            const page = await inbox({ type: "approval_inbox_list" });
+            assert(page.ok);
+            pending = (page.result as { records: ApprovalInboxRecord[] })
+              .records.find((entry) => entry.status === "pending");
+            if (!pending) {
+              await new Promise((resolve) => setTimeout(resolve, 10));
+            }
+          }
+          assert(pending);
+          assertEquals(pending.tool, assignment ? assignedTarget : overview);
+          assertEquals(pending.runId, state.plan.runId);
+          assertEquals(pending.assignmentId, assignment);
+          assertEquals(
+            (await inbox({
+              type: "approval_inbox_decide",
+              approvalId: pending.id,
+              approved: true,
+            })).ok,
+            true,
+          );
+        };
+        await approve();
+        await until(() => approvedResults.has("planner"));
+        await until(() => !!workerId);
+        await approve(workerId);
+        await until(() => approvedResults.has("leased-worker"));
+        await until(() =>
+          readAdaptiveSentinel(path, state)?.modelReviews.some(({ taskId }) =>
+            taskId === workerId
+          ) === true
+        );
+        assertEquals(
+          policyCalls.filter(({ tool, hook }) =>
+            tool === trace && hook === "POST_TOOL_RESPONSE"
+          ),
+          [],
+        );
+        const reads = policyCalls.filter(({ tool, hook }) =>
+          (tool === overview || tool === assignedTarget) &&
+          hook === "POST_TOOL_RESPONSE"
+        );
+        assertEquals(reads.map(({ run, assignment }) => [run, assignment]), [
+          [state.plan.runId, null],
+          [state.plan.runId, workerId],
+        ]);
+      },
+      undefined,
+      hookRunner,
+    );
+  } finally {
+    planner?.stop();
+    await until(() => !planner?.hasInFlightWork());
+    await Deno.remove(baseDir, { recursive: true });
   }
 });
