@@ -3534,36 +3534,49 @@ function createAgent(
 
   // The base orchestrator's final summarization path also uses this wrapper,
   // so abort applies to every provider call, including a forced summary.
-  const registry = createProviderRegistry();
-  const provider = options.allowModelAccess
-    ? options.providerRegistry.getForClassification("INTERNAL") ??
-      options.providerRegistry.getDefault()
-    : undefined;
-  if (provider) {
-    registry.register({
-      get name() {
-        return provider.name;
-      },
-      get model() {
-        return provider.model;
-      },
-      supportsStreaming: false,
-      get contextWindow() {
-        return provider.contextWindow;
-      },
-      async complete(messages, tools, callOptions) {
-        const signal = active?.signal;
-        signal?.throwIfAborted();
-        const result = await provider.complete(messages, tools, {
-          ...callOptions,
-          signal,
-        });
-        options.onUsage?.(result.usage);
-        return result;
-      },
-    });
-    registry.setDefault(provider.name);
-  }
+  const wrapProvider = (source: LlmProviderRegistry): LlmProviderRegistry => {
+    const registry = createProviderRegistry();
+    const provider = options.allowModelAccess
+      ? source.getForClassification("INTERNAL") ??
+        source.getDefault()
+      : undefined;
+    if (provider) {
+      registry.register({
+        get name() {
+          return provider.name;
+        },
+        get model() {
+          return provider.model;
+        },
+        supportsStreaming: false,
+        get contextWindow() {
+          return provider.contextWindow;
+        },
+        async complete(messages, tools, callOptions) {
+          const signal = active?.signal;
+          signal?.throwIfAborted();
+          const result = await provider.complete(messages, tools, {
+            ...callOptions,
+            signal,
+          });
+          options.onUsage?.(result.usage);
+          return result;
+        },
+      });
+      registry.setDefault(provider.name);
+    }
+
+    const { modelRouteIdentity, snapshotForTurn } = source;
+    return {
+      ...registry,
+      ...(modelRouteIdentity !== undefined && { modelRouteIdentity }),
+      ...(snapshotForTurn && options.allowModelAccess && {
+        snapshotForTurn: (identity?: string) =>
+          wrapProvider(snapshotForTurn(identity)),
+      }),
+    };
+  };
+  const registry = wrapProvider(options.providerRegistry);
 
   async function delegate(
     turn: ActiveTurn,

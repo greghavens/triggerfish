@@ -174,6 +174,7 @@ async function verifyHistoricalWorkerReads(
 for (
   const scenario of [
     "resume",
+    "resume_model_route_revoked",
     "resume_control_renewal",
     "resume_assigned",
     "resume_execution_evidence",
@@ -241,7 +242,11 @@ for (
   const nativeExecution = scenario.startsWith(
     "resume_native_execution_evidence",
   );
-  const phase = typedFollowup
+  const revokedModelRoute = scenario === "resume_model_route_revoked";
+  const routeScenario = scenario === "resume" || revokedModelRoute;
+  const phase = revokedModelRoute
+    ? "resume"
+    : typedFollowup
     ? "resume_execution_evidence_followup"
     : scenario === "resume_native_execution_evidence"
     ? "resume_execution_evidence"
@@ -249,7 +254,9 @@ for (
     ? "resume_execution_evidence_denied"
     : scenario;
   Deno.test({
-    name: nativeExecution
+    name: revokedModelRoute
+      ? "Sentinel leased worker withholds a committed result when its model route is revoked"
+      : nativeExecution
       ? phase.endsWith("_denied")
         ? "Sentinel withholds a native remediation receipt when workflow access is revoked during restart"
         : "Sentinel resumes a native remediation receipt without listing workflow runs again"
@@ -429,7 +436,9 @@ for (
         "resume_traffic_direct_blob_unavailable",
         "resume_traffic_unavailable",
       ].includes(phase);
-      const dir = await Deno.makeTempDir();
+      const dir = await Deno.makeTempDir(
+        routeScenario ? { dir: Deno.cwd() } : {},
+      );
       const path = resolveSentinelCasePath(dir);
       let child: Deno.ChildProcess | undefined;
       let followupTaskId: string | undefined;
@@ -1970,9 +1979,33 @@ for (
             import.meta.url,
           ),
         );
+        const setModelRoute = async (provider: string) => {
+          await Deno.mkdir(join(dir, "data"), { recursive: true, mode: 0o700 });
+          await Deno.writeTextFile(
+            join(dir, "data", "model-routes.json"),
+            JSON.stringify({ INTERNAL: { provider } }),
+            { mode: 0o600 },
+          );
+        };
+        if (routeScenario) await setModelRoute("workflow-restart-fixture");
         const spawn = (phase: string) =>
           new Deno.Command(Deno.execPath(), {
-            args: ["run", "-A", fixture, dir, phase],
+            args: [
+              "run",
+              "-A",
+              fixture,
+              dir,
+              phase,
+              ...(routeScenario
+                ? [
+                  phase === "interrupt"
+                    ? "original"
+                    : revokedModelRoute
+                    ? "revoked"
+                    : "rotated",
+                ]
+                : []),
+            ],
             stdout: "null",
             stderr: "piped",
           }).spawn();
@@ -2077,6 +2110,14 @@ for (
             ).get()?.count,
             1,
           );
+          if (routeScenario) {
+            const checkpoint = JSON.parse(String(
+              store.prepare(
+                "SELECT checkpoint FROM adaptive_worker_checkpoints",
+              ).get()?.checkpoint,
+            ));
+            assert(/^[a-f0-9]{256}$/.test(checkpoint.modelRouteIdentity));
+          }
           if (executionFollowup) {
             const checkpoint = JSON.parse(String(
               store.prepare(
@@ -2557,6 +2598,7 @@ for (
           const refreshed = refreshSentinelAssessment(path);
           assert(refreshed?.revision === assessment.revision + 1);
         }
+        if (routeScenario) await setModelRoute("alternate");
         child = spawn(phase);
         const resumed = await child.output();
         child = undefined;
@@ -2574,6 +2616,16 @@ for (
             ? "read\nread\n"
             : "read\n",
         );
+        if (routeScenario) {
+          const calls = (await Deno.readTextFile(join(dir, "model-route.log")))
+            .trim().split("\n");
+          assertEquals(calls, [
+            "interrupt:original",
+            "interrupt:original",
+            ...(revokedModelRoute ? [] : ["resume:original"]),
+          ]);
+          if (revokedModelRoute) return;
+        }
         const hooks = (await Deno.readTextFile(join(dir, "hook.log"))).trim()
           .split("\n");
         if (controlRenewal) {

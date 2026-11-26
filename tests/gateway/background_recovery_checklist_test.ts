@@ -91,6 +91,7 @@ function backgroundFixture(
     hooks: [] as HookLogEntry[],
     providerCalls: [] as string[],
     routeNames: ["fixture", "alternate"],
+    routingEnabled: liveRoutes,
   };
   const engine = createPolicyEngine();
   for (const rule of createDefaultRules()) engine.addRule(rule);
@@ -174,7 +175,7 @@ function backgroundFixture(
         return assembled(name, args, context);
       };
       const orchestrator = createOrchestrator({
-        providerRegistry: liveRoutes
+        providerRegistry: state.routingEnabled
           ? enableLiveProviderRoutes(infra.registry, baseDir, {
             PUBLIC: [...state.routeNames],
             INTERNAL: [...state.routeNames],
@@ -1148,9 +1149,10 @@ Deno.test("Authenticated scheduler gateway resumes the exact classified checklis
 });
 
 Deno.test("Owner gateway resumes a team delivery checklist without repeating a committed write", async () => {
-  const baseDir = await Deno.makeTempDir();
-  const fixture = backgroundFixture(baseDir, "team");
+  const baseDir = await Deno.makeTempDir({ dir: Deno.cwd() });
+  const fixture = backgroundFixture(baseDir, "team", true);
   const { state } = fixture;
+  state.routingEnabled = false;
   const storage = createMemoryStorage();
   const keychain = createMemorySecretStore();
   const parent = createSession({
@@ -1388,6 +1390,8 @@ Deno.test("Owner gateway resumes a team delivery checklist without repeating a c
     );
     assertEquals(approvals, 1);
     const interruptedDelivery = crypto.randomUUID();
+    await chooseBackgroundRoute(baseDir, "fixture");
+    state.routingEnabled = true;
     state.interruption = "after";
     assertStringIncludes(await send(interruptedDelivery), "checkpoint");
     state.interruption = undefined;
@@ -1501,7 +1505,8 @@ Deno.test("Owner gateway resumes a team delivery checklist without repeating a c
         .receipt.status,
       "succeeded",
     );
-    const target = backgroundFixture(cleanRoot, "team");
+    await chooseBackgroundRoute(cleanRoot, "alternate");
+    const target = backgroundFixture(cleanRoot, "team", true);
     target.state.interruption = undefined;
     const resume = (
       request = instructions,
@@ -1611,6 +1616,15 @@ Deno.test("Owner gateway resumes a team delivery checklist without repeating a c
         "scope or request changed",
       );
       assertStringIncludes(await resume(instructions, false), "paused");
+      target.state.routeNames = ["alternate"];
+      assertStringIncludes(
+        await resume(),
+        "original approved model route is unavailable",
+      );
+      assertEquals(target.state.providerCalls, []);
+      assertEquals(target.state.writes, 0);
+      assertEquals(target.state.reads, 0);
+      target.state.routeNames = ["fixture", "alternate"];
       target.state.rejectSavedWrite = true;
       assertStringIncludes(await resume(), "blocked by the current policy");
       assertEquals(restoredRecovery.read(pausedKey)?.status, "paused");
@@ -1631,6 +1645,7 @@ Deno.test("Owner gateway resumes a team delivery checklist without repeating a c
       assertEquals(approvals, approvedResumes);
       assertEquals(target.state.writes, 0);
       assertEquals(target.state.reads, 1);
+      assertEquals(target.state.providerCalls, ["fixture", "fixture"]);
       assertEquals(target.state.results[0], target.state.results[1]);
       assertEquals(JSON.parse(target.state.results[0]).todos, [todo]);
       const reopened = JSON.parse(

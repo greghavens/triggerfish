@@ -1,3 +1,4 @@
+import { enableLiveProviderRoutes } from "../../../src/agent/providers/live_routes.ts";
 import {
   readSentinelSharedAssetDiscoveries,
   submitSentinelAssetDiscovery,
@@ -21,7 +22,7 @@ import { resolveSentinelCasePath } from "../../../src/sentinel/cases.ts";
 
 import { verifySentinelGitHubWorkflowAccess } from "../../../src/sentinel/github_workflow_runs.ts";
 
-const [baseDir, phase] = Deno.args;
+const [baseDir, phase, routeMode] = Deno.args;
 const controlRenewal = phase.endsWith("_control_renewal");
 const renewedControl = phase === "resume_control_renewal";
 if (renewedControl) {
@@ -792,10 +793,18 @@ const reader = createSentinelLiveWorkflowReader({
   },
 });
 const registry = createProviderRegistry();
+function recordRoute(name: string) {
+  Deno.writeTextFileSync(
+    join(baseDir, "model-route.log"),
+    `${phase}:${name}\n`,
+    { append: true },
+  );
+}
 registry.register({
   name: "workflow-restart-fixture",
   supportsStreaming: false,
   complete(messages) {
+    if (routeMode) recordRoute("original");
     const results = messages.filter(({ role }) => role === "tool");
     if (inventoryStale) {
       if (results.length) {
@@ -1996,6 +2005,24 @@ registry.register({
   },
 });
 registry.setDefault("workflow-restart-fixture");
+if (routeMode) {
+  const original = registry.get("workflow-restart-fixture")!;
+  registry.register({
+    ...original,
+    name: "alternate",
+    complete(messages, tools, options) {
+      recordRoute("alternate");
+      return original.complete(messages, tools, options);
+    },
+  });
+}
+const workerModels = routeMode
+  ? enableLiveProviderRoutes(registry, baseDir, {
+    INTERNAL: routeMode === "revoked"
+      ? ["alternate"]
+      : ["workflow-restart-fixture", "alternate"],
+  })
+  : registry;
 
 const followupPlannerRegistry = createProviderRegistry();
 if (executionFollowup) {
@@ -2105,7 +2132,7 @@ const createWorker: Parameters<typeof createSentinelModelPlanner>[1] = (
     assessmentRevision: state.revision,
     assignedTaskId: taskId,
     assignedTaskLeaseToken: token,
-    providerRegistry: registry,
+    providerRegistry: workerModels,
     hookRunner,
     allowModelAccess: true,
     readSharedAssetDiscoveries: discoveryPhase
@@ -2179,6 +2206,13 @@ try {
     advanceAdaptiveSentinel(path, state);
     planner.advance(state);
     const adaptive = readAdaptiveSentinel(path, state);
+    if (
+      routeMode === "revoked" &&
+      adaptive?.modelReviewStates.some(({ status }) =>
+        status === "exhausted"
+      ) &&
+      !adaptive.modelReviews.length
+    ) Deno.exit(0);
     if (
       (phase === "resume_execution_evidence_followup" &&
         adaptive?.modelReviews.some(({ summary, steps }) =>
