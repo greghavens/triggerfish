@@ -7068,6 +7068,17 @@ Deno.test("Committed worker narrative reaches peers and planning while its sourc
     summary: "The assigned application exposes a stale local inventory check.",
     confidence: "observed",
   };
+  const conclusions = [{
+    summary: narrative.summary,
+    confidence: narrative.confidence,
+    conclusion: "positive",
+    detail: "The saved local check was present in the assigned evidence.",
+  }, {
+    summary: "The retained record showed no current inventory confirmation.",
+    confidence: "inferred",
+    conclusion: "negative",
+  }];
+  const submission = { evidenceId: narrative.evidenceId, facts: conclusions };
   const sourceRead = Promise.withResolvers<string[]>();
   const releaseSource = Promise.withResolvers<void>();
   let sourceCoordinator:
@@ -7121,7 +7132,7 @@ Deno.test("Committed worker narrative reaches peers and planning while its sourc
     advanceAdaptiveSentinel(path, state);
     const peer = assignedLease(path, state, "review_evidence");
     const unrelated = assignedLease(path, state, "trace", "other");
-    const denied = await workerTurn(path, peer, [[tool(publish, narrative)]]);
+    const denied = await workerTurn(path, peer, [[tool(publish, submission)]]);
     assertStringIncludes(denied.results[0][0], "unavailable");
 
     const call = (name: string, args: Record<string, unknown>, id: string) => {
@@ -7163,7 +7174,7 @@ Deno.test("Committed worker narrative reaches peers and planning while its sourc
             content: "",
             usage,
             toolCalls: [
-              call(publish, narrative, `source-publish-${results.length}`),
+              call(publish, submission, `source-publish-${results.length}`),
             ],
           };
         }
@@ -7221,6 +7232,7 @@ Deno.test("Committed worker narrative reaches peers and planning while its sourc
     assertEquals(committed.taskId, sourceTaskId);
     assertEquals(committed.targetId, "app");
     assertEquals(committed.evidenceRevision, state.revision);
+    assertEquals(committed.receipt.facts, conclusions);
     assertEquals(committed.receipt.summary, narrative.summary);
     assertEquals(committed.receipt.evidenceId, narrative.evidenceId);
     assertEquals(committed.receipt.confidence, narrative.confidence);
@@ -7270,7 +7282,7 @@ Deno.test("Committed worker narrative reaches peers and planning while its sourc
       );
     });
 
-    const query = "  STALE LOCAL  ";
+    const query = "  NO CURRENT INVENTORY  ";
     const retrieved = await workerTurn(path, peer, [
       [tool(reopen)],
       [tool(reopen, { query })],
@@ -15135,3 +15147,90 @@ Deno.test("A leased reporter reauthorizes a retained native workflow publication
 
 Deno.test("A leased reporter reauthorizes a retained delegated branch publication on resume", () =>
   verifyReceiptFamily("branch protection", "reporter-history"));
+
+Deno.test("An ordinary leased worker discovers and cites an exact same-asset peer step", async () => {
+  const baseDir = await Deno.makeTempDir();
+  try {
+    const path = resolveSentinelCasePath(baseDir);
+    await Deno.mkdir(dirname(path), { recursive: true });
+    await Deno.writeTextFile(
+      path,
+      JSON.stringify({
+        version: 1,
+        nodes: [
+          { id: "app", kind: "asset", label: "App" },
+          { id: "other", kind: "asset", label: "Other" },
+        ],
+        edges: [],
+      }),
+    );
+    const state = startSentinelAssessment(path);
+    const producer = assignedLease(path, state, "impact");
+    const neighbor = assignedLease(path, state, "impact", "other");
+    const consumer = assignedLease(path, state, "trace");
+    const store = openSentinelAdaptiveStore(
+      join(dirname(path), "sentinel-adaptive.db"),
+    );
+    try {
+      for (const lease of [producer, neighbor]) {
+        assert(store.finishModelReview(
+          adaptiveRevision(state),
+          lease.assignedTaskId,
+          lease.assignedTaskLeaseToken,
+          {
+            note: "Reviewed the inventory.",
+            steps: [{
+              tool: "trace",
+              target: "app",
+              outcome: "returned",
+            }],
+          },
+        ));
+      }
+    } finally {
+      store.close();
+    }
+    const name = "sentinel_worker_trace_search";
+    const hooks: string[] = [];
+    const citations: unknown[] = [];
+    const exact = { task: producer.assignedTaskId, stepIndices: [0] };
+    const run = await workerTurn(
+      path,
+      consumer,
+      [[tool(name, { query: "trace" })], [
+        tool(name, exact),
+        tool(name, { ...exact, task: neighbor.assignedTaskId }),
+        tool(name, { ...exact, revision: state.revision + 1 }),
+      ]],
+      undefined,
+      undefined,
+      undefined,
+      {
+        prompt:
+          "Find a committed peer step and reopen it by its exact reference.",
+        options: [undefined, (step) => {
+          if (step.workerTrace) citations.push(step.workerTrace);
+        }],
+        beforeHook(hook, toolName) {
+          if (toolName === name) hooks.push(hook);
+        },
+      },
+    );
+    const [step] = JSON.parse(run.results[0][0]).steps;
+    assertEquals(step.taskId, producer.assignedTaskId);
+    assertEquals(JSON.parse(run.results[0][0]).totalSteps, 1);
+    assertEquals(JSON.parse(run.results[1][0]).steps, [step]);
+    assertEquals(citations, [{
+      sourceTaskId: producer.assignedTaskId,
+      evidenceRevision: state.revision,
+      stepIndices: [0],
+    }]);
+    assertStringIncludes(run.results[1][1], "unavailable");
+    assert(!run.results[1][2].includes(step.reviewId));
+    assert(hooks.includes("PRE_TOOL_CALL"));
+    assert(hooks.includes("POST_TOOL_RESPONSE"));
+    assert(run.outputChecks.some((content) => content.includes(step.reviewId)));
+  } finally {
+    await Deno.remove(baseDir, { recursive: true });
+  }
+});

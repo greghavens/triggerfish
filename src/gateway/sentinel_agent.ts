@@ -1635,8 +1635,8 @@ function rememberIncidentRecommendationPage(
 }
 
 interface ActiveTurn {
-  readonly reporterTraceCalls: Map<string, SentinelWorkerTraceSearchArgs>;
-  readonly approvedReporterTraces: Map<string, SentinelWorkerTraceSearchArgs>;
+  readonly leasedTraceCalls: Map<string, SentinelWorkerTraceSearchArgs>;
+  readonly approvedLeasedTraces: Map<string, SentinelWorkerTraceSearchArgs>;
   readonly incidentRecommendationPages: Map<number, IncidentRecommendationPage>;
   readonly controller: AbortController;
   readonly signal: AbortSignal;
@@ -6559,24 +6559,29 @@ function createAgent(
               toolName === "sentinel_record_finding_recheck") &&
               call?.args?.findingId !== findingFollowup.findingId))
         ) return { ...result, allowed: false, action: "BLOCK" };
-        if (reporter && toolName === SENTINEL_WORKER_TRACE_SEARCH) {
+        if (
+          options.assignedTaskLeaseToken &&
+          toolName === SENTINEL_WORKER_TRACE_SEARCH
+        ) {
           const revision = options.assessmentRevision;
           const args = call?.args && sentinelWorkerTraceSearchArgs(call.args);
           const live = revision !== undefined &&
             liveProgressConsumer(options, revision);
           if (name === "PRE_TOOL_CALL") {
             if (
-              !args || args.liveProgress || !live || !turn ||
+              !args || (reporter && args.liveProgress) || !live || !turn ||
               revision === undefined ||
               (args.revision !== undefined && args.revision !== revision)
             ) {
               return { ...result, allowed: false, action: "BLOCK" };
             }
-            const binding = reporterConnectorBinding(options, revision);
+            const binding = reporter
+              ? reporterConnectorBinding(options, revision)
+              : undefined;
             if (binding && args.task && args.task !== binding.producerTaskId) {
               return { ...result, allowed: false, action: "BLOCK" };
             }
-            turn.reporterTraceCalls.set(JSON.stringify(args), args);
+            turn.leasedTraceCalls.set(JSON.stringify(args), args);
           }
         }
         if (
@@ -6705,7 +6710,7 @@ function createAgent(
           ((workerApprovalContext && (!turn || !approvalIsCurrent(turn))) ||
             (await turn?.workerBoundary?.("before_tool"))?.stop)
         ) return { ...result, allowed: false, action: "BLOCK" };
-        if (reporter && turn && result.allowed) {
+        if (options.assignedTaskLeaseToken && turn && result.allowed) {
           const response = context.input.tool_response;
           if (
             name === "POST_TOOL_RESPONSE" &&
@@ -6713,19 +6718,19 @@ function createAgent(
             typeof response === "string" && response.startsWith("{")
           ) {
             const connector = await authorizeReporterConnectorSource(turn);
-            const args = [...turn.reporterTraceCalls.values()].find((args) =>
+            const args = [...turn.leasedTraceCalls.values()].find((args) =>
               searchSentinelWorkerTraces(options, args, true, connector) ===
                 response
             );
             if (!args) return { ...result, allowed: false, action: "BLOCK" };
             if (JSON.parse(response).steps.length) {
-              turn.approvedReporterTraces.set(response, args);
+              turn.approvedLeasedTraces.set(response, args);
             }
           }
-          if (name === "PRE_OUTPUT" && turn.approvedReporterTraces.size) {
+          if (name === "PRE_OUTPUT" && turn.approvedLeasedTraces.size) {
             const connector = await authorizeReporterConnectorSource(turn);
             if (
-              [...turn.approvedReporterTraces].some(([approved, args]) =>
+              [...turn.approvedLeasedTraces].some(([approved, args]) =>
                 searchSentinelWorkerTraces(options, args, true, connector) !==
                   approved
               )
@@ -10449,8 +10454,8 @@ function createAgent(
           plannerFindingEvidence: new Map(),
           plannerFindingDrafts: new Map(),
           incidentRecommendationPages: new Map(),
-          reporterTraceCalls: new Map(),
-          approvedReporterTraces: new Map(),
+          leasedTraceCalls: new Map(),
+          approvedLeasedTraces: new Map(),
           operatingConstraints,
           reads: 0,
           workers: 0,
