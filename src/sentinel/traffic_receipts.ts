@@ -157,7 +157,7 @@ function safeObservation(
       (status !== 0 && (status < 100 || status > 599)) ||
       (startedAt !== undefined && !timestamp(startedAt)) ||
       (reviewedRoute !== undefined &&
-        (family !== "har" || !isReviewedHarRoute(reviewedRoute)))
+        !isReviewedHarRoute(reviewedRoute))
     ) return undefined;
     return {
       assetId,

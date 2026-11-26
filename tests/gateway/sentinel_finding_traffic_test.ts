@@ -1274,7 +1274,7 @@ Deno.test("Authenticated retained HTTP authority and URL searches bind cursors t
   }
 });
 
-Deno.test("Reviewed HAR routes are searchable under exact gateway scope without retaining raw segments", async () => {
+Deno.test("Reviewed HTTP routes are searchable under exact gateway scope without retaining raw segments", async () => {
   const baseDir = await Deno.makeTempDir();
   const path = resolveSentinelCasePath(baseDir, caseId);
   try {
@@ -1322,6 +1322,60 @@ Deno.test("Reviewed HAR routes are searchable under exact gateway scope without 
       false,
       "https://other.example:8443/metrics",
     );
+    const sensorOrigin = "http://collector.example:8080";
+    const sensorRoute = `${sensorOrigin}/health/{instance}`;
+    const zeek = {
+      ts: Date.now() / 1000,
+      host: "collector.example:8080",
+      uid: "Z1",
+      trans_depth: 1,
+      method: "GET",
+      status_code: 200,
+      uri: "/health/raw-zeek-key?auth=secret",
+    };
+    const suricata = {
+      event_type: "http",
+      timestamp: new Date().toISOString(),
+      flow_id: "42",
+      tx_id: 0,
+      http: {
+        hostname: "collector.example",
+        http_port: 8080,
+        http_method: "GET",
+        status: 200,
+        url: "/health/raw-suricata-key?auth=secret",
+      },
+    };
+    for (
+      const [family, records] of [
+        ["zeek-http", [zeek, {
+          ...zeek,
+          trans_depth: 2,
+          uri: "//wrong.example/health/private",
+        }]],
+        ["suricata-http", [
+          suricata,
+          {
+            ...suricata,
+            tx_id: 1,
+            http: { ...suricata.http, hostname: "other.example" },
+          },
+        ]],
+      ] as const
+    ) {
+      await ingestSentinelTraffic(
+        new Blob([records.map((record) => JSON.stringify(record)).join("\n")])
+          .stream(),
+        source,
+        path,
+        family,
+        false,
+        false,
+        false,
+        false,
+        sensorRoute,
+      );
+    }
     const snapshot = await readSentinelChatSnapshot(sentinelTrafficPath(path));
     await Deno.writeTextFile(path, JSON.stringify(snapshot));
     const state = startSentinelAssessment(path);
@@ -1377,6 +1431,29 @@ Deno.test("Reviewed HAR routes are searchable under exact gateway scope without 
       ]).then(([response]) => response),
     ).receipts[0];
     assertEquals(otherAsset.observation.reviewedRoute, "/metrics");
+    const sensorQuery = {
+      ...query,
+      authority: "collector.example:8080",
+      urlContains: "/health/{instance}",
+      limit: 10,
+    };
+    const [sensors, privateSensor, wrongSensor] =
+      await readTrafficThroughGateway(
+        baseDir,
+        [
+          sensorQuery,
+          { ...sensorQuery, urlContains: "raw-zeek-key" },
+          { ...sensorQuery, authority: "other.example:8080" },
+        ],
+      );
+    const sensorReceipts = JSON.parse(sensors).receipts;
+    assertEquals(
+      sensorReceipts.map(({ family }: { family: string }) => family).sort(),
+      ["suricata-http", "zeek-http"],
+    );
+    assert(!sensors.includes("raw-") && !sensors.includes("auth=secret"));
+    assertEquals(JSON.parse(privateSensor).receipts, []);
+    assertEquals(JSON.parse(wrongSensor).receipts, []);
     const lease = createLease(path, state, page.receipts[0].assetIds[0]);
     const worker = await runWorker(path, lease, [[
       call(search, {

@@ -109,9 +109,9 @@ function decodeTrafficEntry(
 ) {
   switch (format) {
     case "suricata-http":
-      return importSentinelSuricataHttp(entry, source);
+      return importSentinelSuricataHttp(entry, source, reviewedRoute);
     case "zeek-http":
-      return importSentinelZeekHttp(entry, source);
+      return importSentinelZeekHttp(entry, source, reviewedRoute);
     case "zeek-dns":
       return importSentinelZeekDns(entry, source);
     case "dns":
@@ -160,16 +160,16 @@ export async function ingestSentinelTraffic(
     );
   }
   const reviewedRoute = parseReviewedHarRoute(reviewedRouteInput);
-  if (
-    reviewedRouteInput !== undefined &&
-    (!reviewedRoute || format !== "har" || !snapshotPath)
-  ) {
-    throw new Error(
-      "Provide an exact HTTP origin and reviewed route for a published HAR feed.",
-    );
-  }
   const http = format === "har" || format === "zeek-http" ||
     format === "suricata-http";
+  if (
+    reviewedRouteInput !== undefined &&
+    (!reviewedRoute || !http || !snapshotPath)
+  ) {
+    throw new Error(
+      "Provide an exact HTTP origin and reviewed route for a published HTTP feed.",
+    );
+  }
   const output = snapshotPath
     ? (http ? sentinelTrafficPath : sentinelDnsPath)(snapshotPath)
     : undefined;

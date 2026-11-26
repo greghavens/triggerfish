@@ -70,7 +70,7 @@ export const sentinelTrafficSearchTool: ToolDefinition = {
     urlContains: {
       type: "string",
       description:
-        "Literal case-insensitive substring of the retained HTTP origin or explicitly reviewed HAR route. A reviewed route may contain segment placeholders. Query strings, credentials, and unreviewed paths are absent.",
+        "Literal case-insensitive substring of the retained HTTP origin or explicitly reviewed route. A reviewed route may contain segment placeholders. Query strings, credentials, and unreviewed paths are absent.",
     },
     hostname: { type: "string", description: "Exact normalized DNS hostname" },
     method: { type: "string", description: "Exact normalized HTTP method" },

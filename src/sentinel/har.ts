@@ -257,14 +257,19 @@ export function importSentinelHar(
 }
 
 /** Extract a sanitized HTTP observation from Zeek's JSON http.log. */
-export function importSentinelZeekHttp(raw: unknown, source: string) {
+export function importSentinelZeekHttp(
+  raw: unknown,
+  source: string,
+  reviewedRoute?: ReturnType<typeof parseReviewedHarRoute>,
+) {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
     throw new Error("Expected a Zeek HTTP record");
   }
-  const { host, method, status_code, uid, trans_depth, ts } = raw as Record<
-    string,
-    unknown
-  >;
+  const { host, method, status_code, uid, trans_depth, ts, uri } =
+    raw as Record<
+      string,
+      unknown
+    >;
   if (host === undefined || method === undefined || method === "CONNECT") {
     return;
   }
@@ -285,11 +290,17 @@ export function importSentinelZeekHttp(raw: unknown, source: string) {
     source,
     "Zeek HTTP",
     ["zeek-http", uid, trans_depth],
+    uri,
+    reviewedRoute,
   );
 }
 
 /** Extract sanitized HTTP metadata from standalone Suricata EVE HTTP records. */
-export function importSentinelSuricataHttp(raw: unknown, source: string) {
+export function importSentinelSuricataHttp(
+  raw: unknown,
+  source: string,
+  reviewedRoute?: ReturnType<typeof parseReviewedHarRoute>,
+) {
   const event = object(raw, "Suricata EVE record");
   if (event.event_type !== "http") return;
   const http = object(event.http, "Suricata HTTP record");
@@ -335,6 +346,8 @@ export function importSentinelSuricataHttp(raw: unknown, source: string) {
       event.dest_ip,
       event.dest_port,
     ],
+    http.url,
+    reviewedRoute,
   );
 }
 
@@ -346,6 +359,8 @@ function importSensorHttp(
   source: string,
   label: string,
   identity: readonly unknown[],
+  target: unknown,
+  reviewedRoute?: ReturnType<typeof parseReviewedHarRoute>,
 ) {
   if (
     typeof host !== "string" || host.length > 261 ||
@@ -367,6 +382,13 @@ function importSensorHttp(
     "evidence",
     JSON.stringify([...identity, observation.evidenceId]),
   );
+  const route = reviewedRoute && typeof target === "string" &&
+      target.length <= 8192 && /^\/(?!\/)/.test(target) &&
+      !/[\\\p{Cc}\p{Cf}]/u.test(target) &&
+      URL.parse(observation.origin + target)?.pathname ===
+        target.split(/[?#]/, 1)[0]
+    ? matchReviewedHarRoute(observation.origin + target, reviewedRoute)
+    : undefined;
   return {
     snapshot: {
       ...snapshot,
@@ -381,6 +403,10 @@ function importSensorHttp(
       ),
       edges: snapshot.edges.map((edge) => ({ ...edge, from: evidenceId })),
     },
-    observation: { ...observation, evidenceId },
+    observation: {
+      ...observation,
+      evidenceId,
+      ...(route && { reviewedRoute: route }),
+    },
   };
 }
