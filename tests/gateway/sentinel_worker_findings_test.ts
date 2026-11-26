@@ -1387,14 +1387,47 @@ Deno.test("Leased Sentinel workers report, recheck, and amend findings visible i
         assertEquals(rejected.type, "error");
         assertEquals(rejected.content, undefined);
       }
-      const tooMany = await request("export", {
+      const completeRequest = {
         ...filterExport,
         caseId: "other",
         revision: other.revision,
         findingFilter: {},
+      };
+      const complete = await request("export", completeRequest);
+      assertEquals(complete.type, "export");
+      assertEquals(complete.findingPage, undefined);
+      const completeIds: string[] = JSON.parse(String(complete.content))
+        .findings
+        .map(({ id }: { id: string }) => id);
+      assertEquals(completeIds.length, 17);
+      assertEquals(new Set(completeIds).size, 17);
+      const explicit = await request("export", {
+        ...filterExport,
+        caseId: "other",
+        revision: other.revision,
+        findingIds: completeIds,
       });
-      assertEquals(tooMany.type, "error");
-      assertEquals(tooMany.content, undefined);
+      assertEquals(explicit.content, complete.content);
+      for (const format of ["csv", "markdown"]) {
+        const output = await request("export", { ...completeRequest, format });
+        assertEquals(output.type, "export");
+        assertEquals(output.findingPage, undefined);
+        const visible = String(output.content).replace(
+          /&#(\d+);/g,
+          (_entity, code) => String.fromCodePoint(Number(code)),
+        );
+        for (const id of completeIds) assertStringIncludes(visible, id);
+      }
+      const zip = await request("export", {
+        ...completeRequest,
+        format: "md-zip",
+      });
+      assertEquals(zip.type, "export");
+      assertEquals(zip.findingPage, undefined);
+      const bytes = Buffer.from(String(zip.content), "base64");
+      const centralEnd = bytes.length - 22;
+      assertEquals(bytes.readUInt32LE(centralEnd), 0x06054b50);
+      assertEquals(bytes.readUInt16LE(centralEnd + 10), 17);
       const pageRequest = {
         ...filterExport,
         caseId: "other",
@@ -1442,7 +1475,7 @@ Deno.test("Leased Sentinel workers report, recheck, and amend findings visible i
         assertEquals(lastPage.manifestDigest, firstPage.manifestDigest);
         assertEquals(lastPage.nextCursor, null);
         const allIds = [...firstPage.ids, ...secondPage.ids, ...lastPage.ids];
-        assertEquals(allIds.length, 17);
+        assertEquals(allIds, completeIds);
         assertEquals(new Set(allIds).size, 17);
         assertEquals(
           [...allIds].sort(),
@@ -3934,6 +3967,47 @@ for (
     () => verifyReceiptFamily(family),
   );
 }
+
+Deno.test("Single-file Sentinel finding exports retain the output byte limit", async () => {
+  const baseDir = await Deno.makeTempDir();
+  try {
+    const path = resolveSentinelCasePath(baseDir);
+    await Deno.mkdir(dirname(path), { recursive: true });
+    await Deno.writeTextFile(
+      path,
+      JSON.stringify({
+        version: 1,
+        nodes: Array.from({ length: 140 }, (_, index) => ({
+          id: `finding-${index}`,
+          kind: "finding",
+          label: "🔍".repeat(256),
+          severity: "low",
+        })),
+        edges: [],
+      }),
+    );
+    const state = startSentinelAssessment(path);
+    await withTidepool(baseDir, async (_list, _provenance, request) => {
+      const selection = {
+        caseId: "main",
+        revision: state.revision,
+        format: "csv",
+        findingFilter: {},
+      };
+      const oversized = await request("export", selection);
+      assertEquals(oversized.type, "error");
+      assertEquals(oversized.content, undefined);
+      const page = await request("export", {
+        ...selection,
+        findingPageSize: 16,
+      });
+      assertEquals(page.type, "export");
+      assertEquals((page.findingPage as { total: number }).total, 140);
+    });
+  } finally {
+    await Deno.remove(baseDir, { recursive: true });
+  }
+});
 
 Deno.test("Gateway publication requires the exact saved workflow attempt and evidence revision", () =>
   verifyReceiptFamily("workflow attempt"));

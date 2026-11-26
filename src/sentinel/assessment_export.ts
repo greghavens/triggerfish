@@ -292,7 +292,8 @@ type ScopedFindingExportFormat =
   | "markdown"
   | "findings-json"
   | "md-zip";
-const MAX_FINDING_EXPORT_COUNT = 16;
+const MAX_FINDING_EXPORT_PAGE_SIZE = 16;
+const MAX_FINDING_EXPORT_SELECTION = 4096;
 const MAX_FINDING_EXPORT_BYTES = 256 * 1024;
 
 interface FindingExportFilter {
@@ -396,7 +397,7 @@ export function renderScopedSentinelFindingsPage(
 ) {
   if (
     typeof size !== "number" || !Number.isSafeInteger(size) ||
-    size < 1 || size > MAX_FINDING_EXPORT_COUNT ||
+    size < 1 || size > MAX_FINDING_EXPORT_PAGE_SIZE ||
     (cursor !== undefined && typeof cursor !== "string")
   ) return;
   const match = typeof cursor === "string"
@@ -433,15 +434,14 @@ function renderFindingExport(
   if (
     explicit &&
     (!selection.length ||
-      selection.length > (page ? 4096 : MAX_FINDING_EXPORT_COUNT) ||
+      selection.length > MAX_FINDING_EXPORT_SELECTION ||
       selection.some((id) =>
         typeof id !== "string" || !id || id.length > 4096 ||
         /[\p{Cc}\p{Cf}]/u.test(id)
       ) ||
       new Set(selection).size !== selection.length ||
-      (page &&
-        new TextEncoder().encode(JSON.stringify(selection)).byteLength >
-          512 * 1024))
+      new TextEncoder().encode(JSON.stringify(selection)).byteLength >
+        512 * 1024)
   ) return;
   const findings = new Map(
     (importedFindings(assessment) ?? []).map((
@@ -486,16 +486,15 @@ function renderFindingExport(
   ]));
   let findingTotal = 0;
   try {
-    const maxScannedWorkerFindings = page ? 4096 : 256;
     const workerIds = !explicit && selection.kind !== "imported" && runId
       ? journal?.listFindingIds(
         caseId,
         runId,
         assessment.revision,
-        maxScannedWorkerFindings + 1,
+        MAX_FINDING_EXPORT_SELECTION + 1,
       ) ?? []
       : [];
-    if (workerIds.length > maxScannedWorkerFindings) return;
+    if (workerIds.length > MAX_FINDING_EXPORT_SELECTION) return;
     const ids = explicit ? selection : [
       ...(selection.kind === "worker" ? [] : findings.keys()),
       ...workerIds,
@@ -533,7 +532,7 @@ function renderFindingExport(
               value.toLowerCase().includes(query)
             ))
         ) continue;
-        if (!page && records.length >= MAX_FINDING_EXPORT_COUNT) return;
+        if (!page && records.length >= MAX_FINDING_EXPORT_SELECTION) return;
       }
       const composition = trafficCompositionByFinding.get(id) ?? [];
       const exactAttachments = (attachmentsByFinding.get(id) ?? []).filter(
