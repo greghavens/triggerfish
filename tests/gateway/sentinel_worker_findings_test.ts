@@ -9,6 +9,7 @@ import {
   restoreSession,
   type UserId,
 } from "../../src/core/types/session.ts";
+import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";
 import { createSentinelLiveWorkflowReader } from "../../src/gateway/sentinel_live_workflow.ts";
 import {
@@ -1403,6 +1404,73 @@ Deno.test("Leased Sentinel workers report, recheck, and amend findings visible i
         ),
         ["review-gap"],
       );
+      const zipped = await request("export", {
+        ...selected,
+        format: "md-zip",
+        findingIds: [finding!.id, "review-gap"],
+      });
+      assertEquals(zipped.type, "export");
+      assertEquals(zipped.encoding, "base64");
+      assertEquals(zipped.contentType, "application/zip");
+      assertEquals(zipped.filename, `sentinel-findings-r${secondRevision}.zip`);
+      const payload = Buffer.from(String(zipped.content), "base64");
+      const end = payload.length - 22;
+      assertEquals(payload.readUInt32LE(end), 0x06054b50);
+      assertEquals(payload.readUInt16LE(end + 10), 2);
+      let directory = payload.readUInt32LE(end + 16);
+      for (
+        const [index, included, excluded] of [
+          [1, finding!.id, "review-gap"],
+          [2, "review-gap", finding!.id],
+        ] as const
+      ) {
+        assertEquals(payload.readUInt32LE(directory), 0x02014b50);
+        const nameSize = payload.readUInt16LE(directory + 28);
+        const local = payload.readUInt32LE(directory + 42);
+        assertEquals(payload.readUInt32LE(local), 0x04034b50);
+        assertEquals(payload.readUInt16LE(local + 8), 0);
+        const name = payload.toString(
+          "utf8",
+          directory + 46,
+          directory + 46 + nameSize,
+        );
+        assertEquals(name, `finding-0${index}.md`);
+        assertEquals(
+          payload.toString("utf8", local + 30, local + 30 + nameSize),
+          name,
+        );
+        const bodyOffset = local + 30 + nameSize;
+        const body = payload.subarray(
+          bodyOffset,
+          bodyOffset + payload.readUInt32LE(directory + 24),
+        );
+        assertEquals(
+          payload.readUInt32LE(local + 14),
+          payload.readUInt32LE(directory + 16),
+        );
+        const report = body.toString("utf8").replace(
+          /&#(\d+);/g,
+          (_entity, code) => String.fromCodePoint(Number(code)),
+        );
+        assertStringIncludes(report, included);
+        assert(!report.includes(excluded));
+        assert(!report.includes("Waiting dependent"));
+        if (index === 1) {
+          assertStringIncludes(report, finding!.evidenceId);
+          assertStringIncludes(report, finding!.snapshotDigest);
+          assertStringIncludes(report, check!.id);
+          assert(!report.includes(finding!.requestId));
+        }
+        directory += 46 + nameSize;
+      }
+      assertEquals(directory, end);
+      const badZip = await request("export", {
+        ...selected,
+        format: "md-zip",
+        findingIds: [finding!.id, "../other-case.md"],
+      });
+      assertEquals(badZip.type, "error");
+      assertEquals(badZip.content, undefined);
       const beforeUnknown = await request("export", {
         ...selected,
         format: "findings-json",

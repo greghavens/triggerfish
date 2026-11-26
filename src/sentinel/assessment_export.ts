@@ -19,6 +19,7 @@ import {
   readSentinelRunIdForRevision,
 } from "./assessment_store.ts";
 import { locateSentinelCase } from "./cases.ts";
+import { encodeSentinelFindingZip } from "./finding_export_zip.ts";
 import { exportSentinelFindingTrafficLinks } from "./finding_traffic_links.ts";
 import { loadSentinelGraph } from "./graph.ts";
 import {
@@ -278,8 +279,13 @@ export function renderSentinelFindingsCsv(
     "\r\n";
 }
 
-type ScopedFindingExportFormat = "csv" | "markdown" | "findings-json";
+type ScopedFindingExportFormat =
+  | "csv"
+  | "markdown"
+  | "findings-json"
+  | "md-zip";
 const MAX_FINDING_EXPORT_COUNT = 16;
+const MAX_FINDING_EXPORT_BYTES = 256 * 1024;
 
 interface FindingExportFilter {
   readonly kind?: "imported" | "worker";
@@ -485,58 +491,67 @@ export function renderScopedSentinelFindings(
     ).join("\r\n") + "\r\n";
   } else {
     const t = sentinelReportText(language);
-    content = [
-      `# ${t("Sentinel investigation report")}`,
-      "",
-      `- ${t("Saved revision")} ${assessment.revision}`,
-      `- ${markdownText(caseId)}`,
-      ...records.flatMap((row) => [
+    const renderMarkdown = (findings: typeof result.findings): string =>
+      [
+        `# ${t("Sentinel investigation report")}`,
         "",
-        `## ${markdownText(row.title)}`,
-        "",
-        `- ${t("Finding ID")} ${markdownText(row.id)}`,
-        ...(row.summary ? [`- ${markdownText(row.summary)}`] : []),
-        `- ${t("Affected asset IDs")} ${
-          linkedIds(row.assetIds, t("None linked"))
-        }`,
-        `- ${t("Mitigation IDs")} ${
-          linkedIds(row.controlIds, t("None linked"))
-        }`,
-        `- ${t("Evidence IDs")} ${
-          linkedIds(row.evidenceIds, t("None linked"))
-        }`,
-        ...(row.original
-          ? [
-            `- ${t("Evidence revision")} ${row.original.evidenceRevision} · ${
-              markdownText(row.original.snapshotDigest)
-            }`,
-            `- ${t("Task")} ${markdownText(row.original.taskId)}`,
-          ]
-          : []),
-        ...(row.rechecks ?? []).flatMap((record) => [
-          `- ${t("Control recheck")} ${markdownText(record.id)} · ${
-            t(record.outcome)
-          } · ${markdownText(record.evidenceId)}`,
-          `  - ${t("Evidence revision")} ${record.evidenceRevision} · ${
-            markdownText(record.snapshotDigest)
+        `- ${t("Saved revision")} ${assessment.revision}`,
+        `- ${markdownText(caseId)}`,
+        ...findings.flatMap((row) => [
+          "",
+          `## ${markdownText(row.title)}`,
+          "",
+          `- ${t("Finding ID")} ${markdownText(row.id)}`,
+          ...(row.summary ? [`- ${markdownText(row.summary)}`] : []),
+          `- ${t("Affected asset IDs")} ${
+            linkedIds(row.assetIds, t("None linked"))
           }`,
-          `  - ${t("Task")} ${markdownText(record.taskId)}`,
+          `- ${t("Mitigation IDs")} ${
+            linkedIds(row.controlIds, t("None linked"))
+          }`,
+          `- ${t("Evidence IDs")} ${
+            linkedIds(row.evidenceIds, t("None linked"))
+          }`,
+          ...(row.original
+            ? [
+              `- ${t("Evidence revision")} ${row.original.evidenceRevision} · ${
+                markdownText(row.original.snapshotDigest)
+              }`,
+              `- ${t("Task")} ${markdownText(row.original.taskId)}`,
+            ]
+            : []),
+          ...(row.rechecks ?? []).flatMap((record) => [
+            `- ${t("Control recheck")} ${markdownText(record.id)} · ${
+              t(record.outcome)
+            } · ${markdownText(record.evidenceId)}`,
+            `  - ${t("Evidence revision")} ${record.evidenceRevision} · ${
+              markdownText(record.snapshotDigest)
+            }`,
+            `  - ${t("Task")} ${markdownText(record.taskId)}`,
+          ]),
+          ...(row.amendments ?? []).map((record) =>
+            `- ${t("Updated")} v${record.version} · ${
+              markdownText(record.id)
+            } · ${markdownText(record.title)}`
+          ),
+          ...row.trafficLinks.map((link) =>
+            `- ${markdownText(link.id)} · ${markdownText(link.trafficId)} · ${
+              markdownText(link.trafficDigest)
+            }`
+          ),
         ]),
-        ...(row.amendments ?? []).map((record) =>
-          `- ${t("Updated")} v${record.version} · ${
-            markdownText(record.id)
-          } · ${markdownText(record.title)}`
-        ),
-        ...row.trafficLinks.map((link) =>
-          `- ${markdownText(link.id)} · ${markdownText(link.trafficId)} · ${
-            markdownText(link.trafficDigest)
-          }`
-        ),
-      ]),
-      "",
-    ].join("\n");
+        "",
+      ].join("\n");
+    if (format === "md-zip") {
+      return encodeSentinelFindingZip(
+        records.map((record) => renderMarkdown([record])),
+        MAX_FINDING_EXPORT_BYTES,
+      );
+    }
+    content = renderMarkdown(records);
   }
-  return new TextEncoder().encode(content).byteLength <= 256 * 1024
+  return new TextEncoder().encode(content).byteLength <=
+      MAX_FINDING_EXPORT_BYTES
     ? content
     : undefined;
 }

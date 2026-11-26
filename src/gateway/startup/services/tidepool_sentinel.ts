@@ -1326,7 +1326,7 @@ export function createTidepoolSentinelHandler(
         case "export": {
           if (
             message.format !== "csv" && message.format !== "markdown" &&
-            message.format !== "findings-json" &&
+            message.format !== "findings-json" && message.format !== "md-zip" &&
             message.format !== "provenance" && message.format !== "inventory" &&
             message.format !== "alerts" && message.format !== "decisions" &&
             message.format !== "incidents"
@@ -1355,7 +1355,8 @@ export function createTidepoolSentinelHandler(
           const format = message.format;
           if (
             message.findingIds !== undefined ||
-            message.findingFilter !== undefined || format === "findings-json"
+            message.findingFilter !== undefined || format === "findings-json" ||
+            format === "md-zip"
           ) {
             const language = message.language ?? "en";
             const selection = message.findingFilter !== undefined
@@ -1369,7 +1370,7 @@ export function createTidepoolSentinelHandler(
               typeof revision !== "number" ||
               !selection ||
               (format !== "csv" && format !== "markdown" &&
-                format !== "findings-json") ||
+                format !== "findings-json" && format !== "md-zip") ||
               !isSentinelReportLanguage(language)
             ) {
               throw new SentinelAssignmentError(
@@ -1396,6 +1397,11 @@ export function createTidepoolSentinelHandler(
               revision: state.revision,
               format,
               content,
+              ...(format === "md-zip" && {
+                encoding: "base64",
+                contentType: "application/zip",
+                filename: `sentinel-findings-r${state.revision}.zip`,
+              }),
             });
             return;
           }

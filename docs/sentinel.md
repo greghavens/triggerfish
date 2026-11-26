@@ -307,7 +307,7 @@ require a new, exact preview.
 
 The authenticated Tidepool Sentinel `export` route accepts up to 16 exact
 `findingIds` with a case ID and a saved evidence `revision`. Set `format` to
-`findings-json`, `csv`, or `markdown`. The export includes only the selected
+`findings-json`, `csv`, `markdown`, or `md-zip`. The export includes only the selected
 findings, their saved report versions, linked rechecks, and retained traffic
 references from that revision. An unavailable ID rejects the whole selection.
 Use `findingFilter` in place of `findingIds` to match an exact `assetId`,
@@ -315,6 +315,10 @@ the source `kind` (`imported` or `worker`), or a case-insensitive text
 `query` on saved report titles and summaries. An empty filter selects every
 finding in the case at that revision. Over-limit reports require narrower
 filters or exact IDs.
+
+The `md-zip` response provides a base64 ZIP with one Markdown file per finding,
+a suggested `filename`, and `contentType: application/zip`. Each file retains the
+same reviewed report and exact evidence references as the Markdown export.
 
 ### Archive and restore a named assessment
 
@@ -360,6 +364,14 @@ per-worker limits remain independent. Starting or refreshing a queued case can
 save its inputs. Adaptive planning and execution wait for its coordinator slot.
 Without this setting, the gateway uses its existing 12-slot rotation for named
 cases.
+
+In owner chat, use `operator_runs` with `assessment_concurrency` to read the
+current limit and its version. `set_assessment_concurrency` accepts a limit,
+the expected version, and a request ID. `reset_assessment_concurrency` uses
+the same version and request ID fields and restores the configured limit.
+Both changes require operator confirmation and survive restart. When the
+limit goes down, excess named cases keep their place and finish in-flight
+work before releasing their slots.
 
 Resolved and dismissed findings and incidents do not generate new automatic
 review assignments or follow-ups. Explicit operator assignments remain
