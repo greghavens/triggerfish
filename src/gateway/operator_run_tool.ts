@@ -1,4 +1,4 @@
-import type { ManagedSentinelIncidentSource } from "../core/managed_notification_channels.ts";
+import type { ManagedNotificationSource } from "../core/managed_notification_channels.ts";
 import {
   executeOperatorNotificationChannel,
   managedDeliveryStates,
@@ -966,7 +966,7 @@ export const operatorRunTool: ToolDefinition = {
     notificationChannelSettings: {
       type: "object",
       description:
-        "Complete webhook settings: name, destinationOrigin, endpointRef, classification and enabled. Use only an existing notification secret reference. Optionally subscribe to incident increases with sentinelIncidents {caseId, runId, afterRevision} matching an active assessment.",
+        "Complete webhook settings: name, destinationOrigin, endpointRef, classification and enabled. Use only an existing notification secret reference. Optionally subscribe to incident increases with sentinelIncidents {caseId, runId, afterRevision} matching an active assessment, or to retained finding events with sentinelFindings {caseId, runId, afterRevision, events}.",
     },
     expectedVersion: {
       type: "integer",
@@ -1876,7 +1876,7 @@ export interface OperatorRunToolContext {
     origin: string,
     classification: ClassificationLevel,
     body: string,
-    source?: ManagedSentinelIncidentSource,
+    source?: ManagedNotificationSource,
   ) => Promise<boolean>;
   readonly ownerRecoverySessionId?: string;
   readonly delegatedRecovery?: {

@@ -1,4 +1,9 @@
 import {
+  createSentinelFindingDelivery,
+  isCurrentSentinelFindingNotification,
+  readSentinelFindingNotificationScope,
+} from "../notifications/sentinel_findings.ts";
+import {
   createSentinelIncidentDelivery,
   isCurrentSentinelIncident,
   readSentinelIncidentScope,
@@ -104,6 +109,11 @@ function configuredNotificationChannels(
       toolInfra.mainKeychain,
       createDomainPolicy(buildDomainSecurityConfig(bootstrap.config)),
     ),
+    readSentinelFindingScope: (caseId: string) =>
+      readSentinelFindingNotificationScope(bootstrap.baseDir, caseId),
+    isCurrentSentinelFinding: (
+      source: Parameters<typeof isCurrentSentinelFindingNotification>[1],
+    ) => isCurrentSentinelFindingNotification(bootstrap.baseDir, source),
     readSentinelIncidentScope: sentinelIncidents
       ? (caseId: string) => readSentinelIncidentScope(bootstrap.baseDir, caseId)
       : undefined,
@@ -752,11 +762,17 @@ export async function startServicesAndChannels(
       toolInfra.hookRunner,
     )
     : undefined;
+  const notifyManagedFindings = createSentinelFindingDelivery(
+    bootstrap.baseDir,
+    configuredNotificationChannels(bootstrap, coreInfra, toolInfra),
+    toolInfra.hookRunner,
+  );
   const sentinelAssessment = startSentinelAssessmentCoordinator({
     snapshotPath,
     webContainmentConfigured,
     notifyIncidentIncrease: notifyIncidentIncrease?.("main"),
     notifyManagedIncidentIncrease,
+    notifyManagedFindings,
     advanceAdaptive(state) {
       advanceAdaptiveSentinel(snapshotPath, state);
       modelPlanner?.advance(state);
@@ -799,6 +815,7 @@ export async function startServicesAndChannels(
         webContainmentConfigured,
         notifyIncidentIncrease: notifyIncidentIncrease?.(caseId),
         notifyManagedIncidentIncrease,
+        notifyManagedFindings,
         advanceAdaptive(state) {
           advanceAdaptiveSentinel(casePath, state);
           planner?.advance(state);

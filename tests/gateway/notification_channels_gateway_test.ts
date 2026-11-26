@@ -1,3 +1,9 @@
+import {
+  createSentinelFindingDelivery,
+  isCurrentSentinelFindingNotification,
+  readSentinelFindingNotificationScope,
+} from "../../src/gateway/notifications/sentinel_findings.ts";
+import { openSentinelWorkerFindingStore } from "../../src/sentinel/worker_finding_store.ts";
 import { dirname } from "@std/path";
 import type { HookRunner } from "../../src/core/policy/hooks/hooks.ts";
 import type { OperatorNotificationChannels } from "../../src/gateway/notifications/operator_channels.ts";
@@ -115,6 +121,10 @@ Deno.test("gateway reviews notification subscriptions and durably deduplicates s
     };
     channels = {
       store: createManagedNotificationChannels(storage),
+      readSentinelFindingScope: (caseId) =>
+        readSentinelFindingNotificationScope(baseDir, caseId),
+      isCurrentSentinelFinding: (source) =>
+        isCurrentSentinelFindingNotification(baseDir, source),
       isCurrentSentinelIncident: (source) =>
         isCurrentSentinelIncident(baseDir, source),
 
@@ -221,12 +231,42 @@ Deno.test("gateway reviews notification subscriptions and durably deduplicates s
       path,
       JSON.stringify({
         version: 1,
-        nodes: [{
-          id: "fixture-asset",
-          kind: "asset",
-          label: "Private fixture label",
-        }],
-        edges: [],
+        nodes: [
+          {
+            id: "fixture-asset",
+            kind: "asset",
+            label: "Private fixture label",
+          },
+          {
+            id: "fixture-finding",
+            kind: "finding",
+            label: "Private fixture finding",
+            severity: "high",
+          },
+          {
+            id: "fixture-evidence",
+            kind: "evidence",
+            label: "Private fixture evidence",
+          },
+          {
+            id: "fixture-control",
+            kind: "control",
+            label: "Private fixture control",
+          },
+        ],
+        edges: [
+          { from: "fixture-finding", to: "fixture-asset", relation: "affects" },
+          {
+            from: "fixture-evidence",
+            to: "fixture-finding",
+            relation: "supports",
+          },
+          {
+            from: "fixture-control",
+            to: "fixture-finding",
+            relation: "mitigates",
+          },
+        ],
       }),
     );
     const initial = startSentinelAssessment(path);
@@ -260,6 +300,22 @@ Deno.test("gateway reviews notification subscriptions and durably deduplicates s
       notifyIncidentIncrease: () => Promise.resolve("delivered"),
       notifyManagedIncidentIncrease: (source, current) =>
         dispatch(source, current).then(done.resolve, done.reject),
+      onError: done.reject,
+    });
+    try {
+      await done.promise;
+    } finally {
+      coordinator.stop();
+    }
+  }
+
+  async function tickFindingCoordinator(path: string) {
+    const done = Promise.withResolvers<void>();
+    const dispatch = createSentinelFindingDelivery(baseDir, channels, hooks);
+    const coordinator = startSentinelAssessmentCoordinator({
+      snapshotPath: path,
+      notifyManagedFindings: (caseId, current) =>
+        dispatch(caseId, current).then(done.resolve, done.reject),
       onError: done.reject,
     });
     try {
@@ -502,6 +558,109 @@ Deno.test("gateway reviews notification subscriptions and durably deduplicates s
       revision: incident.revision,
     });
 
+    const findingSubscription = {
+      ...mutation,
+      notificationChannelId: "findings",
+      notificationChannelSettings: {
+        ...mutation.notificationChannelSettings,
+        sentinelFindings: {
+          caseId: "main",
+          runId: incident.plan.runId,
+          afterRevision: incident.revision,
+          events: [
+            "sentinel_finding_created",
+            "sentinel_finding_status_changed",
+          ],
+        },
+      },
+    };
+    const findingScope = {
+      caseId: "main",
+      runId: incident.plan.runId!,
+      evidenceRevision: incident.revision,
+      taskId: "finding-assignment",
+      targetId: "fixture-asset",
+      graphFindingId: "fixture-finding",
+      controlId: "fixture-control",
+      evidenceId: "fixture-evidence",
+      snapshotDigest: "a".repeat(64),
+      observedAt: "2026-11-24T12:00:00.000Z",
+      evaluatedAt: "2026-11-24T12:01:00.000Z",
+      validUntil: "2026-11-24T12:02:00.000Z",
+      title: "Private finding title",
+      summary: "Private finding summary",
+      requestId: crypto.randomUUID(),
+    };
+    const journal = openSentinelWorkerFindingStore(path);
+    try {
+      journal.recordFinding(findingScope);
+      assertEquals(
+        JSON.parse(await turn(findingSubscription)).channel.version,
+        1,
+      );
+      const record = journal.recordFinding({
+        ...findingScope,
+        taskId: "new-finding-assignment",
+        requestId: crypto.randomUUID(),
+      });
+      journal.recordFinding({
+        ...findingScope,
+        taskId: "outside-assignment",
+        targetId: "outside-case-asset",
+        requestId: crypto.randomUUID(),
+      });
+      const amend = {
+        ...findingScope,
+        taskId: "operator",
+        findingId: record.id,
+        expectedVersion: 1,
+        disposition: "confirmed" as const,
+        requestId: crypto.randomUUID(),
+      };
+      const update = journal.updateFindingReport(amend);
+      journal.updateFindingReport({
+        ...amend,
+        expectedVersion: 2,
+        requestId: crypto.randomUUID(),
+      });
+      await tickFindingCoordinator(path);
+      assertEquals(calls, 6);
+      const [created, changed] = payloads.slice(-2);
+      assertEquals(created.receiptId, record.id);
+      assertEquals(created.assignmentId, "new-finding-assignment");
+      assertEquals(changed.receiptId, update.id);
+      assertEquals(changed.previousStatus, "open");
+      assertEquals(changed.status, "confirmed");
+      assert(!JSON.stringify([created, changed]).includes("Private"));
+      await disconnect();
+      await connect();
+      await tickFindingCoordinator(path);
+      assertEquals(calls, 6);
+      const results = JSON.parse(
+        await turn({
+          action: "notification_deliveries",
+          notificationChannelId: "findings",
+          notificationEventKind: "sentinel_finding_status_changed",
+        }),
+      ).deliveries;
+      assertEquals(results.length, 1);
+      assertEquals(results[0].source.receiptId, update.id);
+      assertEquals(results[0].source.revision, incident.revision);
+      assertEquals(results[0].source.reportVersion, 2);
+    } finally {
+      journal.close();
+    }
+    assertEquals(
+      JSON.parse(
+        await turn({
+          action: "retire_notification_channel",
+          notificationChannelId: "findings",
+          expectedVersion: 1,
+        }),
+      ).channel.retired,
+      true,
+    );
+
     const retire = {
       action: "retire_notification_channel",
       ...selector,
@@ -523,7 +682,7 @@ Deno.test("gateway reviews notification subscriptions and durably deduplicates s
       await turn({ ...probe, requestId: "stale" }),
       "unavailable",
     );
-    assertEquals(calls, 4);
+    assertEquals(calls, 6);
   } finally {
     await disconnect();
     await Deno.remove(baseDir, { recursive: true });

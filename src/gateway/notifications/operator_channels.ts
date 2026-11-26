@@ -1,6 +1,8 @@
 import {
+  managedFindingEvents,
   type ManagedNotificationChannel,
   type ManagedNotificationChannels,
+  type ManagedSentinelFindingSource,
   type ManagedSentinelIncidentScope,
   type ManagedSentinelIncidentSource,
   maxManagedNotificationRetries,
@@ -8,6 +10,10 @@ import {
 import { canFlowTo } from "../../core/types/classification.ts";
 import { isSentinelCaseId } from "../../sentinel/cases.ts";
 import type { OperatorRunToolContext } from "../operator_run_tool.ts";
+import {
+  matchesSentinelFindingSubscription,
+  sentinelFindingNotificationBody,
+} from "./sentinel_findings.ts";
 import {
   matchesSentinelIncidentSubscription,
   sentinelIncidentNotificationBody,
@@ -32,6 +38,14 @@ export interface OperatorNotificationChannels {
   readonly isCurrentSentinelIncident?: (
     source: ManagedSentinelIncidentSource,
   ) => boolean;
+  readonly readSentinelFindingScope?: (
+    caseId: string,
+  ) =>
+    | (ManagedSentinelIncidentScope & { readonly afterSequence: number })
+    | undefined;
+  readonly isCurrentSentinelFinding?: (
+    source: ManagedSentinelFindingSource,
+  ) => boolean;
   readonly bindWebhookDestination: (
     channel: ManagedNotificationChannel,
   ) => Promise<string | undefined>;
@@ -53,11 +67,31 @@ export const managedDeliveryStates = [
 export const managedEventKinds = [
   "test",
   "sentinel_incident_increase",
+  ...managedFindingEvents,
 ] as const;
 const testMessage = JSON.stringify({
   type: "triggerfish.notification.test",
   message: "Triggerfish notification channel test",
 });
+
+function parseSentinelSubscription(value: unknown, finding: boolean) {
+  if (!value || typeof value !== "object") return;
+  const { caseId, runId, afterRevision, events } = value as Record<
+    string,
+    unknown
+  >;
+  if (
+    Object.keys(value).length !== (finding ? 4 : 3) ||
+    !isSentinelCaseId(caseId) || typeof runId !== "string" ||
+    !/^[a-f0-9-]{36}$/i.test(runId) || typeof afterRevision !== "number" ||
+    !Number.isSafeInteger(afterRevision) || afterRevision < 1
+  ) return;
+  if (!finding) return { caseId, runId, afterRevision };
+  if (!Array.isArray(events)) return;
+  const selected = managedFindingEvents.filter((kind) => events.includes(kind));
+  if (!selected.length || selected.length !== events.length) return;
+  return { caseId, runId, afterRevision, events: selected };
+}
 
 function parseChannelSettings(raw: unknown) {
   if (!raw || typeof raw !== "object") return;
@@ -68,9 +102,12 @@ function parseChannelSettings(raw: unknown) {
     classification,
     enabled,
     sentinelIncidents,
+    sentinelFindings,
   } = raw as Record<string, unknown>;
   if (
-    Object.keys(raw).length !== (sentinelIncidents === undefined ? 5 : 6) ||
+    Object.keys(raw).length !== 5 +
+        Number(sentinelIncidents !== undefined) +
+        Number(sentinelFindings !== undefined) ||
     typeof name !== "string" || !/^[a-zA-Z0-9 _.-]{1,64}$/.test(name) ||
     typeof destinationOrigin !== "string" ||
     typeof endpointRef !== "string" ||
@@ -84,36 +121,39 @@ function parseChannelSettings(raw: unknown) {
   } catch {
     return;
   }
-  let scope: ManagedSentinelIncidentScope | undefined;
-  if (sentinelIncidents !== undefined) {
-    if (!sentinelIncidents || typeof sentinelIncidents !== "object") return;
-    const { caseId, runId, afterRevision } = sentinelIncidents as Record<
-      string,
-      unknown
-    >;
-    if (
-      Object.keys(sentinelIncidents).length !== 3 ||
-      !isSentinelCaseId(caseId) ||
-      typeof runId !== "string" || !/^[a-f0-9-]{36}$/i.test(runId) ||
-      typeof afterRevision !== "number" ||
-      !Number.isSafeInteger(afterRevision) ||
-      afterRevision < 1 || classification !== "INTERNAL"
-    ) return;
-    scope = { caseId, runId, afterRevision };
-  }
+  const incidentScope = sentinelIncidents === undefined
+    ? undefined
+    : parseSentinelSubscription(sentinelIncidents, false);
+  const findingScope = sentinelFindings === undefined
+    ? undefined
+    : parseSentinelSubscription(sentinelFindings, true);
+  if (
+    (sentinelIncidents !== undefined && !incidentScope) ||
+    (sentinelFindings !== undefined && !findingScope?.events) ||
+    ((incidentScope || findingScope) && classification !== "INTERNAL")
+  ) return;
   return {
     name,
     destinationOrigin,
     endpointRef,
     classification,
     enabled,
-    ...(scope && { sentinelIncidents: scope }),
+    ...(incidentScope && { sentinelIncidents: incidentScope }),
+    ...(findingScope?.events && {
+      sentinelFindings: { ...findingScope, events: findingScope.events },
+    }),
   } as const;
 }
 
 function publicChannel(channel: ManagedNotificationChannel) {
-  const { endpointFingerprint: _endpointFingerprint, ...visible } = channel;
-  return visible;
+  const {
+    endpointFingerprint: _endpointFingerprint,
+    sentinelFindings,
+    ...visible
+  } = channel;
+  if (!sentinelFindings) return visible;
+  const { afterSequence: _afterSequence, ...scope } = sentinelFindings;
+  return { ...visible, sentinelFindings: scope };
 }
 
 export async function executeOperatorNotificationChannel(
@@ -262,11 +302,17 @@ export async function executeOperatorNotificationChannel(
       !source ||
       (context.authorizeSentinelCaseRead?.(source.caseId, source.revision) !==
           false &&
-        matchesSentinelIncidentSubscription(
-          current.sentinelIncidents,
-          source,
-        ) &&
-        config.isCurrentSentinelIncident?.(source) === true);
+        (source.kind === "sentinel_incident_increase"
+          ? matchesSentinelIncidentSubscription(
+            current.sentinelIncidents,
+            source,
+          ) &&
+            config.isCurrentSentinelIncident?.(source) === true
+          : matchesSentinelFindingSubscription(
+            current.sentinelFindings,
+            source,
+          ) &&
+            config.isCurrentSentinelFinding?.(source) === true));
     if (
       source
         ? args.kind !== "sentinel" || args.id !== source.caseId ||
@@ -289,7 +335,9 @@ export async function executeOperatorNotificationChannel(
     ) return;
 
     const body = source
-      ? sentinelIncidentNotificationBody(source)
+      ? source.kind === "sentinel_incident_increase"
+        ? sentinelIncidentNotificationBody(source)
+        : sentinelFindingNotificationBody(source)
       : testMessage;
     const exactDelivery = retrying
       ? `Retry delivery ${deliveryId} (attempt ${attempts.length + 2})`
@@ -351,16 +399,31 @@ export async function executeOperatorNotificationChannel(
     return { channel: visible };
   }
   if (current?.retired || (current?.version ?? 0) !== expectedVersion) return;
+  const findingScope = action === "set_notification_channel"
+    ? channel.sentinelFindings
+    : undefined;
+  const findingBaseline = findingScope &&
+    config.readSentinelFindingScope?.(findingScope.caseId);
+  const sameCase = (
+    scope: ManagedSentinelIncidentScope,
+    observed: ManagedSentinelIncidentScope | undefined,
+  ) =>
+    observed?.runId === scope.runId &&
+    observed.afterRevision === scope.afterRevision &&
+    context.authorizeSentinelCaseRead?.(scope.caseId, scope.afterRevision) !==
+      false;
   const scopeCurrent = () => {
-    const scope = action === "set_notification_channel"
+    const incident = action === "set_notification_channel"
       ? channel.sentinelIncidents
       : undefined;
-    if (!scope) return true;
-    const observed = config.readSentinelIncidentScope?.(scope.caseId);
-    return observed?.runId === scope.runId &&
-      observed.afterRevision === scope.afterRevision &&
-      context.authorizeSentinelCaseRead?.(scope.caseId, scope.afterRevision) !==
-        false;
+    if (
+      incident &&
+      !sameCase(incident, config.readSentinelIncidentScope?.(incident.caseId))
+    ) return false;
+    if (!findingScope) return true;
+    const observed = config.readSentinelFindingScope?.(findingScope.caseId);
+    return !!findingBaseline && sameCase(findingScope, observed) &&
+      observed?.afterSequence === findingBaseline.afterSequence;
   };
   if (!scopeCurrent()) return;
   const fingerprint = channel.enabled
@@ -377,6 +440,15 @@ export async function executeOperatorNotificationChannel(
       !await authorize(args) || !scopeCurrent()
     ) return;
     channel = { ...channel, endpointFingerprint: fingerprint };
+  }
+  if (findingScope && findingBaseline) {
+    channel = {
+      ...channel,
+      sentinelFindings: {
+        ...findingScope,
+        afterSequence: findingBaseline.afterSequence,
+      },
+    };
   }
   const updated = await store.amend(channel, expectedVersion);
   return updated ? { channel: publicChannel(updated) } : undefined;

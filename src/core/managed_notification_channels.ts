@@ -14,6 +14,30 @@ export interface ManagedSentinelIncidentSource {
   readonly revision: number;
 }
 
+export const managedFindingEvents = [
+  "sentinel_finding_created",
+  "sentinel_finding_status_changed",
+] as const;
+export interface ManagedSentinelFindingScope
+  extends ManagedSentinelIncidentScope {
+  readonly events: readonly typeof managedFindingEvents[number][];
+  readonly afterSequence?: number;
+}
+export interface ManagedSentinelFindingSource
+  extends Omit<ManagedSentinelIncidentSource, "kind"> {
+  readonly kind: typeof managedFindingEvents[number];
+  readonly findingId: string;
+  readonly receiptId: string;
+  readonly sequence: number;
+  readonly assignmentId?: string;
+  readonly reportVersion: number;
+  readonly previousStatus?: string;
+  readonly status?: string;
+}
+export type ManagedNotificationSource =
+  | ManagedSentinelIncidentSource
+  | ManagedSentinelFindingSource;
+
 export interface ManagedNotificationChannel {
   readonly id: string;
   readonly version: number;
@@ -26,6 +50,7 @@ export interface ManagedNotificationChannel {
   readonly enabled: boolean;
   readonly retired?: true;
   readonly sentinelIncidents?: ManagedSentinelIncidentScope;
+  readonly sentinelFindings?: ManagedSentinelFindingScope;
 }
 
 type DeliveryState = "in_flight" | "delivered" | "blocked" | "uncertain";
@@ -43,7 +68,7 @@ export interface ManagedNotificationDelivery {
   readonly channelId: string;
   readonly channelVersion: number;
   readonly createdAt: string;
-  readonly source?: ManagedSentinelIncidentSource;
+  readonly source?: ManagedNotificationSource;
   readonly state: DeliveryState;
   readonly retries?: readonly ManagedNotificationAttempt[];
 }

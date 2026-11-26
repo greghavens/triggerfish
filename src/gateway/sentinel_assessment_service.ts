@@ -53,6 +53,10 @@ export interface SentinelAssessmentCoordinatorOptions {
     source: ManagedSentinelIncidentSource,
     isCurrent: () => boolean,
   ) => Promise<void>;
+  readonly notifyManagedFindings?: (
+    caseId: string,
+    isCurrent: () => boolean,
+  ) => Promise<void>;
   readonly onError?: (error: unknown) => void;
 }
 
@@ -235,6 +239,7 @@ export function startSentinelAssessmentCoordinator(
   }
 
   let managedNotification: string | undefined;
+  let notifyingFindings = false;
   function tick() {
     if (stopped) return;
     try {
@@ -256,6 +261,15 @@ export function startSentinelAssessmentCoordinator(
       );
       lastPollError = undefined;
       scheduleDeadline(state?.active ? state.plan.deadlineAt : undefined);
+      if (
+        options.notifyManagedFindings && caseId && !notifyingFindings &&
+        state &&
+        (state.active || state.completion) && !state.paused
+      ) {
+        notifyingFindings = true;
+        void options.notifyManagedFindings(caseId, () => !stopped).catch(report)
+          .finally(() => notifyingFindings = false);
+      }
       if (!state?.active || state.paused || !state.result) {
         active?.cancel.abort();
         if (

@@ -1232,6 +1232,59 @@ export function openSentinelWorkerFindingStore(
           .all(...params, limit, offset).map(({ id }) => String(id)),
       }));
     },
+    notificationSequence(): number {
+      return Number(
+        db.prepare("SELECT MAX(rowid) AS sequence FROM receipts").get()
+          ?.sequence ?? 0,
+      );
+    },
+    notificationEvents(
+      caseId: string,
+      runId: string,
+      revision: number,
+      after: number,
+      limit: number,
+    ) {
+      return db.prepare(`
+        WITH candidate AS (SELECT receipt.*, receipt.rowid AS sequence,
+          COALESCE((
+            SELECT json_extract(prior.input, '$.disposition')
+            FROM receipts prior
+            WHERE prior.findingId = receipt.findingId
+              AND prior.reportVersion < receipt.reportVersion
+              AND json_extract(prior.input, '$.disposition') IS NOT NULL
+            ORDER BY prior.reportVersion DESC LIMIT 1
+          ), 'open') AS previousStatus
+        FROM receipts receipt
+        WHERE receipt.revision = ? AND receipt.rowid > ?
+          AND (receipt.findingId IS NULL OR (
+            receipt.reportVersion IS NOT NULL AND
+            json_extract(receipt.input, '$.disposition') IS NOT NULL
+          ))
+          AND json_extract(receipt.input, '$.caseId') = ?
+          AND json_extract(receipt.input, '$.runId') = ?
+        ) SELECT * FROM candidate
+          WHERE reportVersion IS NULL OR json_extract(input, '$.disposition') != previousStatus
+          ORDER BY sequence ASC LIMIT ?
+      `).all(revision, after, caseId, runId, limit).flatMap<{
+        sequence: number;
+        finding: SentinelWorkerFindingRecord;
+        amendment?: SentinelWorkerFindingReportAmendment;
+        previousStatus?: string;
+      }>((row) => {
+        const sequence = Number(row.sequence);
+        if (row.reportVersion === null) {
+          const finding = decode(row);
+          return finding.kind === "finding" ? [{ sequence, finding }] : [];
+        }
+        const amendment = decodeAmendment(row);
+        const finding = readFinding(amendment.findingId);
+        const previousStatus = String(row.previousStatus);
+        return finding && amendment.disposition !== previousStatus
+          ? [{ sequence, finding, amendment, previousStatus }]
+          : [];
+      });
+    },
     listFindingIds(
       caseId: string,
       runId: string,

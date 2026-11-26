@@ -813,6 +813,10 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
             case_id: source.caseId,
             run_id: source.runId,
             evidence_revision: source.revision,
+            ...(source.kind !== "sentinel_incident_increase" && {
+              finding_id: source.findingId,
+              source_receipt_id: source.receiptId,
+            }),
           }),
         };
         const decision = await config.hookRunner.evaluateHook("PRE_OUTPUT", {
