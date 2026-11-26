@@ -1227,6 +1227,19 @@ Deno.test("standalone Sentinel start binds the reviewed template version and exa
         async () => true,
       ),
     );
+    assert(
+      await executeAssessmentTemplates(
+        directory,
+        {
+          action: "withdraw_assessment_template",
+          templateId,
+          templateVersion: 2,
+          requestId: crypto.randomUUID(),
+        },
+        async () => true,
+        async () => true,
+      ),
+    );
     await withSentinelGoalSocket(path, async (turn) => {
       const replay = JSON.parse(await turn(start()));
       assertEquals(replay.duplicate, true);
@@ -1241,6 +1254,15 @@ Deno.test("standalone Sentinel start binds the reviewed template version and exa
       );
       await assertRejects(
         () => turn(start({ requestId: "fresh-stale-template" })),
+        Error,
+        "no longer current",
+      );
+      await assertRejects(
+        () =>
+          turn(start({
+            requestId: "fresh-withdrawn-template",
+            template: { id: templateId, version: 2 },
+          })),
         Error,
         "no longer current",
       );

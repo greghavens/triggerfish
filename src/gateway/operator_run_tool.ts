@@ -419,6 +419,7 @@ export const operatorRunTool: ToolDefinition = {
         "archive_catalog",
         "assessment_templates",
         "set_assessment_template",
+        "withdraw_assessment_template",
         "archive_runs",
         "restore_runs",
         "approval_history",
@@ -3641,7 +3642,8 @@ ${
       }
       if (
         action === "assessment_templates" ||
-        action === "set_assessment_template"
+        action === "set_assessment_template" ||
+        action === "withdraw_assessment_template"
       ) {
         if (
           !context?.authenticatedOwnerSessionId ||

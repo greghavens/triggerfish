@@ -4306,6 +4306,82 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
         );
       }, reopenedWorkflows);
 
+      const withdrawal = {
+        action: "withdraw_assessment_template",
+        templateId,
+        templateVersion: 2,
+        requestId: crypto.randomUUID(),
+      };
+      const beforeWithdrawal = confirmations.length;
+      denied = "PRE_TOOL_CALL";
+      await turn(withdrawal);
+      denied = undefined;
+      assertEquals(confirmations.length, beforeWithdrawal);
+      assertStringIncludes(
+        (await turn({ ...withdrawal, templateVersion: 1 })).result,
+        "unavailable",
+      );
+      assertEquals(confirmations.length, beforeWithdrawal);
+      approved = false;
+      try {
+        assertStringIncludes(
+          (await turn(withdrawal)).result,
+          "operator declined",
+        );
+      } finally {
+        approved = true;
+      }
+      assertEquals(
+        JSON.parse((await turn({ action: "assessment_templates" })).result)
+          .templates,
+        [secondTemplate],
+      );
+      const withdrawalReceipt =
+        JSON.parse((await turn(withdrawal)).result).withdrawal;
+      assertEquals(withdrawalReceipt.id, templateId);
+      assertEquals(withdrawalReceipt.version, 2);
+      assertEquals(
+        JSON.parse(confirmations.at(-1)!.split("\n").at(-1)!).template,
+        secondTemplate,
+      );
+      const afterWithdrawal = confirmations.length;
+      await withGateway(async (afterTemplateRestart) => {
+        assertEquals(
+          JSON.parse((await afterTemplateRestart(withdrawal)).result)
+            .withdrawal,
+          withdrawalReceipt,
+        );
+        assertEquals(
+          JSON.parse(
+            (await afterTemplateRestart({ action: "assessment_templates" }))
+              .result,
+          ).templates,
+          [],
+        );
+        assertEquals(
+          JSON.parse((await afterTemplateRestart(firstTemplateStart)).result),
+          templatedRun,
+        );
+        assertStringIncludes(
+          (await afterTemplateRestart({
+            ...templateSelection,
+            templateVersion: 2,
+            requestId: crypto.randomUUID(),
+            targetId: "withdrawn-template-run",
+          })).result,
+          "unavailable",
+        );
+        assertStringIncludes(
+          (await afterTemplateRestart({
+            ...changeTemplate,
+            templateVersion: 2,
+            requestId: crypto.randomUUID(),
+          })).result,
+          "unavailable",
+        );
+        assertEquals(confirmations.length, afterWithdrawal);
+      }, reopenedWorkflows);
+
       const childCase = "linked-sentinel";
       const childPath = resolveSentinelCasePath(baseDir, childCase);
       await Deno.mkdir(dirname(childPath), { recursive: true });

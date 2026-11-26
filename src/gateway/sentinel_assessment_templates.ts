@@ -55,6 +55,12 @@ function open(baseDir: string) {
         requestId TEXT NOT NULL UNIQUE,
         PRIMARY KEY(id, version)
       ) STRICT;
+      CREATE TABLE IF NOT EXISTS assessment_template_withdrawals (
+        id TEXT PRIMARY KEY,
+        version INTEGER NOT NULL,
+        requestId TEXT NOT NULL UNIQUE,
+        at TEXT NOT NULL
+      ) STRICT;
     `);
     return db;
   } catch (error) {
@@ -86,6 +92,85 @@ function latest(db: DatabaseSync, id: string) {
   );
 }
 
+function withdrawn(db: DatabaseSync, id: string) {
+  return !!db.prepare(
+    "SELECT 1 FROM assessment_template_withdrawals WHERE id = ?",
+  ).get(id);
+}
+
+function writeRequestExists(db: DatabaseSync, requestId: string) {
+  return !!db.prepare("SELECT 1 FROM assessment_templates WHERE requestId = ?")
+    .get(requestId);
+}
+
+async function withdrawTemplate(
+  baseDir: string,
+  args: Record<string, unknown>,
+  authorize: (args: Record<string, unknown>) => Promise<boolean>,
+  confirm: (summary: string) => Promise<boolean>,
+) {
+  const selector = parseAssessmentTemplateSelector({
+    id: args.templateId,
+    version: args.templateVersion,
+  });
+  if (
+    !selector || typeof args.requestId !== "string" ||
+    !uuid.test(args.requestId) ||
+    Object.keys(args).some((key) =>
+      !["action", "templateId", "templateVersion", "requestId"].includes(key)
+    )
+  ) return;
+  const { id, version } = selector;
+  const requestId = args.requestId.toLowerCase();
+  const db = open(baseDir);
+  const prior = () =>
+    db.prepare(
+      "SELECT * FROM assessment_template_withdrawals WHERE requestId = ?",
+    ).get(requestId);
+  const exactReceipt = (row: NonNullable<ReturnType<typeof prior>>) =>
+    row.id === id && row.version === version && typeof row.at === "string"
+      ? { withdrawal: { id, version, requestId, at: row.at } }
+      : undefined;
+  try {
+    const priorRequest = prior();
+    if (priorRequest) return exactReceipt(priorRequest);
+    const template = latest(db, id);
+    if (
+      template?.version !== version || withdrawn(db, id) ||
+      writeRequestExists(db, requestId)
+    ) return;
+    if (
+      !await confirm(
+        `Withdraw this exact Sentinel template from future starts?
+${JSON.stringify({ requestId, template })}`,
+      )
+    ) return { declined: true as const };
+    if (!await authorize(args)) return;
+    db.exec("BEGIN IMMEDIATE");
+    let committed = false;
+    try {
+      const existing = prior();
+      if (existing) return exactReceipt(existing);
+      if (
+        latest(db, id)?.version !== version || withdrawn(db, id) ||
+        writeRequestExists(db, requestId)
+      ) return;
+      const at = new Date().toISOString();
+      db.prepare(
+        "INSERT INTO assessment_template_withdrawals VALUES (?, ?, ?, ?)",
+      )
+        .run(id, version, requestId, at);
+      db.exec("COMMIT");
+      committed = true;
+      return { withdrawal: { id, version, requestId, at } };
+    } finally {
+      if (!committed) db.exec("ROLLBACK");
+    }
+  } finally {
+    db.close();
+  }
+}
+
 export function readAssessmentTemplate(baseDir: string, selection: Selector) {
   const db = open(baseDir);
   try {
@@ -109,7 +194,10 @@ export function withAssessmentTemplateVersion<T>(
   try {
     db.exec("BEGIN IMMEDIATE");
     try {
-      return action(latest(db, selection.id)?.version === selection.version);
+      return action(
+        latest(db, selection.id)?.version === selection.version &&
+          !withdrawn(db, selection.id),
+      );
     } finally {
       db.exec("ROLLBACK");
     }
@@ -138,6 +226,9 @@ export async function executeAssessmentTemplates(
 ) {
   if (!await authorize(args)) return;
   const { action, templateId, templateVersion } = args;
+  if (action === "withdraw_assessment_template") {
+    return await withdrawTemplate(baseDir, args, authorize, confirm);
+  }
   if (action === "assessment_templates") {
     const { offset = 0, limit = 8 } = args;
     if (
@@ -154,6 +245,7 @@ export async function executeAssessmentTemplates(
       const rows = db.prepare(`
         SELECT * FROM assessment_templates AS entry
         WHERE version = (SELECT MAX(version) FROM assessment_templates WHERE id = entry.id)
+          AND NOT EXISTS (SELECT 1 FROM assessment_template_withdrawals WHERE id = entry.id)
         ORDER BY lower(name), id LIMIT ? OFFSET ?
       `).all(limit + 1, offset);
       return {
@@ -196,6 +288,10 @@ export async function executeAssessmentTemplates(
   };
   const request = requestId.toLowerCase();
   const db = open(baseDir);
+  const blocked = () =>
+    withdrawn(db, proposal.id) || db.prepare(
+      "SELECT 1 FROM assessment_template_withdrawals WHERE requestId = ?",
+    ).get(request);
   const prior = () =>
     db.prepare(
       "SELECT * FROM assessment_templates WHERE requestId = ?",
@@ -209,7 +305,9 @@ export async function executeAssessmentTemplates(
   try {
     const priorRequest = prior();
     if (priorRequest) return replay(priorRequest);
-    if ((latest(db, proposal.id)?.version ?? 0) !== templateVersion) return;
+    if (
+      blocked() || (latest(db, proposal.id)?.version ?? 0) !== templateVersion
+    ) return;
     if (
       !await confirm(
         `Save this exact Sentinel assessment template version?\n${
@@ -225,7 +323,9 @@ export async function executeAssessmentTemplates(
     try {
       const existing = prior();
       if (existing) return replay(existing);
-      if ((latest(db, proposal.id)?.version ?? 0) !== templateVersion) return;
+      if (
+        blocked() || (latest(db, proposal.id)?.version ?? 0) !== templateVersion
+      ) return;
       db.prepare("INSERT INTO assessment_templates VALUES (?, ?, ?, ?, ?, ?)")
         .run(
           proposal.id,
