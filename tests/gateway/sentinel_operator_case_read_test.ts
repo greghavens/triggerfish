@@ -83,6 +83,10 @@ Deno.test("Authenticated Sentinel chat reads exact approved cross-case graph fin
             from: "coverage-evidence",
             to: "asset-a",
             relation: "observed_on",
+          }, {
+            from: "finding",
+            to: "asset-a",
+            relation: "affects",
           }]
           : [],
       }),
@@ -202,6 +206,8 @@ Deno.test("Authenticated Sentinel chat reads exact approved cross-case graph fin
     | "sentinel_defense"
     | "sentinel_incident_alerts"
     | undefined;
+  let localGraph: "sentinel_trace" | "sentinel_provenance_node" | undefined;
+  let forensicGraph = false;
   let rejectExecutorCeiling = false;
   let dispatched = 0;
   let reject: "PRE_TOOL_CALL" | "POST_TOOL_RESPONSE" | "PRE_OUTPUT" | undefined;
@@ -307,7 +313,7 @@ Deno.test("Authenticated Sentinel chat reads exact approved cross-case graph fin
           assert(definitions?.some((tool) => tool.function?.name === name));
         }
       }
-      if (next && !localInventory && !unleasedTelemetry) {
+      if (next && !localInventory && !unleasedTelemetry && !forensicGraph) {
         assert(definition);
         assertEquals(
           definition.function?.parameters?.properties?.action?.enum,
@@ -357,7 +363,7 @@ Deno.test("Authenticated Sentinel chat reads exact approved cross-case graph fin
                 ? "sentinel_case_inventory"
                 : nestedTelemetry
                 ? "sentinel_subagent"
-                : localTelemetry ?? "operator_runs",
+                : localTelemetry ?? localGraph ?? "operator_runs",
               arguments: JSON.stringify(next),
             },
           }]
@@ -381,7 +387,9 @@ Deno.test("Authenticated Sentinel chat reads exact approved cross-case graph fin
       hookRunner: {
         async evaluateHook(hook, { input, auditInput }) {
           const selectsTool = input.tool_name === "operator_runs" ||
-            input.tool_name === localTelemetry && localTelemetry !== undefined;
+            input.tool_name === localTelemetry &&
+              localTelemetry !== undefined ||
+            input.tool_name === localGraph && localGraph !== undefined;
           if (
             localTelemetry && input.tool_name === localTelemetry &&
             (hook === "PRE_TOOL_CALL" || hook === "POST_TOOL_RESPONSE")
@@ -394,6 +402,16 @@ Deno.test("Authenticated Sentinel chat reads exact approved cross-case graph fin
             ) {
               assertEquals(input.evidence_revision, approved.revision);
             }
+          }
+          if (
+            !forensicGraph && input.tool_name === "operator_runs" &&
+            hook === "POST_TOOL_RESPONSE" &&
+            typeof input.tool_response === "string" &&
+            input.tool_response.includes(secretLabel) &&
+            /"page":\s*\{/.test(input.tool_response)
+          ) {
+            assertEquals(input.case_id, "approved");
+            assertEquals(input.evidence_revision, approved.revision);
           }
           if (selectsTool || hook === "PRE_OUTPUT") hooks.push(hook);
           if (
@@ -493,14 +511,24 @@ Deno.test("Authenticated Sentinel chat reads exact approved cross-case graph fin
         dispatched++;
         assertEquals(policy?.authenticatedOwnerSessionId, ordinaryOwner.id);
         assertEquals(policy?.ceiling, "INTERNAL");
-        assert(
-          policy?.authorizeSentinelCaseRead?.("approved", approved.revision) ||
-            args.revision !== approved.revision,
-        );
-        assertEquals(
-          policy?.authorizeSentinelCaseRead?.("unregistered", hidden.revision),
-          false,
-        );
+        if (forensicGraph) {
+          assertEquals(policy?.authorizeSentinelCaseRead, undefined);
+        } else {
+          assert(
+            policy?.authorizeSentinelCaseRead?.(
+              "approved",
+              approved.revision,
+            ) ||
+              args.revision !== approved.revision,
+          );
+          assertEquals(
+            policy?.authorizeSentinelCaseRead?.(
+              "unregistered",
+              hidden.revision,
+            ),
+            false,
+          );
+        }
         return operator(
           args,
           rejectExecutorCeiling && policy
@@ -582,6 +610,80 @@ Deno.test("Authenticated Sentinel chat reads exact approved cross-case graph fin
       action: "graph_overview",
     });
     assertEquals(JSON.parse(result).overview.revision, approved.revision);
+    assertEquals(JSON.parse(result).overview.nodesByKind.asset, 2);
+    await turn("Reject the excluded exact provenance node", {
+      ...exact,
+      action: "node",
+      node: "asset:asset-c",
+    });
+    assertStringIncludes(result, "unavailable");
+    await turn("List authorized graph records only", {
+      ...exact,
+      action: "graph",
+    });
+    assert(
+      !JSON.parse(result).page.nodes.some(({ id }: { id: string }) =>
+        id === "asset:asset-c"
+      ),
+    );
+
+    await turn("/sentinel case approved");
+    localGraph = "sentinel_trace";
+    await turn("Use the native direct asset graph", { node: "asset-a" });
+    assertStringIncludes(result, secretLabel);
+    assert(
+      hooks.includes("PRE_TOOL_CALL") && hooks.includes("POST_TOOL_RESPONSE") &&
+        hooks.includes("PRE_OUTPUT"),
+    );
+    await turn("Reject an excluded asset in the native inventory graph", {
+      node: "asset-c",
+    });
+    assertStringIncludes(result, "unavailable");
+    localGraph = "sentinel_provenance_node";
+    await turn("Reject an excluded node in the native provenance graph", {
+      node: "asset:asset-c",
+    });
+    assertStringIncludes(result, "unavailable");
+    reject = "PRE_TOOL_CALL";
+    await turn("Deny a native graph read before dispatch", { node: graphNode });
+    assert(!result.includes(secretLabel));
+    reject = "POST_TOOL_RESPONSE";
+    await turn("Block a native authorized node at response classification", {
+      node: graphNode,
+    });
+    assert(!result.includes(secretLabel));
+    reject = "PRE_OUTPUT";
+    const withheldGraph = await turn("Block graph content at delivery", {
+      node: graphNode,
+    });
+    assertStringIncludes(result, secretLabel);
+    assert(withheldGraph.every((frame) => !frame.includes(secretLabel)));
+    reject = undefined;
+    await turn("Read an authorized provenance node into context", {
+      node: graphNode,
+    });
+    assertStringIncludes(result, secretLabel);
+    localGraph = undefined;
+    captureModelContext = true;
+    await turn("Check context while graph authority remains current.");
+    assertStringIncludes(modelContext, secretLabel);
+    captureModelContext = true;
+    revokeBeforeContext = true;
+    await turn(revokeContextRequest);
+    assert(!modelContext.includes(secretLabel));
+    constraintsAllowed = true;
+
+    await turn("/sentinel off");
+    forensicGraph = true;
+    await turn("Open the exact excluded node in the forensic owner route", {
+      ...exact,
+      action: "node",
+      node: "asset:asset-c",
+    });
+    assertEquals(JSON.parse(result).page.node.id, "asset:asset-c");
+    forensicGraph = false;
+    await turn("/sentinel on");
+    await turn("/sentinel case main");
 
     const coverageCheck = {
       ...exact,
@@ -943,6 +1045,16 @@ Deno.test("Authenticated Sentinel chat reads exact approved cross-case graph fin
     await turn("/sentinel case approved");
     const localCheck = { upstreamCheck: coverageCheck.upstreamCheck };
     unleasedTelemetry = true;
+    localGraph = "sentinel_trace";
+    await turn("/sentinel-agent Read the authorized asset graph.", {
+      node: "asset-a",
+    });
+    assertStringIncludes(result, secretLabel);
+    await turn("/sentinel-agent Try the excluded asset graph.", {
+      node: "asset-c",
+    });
+    assertStringIncludes(result, "unavailable");
+    localGraph = undefined;
     localTelemetry = "sentinel_defense";
     const intake = sentinelAlertsPath(approved.path);
     const previousIntake = await Deno.readTextFile(intake);

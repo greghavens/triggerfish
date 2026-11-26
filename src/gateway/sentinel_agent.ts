@@ -315,7 +315,7 @@ interface SentinelTelemetryFence {
   readonly authorize: () => Promise<boolean>;
 }
 
-interface SentinelDirectTelemetryRead {
+interface SentinelDirectCaseRead {
   readonly name: string;
   readonly args: Record<string, unknown>;
 }
@@ -327,7 +327,7 @@ export interface SentinelAgentOptions {
       args: Record<string, unknown>,
       signal: AbortSignal,
       retainTelemetryFence?: (fence: SentinelTelemetryFence) => void,
-      directTelemetry?: SentinelDirectTelemetryRead,
+      directTelemetry?: SentinelDirectCaseRead,
     ) => Promise<string>;
   };
   readonly allowUnleasedInteractiveTelemetry?: boolean;
@@ -1282,6 +1282,7 @@ interface ActiveTurn {
     readonly tool: string;
     readonly revision?: unknown;
     readonly sources: readonly SentinelTelemetryFence[];
+    readonly graphCaseId?: string;
   };
   telemetryHistoryPrefix?: readonly HistoryEntry[];
   readonly outputLanguage: SentinelOutputLanguage;
@@ -2624,15 +2625,17 @@ function pageFindings(
   return "Error: This finding exceeds the Sentinel tool output limit. Use trace to investigate an exact node.";
 }
 
-type ProvenanceScope = Pick<
-  SentinelAgentOptions,
-  | "snapshotPath"
-  | "snapshotOverride"
-  | "assessmentRevision"
-  | "assignedTaskId"
-  | "assignedTaskLeaseToken"
-  | "plannerExecutionEvidenceRunId"
->;
+type ProvenanceScope =
+  & Pick<
+    SentinelAgentOptions,
+    | "snapshotPath"
+    | "snapshotOverride"
+    | "assessmentRevision"
+    | "assignedTaskId"
+    | "assignedTaskLeaseToken"
+    | "plannerExecutionEvidenceRunId"
+  >
+  & { readonly scopeCaseGraph?: boolean };
 
 function readAgentProvenance(options: ProvenanceScope, revision?: number) {
   const pinned = options.assessmentRevision;
@@ -2647,7 +2650,10 @@ function readAgentProvenance(options: ProvenanceScope, revision?: number) {
   }
   const selected = pinned ?? revision;
   const scopedAssignment = options.assignedTaskId ??
-    (options.plannerExecutionEvidenceRunId !== undefined ? null : undefined);
+    (options.scopeCaseGraph ||
+        options.plannerExecutionEvidenceRunId !== undefined
+      ? null
+      : undefined);
   if (
     options.assignedTaskLeaseToken !== undefined &&
     (selected === undefined || !liveProgressConsumer(options, selected))
@@ -3862,6 +3868,64 @@ export async function readSentinelGraphProjection(
   return queryGraph(graph, name, args, evaluatedAt);
 }
 
+export const sentinelScopedGraphReadActions = [
+  "graph_overview",
+  "graph",
+  "findings",
+  "node",
+  "traces",
+] as const;
+
+export function isSentinelNativeGraphRead(name: unknown) {
+  return name === graphOverviewTool.name ||
+    name === SENTINEL_PROVENANCE_NODE_READ ||
+    name === SENTINEL_PROVENANCE_SEARCH ||
+    name === SENTINEL_PATH_READ ||
+    isSentinelInventoryFindingRead(name) ||
+    isSentinelInventoryNeighborhoodRead(name) ||
+    name === "sentinel_worker_trace_search";
+}
+
+/** Reopen native console graph tools from the same exact scoped saved case. */
+export async function readScopedSentinelConsoleGraph(
+  snapshotPath: string,
+  assessmentRevision: number,
+  name: string,
+  args: Record<string, unknown>,
+): Promise<string> {
+  if (!isSentinelNativeGraphRead(name)) {
+    return "Error: This graph tool is unavailable in Sentinel.";
+  }
+  const options = { snapshotPath, assessmentRevision, scopeCaseGraph: true };
+  if (name === graphOverviewTool.name) {
+    return readSentinelGraphOverview(options, args);
+  }
+  if (name === SENTINEL_PROVENANCE_NODE_READ) {
+    return inspectSentinelProvenance(options, args);
+  }
+  if (name === SENTINEL_PROVENANCE_SEARCH) {
+    return searchSentinelProvenance(options, args);
+  }
+  if (name === "sentinel_worker_trace_search") {
+    return searchSentinelWorkerTraces(options, args, true);
+  }
+  if (name === SENTINEL_PATH_READ && args.graph === "provenance") {
+    return await queryPath(
+      options,
+      getGraphReader(snapshotPath, undefined, assessmentRevision),
+      args,
+      true,
+    );
+  }
+  return await readSentinelGraphProjection(
+    snapshotPath,
+    assessmentRevision,
+    name,
+    args,
+    true,
+  );
+}
+
 function queryGraph(
   graph: Graph,
   name: string,
@@ -4419,8 +4483,14 @@ function createAgent(
           selectedCaseAction === "append_goals" ||
           selectedCaseAction === "withdraw_goal" ||
           selectedCaseAction === "add_case_membership";
+        const pendingTelemetry = active?.pendingTelemetryFence;
+        const selectedCaseGraph =
+          toolName === operatorRunReader?.definition.name &&
+          (sentinelScopedGraphReadActions.some((action) =>
+            action === selectedCaseAction
+          ) || pendingTelemetry?.graphCaseId !== undefined);
         const selectedCaseCall = selectedCaseAction === "constraints" ||
-          selectedCaseWrite;
+          selectedCaseWrite || selectedCaseGraph;
         const provenanceRead = toolName === graphOverviewTool.name ||
           toolName === SENTINEL_PROVENANCE_NODE_READ ||
           toolName === SENTINEL_PROVENANCE_SEARCH ||
@@ -4442,17 +4512,20 @@ function createAgent(
             toolName === SENTINEL_INCIDENT_ALERTS_READ ||
             toolName === SENTINEL_DEFENSE_READ || traffic || plannerTodo ||
             digestRead || plannerControl);
-        const selectedDirectTelemetry = !!directTelemetryReader &&
+        const selectedDirectRead = (!!directTelemetryReader &&
           (toolName === SENTINEL_DEFENSE_READ ||
-            toolName === SENTINEL_INCIDENT_ALERTS_READ);
-        const pendingTelemetry = active?.pendingTelemetryFence;
+            toolName === SENTINEL_INCIDENT_ALERTS_READ)) ||
+          (!!directTelemetryReader && isSentinelNativeGraphRead(toolName));
         let evidenceRevision = options.assessmentRevision ??
-          (selectedDirectTelemetry
+          (selectedDirectRead
             ? sentinelTrafficPolicyRevision(call?.args?.revision) ??
               sentinelTrafficPolicyRevision(pendingTelemetry?.revision) ??
               readSentinelAssessment(options.snapshotPath)?.revision
             : traffic || digestRead || selectedCaseCall
-            ? sentinelTrafficPolicyRevision(call?.args?.revision)
+            ? sentinelTrafficPolicyRevision(call?.args?.revision) ??
+              (selectedCaseGraph
+                ? sentinelTrafficPolicyRevision(pendingTelemetry?.revision)
+                : undefined)
             : undefined);
         if (
           (traffic || digestRead) && name === "POST_TOOL_RESPONSE" &&
@@ -4467,7 +4540,11 @@ function createAgent(
         const policyInput = scoped || selectedCaseCall
           ? {
             tool_name: toolName,
-            case_id: locateSentinelCase(options.snapshotPath)?.caseId ?? null,
+            case_id: selectedCaseGraph
+              ? (typeof call?.args?.id === "string"
+                ? call.args.id
+                : pendingTelemetry?.graphCaseId) ?? null
+              : locateSentinelCase(options.snapshotPath)?.caseId ?? null,
             evidence_revision: evidenceRevision ?? null,
             assignment_id: options.assignedTaskId ??
               (plannerControl && typeof call?.args?.taskId === "string" &&
@@ -4737,11 +4814,17 @@ function createAgent(
       if (++turn.reads > MAX_READS_PER_TURN) {
         return "Error: This turn reached the Sentinel graph read limit.";
       }
-      const direct =
-        name === SENTINEL_DEFENSE_READ || name === SENTINEL_INCIDENT_ALERTS_READ
-          ? { name, args }
+      const directTelemetry = name === SENTINEL_DEFENSE_READ ||
+        name === SENTINEL_INCIDENT_ALERTS_READ;
+      const selectedAssessment =
+        directTelemetryReader && isSentinelNativeGraphRead(name)
+          ? readSentinelAssessment(options.snapshotPath)
           : undefined;
-      const selectedReader = direct
+      const directGraph = !!selectedAssessment;
+      const direct = directTelemetry || directGraph
+        ? { name, args }
+        : undefined;
+      const selectedReader = directTelemetry || directGraph
         ? directTelemetryReader
         : operatorRunReader?.definition.name === name
         ? operatorRunReader
@@ -4753,7 +4836,14 @@ function createAgent(
       }
       if (selectedReader) {
         let request = args;
-        if (direct) {
+        if (directGraph) {
+          const caseId = locateSentinelCase(options.snapshotPath)?.caseId;
+          const revision = args.revision ?? selectedAssessment.revision;
+          if (!caseId) {
+            return "Error: The selected Sentinel graph is unavailable.";
+          }
+          request = { action: "graph", kind: "sentinel", id: caseId, revision };
+        } else if (directTelemetry) {
           const query = name === SENTINEL_DEFENSE_READ
             ? sentinelDefenseReadArgs(args)
             : sentinelIncidentAlertsArgs(args);
@@ -4783,6 +4873,12 @@ function createAgent(
               tool: name,
               revision: request.revision,
               sources: [fence],
+              ...(name === operatorRunReader?.definition.name &&
+                typeof request.id === "string" &&
+                sentinelScopedGraphReadActions.some((action) =>
+                  action === request.action
+                ) &&
+                { graphCaseId: request.id }),
             };
           },
           direct,

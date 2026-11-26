@@ -37,6 +37,9 @@ import { evaluatePreOutputHook } from "../agent/dispatch/response_handling.ts";
 import {
   createSentinelAgent,
   createSentinelSubagent,
+  isSentinelNativeGraphRead,
+  readScopedSentinelConsoleGraph,
+  sentinelScopedGraphReadActions,
 } from "./sentinel_agent.ts";
 import {
   readSentinelModelSettings,
@@ -884,7 +887,7 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
             authorize: () => Promise<boolean>;
           },
         ) => void,
-        directTelemetry?: { name: string; args: Record<string, unknown> },
+        directRead?: { name: string; args: Record<string, unknown> },
       ) {
         const { action, kind, id, revision, runId } = args;
         const selectedControl = sentinelOperatorCaseControlActions.some((
@@ -923,7 +926,7 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
           ) return false;
           const casePath = resolveCase();
           if (!selectedControl) {
-            return directTelemetry ? casePath === selectedPath : !!casePath;
+            return directRead ? casePath === selectedPath : !!casePath;
           }
           if (casePath !== selectedPath) return false;
           const assessment = readSentinelAssessment(selectedPath);
@@ -936,28 +939,30 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
             : assessment.active && assessment.revision === revision;
         };
         if (!current()) return unavailable;
-        const scopedTelemetry = sentinelScopedTelemetryReadActions.some(
+        const scopedRead = sentinelScopedTelemetryReadActions.some(
           (allowed) => allowed === action,
+        ) || sentinelScopedGraphReadActions.some((allowed) =>
+          allowed === action
         );
-        const telemetryPath = scopedTelemetry ? resolveCase() : undefined;
-        const telemetryRun = telemetryPath &&
-          readSentinelRunIdForRevision(telemetryPath, revision);
-        const telemetryPolicy = telemetryPath && telemetryRun
-          ? readSentinelOperatingConstraints(telemetryPath, telemetryRun)
+        const sourcePath = scopedRead ? resolveCase() : undefined;
+        const sourceRun = sourcePath &&
+          readSentinelRunIdForRevision(sourcePath, revision);
+        const sourcePolicy = sourcePath && sourceRun
+          ? readSentinelOperatingConstraints(sourcePath, sourceRun)
           : undefined;
-        const telemetryIsCurrent = () => {
+        const sourceIsCurrent = () => {
           if (
-            !telemetryPath || !telemetryRun || !current() ||
-            resolveCase() !== telemetryPath ||
-            readSentinelRunIdForRevision(telemetryPath, revision) !==
-              telemetryRun
+            !sourcePath || !sourceRun || !current() ||
+            resolveCase() !== sourcePath ||
+            readSentinelRunIdForRevision(sourcePath, revision) !==
+              sourceRun
           ) return false;
           const latest = readSentinelOperatingConstraints(
-            telemetryPath,
-            telemetryRun,
+            sourcePath,
+            sourceRun,
           );
-          return latest?.version === telemetryPolicy?.version &&
-            latest?.digest === telemetryPolicy?.digest;
+          return latest?.version === sourcePolicy?.version &&
+            latest?.digest === sourcePolicy?.digest;
         };
         const authority = savedToolAuthorization(
           owner,
@@ -967,19 +972,28 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
         if (
           selectedControl && !await authority.authorizeOwnerRunCall?.(args)
         ) return unavailable;
-        const result = await execute(args, {
-          ...authority,
-          ...(selectedControl &&
-            { authorizeSelectedSentinelCase: current }),
-          authorizeSentinelCaseRead: (caseId, evidenceRevision) =>
-            caseId === id && evidenceRevision === revision && current(),
-        });
+        const nativeGraph = directRead &&
+          isSentinelNativeGraphRead(directRead.name);
+        const result = nativeGraph && sourcePath
+          ? await readScopedSentinelConsoleGraph(
+            sourcePath,
+            revision,
+            directRead.name,
+            directRead.args,
+          )
+          : await execute(args, {
+            ...authority,
+            ...(selectedControl &&
+              { authorizeSelectedSentinelCase: current }),
+            authorizeSentinelCaseRead: (caseId, evidenceRevision) =>
+              caseId === id && evidenceRevision === revision && current(),
+          });
         if (!current()) return unavailable;
-        if (scopedTelemetry && result.startsWith("{")) {
-          if (!telemetryIsCurrent()) return unavailable;
-          const source = directTelemetry ??
+        if (scopedRead && result.startsWith("{")) {
+          if (!sourceIsCurrent()) return unavailable;
+          const source = directRead ??
             { name: operatorRunTool.name, args };
-          const text = directTelemetry
+          const text = directRead && !nativeGraph
             ? JSON.stringify(JSON.parse(result).evidence)
             : result;
           if (!text) return unavailable;
@@ -1008,17 +1022,17 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
             key: createHash("sha256").update(JSON.stringify([
               id,
               revision,
-              telemetryRun,
-              telemetryPolicy?.version,
+              sourceRun,
+              sourcePolicy?.version,
               source,
               text,
             ])).digest("hex"),
-            isCurrent: telemetryIsCurrent,
+            isCurrent: sourceIsCurrent,
             async authorize() {
               if (
-                !telemetryIsCurrent() ||
+                !sourceIsCurrent() ||
                 !await authorizeSavedToolCalls([source], policy, owner) ||
-                !telemetryIsCurrent()
+                !sourceIsCurrent()
               ) return false;
               const approved = await enforcePostToolResponse(
                 source.name,
@@ -1026,7 +1040,7 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
                 owner,
                 { resultText: text, blocked: false },
               );
-              return !approved.blocked && telemetryIsCurrent();
+              return !approved.blocked && sourceIsCurrent();
             },
           });
           return text;

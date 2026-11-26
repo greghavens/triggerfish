@@ -11308,12 +11308,17 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
         ) return unavailable;
         const path = resolveSentinelCasePath(options.baseDir, ref.id);
         const frontier = args.includeFrontier === true
-          ? readSentinelInvestigationFrontier(path, ref.revision)
+          ? readSentinelInvestigationFrontier(
+            path,
+            ref.revision,
+            !!authorizeCaseRead,
+          )
           : undefined;
         if (args.includeFrontier === true && !frontier) return unavailable;
         const result = readSentinelGraphOverview({
           snapshotPath: path,
           assessmentRevision: ref.revision,
+          scopeCaseGraph: !!authorizeCaseRead,
         }, {});
         return result.startsWith("Error:") ? unavailable : safeProjection({
           run: ref,
@@ -11332,6 +11337,7 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
         const scope = {
           snapshotPath: resolveSentinelCasePath(options.baseDir, ref.id),
           assessmentRevision: ref.revision,
+          scopeCaseGraph: !!authorizeCaseRead,
         };
         const page = {
           revision: ref.revision,

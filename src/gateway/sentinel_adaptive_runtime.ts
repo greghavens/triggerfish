@@ -843,6 +843,7 @@ function summarizeInvestigationQueue(tasks: readonly AdaptiveTask[]) {
 export function readSentinelInvestigationFrontier(
   snapshotPath: string,
   evidenceRevision: number,
+  scopeCaseGraph = false,
 ) {
   const saved = readSentinelAssessmentRevision(snapshotPath, evidenceRevision);
   const path = storePath(snapshotPath);
@@ -861,7 +862,16 @@ export function readSentinelInvestigationFrontier(
       snapshotPath,
       mapping.goal.id,
     );
+    const visibleTargets = scopeCaseGraph
+      ? readSentinelProvenance(snapshotPath, evidenceRevision, null)?.graph
+        .snapshot().nodes
+      : undefined;
+    if (scopeCaseGraph && !visibleTargets) return;
+    const targetIds = visibleTargets && new Set(
+      visibleTargets.map(({ sourceId }) => sourceId),
+    );
     const tasks = store.list(mapping.revision).filter((task) =>
+      (!targetIds || !task.nodeId || targetIds.has(task.nodeId)) &&
       sentinelOperatingConstraintsAllow(
         policy?.constraints,
         task,
