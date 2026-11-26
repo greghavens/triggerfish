@@ -8715,7 +8715,7 @@ for (
       };
       await withFindingAssignmentGateway(
         baseDir,
-        () => Promise.resolve(scenario.outcome === "fail" && !branchMode),
+        () => Promise.resolve(scenario.outcome === "fail"),
         async (turn) => {
           const readRef = {
             kind: "sentinel",
@@ -8747,7 +8747,7 @@ for (
             finding,
           );
           assert(!JSON.stringify(revoked).includes(receipt.id));
-          if (scenario.outcome === "fail" && !branchMode) {
+          if (scenario.outcome === "fail") {
             assertEquals(
               JSON.parse(await turn({ ...runRef, action: "cancel" })).run
                 .status,
@@ -8779,7 +8779,7 @@ for (
           ),
         reader,
       );
-      if (scenario.outcome === "fail" && !branchMode) {
+      if (scenario.outcome === "fail") {
         coordinator.stop();
         await Deno.rename(
           dirname(path),
@@ -8796,13 +8796,27 @@ for (
         );
         const altered = new DatabaseSync(alteredPath);
         try {
-          altered.prepare(
-            "DELETE FROM adaptive_repository_visibility_results WHERE taskId = ?",
-          ).run(selectedTask);
+          const changed = branchMode
+            ? altered.prepare(`
+                UPDATE adaptive_tasks
+                SET plannerRound = json_set(
+                  plannerRound, '$.findingFollowup.nativeRepositoryVisibility.branch', ?
+                )
+                WHERE id = ?
+              `).run("release/other", selectedTask)
+            : altered.prepare(
+              "DELETE FROM adaptive_repository_visibility_results WHERE taskId = ?",
+            ).run(selectedTask);
+          assertEquals(changed.changes, 1);
         } finally {
           altered.close();
         }
-        const damaged = join(baseDir, "missing-native-recheck-source");
+        const damaged = join(
+          baseDir,
+          branchMode
+            ? "mismatched-native-recheck-branch"
+            : "missing-native-recheck-source",
+        );
         await writeRunArchive(
           damaged,
           manifest.identity,
@@ -8833,6 +8847,7 @@ for (
           Deno.errors.NotFound,
         );
         availableCredential = true;
+        let archivedBranchAllowed = true;
         await withFindingAssignmentGateway(
           baseDir,
           () => Promise.resolve(true),
@@ -8850,18 +8865,45 @@ for (
             );
             assertEquals(readSentinelAssessment(path)?.paused, true);
             const { runId: _runId, ...ref } = runRef;
+            const verdict = {
+              ...ref,
+              action: "finding_receipt",
+              receiptId: receipt.id,
+            };
+            const report = {
+              ...ref,
+              action: "finding_report",
+              receiptId: finding.id,
+            };
+            assertEquals(JSON.parse(await turn(verdict)).record, receipt);
+            const restored = JSON.parse(await turn(report)).report;
+            assertEquals(restored.remediation.status, scenario.outcome);
+            assertEquals(restored.sourceReceiptId, finding.id);
+            if (branchMode) {
+              archivedBranchAllowed = false;
+              assertStringIncludes(await turn(verdict), "unavailable");
+              assertEquals(
+                JSON.parse(await turn(report)).report.remediation.status,
+                "unknown",
+              );
+              archivedBranchAllowed = true;
+            }
+            availableCredential = false;
+            assertStringIncludes(await turn(verdict), "unavailable");
             assertEquals(
-              JSON.parse(
-                await turn({
-                  ...ref,
-                  action: "finding_receipt",
-                  receiptId: receipt.id,
-                }),
-              ).record,
-              receipt,
+              JSON.parse(await turn(report)).report.remediation.status,
+              "unknown",
+            );
+            assertEquals(
+              JSON.parse(await turn({ ...verdict, receiptId: finding.id }))
+                .record,
+              finding,
             );
           },
-          undefined,
+          (hook, input) =>
+            archivedBranchAllowed || hook !== "PRE_TOOL_CALL" ||
+            typeof input.url !== "string" ||
+            new URL(input.url).pathname !== branchPath,
           undefined,
           undefined,
           undefined,
@@ -8877,6 +8919,9 @@ for (
         );
       }
       assertEquals(fetches, 1);
+      if (branchMode === "unprotected") {
+        assertEquals(branchRequests, [metadataPath, branchPath, metadataPath]);
+      }
       if (scenario.outcome !== "pass") return;
       coordinator.stop();
 
