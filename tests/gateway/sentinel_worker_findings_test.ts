@@ -581,7 +581,17 @@ Deno.test("Leased Sentinel workers report, recheck, and amend findings visible i
   try {
     const otherPath = resolveSentinelCasePath(baseDir, "other");
     await Deno.mkdir(dirname(otherPath), { recursive: true });
-    await Deno.writeTextFile(otherPath, JSON.stringify(snapshot(false)));
+    const otherSnapshot = snapshot(false);
+    otherSnapshot.nodes.push(...Array.from({ length: 16 }, (_, index) => ({
+      id: `other-finding-${index}`,
+      kind: "finding",
+      label: "Separate case finding",
+      severity: "low",
+    })));
+    await Deno.writeTextFile(otherPath, JSON.stringify(otherSnapshot));
+    const other = startSentinelAssessment(otherPath, {
+      goal: "Review other case",
+    });
     await Deno.writeTextFile(path, JSON.stringify(snapshot(false)));
     const first = startSentinelAssessment(path, { goal: "Verify remediation" });
     const source = assignedLease(path, first, "impact");
@@ -1329,6 +1339,70 @@ Deno.test("Leased Sentinel workers report, recheck, and amend findings visible i
         assertStringIncludes(visible, check!.id);
         assert(!String(output.content).includes("Waiting dependent"));
       }
+      const filterExport = {
+        caseId: selected.caseId,
+        revision: selected.revision,
+        format: "findings-json",
+      };
+      const filtered = await request("export", {
+        ...filterExport,
+        findingFilter: {
+          kind: "worker",
+          assetId: "app",
+          query: amendment!.title.toUpperCase(),
+        },
+      });
+      assertEquals(filtered.type, "export");
+      assertEquals(JSON.parse(String(filtered.content)).findings, [record]);
+      const unfiltered = await request("export", {
+        ...filterExport,
+        findingFilter: {},
+      });
+      const all = JSON.parse(String(unfiltered.content));
+      assert(
+        all.findings.some(({ id }: { id: string }) => id === "review-gap"),
+      );
+      assert(all.findings.some(({ id }: { id: string }) => id === record.id));
+      const empty = await request("export", {
+        ...filterExport,
+        revision: first.revision,
+        findingFilter: { kind: "worker", query: amendment!.title },
+      });
+      assertEquals(JSON.parse(String(empty.content)).findings, []);
+      for (
+        const invalid of [
+          { ...selected, findingFilter: {} },
+          { ...filterExport, findingFilter: { caseId: "other" } },
+          { ...filterExport, revision: undefined, findingFilter: {} },
+        ]
+      ) {
+        const rejected = await request("export", {
+          format: "findings-json",
+          ...invalid,
+        });
+        assertEquals(rejected.type, "error");
+        assertEquals(rejected.content, undefined);
+      }
+      const tooMany = await request("export", {
+        ...filterExport,
+        caseId: "other",
+        revision: other.revision,
+        findingFilter: {},
+      });
+      assertEquals(tooMany.type, "error");
+      assertEquals(tooMany.content, undefined);
+      const narrowed = await request("export", {
+        ...filterExport,
+        caseId: "other",
+        revision: other.revision,
+        findingFilter: { query: "Control gap" },
+      });
+      assertEquals(
+        JSON.parse(String(narrowed.content)).findings.map(
+          ({ id }: { id: string }) => id,
+        ),
+        ["review-gap"],
+      );
       const beforeUnknown = await request("export", {
         ...selected,
         format: "findings-json",

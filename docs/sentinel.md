@@ -310,6 +310,11 @@ The authenticated Tidepool Sentinel `export` route accepts up to 16 exact
 `findings-json`, `csv`, or `markdown`. The export includes only the selected
 findings, their saved report versions, linked rechecks, and retained traffic
 references from that revision. An unavailable ID rejects the whole selection.
+Use `findingFilter` in place of `findingIds` to match an exact `assetId`,
+the source `kind` (`imported` or `worker`), or a case-insensitive text
+`query` on saved report titles and summaries. An empty filter selects every
+finding in the case at that revision. Over-limit reports require narrower
+filters or exact IDs.
 
 ### Archive and restore a named assessment
 

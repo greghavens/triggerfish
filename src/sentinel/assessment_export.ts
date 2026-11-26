@@ -278,24 +278,58 @@ export function renderSentinelFindingsCsv(
     "\r\n";
 }
 
-export type SelectedFindingExportFormat = "csv" | "markdown" | "findings-json";
+type ScopedFindingExportFormat = "csv" | "markdown" | "findings-json";
+const MAX_FINDING_EXPORT_COUNT = 16;
 
-/** Export only reviewed finding identifiers from one exact saved revision. */
-export function renderSelectedSentinelFindings(
+interface FindingExportFilter {
+  readonly kind?: "imported" | "worker";
+  readonly assetId?: string;
+  readonly query?: string;
+}
+
+export function parseFindingExportFilter(
+  raw: unknown,
+): FindingExportFilter | undefined {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return;
+  const { kind, assetId, query } = raw as Record<string, unknown>;
+  if (
+    Object.keys(raw).some((key) =>
+      !["kind", "assetId", "query"].includes(key)
+    ) ||
+    (kind !== undefined && kind !== "imported" && kind !== "worker") ||
+    (assetId !== undefined &&
+      (typeof assetId !== "string" || !assetId || assetId.length > 4096 ||
+        /[\p{Cc}\p{Cf}]/u.test(assetId))) ||
+    (query !== undefined &&
+      (typeof query !== "string" || !query.trim() || query.length > 256 ||
+        /[\p{Cc}\p{Cf}]/u.test(query)))
+  ) return;
+  return {
+    ...(kind && { kind }),
+    ...(typeof assetId === "string" && { assetId }),
+    ...(typeof query === "string" && { query: query.trim().toLowerCase() }),
+  };
+}
+
+/** Export reviewed finding IDs or a complete case-local match set at one revision. */
+export function renderScopedSentinelFindings(
   path: string,
   caseId: string,
   assessment: SentinelAssessmentExportInput,
-  ids: readonly string[],
-  format: SelectedFindingExportFormat,
+  selection: string[] | FindingExportFilter,
+  format: ScopedFindingExportFormat,
   language: SentinelReportLanguage,
 ): string | undefined {
+  const explicit = Array.isArray(selection);
+  if (locateSentinelCase(path)?.caseId !== caseId) return;
   if (
-    locateSentinelCase(path)?.caseId !== caseId ||
-    !ids.length || ids.length > 16 || new Set(ids).size !== ids.length ||
-    ids.some((id) =>
-      typeof id !== "string" || !id || id.length > 4096 ||
-      /[\p{Cc}\p{Cf}]/u.test(id)
-    )
+    explicit &&
+    (!selection.length || selection.length > MAX_FINDING_EXPORT_COUNT ||
+      new Set(selection).size !== selection.length ||
+      selection.some((id) =>
+        typeof id !== "string" || !id || id.length > 4096 ||
+        /[\p{Cc}\p{Cf}]/u.test(id)
+      ))
   ) return;
   const findings = new Map(
     (importedFindings(assessment) ?? []).map((
@@ -318,10 +352,41 @@ export function renderSelectedSentinelFindings(
     : undefined;
   const records = [];
   try {
+    const maxScannedWorkerFindings = 256;
+    const workerIds = !explicit && selection.kind !== "imported" && runId
+      ? journal?.listFindingIds(
+        caseId,
+        runId,
+        assessment.revision,
+        maxScannedWorkerFindings + 1,
+      ) ?? []
+      : [];
+    if (workerIds.length > maxScannedWorkerFindings) return;
+    const ids = explicit ? selection : [
+      ...(selection.kind === "worker" ? [] : findings.keys()),
+      ...workerIds,
+    ];
+    if (new Set(ids).size !== ids.length) return;
     for (const id of ids) {
       const imported = findings.get(id);
       const report = journal?.readFindingReport(id, assessment.revision);
       if (imported && report) return;
+      if (!explicit) {
+        const { assetId, query } = selection;
+        const scope = imported ? imported.assets : [report?.finding.targetId];
+        const title = redactCredentialText(
+          imported?.label ?? report?.title ?? "",
+        );
+        const summary = redactCredentialText(report?.summary ?? "");
+        if (
+          (assetId && !scope.includes(assetId)) ||
+          (query &&
+            ![title, summary].some((value) =>
+              value.toLowerCase().includes(query)
+            ))
+        ) continue;
+        if (records.length >= MAX_FINDING_EXPORT_COUNT) return;
+      }
       const trafficLinks = attachments.filter((
         { findingId, caseId: sourceCase },
       ) => findingId === id && sourceCase === caseId).map((

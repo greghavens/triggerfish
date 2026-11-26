@@ -65,7 +65,8 @@ import {
   updateSentinelAssessmentGoal,
 } from "../../../sentinel/assessment_store.ts";
 import {
-  renderSelectedSentinelFindings,
+  parseFindingExportFilter,
+  renderScopedSentinelFindings,
   renderSentinelAlertsJson,
   renderSentinelDecisionHistoryJson,
   renderSentinelFindingsCsv,
@@ -1352,30 +1353,40 @@ export function createTidepoolSentinelHandler(
             );
           }
           const format = message.format;
-          if (message.findingIds !== undefined || format === "findings-json") {
+          if (
+            message.findingIds !== undefined ||
+            message.findingFilter !== undefined || format === "findings-json"
+          ) {
             const language = message.language ?? "en";
+            const selection = message.findingFilter !== undefined
+              ? message.findingIds === undefined
+                ? parseFindingExportFilter(message.findingFilter)
+                : undefined
+              : Array.isArray(message.findingIds)
+              ? message.findingIds
+              : undefined;
             if (
               typeof revision !== "number" ||
-              !Array.isArray(message.findingIds) ||
+              !selection ||
               (format !== "csv" && format !== "markdown" &&
                 format !== "findings-json") ||
               !isSentinelReportLanguage(language)
             ) {
               throw new SentinelAssignmentError(
-                "Select exact findings and an evidence revision to export.",
+                "Select findings or a finding filter and an exact evidence revision to export.",
               );
             }
-            const content = renderSelectedSentinelFindings(
+            const content = renderScopedSentinelFindings(
               path,
               caseId,
               state,
-              message.findingIds,
+              selection,
               format,
               language,
             );
             if (content === undefined) {
               throw new SentinelAssignmentError(
-                "The selected finding report is unavailable.",
+                "The finding report is unavailable. Narrow the filter or select exact findings.",
               );
             }
             send({
