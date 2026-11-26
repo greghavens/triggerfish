@@ -3717,7 +3717,9 @@ function createAgent(
       ...(canReadCaseExecutionEvidence ? [caseExecutionEvidenceTool] : []),
     ]
     : tools;
-  const reporter = readAssignedModelReview(options)?.kind === "report_finding";
+  const assignedReview = readAssignedModelReview(options);
+  const reporter = assignedReview?.kind === "report_finding";
+  const findingFollowup = assignedReview?.plannerRound?.findingFollowup;
   const toolDefs = reporter
     ? availableTools.filter(({ name }) =>
       [
@@ -3733,6 +3735,10 @@ function createAgent(
       tool.name === sentinelFindingTrafficAttachTool.name
         ? sentinelReporterTrafficAttachTool
         : tool
+    )
+    : findingFollowup
+    ? availableTools.filter(({ name }) =>
+      name === assignedTargetTool.name || name === "sentinel_worker_findings"
     )
     : availableTools;
   const mutationTools = new Set([
@@ -4073,6 +4079,14 @@ function createAgent(
             !validatePlannerWorkerControl(turn, toolName, call.args)
           ) return { ...result, allowed: false, action: "BLOCK" };
           return { ...result, allowed: false, action: "REQUIRE_APPROVAL" };
+        }
+        if (
+          name === "PRE_TOOL_CALL" && findingFollowup &&
+          toolName === "sentinel_worker_findings" &&
+          (call?.args?.receiptId !== findingFollowup.findingId ||
+            Object.keys(call.args).some((key) => key !== "receiptId"))
+        ) {
+          return { ...result, allowed: false, action: "BLOCK" };
         }
         if (
           name === "PRE_TOOL_CALL" && reporter &&

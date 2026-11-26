@@ -731,7 +731,19 @@ export type AdaptiveCommittedObservationCitation = NonNullable<
   SentinelReviewStep["intermediateWorkflowObservation"]
 >;
 
+export interface AdaptiveFindingFollowup {
+  readonly findingId: string;
+  readonly sourceTaskId: string;
+  readonly evidenceId: string;
+  readonly sourceRevision: number;
+  readonly assignedRevision: number;
+  readonly snapshotDigest: string;
+  readonly reportVersion: number;
+  readonly note: string;
+}
+
 export interface AdaptivePlannerRound {
+  readonly findingFollowup?: AdaptiveFindingFollowup;
   readonly passingRecheckId?: string;
   readonly passingRecheckForFindingId?: string;
   readonly recheckFindingId?: string;
@@ -1892,6 +1904,13 @@ export function sentinelAdaptiveTaskId(
           receipt.committedObservation.observationId,
         ]]
         : []),
+      ...(request.plannerRound?.findingFollowup
+        ? [[
+          "finding_followup",
+          request.plannerRound.findingFollowup,
+          request.plannerRound.identity,
+        ]]
+        : []),
       ...(receipt.recheckFindingId ? [receipt.recheckFindingId] : []),
       ...(reportFinding ? [reportFinding] : []),
     ]))
@@ -2074,7 +2093,26 @@ function normalizePlannerRound(round: AdaptivePlannerRound | undefined) {
     peerFindingCitations,
     priorAssignedTargetCitations,
     carriedAssignedTargetCitations,
+    findingFollowup,
   } = round;
+  if (
+    findingFollowup !== undefined && (
+      !/^operator:[a-f0-9-]{36}$/.test(identity) ||
+      !/^worker-finding:[a-f0-9]{64}$/.test(findingFollowup.findingId) ||
+      !/^adaptive:[a-f0-9]{64}$/.test(findingFollowup.sourceTaskId) ||
+      !Number.isSafeInteger(findingFollowup.sourceRevision) ||
+      findingFollowup.sourceRevision < 1 ||
+      !Number.isSafeInteger(findingFollowup.assignedRevision) ||
+      findingFollowup.assignedRevision < findingFollowup.sourceRevision ||
+      !/^[a-f0-9]{64}$/.test(findingFollowup.snapshotDigest) ||
+      !Number.isSafeInteger(findingFollowup.reportVersion) ||
+      findingFollowup.reportVersion < 1 ||
+      !findingFollowup.evidenceId || findingFollowup.evidenceId.length > 256 ||
+      !findingFollowup.note?.trim() || findingFollowup.note.length > 1000 ||
+      /[\p{Cc}\p{Cf}]/u.test(findingFollowup.note) ||
+      redactCredentialText(findingFollowup.note) !== findingFollowup.note
+    )
+  ) throw new Error("Invalid Sentinel finding follow-up scope");
   if (
     (passingRecheckId !== undefined &&
       (typeof passingRecheckId !== "string" ||
@@ -2196,6 +2234,18 @@ function normalizePlannerRound(round: AdaptivePlannerRound | undefined) {
   ) throw new Error("Invalid committed observation citation");
   return {
     identity: revisionKey(identity),
+    ...(findingFollowup && {
+      findingFollowup: {
+        findingId: findingFollowup.findingId,
+        sourceTaskId: findingFollowup.sourceTaskId,
+        evidenceId: findingFollowup.evidenceId,
+        sourceRevision: findingFollowup.sourceRevision,
+        assignedRevision: findingFollowup.assignedRevision,
+        snapshotDigest: findingFollowup.snapshotDigest,
+        reportVersion: findingFollowup.reportVersion,
+        note: findingFollowup.note,
+      },
+    }),
     ...(passingRecheckId && { passingRecheckId }),
     ...(passingRecheckForFindingId && { passingRecheckForFindingId }),
     ...(recheckFindingId && { recheckFindingId }),
@@ -2253,6 +2303,16 @@ function normalizeTask(revision: string, request: AdaptiveTaskRequest) {
   }
   const identity = normalizeIdentity(request);
   const plannerRound = normalizePlannerRound(request.plannerRound);
+  if (
+    plannerRound?.findingFollowup &&
+    (identity.kind !== "trace" || identity.depth !== 1 ||
+      request.evidenceIds?.length !== 1 ||
+      request.evidenceIds[0] !== plannerRound.findingFollowup.findingId)
+  ) {
+    throw new Error(
+      "Finding follow-up requires an exact one-hop finding trace",
+    );
+  }
   if (
     plannerRound?.futureWorkflowOutcome &&
     (identity.kind !== "trace" || identity.depth !== 1 ||
@@ -3042,6 +3102,7 @@ export interface AdaptiveOperatorAssignmentIntentReceipt {
   readonly depth?: number;
   readonly recheckFindingId?: string;
   readonly passingRecheckForFindingId?: string;
+  readonly findingFollowup?: AdaptiveFindingFollowup;
   readonly graphRelationship?: SentinelGraphFactRequirement;
   readonly prioritizeNext?: true;
   readonly priorityRank?: number;
@@ -4187,7 +4248,8 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
     SELECT task.*, COALESCE(review.attempts, 0) AS reviewAttempts
     FROM adaptive_tasks AS task
     LEFT JOIN adaptive_model_reviews AS review ON review.taskId = task.id
-    WHERE task.revision = ? AND (task.reason = ? OR task.kind = 'review_incident')
+    WHERE task.revision = ? AND (task.reason = ? OR task.kind = 'review_incident'
+      OR json_type(task.plannerRound, '$.findingFollowup') = 'object')
       AND task.status = 'completed' AND task.factSatisfaction IS NULL AND review.noteId IS NULL
       AND (COALESCE(review.attempts, 0) < 2 + COALESCE(review.operatorRetry, 0)
         OR (task.kind = 'report_finding' AND EXISTS (
@@ -4375,6 +4437,8 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
       kind: task.kind,
       ...(task.nodeId !== undefined && { nodeId: task.nodeId }),
       ...(task.depth !== undefined && { depth: task.depth }),
+      ...(task.plannerRound?.findingFollowup &&
+        { findingFollowup: task.plannerRound.findingFollowup }),
       ...(task.plannerRound?.graphRelationship && {
         graphRelationship: task.plannerRound.graphRelationship,
       }),

@@ -269,6 +269,7 @@ import {
   previewSentinelQueueControl,
   readHistoricalAdaptiveSentinel,
   readSentinelAdaptiveEvidenceMapping,
+  readSentinelFindingFollowup,
   readSentinelIntermediateWorkflowObservations,
   readSentinelModelSettings,
   readSentinelOperatorAssetHint,
@@ -516,7 +517,8 @@ export const operatorRunTool: ToolDefinition = {
     },
     receiptId: {
       type: "string",
-      description: "Exact saved Sentinel worker finding or recheck ID",
+      description:
+        "Exact saved Sentinel worker finding or recheck ID. For assign, pair an exact worker finding with note and taskKind trace for a reviewed follow-up.",
     },
     observationId: {
       type: "string",
@@ -4885,6 +4887,8 @@ ${
       if (action === "assign") {
         const {
           runId,
+          receiptId,
+          note,
           adaptiveRevision,
           requestId,
           taskKind,
@@ -4905,6 +4909,8 @@ ${
               "revision",
               "runId",
               "adaptiveRevision",
+              "receiptId",
+              "note",
               "requestId",
               "taskKind",
               "node",
@@ -4934,6 +4940,24 @@ ${
               graphRelationship !== undefined)) ||
           typeof node !== "string" || !node.trim() || node.length > 4096 ||
           node.includes("\0")
+        ) return unavailable;
+        const isFindingFollowup = receiptId !== undefined || note !== undefined;
+        if (
+          isFindingFollowup && (
+            taskKind !== "trace" || recheckFindingId !== undefined ||
+            passingRecheckForFindingId !== undefined ||
+            graphRelationship !== undefined ||
+            typeof receiptId !== "string" ||
+            !/^worker-finding:[a-f0-9]{64}$/.test(receiptId) ||
+            typeof note !== "string" || !note.trim() || note.length > 1000 ||
+            /[\p{Cc}\p{Cf}]/u.test(note) ||
+            redactCredentialText(note) !== note ||
+            !canFlowTo(
+              context?.inputClassification ?? "INTERNAL",
+              "INTERNAL",
+            ) ||
+            !canFlowTo("INTERNAL", context?.ceiling ?? "INTERNAL")
+          )
         ) return unavailable;
         const relationship = graphRelationship === undefined
           ? undefined
@@ -5004,12 +5028,28 @@ ${
           ? undefined
           : await reopen();
         if (recheckFindingId !== undefined && !original) return unavailable;
+        const findingState = isFindingFollowup
+          ? readSentinelAssessment(path)
+          : undefined;
+        const findingFollowup = findingState?.revision === ref.revision &&
+            findingState.plan.runId === runId.toLowerCase() &&
+            typeof receiptId === "string" && typeof note === "string"
+          ? readSentinelFindingFollowup(
+            path,
+            findingState,
+            node,
+            receiptId,
+            note.trim(),
+          )
+          : undefined;
+        if (isFindingFollowup && !findingFollowup) return unavailable;
         const intent = {
           requestId: requestId.toLowerCase(),
           runId: runId.toLowerCase(),
           evidenceRevision: ref.revision,
           adaptiveRevision,
           kind: taskKind,
+          ...(findingFollowup && { findingFollowup }),
           nodeId: node,
           ...(prioritizeNext === true && { prioritizeNext: true as const }),
           ...(typeof priorityRank === "number" &&

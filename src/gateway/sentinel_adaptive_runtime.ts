@@ -174,6 +174,7 @@ import {
   SENTINEL_RECHECK_CONTEXT_TOOL,
 } from "../sentinel/worker_finding_recovery.ts";
 import {
+  hasSentinelWorkerFindingJournal,
   openSentinelWorkerFindingStore,
   readSentinelCaseFindingReceipts,
   readSentinelRemediationReceipts,
@@ -1814,6 +1815,50 @@ export function canQueueSentinelPassingRecheck(
     findingRecheckStillApplies(snapshot, finding);
 }
 
+/** Bind an operator's read-only follow-up to the exact local finding and report. */
+export function readSentinelFindingFollowup(
+  path: string,
+  state: State,
+  nodeId: string,
+  findingId: string,
+  note: string,
+): import("../sentinel/adaptive_store.ts").AdaptiveFindingFollowup | undefined {
+  const snapshot = state.result?.sharedGraph.snapshot;
+  const caseId = locateSentinelCase(path)?.caseId;
+  if (
+    !caseId || !snapshot || !state.plan.runId ||
+    !hasSentinelWorkerFindingJournal(path)
+  ) return;
+  const allowed = caseOperatingScope(path, state.revision);
+  if (
+    !allowed({ kind: "trace", nodeId }) ||
+    !allowed({ kind: "review_evidence", nodeId })
+  ) return;
+  const journal = openSentinelWorkerFindingStore(path);
+  try {
+    const report = journal.readFindingReport(findingId, state.revision);
+    const finding = report?.finding;
+    if (
+      !report || !finding || finding.caseId !== caseId ||
+      finding.runId !== state.plan.runId || finding.targetId !== nodeId ||
+      finding.evidenceRevision > state.revision ||
+      !findingRecheckStillApplies(snapshot, finding)
+    ) return;
+    return {
+      findingId,
+      sourceTaskId: finding.taskId,
+      evidenceId: finding.evidenceId,
+      sourceRevision: finding.evidenceRevision,
+      assignedRevision: state.revision,
+      snapshotDigest: finding.snapshotDigest,
+      reportVersion: report.version,
+      note,
+    };
+  } finally {
+    journal.close();
+  }
+}
+
 export function submitSentinelAssignmentIntent(
   snapshotPath: string,
   input: {
@@ -1828,6 +1873,8 @@ export function submitSentinelAssignmentIntent(
     readonly recheckFindingId?: string;
     readonly passingRecheckForFindingId?: string;
     readonly graphRelationship?: SentinelGraphFactRequirement;
+    readonly findingFollowup?:
+      import("../sentinel/adaptive_store.ts").AdaptiveFindingFollowup;
   },
   authorizedReceipt?: ExecutionControlReceipt,
   replayOnly = false,
@@ -1837,6 +1884,21 @@ export function submitSentinelAssignmentIntent(
       !state?.active || state.plan.runId !== input.runId ||
       state.revision !== input.evidenceRevision
     ) return undefined;
+    const followup = input.findingFollowup;
+    if (
+      followup && (input.kind !== "trace" || input.graphRelationship ||
+        input.passingRecheckForFindingId || input.recheckFindingId ||
+        !isDeepStrictEqual(
+          followup,
+          readSentinelFindingFollowup(
+            snapshotPath,
+            state,
+            input.nodeId,
+            followup.findingId,
+            followup.note,
+          ),
+        ))
+    ) return;
     const passing = input.passingRecheckForFindingId;
     if (
       passing !== undefined &&
@@ -1863,6 +1925,7 @@ export function submitSentinelAssignmentIntent(
               prior.graphRelationship,
               input.graphRelationship,
             ) &&
+            isDeepStrictEqual(prior.findingFollowup, followup) &&
             prior.recheckFindingId === input.recheckFindingId &&
             prior.passingRecheckForFindingId === passing &&
             prior.prioritizeNext === input.prioritizeNext &&
@@ -1881,6 +1944,18 @@ export function submitSentinelAssignmentIntent(
         input.graphRelationship &&
           { edge: input.graphRelationship, requestId: input.requestId },
       );
+      if (followup) {
+        task = {
+          ...task,
+          depth: 1,
+          evidenceIds: [followup.findingId],
+          plannerRound: {
+            identity: `operator:${input.requestId}`,
+            attempt: 1,
+            findingFollowup: followup,
+          },
+        };
+      }
       if (passing) {
         task = {
           ...task,
@@ -2475,7 +2550,22 @@ function decisionAllowsClaim(snapshotPath: string, revision: number) {
   const allowed = caseOperatingScope(snapshotPath, revision);
   return (task: AdaptiveTask) =>
     allowed(task) &&
-    (task.reason === OPERATOR_ASSIGNMENT_REASON || !decisionHold(task));
+    (task.reason === OPERATOR_ASSIGNMENT_REASON || !decisionHold(task)) &&
+    (!task.plannerRound?.findingFollowup || (() => {
+      const current = readSentinelAssessment(snapshotPath);
+      const source = task.plannerRound.findingFollowup;
+      return current?.revision === revision && task.nodeId !== undefined &&
+        isDeepStrictEqual(
+          source,
+          readSentinelFindingFollowup(
+            snapshotPath,
+            current,
+            task.nodeId,
+            source.findingId,
+            source.note,
+          ),
+        );
+    })());
 }
 
 /** Project only durable, exact assignment context for an owner side question. */
@@ -3772,7 +3862,15 @@ export function advanceAdaptiveSentinel(snapshotPath: string, state: State) {
       const lease = { taskId: claim.task.id, leaseToken: claim.leaseToken };
       let result: unknown;
       try {
-        const observation = claim.task.kind === "report_finding"
+        const findingFollowup = claim.task.plannerRound?.findingFollowup;
+        const observation = findingFollowup
+          ? {
+            findingId: findingFollowup.findingId,
+            evidenceId: findingFollowup.evidenceId,
+            sourceRevision: findingFollowup.sourceRevision,
+            reportVersion: findingFollowup.reportVersion,
+          }
+          : claim.task.kind === "report_finding"
           ? { findingId: claim.task.evidenceIds?.[0] }
           : executeSentinelTask(
             state,
@@ -3858,7 +3956,10 @@ function parseModelReview(
       !output || typeof output.summary !== "string" || !output.summary.trim()
     ) return undefined;
     note = output.summary.trim().slice(0, 1500);
-    if (Array.isArray(output.followUps) && output.followUps.length <= 2) {
+    if (
+      !task.plannerRound?.findingFollowup && Array.isArray(output.followUps) &&
+      output.followUps.length <= 2
+    ) {
       const observation = task.observation as
         | { relatedNodeIds?: unknown }
         | undefined;
@@ -4693,6 +4794,11 @@ export function createSentinelModelPlanner(
               "Reopen committedObservation.observationId exactly with sentinel_intermediate_workflow_observation before relying on it.",
             ]
             : []),
+          ...(task.plannerRound?.findingFollowup
+            ? [
+              "Review this findingFollowup using the exact receipt in sentinel_worker_findings and the approved note as guidance for retained evidence analysis.",
+            ]
+            : []),
           ...(task.plannerRound?.recheckFindingId
             ? [
               "After reopening the assigned receipt, open recheckFindingId with sentinel_finding_recheck_context and record the recheck for that exact finding.",
@@ -4726,6 +4832,7 @@ export function createSentinelModelPlanner(
           workerSources: task.plannerRound?.workerSources,
           graphFactId: task.plannerRound?.graphFactId,
           recheckFindingId: task.plannerRound?.recheckFindingId,
+          findingFollowup: task.plannerRound?.findingFollowup,
           committedObservation: task.plannerRound?.committedObservation,
           peerFindingCitations: task.plannerRound?.peerFindingCitations?.map(
             ({ mappingSources: _mappingSources, ...citation }) => citation,
