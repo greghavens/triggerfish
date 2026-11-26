@@ -11211,13 +11211,20 @@ Deno.test("Tidepool assembles oversized exact-version finding downloads without 
       path,
       JSON.stringify({
         version: 1,
-        nodes: Array.from({ length: 280 }, (_, index) => ({
-          id: `finding-${index}`,
-          kind: "finding",
-          label: "🔍".repeat(256),
-          severity: "low",
-        })),
-        edges: [],
+        nodes: [
+          { id: "export-asset", kind: "asset", label: "Export subject" },
+          ...Array.from({ length: 280 }, (_, index) => ({
+            id: `finding-${index}`,
+            kind: "finding",
+            label: "🔍".repeat(256),
+            severity: "low",
+          })),
+        ],
+        edges: [{
+          from: "finding-0",
+          to: "export-asset",
+          relation: "affects",
+        }],
       }),
     );
     const state = startSentinelAssessment(path);
