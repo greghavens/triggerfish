@@ -2240,12 +2240,14 @@ export function resumeSentinelAssessment(
   path: string,
   webContainmentConfigured?: boolean,
   expectedRevision?: number,
+  expectedRunId?: string,
 ): StoredAssessment | undefined {
   return activateSentinelAssessment(
     path,
     2,
     webContainmentConfigured,
     expectedRevision,
+    expectedRunId,
   );
 }
 
@@ -2254,6 +2256,7 @@ function activateSentinelAssessment(
   priorState: 0 | 2,
   webContainmentConfigured?: boolean,
   expectedRevision?: number,
+  expectedRunId?: string,
 ): StoredAssessment | undefined {
   const db = openStore(path, false);
   if (!db) return undefined;
@@ -2265,6 +2268,7 @@ function activateSentinelAssessment(
       if (
         row?.active !== priorState ||
         (expectedRevision !== undefined && row.revision !== expectedRevision) ||
+        (expectedRunId !== undefined && plan.runId !== expectedRunId) ||
         (deadlineAt !== undefined && Date.now() >= deadlineAt)
       ) return undefined;
       const changed = db.prepare(
@@ -3398,6 +3402,7 @@ export function readSentinelAssessmentRevision(path: string, revision: number) {
 export function pauseSentinelAssessment(
   path: string,
   expectedRevision?: number,
+  expectedRunId?: string,
 ): boolean {
   const db = openStore(path, false);
   if (!db) return false;
@@ -3406,7 +3411,9 @@ export function pauseSentinelAssessment(
       const row = getRow(db);
       if (
         row?.active !== 1 ||
-        (expectedRevision !== undefined && row.revision !== expectedRevision)
+        (expectedRevision !== undefined && row.revision !== expectedRevision) ||
+        (expectedRunId !== undefined &&
+          (JSON.parse(row.plan) as AssessmentPlan).runId !== expectedRunId)
       ) return false;
       return Boolean(
         db.prepare("UPDATE assessment SET active = 2 WHERE id = 1")

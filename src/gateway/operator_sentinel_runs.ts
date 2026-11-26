@@ -245,21 +245,30 @@ export function createOperatorSentinelRuns(
     };
   }
 
-  function change(ref: OperatorRunRef, action: "pause" | "resume") {
+  function change(
+    ref: OperatorRunRef,
+    action: "pause" | "resume",
+    expectedRunId?: string,
+  ) {
     const path = pathFor(ref);
     if (!path || ref.revision === undefined) return undefined;
     const status = readSentinelCaseStatus(path);
-    if (!status || status.revision !== ref.revision) return undefined;
+    if (
+      !status || status.revision !== ref.revision ||
+      (expectedRunId !== undefined &&
+        readSentinelRunIdForRevision(path, ref.revision) !== expectedRunId)
+    ) return undefined;
     if (action === "pause") {
       if (
         status.status !== "paused" &&
-        !pauseSentinelAssessment(path, ref.revision)
+        !pauseSentinelAssessment(path, ref.revision, expectedRunId)
       ) return;
     } else if (status.status !== "running") {
       const state = resumeSentinelAssessment(
         path,
         webContainmentConfigured,
         ref.revision,
+        expectedRunId,
       );
       if (!state) return;
       advanceAdaptiveSentinel(path, state);
@@ -472,8 +481,8 @@ export function createOperatorSentinelRuns(
         advanceAdaptiveSentinel(path, state);
         return inspect(ref);
       },
-      pause: (ref) => change(ref, "pause"),
-      resume: (ref) => change(ref, "resume"),
+      pause: (ref, context) => change(ref, "pause", context?.expectedRunId),
+      resume: (ref, context) => change(ref, "resume", context?.expectedRunId),
       hint(ref, context) {
         const path = pathFor(ref);
         if (

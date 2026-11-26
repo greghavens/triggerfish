@@ -1,3 +1,4 @@
+import { applyOperatorRunBatch } from "./operator_run_batch_control.ts";
 import {
   type SentinelModelRoute,
   sentinelModelRouteEditLimit,
@@ -144,6 +145,7 @@ import {
 } from "../core/execution_traces.ts";
 import {
   openOperatorRunLinkStore,
+  type OperatorRunBatchTarget,
   OperatorRunController,
   type OperatorRunKind,
   type OperatorRunProvider,
@@ -397,6 +399,8 @@ export const operatorRunTool: ToolDefinition = {
         "propose_graph_fact_discovery",
         "preview_inventory_withdrawal",
         "withdraw_inventory_host",
+        "pause_runs",
+        "resume_runs",
         "retry_graph_tasks",
         "set_case_membership",
         "traces",
@@ -879,6 +883,22 @@ export const operatorRunTool: ToolDefinition = {
     sequence: {
       type: "integer",
       description: "Exact workflow trace event sequence",
+    },
+    runTargets: {
+      type: "array",
+      description:
+        "Exact workflow run IDs or Sentinel case, revision and run IDs to pause or resume.",
+      items: {
+        type: "object",
+        properties: {
+          kind: { type: "string", enum: ["workflow", "sentinel"] },
+          id: { type: "string" },
+          revision: { type: "integer" },
+          runId: { type: "string" },
+        },
+        required: ["kind", "id"],
+        additionalProperties: false,
+      },
     },
     scopes: {
       type: "array",
@@ -2397,6 +2417,63 @@ export function createOperatorRunToolExecutor(options: {
             }`,
           ),
       });
+      if (action === "pause_runs" || action === "resume_runs") {
+        const { requestId, runTargets } = args;
+        const ceiling = context?.ceiling ?? "INTERNAL";
+        if (
+          !canFlowTo("INTERNAL", ceiling) ||
+          typeof requestId !== "string" || !digestPattern.test(requestId) ||
+          !Array.isArray(runTargets) || !runTargets.length ||
+          runTargets.length > 8 ||
+          Object.keys(args).some((key) =>
+            !["action", "requestId", "runTargets"].includes(key)
+          )
+        ) return unavailable;
+        const seen = new Set<string>();
+        const targets: OperatorRunBatchTarget[] = [];
+        for (const item of runTargets) {
+          if (!item || typeof item !== "object" || Array.isArray(item)) {
+            return unavailable;
+          }
+          const ref = reference(item.kind, item.id, item.revision);
+          if (
+            !ref || (ref.kind !== "sentinel" && ref.kind !== "workflow") ||
+            seen.has(`${ref.kind}:${ref.id}`) ||
+            (ref.kind === "sentinel"
+              ? !isSentinelCaseId(ref.id) || ref.revision === undefined ||
+                typeof item.runId !== "string" ||
+                !digestPattern.test(item.runId)
+              : item.runId !== undefined) ||
+            Object.keys(item).some((key) =>
+              !["kind", "id", "revision", "runId"].includes(key)
+            )
+          ) return unavailable;
+          seen.add(`${ref.kind}:${ref.id}`);
+          targets.push({
+            ref,
+            ...(typeof item.runId === "string" &&
+              { runId: item.runId.toLowerCase() }),
+          });
+        }
+        const controlled = await applyOperatorRunBatch({
+          request: {
+            scope: linkScope,
+            operatorId,
+            action: action === "pause_runs" ? "pause" : "resume",
+            requestId: requestId.toLowerCase(),
+            targets,
+          },
+          controller,
+          journal: links,
+          ceiling,
+          confirm: options.confirm,
+        });
+        if (!controlled) return unavailable;
+        if (controlled.declined) {
+          return "Error: The operator declined the run action.";
+        }
+        return safeProjection(controlled);
+      }
       if (action === "list") {
         const filter = kind(args.kind);
         if (args.kind !== undefined && !filter) return unavailable;

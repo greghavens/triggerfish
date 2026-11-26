@@ -63,6 +63,7 @@ export interface OperatorRunMutationContext {
   readonly requestId?: string;
   readonly note?: string;
   readonly taskId?: string;
+  readonly expectedRunId?: string;
 }
 
 export interface OperatorRunProvider {
@@ -77,6 +78,36 @@ export interface OperatorRunProvider {
       ) => MaybePromise<OperatorRunSummary | undefined>
     >
   >;
+}
+
+export interface OperatorRunBatchTarget {
+  readonly ref: OperatorRunRef;
+  readonly runId?: string;
+}
+
+export interface OperatorRunBatchItem extends OperatorRunBatchTarget {
+  readonly status:
+    | "approved"
+    | "pending"
+    | "applied"
+    | "observed"
+    | "unchanged"
+    | "unavailable"
+    | "stale";
+  readonly resultRef?: OperatorRunRef;
+}
+
+export interface OperatorRunBatchRequest {
+  readonly scope: string;
+  readonly operatorId: string;
+  readonly requestId: string;
+  readonly action: "pause" | "resume";
+  readonly targets: readonly OperatorRunBatchTarget[];
+}
+
+export interface OperatorRunBatchReceipt extends OperatorRunBatchRequest {
+  readonly approvedAt: string;
+  readonly items: readonly OperatorRunBatchItem[];
 }
 
 export interface OperatorRunLinkInput {
@@ -468,7 +499,89 @@ export function openOperatorRunLinkStore(path: string, now = Date.now) {
     db.close();
     throw error;
   }
+  function readBatch(
+    request: OperatorRunBatchRequest,
+  ): OperatorRunBatchReceipt | undefined {
+    if (
+      !db.prepare(
+        "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'run_control_batches'",
+      ).get()
+    ) return;
+    const row = db.prepare(
+      "SELECT record FROM run_control_batches WHERE scope = ? AND operatorId = ? AND requestId = ?",
+    ).get(request.scope, request.operatorId, request.requestId);
+    if (!row) return;
+    const saved = JSON.parse(String(row.record)) as OperatorRunBatchReceipt;
+    if (
+      saved.action !== request.action ||
+      JSON.stringify(saved.targets) !== JSON.stringify(request.targets)
+    ) {
+      throw new Error("Conflicting operator run control batch request");
+    }
+    return saved;
+  }
   return {
+    readBatch,
+    approveBatch(
+      request: OperatorRunBatchRequest,
+      items: readonly OperatorRunBatchItem[],
+    ) {
+      return transaction(db, () => {
+        const prior = readBatch(request);
+        if (prior) return prior;
+        db.exec(`CREATE TABLE IF NOT EXISTS run_control_batches (
+          scope TEXT NOT NULL, operatorId TEXT NOT NULL, requestId TEXT NOT NULL, record TEXT NOT NULL,
+          PRIMARY KEY (scope, operatorId, requestId)
+        ) STRICT`);
+        if (
+          Number(
+            db.prepare("SELECT COUNT(*) AS count FROM run_control_batches")
+              .get()?.count,
+          ) >= MAX_REQUESTS
+        ) {
+          throw new Error("Operator run control batch limit reached");
+        }
+        const receipt = {
+          ...request,
+          approvedAt: new Date(now()).toISOString(),
+          items,
+        };
+        db.prepare("INSERT INTO run_control_batches VALUES (?, ?, ?, ?)").run(
+          request.scope,
+          request.operatorId,
+          request.requestId,
+          JSON.stringify(receipt),
+        );
+        return receipt;
+      });
+    },
+    updateBatchItem(
+      request: OperatorRunBatchRequest,
+      index: number,
+      expected: "approved" | "pending",
+      status: "pending" | "applied" | "observed" | "stale",
+      resultRef?: OperatorRunRef,
+    ) {
+      return transaction(db, () => {
+        const prior = readBatch(request);
+        if (!prior || prior.items[index]?.status !== expected) return false;
+        const items = prior.items.map((item, i) =>
+          i === index
+            ? { ...item, status, ...(resultRef && { resultRef }) }
+            : item
+        );
+        return Number(
+          db.prepare(
+            "UPDATE run_control_batches SET record = ? WHERE scope = ? AND operatorId = ? AND requestId = ?",
+          ).run(
+            JSON.stringify({ ...prior, items }),
+            request.scope,
+            request.operatorId,
+            request.requestId,
+          ).changes,
+        ) === 1;
+      });
+    },
     record(raw: OperatorRunLinkInput): OperatorRunLink {
       return transaction(db, () => recordOperatorRunLink(db, raw, "main", now));
     },
@@ -608,11 +721,12 @@ export class OperatorRunController {
     if (!await this.options.authorize(action, ref)) return undefined;
     const mutate = this.options.providers[ref.kind]?.mutations?.[action];
     if (!mutate) return undefined;
-    const { requestId, note, taskId } = context ?? {};
+    const { requestId, note, taskId, expectedRunId } = context ?? {};
     if (
       (requestId !== undefined && !bounded(requestId, 128)) ||
       (note !== undefined && !bounded(note, 4096)) ||
-      (taskId !== undefined && !bounded(taskId, 256))
+      (taskId !== undefined && !bounded(taskId, 256)) ||
+      (expectedRunId !== undefined && !bounded(expectedRunId, 128))
     ) throw new Error("Invalid operator run mutation context");
     // Starts target a configured plan ID. All other actions target an existing run.
     const exact = action === "start" ? ref : (await this.inspect(ref))?.ref;
@@ -623,7 +737,12 @@ export class OperatorRunController {
     ) return undefined;
     const result = await mutate(
       exact,
-      context === undefined ? undefined : { requestId, note, taskId },
+      context === undefined ? undefined : {
+        requestId,
+        note,
+        taskId,
+        ...(expectedRunId !== undefined && { expectedRunId }),
+      },
     );
     if (!result) return undefined;
     const canonical = canonicalSummary(result, ref.kind);

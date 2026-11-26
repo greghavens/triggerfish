@@ -3631,6 +3631,176 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
         });
       }, reopenedWorkflows);
 
+      const batchCase = "reviewed-batch-case";
+      const batchPath = resolveSentinelCasePath(baseDir, batchCase);
+      await Deno.mkdir(dirname(batchPath), { recursive: true });
+      await Deno.writeTextFile(batchPath, JSON.stringify(childGraph));
+      const batchCaseStart = startSentinelAssessment(batchPath);
+      const batchCaseRef = {
+        kind: "sentinel",
+        id: batchCase,
+        revision: batchCaseStart.revision,
+        runId: batchCaseStart.plan.runId,
+      };
+      const batchWorkflow = JSON.parse(
+        (await turn({
+          action: "start",
+          ...configured,
+          requestId: crypto.randomUUID(),
+        })).result,
+      ).run.ref;
+      const missingWorkflow = { kind: "workflow", id: crypto.randomUUID() };
+      const pauseBatch = {
+        action: "pause_runs",
+        requestId: crypto.randomUUID(),
+        runTargets: [batchCaseRef, batchWorkflow, missingWorkflow],
+      };
+      const originalBatchApproval = confirmations.length;
+      denied = "PRE_TOOL_CALL";
+      await turn(pauseBatch);
+      denied = undefined;
+      assertEquals(confirmations.length, originalBatchApproval);
+      assertEquals(readSentinelAssessment(batchPath)?.paused, false);
+      assertEquals(
+        restarted.inspect(batchWorkflow.id)?.status,
+        "running",
+      );
+      approved = false;
+      assertStringIncludes(
+        (await turn(pauseBatch)).result,
+        "operator declined",
+      );
+      approved = true;
+      assertEquals(readSentinelAssessment(batchPath)?.paused, false);
+      assertEquals(
+        restarted.inspect(batchWorkflow.id)?.status,
+        "running",
+      );
+      duringConfirmation = () => {
+        Deno.writeTextFileSync(
+          batchPath,
+          JSON.stringify({
+            ...childGraph,
+            nodes: childGraph.nodes.map((node) => ({
+              ...node,
+              label: node.label + " updated",
+            })),
+          }),
+        );
+        assertEquals(refreshSentinelAssessment(batchPath)?.revision, 2);
+      };
+      let pausedBatch;
+      try {
+        pausedBatch = JSON.parse((await turn(pauseBatch)).result);
+      } finally {
+        duringConfirmation = undefined;
+      }
+      assertEquals(
+        pausedBatch.items.map(({ status }: { status: string }) => status),
+        [
+          "stale",
+          "applied",
+          "unavailable",
+        ],
+      );
+      assertEquals(readSentinelAssessment(batchPath)?.paused, false);
+      const reviewedBatchApproval = confirmations.length;
+      await withGateway(async (restartTurn) => {
+        assertEquals(
+          JSON.parse((await restartTurn(pauseBatch)).result),
+          pausedBatch,
+        );
+        assertStringIncludes(
+          (await restartTurn({ ...pauseBatch, runTargets: [batchWorkflow] }))
+            .result,
+          "unavailable",
+        );
+        assertEquals(confirmations.length, reviewedBatchApproval);
+        const exactBatchRef = { ...batchCaseRef, revision: 2 };
+        const secondPause = JSON.parse(
+          (await restartTurn({
+            action: "pause_runs",
+            requestId: crypto.randomUUID(),
+            runTargets: [exactBatchRef, batchWorkflow],
+          })).result,
+        );
+        assertEquals(
+          secondPause.items.map(({ status }: { status: string }) => status),
+          [
+            "applied",
+            "unchanged",
+          ],
+        );
+        assertEquals(readSentinelAssessment(batchPath)?.paused, true);
+        const resumeBatch = {
+          action: "resume_runs",
+          requestId: crypto.randomUUID(),
+          runTargets: [exactBatchRef, batchWorkflow],
+        };
+        const resumedBatch = JSON.parse(
+          (await restartTurn(resumeBatch)).result,
+        );
+        assertEquals(
+          resumedBatch.items.map(({ status }: { status: string }) => status),
+          [
+            "applied",
+            "applied",
+          ],
+        );
+        assertEquals(readSentinelAssessment(batchPath)?.paused, false);
+
+        // Simulate a committed transition whose receipt update was interrupted.
+        const journal = new DatabaseSync(
+          join(baseDir, "operator-run-links.db"),
+        );
+        try {
+          const raw = journal.prepare(
+            "SELECT record FROM run_control_batches WHERE requestId = ?",
+          ).get(resumeBatch.requestId)?.record;
+          assert(typeof raw === "string");
+          const receipt = JSON.parse(raw);
+          receipt.items[0].status = "pending";
+          delete receipt.items[0].resultRef;
+          journal.prepare(
+            "UPDATE run_control_batches SET record = ? WHERE requestId = ?",
+          )
+            .run(JSON.stringify(receipt), resumeBatch.requestId);
+        } finally {
+          journal.close();
+        }
+        assertEquals(
+          JSON.parse(
+            (await restartTurn({
+              action: "pause",
+              kind: "sentinel",
+              id: batchCase,
+              revision: 2,
+            })).result,
+          ).run.status,
+          "paused",
+        );
+        const pendingBatch = JSON.parse(
+          (await restartTurn(resumeBatch)).result,
+        );
+        assertEquals(pendingBatch.items[0].status, "pending");
+        assertEquals(readSentinelAssessment(batchPath)?.paused, true);
+        assertEquals(
+          JSON.parse(
+            (await restartTurn({
+              action: "resume",
+              kind: "sentinel",
+              id: batchCase,
+              revision: 2,
+            })).result,
+          ).run.status,
+          "running",
+        );
+        const observedBatch = JSON.parse(
+          (await restartTurn(resumeBatch)).result,
+        );
+        assertEquals(observedBatch.items[0].status, "observed");
+      }, restarted);
+
       const cancelSentinel = {
         action: "cancel",
         ...linkedSentinel.run.ref,
