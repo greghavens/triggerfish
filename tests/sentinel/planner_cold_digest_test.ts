@@ -223,7 +223,8 @@ async function archiveAndRestoreDigestFixture(
     runId,
   }, confirm);
   assert(typeof archive !== "string");
-  assertEquals((archive.receipt as { status: string }).status, "succeeded");
+  assert("receipt" in archive);
+  assertEquals(archive.receipt.status, "succeeded");
   await Deno.rename(dirname(path), join(directory, `previous-case-${ref.id}`));
   try {
     await Deno.remove(join(directory, "data", "sentinel-evidence-digests.db"));
@@ -238,7 +239,8 @@ async function archiveAndRestoreDigestFixture(
     runId,
   }, confirm);
   assert(typeof restored !== "string");
-  assertEquals((restored.receipt as { status: string }).status, "succeeded");
+  assert("receipt" in restored);
+  assertEquals(restored.receipt.status, "succeeded");
 }
 
 interface PlannerInput {
@@ -1208,6 +1210,16 @@ Deno.test("planner expands older committed workflow observations and graph facts
       ownerCursor = page.nextCursor;
       assert(ownerCursor);
       assertEquals(page.facts.length, 3);
+      assertEquals(page.total, 6);
+      const noMatch = JSON.parse(
+        await read({
+          ...factSelection,
+          cursor: "start",
+          query: "other-relationship",
+        }),
+      ).page;
+      assertEquals(noMatch.total, 0);
+      assertEquals(noMatch.facts, []);
     });
     planner.advance(state);
     const timeout = setTimeout(
@@ -1360,9 +1372,11 @@ Deno.test("planner expands older committed workflow observations and graph facts
         JSON.parse(await read({ ...factSelection, cursor: ownerCursor })).page;
       assertEquals(continued.facts, JSON.parse(filteredFactPages[1]).facts);
       assertEquals(continued.nextCursor, null);
+      assertEquals(continued.total, 7);
       const fresh =
         JSON.parse(await read({ ...factSelection, cursor: "start" })).page;
       assertEquals(fresh.facts[0].id, newestFact!.id);
+      assertEquals(fresh.total, 7);
       for (
         const different of [
           { ...factSelection, query: "dependency" },

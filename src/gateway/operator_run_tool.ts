@@ -6304,9 +6304,10 @@ ${
               query: phrase,
               limit,
               audience: "owner",
+              countMatches: true,
             }, readSentinelOperatingConstraints(path, scope.runId))
             : cursor === "start"
-            ? { facts: [], nextOffset: null, nextCursor: null }
+            ? { facts: [], nextOffset: null, nextCursor: null, total: 0 }
             : undefined
           : adaptive
           ? readSentinelCaseGraphFacts(path, scope, {
@@ -6314,9 +6315,10 @@ ${
             limit,
             offset,
             query: phrase,
+            countMatches: true,
           })
           : factId === undefined
-          ? { facts: [], nextOffset: null }
+          ? { facts: [], nextOffset: null, total: 0 }
           : undefined;
         if (!page) return unavailable;
         const visible = (
@@ -6327,6 +6329,7 @@ ${
           page: "fact" in page ? { fact: visible(page.fact) } : {
             facts: page.facts.map(visible),
             nextOffset: page.nextOffset,
+            total: page.total,
             ...("nextCursor" in page && { nextCursor: page.nextCursor }),
           },
         });

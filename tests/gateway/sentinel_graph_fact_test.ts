@@ -2029,16 +2029,13 @@ Deno.test("Only a post-authorized exact leased graph edge can be published and r
           fact.id,
         ]);
         assertEquals(filtered.nextOffset, null);
-        assertEquals(
-          JSON.parse(
-            await query({
-              ...ref,
-              query: "other-app",
-              offset: 1,
-            }),
-          ).page.facts,
-          [],
-        );
+        assertEquals(filtered.total, 1);
+        const beyondMatch = JSON.parse(
+          await query({ ...ref, query: "other-app", offset: 1 }),
+        ).page;
+        assertEquals(beyondMatch.facts, []);
+        assertEquals(beyondMatch.total, 1);
+        assertEquals(listed.page.total, 2);
         assertStringIncludes(
           await query({ ...ref, factId: fact.id, query: "supports" }),
           "unavailable",

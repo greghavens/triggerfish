@@ -493,13 +493,14 @@ function openFacts(snapshotPath: string, writable: boolean, now: () => number) {
       scope: SentinelPlannerGraphFactScope,
       { limit = 5, offset = 0 }: SentinelWorkerGraphFactPageOptions = {},
       allow?: (fact: SentinelWorkerGraphFact) => boolean,
+      countMatches = false,
     ) {
       if (
         !checkedRunScope(scope, caseId) || !Number.isSafeInteger(limit) ||
         limit < 1 || limit > maxPage || !Number.isSafeInteger(offset) ||
         offset < 0 || offset > maxFacts
       ) return { facts: [], nextOffset: null };
-      if (allow) {
+      if (allow || countMatches) {
         const rows = db.prepare(`
           SELECT * FROM worker_graph_facts WHERE run_id = ? AND revision = ?
           ORDER BY rowid DESC LIMIT ?
@@ -508,13 +509,15 @@ function openFacts(snapshotPath: string, writable: boolean, now: () => number) {
         let visible = 0;
         for (const row of rows) {
           const fact = decode(row);
-          if (!allow(fact) || visible++ < offset) continue;
-          facts.push(fact);
-          if (facts.length > limit) break;
+          if (allow && !allow(fact)) continue;
+          if (visible++ < offset) continue;
+          if (facts.length <= limit) facts.push(fact);
+          if (!countMatches && facts.length > limit) break;
         }
         return {
           facts: facts.slice(0, limit),
           nextOffset: facts.length > limit ? offset + limit : null,
+          ...(countMatches && { total: visible }),
         };
       }
       const rows = db.prepare(`
@@ -532,6 +535,7 @@ function openFacts(snapshotPath: string, writable: boolean, now: () => number) {
       before: string | undefined,
       limit: number,
       allow: (fact: SentinelWorkerGraphFact) => boolean,
+      countMatches = false,
     ) {
       if (
         !checkedRunScope(scope, caseId) || !Number.isSafeInteger(limit) ||
@@ -544,18 +548,34 @@ function openFacts(snapshotPath: string, writable: boolean, now: () => number) {
       if (before !== undefined && (!anchor || !allow(decode(anchor)))) return;
       const position = anchor?.position ?? null;
       const rows = db.prepare(`
-        SELECT * FROM worker_graph_facts WHERE run_id = ? AND revision = ?
-          AND (? IS NULL OR rowid < ?)
+        SELECT *, (? IS NULL OR rowid < ?) AS before_anchor
+        FROM worker_graph_facts WHERE run_id = ? AND revision = ?
+          AND (? OR ? IS NULL OR rowid < ?)
         ORDER BY rowid DESC LIMIT ?
-      `).all(scope.runId, scope.evidenceRevision, position, position, maxFacts);
+      `).all(
+        position,
+        position,
+        scope.runId,
+        scope.evidenceRevision,
+        Number(countMatches),
+        position,
+        position,
+        maxFacts,
+      );
       const facts: SentinelWorkerGraphFact[] = [];
+      let visible = 0;
       for (const row of rows) {
         const fact = decode(row);
         if (!allow(fact)) continue;
-        facts.push(fact);
-        if (facts.length > limit) break;
+        visible++;
+        if (row.before_anchor && facts.length <= limit) facts.push(fact);
+        if (!countMatches && facts.length > limit) break;
       }
-      return { facts: facts.slice(0, limit), hasMore: facts.length > limit };
+      return {
+        facts: facts.slice(0, limit),
+        hasMore: facts.length > limit,
+        ...(countMatches && { total: visible }),
+      };
     },
 
     listForPlanner(scope: SentinelPlannerGraphFactScope, limit: number) {
@@ -676,6 +696,7 @@ export function readSentinelCaseGraphFacts(
   query: SentinelWorkerGraphFactPageOptions & {
     readonly id?: string;
     readonly query?: string;
+    readonly countMatches?: boolean;
   } = {},
   allow?: (fact: SentinelWorkerGraphFact) => boolean,
 ) {
@@ -694,9 +715,9 @@ export function readSentinelCaseGraphFacts(
       (!allow || allow(fact)) && matchesSentinelGraphFact(fact, phrase);
   return readJournal(
     snapshotPath,
-    (journal) => journal.listForCase(scope, query, eligible),
-  ) ??
-    { facts: [], nextOffset: null };
+    (journal) =>
+      journal.listForCase(scope, query, eligible, query.countMatches),
+  ) ?? { facts: [], nextOffset: null, ...(query.countMatches && { total: 0 }) };
 }
 
 /** Resume strictly before an immutable, currently readable receipt in the same selection. */
@@ -708,11 +729,12 @@ export function readSentinelCaseGraphFactCursorPage(
     query?: string;
     limit: number;
     audience: "owner" | "planner";
+    countMatches?: boolean;
   },
   policy: { version: number; digest: string } | undefined,
   allow?: (fact: SentinelWorkerGraphFact) => boolean,
 ) {
-  const { cursor, query, limit, audience } = options;
+  const { cursor, query, limit, audience, countMatches } = options;
   const tokenFor = (id: string) => {
     const digest = createHash("sha256").update(JSON.stringify([
       scope.caseId,
@@ -740,17 +762,24 @@ export function readSentinelCaseGraphFactCursorPage(
         (fact) =>
           (!allow || allow(fact)) &&
           (query === undefined || matchesSentinelGraphFact(fact, query)),
+        countMatches,
       ),
   );
   if (!page) {
     return before === undefined
-      ? { facts: [], nextOffset: null, nextCursor: null }
+      ? {
+        facts: [],
+        nextOffset: null,
+        nextCursor: null,
+        ...(countMatches && { total: 0 }),
+      }
       : undefined;
   }
   return {
     facts: page.facts,
     nextOffset: null,
     nextCursor: page.hasMore ? tokenFor(page.facts.at(-1)!.id) : null,
+    ...(page.total !== undefined && { total: page.total }),
   };
 }
 
