@@ -4296,12 +4296,26 @@ for (
     "handled",
     "revoked",
     "exhausted",
+    "approved-provenance",
+    "revoked-provenance",
   ] as const
 ) {
   Deno.test(`Sentinel retries an exact worker checkpoint only when eligible (${scenario})`, async () => {
     const baseDir = await Deno.makeTempDir();
     const path = resolveSentinelCasePath(baseDir);
     const asset = "retry-asset";
+    const provenance = scenario === "approved-provenance" ||
+      scenario === "revoked-provenance";
+    const read = provenance
+      ? "sentinel_provenance_node"
+      : "sentinel_assigned_target";
+    const node = `asset:${asset}`;
+    const toolApprovalInbox = provenance
+      ? createToolApprovalService(join(baseDir, "provenance-approval.db"))
+      : undefined;
+    const recover = scenario === "recovered" ||
+      scenario === "approved-provenance";
+    let revokeProvenance = false;
     const registry = createProviderRegistry();
     const outcome = Promise.withResolvers<void>();
     let reads = 0;
@@ -4325,19 +4339,31 @@ for (
               id: "exact-retry-read",
               type: "function",
               function: {
-                name: "sentinel_assigned_target",
-                arguments: "{}",
+                name: read,
+                arguments: JSON.stringify(
+                  provenance
+                    ? { node, revision: fixtureRevision, offset: 0, limit: 2 }
+                    : {},
+                ),
               },
             }],
           });
         }
         modelTurns++;
         savedResults.push(saved.content);
+        if (provenance) {
+          const parsed = JSON.parse(String(saved.content));
+          assertEquals(parsed.revision, fixtureRevision);
+          assertEquals(parsed.node.id, node);
+          assertEquals(parsed.node.sourceId, asset);
+          assertEquals(parsed.offset, 0);
+          assert(parsed.connections.length <= 2);
+        }
         outcome.resolve();
         if (scenario === "handled") {
           return Promise.reject(new ModelFailoverExhausted());
         }
-        if (modelTurns === 1 || scenario !== "recovered") {
+        if (modelTurns === 1 || !recover) {
           return Promise.reject(
             Object.assign(new Error("fixture provider failure"), {
               status: scenario === "permanent" ? 400 : 503,
@@ -4372,12 +4398,15 @@ for (
         providerRegistry: registry,
         allowModelAccess: true,
         hookRunner: {
+          toolApprovalInbox,
           evaluateHook(hook, { input }) {
             if (
               hook === "PRE_TOOL_CALL" &&
-              input.tool_name === "sentinel_assigned_target"
+              input.tool_name === read
             ) savedChecks++;
-            const allowed = scenario !== "revoked" || savedChecks < 2;
+            const allowed = (scenario !== "revoked" || savedChecks < 2) &&
+              !(revokeProvenance && hook === "PRE_TOOL_CALL" &&
+                input.tool_name === read);
             return Promise.resolve({
               allowed,
               action: allowed ? "ALLOW" : "BLOCK",
@@ -4398,7 +4427,39 @@ for (
           edges: [],
         }),
       );
-      const state = startSentinelAssessment(path);
+      const goals: SentinelFormalGoal[] = [{
+        id: "provenance-retry",
+        title: "Review retained asset provenance",
+        policy: "operator",
+        criteria: [{
+          id: "verified-proof",
+          description: "Verify the known local control record.",
+          source: "graph_evidence",
+          reference: "future-control-record",
+        }],
+      }];
+      const state = provenance
+        ? applySentinelFormalGoals(path, {
+          mode: "start",
+          requestId: "reviewed-provenance-retry",
+          proposalDigest: digestSentinelGoalProposal(goals),
+          goals,
+          plan: {
+            childDescription: "Review the retained asset record.",
+            assessmentTemplate: {
+              id: crypto.randomUUID(),
+              version: 1,
+              digest: "b".repeat(64),
+              interceptRules: [{
+                tool: read,
+                effect: "ask",
+                enabled: true,
+                assetId: asset,
+              }],
+            },
+          },
+        }).state
+        : startSentinelAssessment(path);
       fixtureRevision = state.revision;
       advanceAdaptiveSentinel(path, state);
       const store = openSentinelAdaptiveStore(
@@ -4417,8 +4478,41 @@ for (
       }
       advanceAdaptiveSentinel(path, state);
       planner.advance(state);
+      if (toolApprovalInbox) {
+        await withOwnerControl(
+          baseDir,
+          async (_owner, _approvals, inbox) => {
+            let pending: ApprovalInboxRecord | undefined;
+            for (let attempt = 0; attempt < 100 && !pending; attempt++) {
+              const reply = await inbox({ type: "approval_inbox_list" });
+              assert(reply.ok);
+              pending = (reply.result as { records: ApprovalInboxRecord[] })
+                .records
+                .find((record) => record.status === "pending");
+              if (!pending) {
+                await new Promise((resolve) => setTimeout(resolve, 10));
+              }
+            }
+            assert(pending);
+            assertEquals(pending.tool, read);
+            assertEquals(pending.runId, state.plan.runId);
+            assertEquals(pending.assignmentId, assignment?.taskId);
+            assert(
+              (await inbox({
+                type: "approval_inbox_decide",
+                approvalId: pending.id,
+                approved: true,
+              })).ok,
+            );
+          },
+          undefined,
+          undefined,
+          { toolApprovalInbox },
+        );
+      }
       await until(() => modelTurns > 0);
       await outcome.promise;
+      if (scenario === "revoked-provenance") revokeProvenance = true;
       assert(assignment);
       const taskId = assignment.taskId;
       if (scenario === "cancelled") {
@@ -4459,9 +4553,9 @@ for (
       assert(savedResults.every((saved) => saved === savedResults[0]));
       assertEquals(
         modelTurns,
-        scenario === "recovered" ? 2 : scenario === "exhausted" ? 3 : 1,
+        recover ? 2 : scenario === "exhausted" ? 3 : 1,
       );
-      if (scenario === "recovered" || scenario === "exhausted") {
+      if (recover || scenario === "exhausted") {
         assert(
           savedChecks >= modelTurns,
           "Each saved result must be reauthorized",
@@ -4474,8 +4568,20 @@ for (
         assertEquals(review?.status, "exhausted");
         assertEquals(review?.attempts, 1);
       }
-      if (scenario === "recovered") assertEquals(review?.status, "completed");
+      if (recover) assertEquals(review?.status, "completed");
       if (scenario === "revoked") assertEquals(savedChecks, 2);
+      if (toolApprovalInbox) {
+        assertEquals(
+          toolApprovalInbox.list().records.map((
+            { status, dispatchOutcome },
+          ) => [status, dispatchOutcome]),
+          [["completed", "returned"]],
+        );
+        assert(
+          savedChecks >= 3,
+          "Provenance must pass current policy before reuse",
+        );
+      }
     } finally {
       planner.stop();
       await until(() => !planner.hasInFlightWork());
