@@ -449,6 +449,30 @@ Deno.test("Reviewed event subscription dispatches committed case metadata only o
     );
     assertEquals(remaining.deliveries.length, 3);
     assertEquals(messages.length, 3);
+
+    scheduler.stop();
+    const closed = startSentinelAssessment(path, { goal: "Retained goal" });
+    assert(completeSentinelAssessmentGoal(
+      path,
+      closed.revision,
+      "Retained goal",
+      "Private historical conclusion.",
+    ));
+    const replacement = startSentinelAssessment(path, { goal: "New goal" });
+    assert(replacement.revision > closed.revision);
+    scheduler.start();
+    await manage({ action: "agent_event_subscriptions" });
+    assertEquals(messages.length, 4);
+    assertStringIncludes(messages[3], '"kind":"goal_completed"');
+    assertStringIncludes(
+      messages[3],
+      `${closed.plan.runId}:${closed.revision}`,
+    );
+    assert(!messages[3].includes("Private historical conclusion"));
+    scheduler.stop();
+    scheduler.start();
+    await manage({ action: "agent_event_subscriptions" });
+    assertEquals(messages.length, 4);
   } finally {
     scheduler.stop();
     socket?.close();

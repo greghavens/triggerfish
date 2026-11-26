@@ -5,6 +5,7 @@ import type { AgentEventSchedulerConfig } from "../scheduler/service_agent_event
 import {
   readSentinelAssessment,
   readSentinelCaseStatus,
+  readSentinelGoalCompletionEvents,
 } from "../sentinel/assessment_store.ts";
 import {
   listSentinelCaseIds,
@@ -70,20 +71,14 @@ export function sentinelAgentEventSources(
             }
           }
         }
-        if (!kinds.has("goal_completed") && !kinds.has("tool_completed")) {
-          continue;
-        }
-        const assessment = readSentinelAssessment(path);
-        if (!assessment) continue;
-        if (assessment.completion && kinds.has("goal_completed")) {
-          publish({
-            kind: "goal_completed",
-            receipt: `${runId}:${assessment.revision}`,
-            caseId,
-            recordedAt: Date.parse(assessment.completion.at),
-          });
+        if (kinds.has("goal_completed")) {
+          for (const completion of readSentinelGoalCompletionEvents(path)) {
+            publish({ kind: "goal_completed", caseId, ...completion });
+          }
         }
         if (kinds.has("tool_completed")) {
+          const assessment = readSentinelAssessment(path);
+          if (!assessment) continue;
           for (
             const review
               of readAdaptiveSentinel(path, assessment)?.modelReviews ?? []

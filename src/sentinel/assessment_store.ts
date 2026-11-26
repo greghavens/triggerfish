@@ -4015,6 +4015,43 @@ export function readSentinelAssessmentHistory(path: string) {
   }
 }
 
+/** Project exact historical completion identities without returning goal text. */
+export function readSentinelGoalCompletionEvents(path: string) {
+  const db = openStore(path, false);
+  if (!db) return [];
+  try {
+    if (!hasTable(db, "assessment_goal_completion")) return [];
+    const current = getRow(db);
+    const currentRun = current &&
+      (JSON.parse(current.plan) as AssessmentPlan).runId;
+    const indexed = hasTable(db, "assessment_run_revisions");
+    return db.prepare(`
+      SELECT completion.revision, completion.at
+        ${indexed ? ", retained.runId" : ""}
+      FROM assessment_goal_completion AS completion
+      JOIN assessment_history AS history ON history.revision = completion.revision
+      ${
+      indexed
+        ? "LEFT JOIN assessment_run_revisions AS retained ON retained.revision = completion.revision"
+        : ""
+    }
+      ORDER BY completion.revision
+    `).all().flatMap(({ revision, at, runId }) => {
+      const number = Number(revision);
+      const run = current?.revision === number
+        ? currentRun
+        : runId ?? readFormalGoalHistory(db, number)?.plan.runId;
+      const recordedAt = Date.parse(String(at));
+      return typeof run === "string" && constraintUuid.test(run) &&
+          Number.isSafeInteger(number) && Number.isFinite(recordedAt)
+        ? [{ receipt: `${run}:${number}`, recordedAt }]
+        : [];
+    });
+  } finally {
+    db.close();
+  }
+}
+
 /** Read the revision picker index without decoding retained assessments. */
 export function readSentinelAssessmentRevisionIndex(path: string) {
   const db = openStore(path, false);
