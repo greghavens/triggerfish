@@ -6080,13 +6080,16 @@ async function verifyNativeFindingTrafficReadScope(
   state: State,
   findingId: string,
   linkId: string,
+  originalAssetId: string,
+  nativeReceipt: { evidenceId: string; digest: string },
 ) {
-  const name = "sentinel_finding_traffic_links";
+  let name = "sentinel_finding_traffic_links";
   let args: Record<string, unknown> = { revision: state.revision };
   let result = "";
   let revokeOnResponse = false;
   let denyHistoryRead = false;
   const memory: Array<{ attachment: boolean; payload: boolean }> = [];
+  const nativePayloadMemory: boolean[] = [];
   const registry = createProviderRegistry();
   registry.register({
     name: "finding-traffic-scope",
@@ -6104,6 +6107,12 @@ async function verifyNativeFindingTrafficReadScope(
               return undefined;
             }
           },
+        );
+        nativePayloadMemory.push(
+          retained.some((page) =>
+            page?.evidenceId === nativeReceipt.evidenceId &&
+            typeof page.text === "string" && page.text.length > 0
+          ),
         );
         memory.push({
           attachment: retained.some((page) =>
@@ -6135,6 +6144,7 @@ async function verifyNativeFindingTrafficReadScope(
   const setPolicy = (
     expectedVersion: number,
     deniedKinds: ["review_evidence"] | [],
+    allowedAssetIds?: string[],
   ) =>
     assert(recordSentinelOperatingConstraints(path, {
       runId: state.plan.runId!,
@@ -6142,7 +6152,7 @@ async function verifyNativeFindingTrafficReadScope(
       expectedVersion,
       requestId: crypto.randomUUID(),
       operatorScope: "owner",
-      constraints: { deniedKinds },
+      constraints: { deniedKinds, allowedAssetIds },
     }));
   const token = crypto.randomUUID();
   const gateway = createGatewayServer({
@@ -6256,6 +6266,54 @@ async function verifyNativeFindingTrafficReadScope(
     assertStringIncludes(await turn({ findingId }), "unavailable");
     assertEquals(JSON.parse(await turn({})).links, []);
     setPolicy(3, []);
+    name = "sentinel_traffic_search";
+    const unfiltered = JSON.parse(await turn({ limit: 10 })).receipts;
+    assert(
+      unfiltered.some(({ assetIds }: { assetIds: string[] }) =>
+        !assetIds.includes(originalAssetId)
+      ),
+    );
+    const originalPage = JSON.parse(await turn({ limit: 1 }));
+    assert(originalPage.nextCursor);
+    setPolicy(4, [], [originalAssetId]);
+    assertStringIncludes(
+      await turn({ limit: 1, cursor: originalPage.nextCursor }),
+      "unavailable",
+    );
+    const scoped = JSON.parse(await turn({ limit: 10 })).receipts;
+    assert(
+      scoped.length > 0 && scoped.every(
+        ({ assetIds }: { assetIds: string[] }) =>
+          assetIds.includes(originalAssetId),
+      ),
+    );
+    name = "sentinel_traffic_get";
+    assertEquals(
+      JSON.parse(await turn(nativeReceipt)).receipt.digest,
+      nativeReceipt.digest,
+    );
+    name = "sentinel_traffic_blob";
+    const raw = { ...nativeReceipt, payloadPart: "response" };
+    assertEquals(JSON.parse(await turn(raw)).text, retained.payload.text);
+    await turn({}, "/sentinel on");
+    await turn(raw, "Open the exact standalone traffic body.");
+    await turn(
+      {},
+      "Check saved traffic context with the standalone body allowed.",
+    );
+    setPolicy(5, ["review_evidence"]);
+    await turn(
+      {},
+      "Check saved traffic context after standalone access withdrawal.",
+    );
+    assertEquals(nativePayloadMemory.slice(-2), [true, false]);
+    await turn({}, "/sentinel off");
+    assertStringIncludes(await turn(raw), "unavailable");
+    name = "sentinel_traffic_get";
+    assertStringIncludes(await turn(nativeReceipt), "unavailable");
+    name = "sentinel_traffic_search";
+    assertEquals(JSON.parse(await turn({ limit: 10 })).receipts, []);
+    setPolicy(6, []);
   } finally {
     socket.close();
     await closed.promise;
@@ -6618,6 +6676,8 @@ async function verifyInitialTrafficPublication(
       state,
       recovered.record.id,
       attached[0].id,
+      attached[0].assetId,
+      { evidenceId: attached[0].trafficId, digest: attached[0].trafficDigest },
     );
   }
   const readTidepoolLinks = async () => {

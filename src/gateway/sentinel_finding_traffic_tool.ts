@@ -51,7 +51,10 @@ import {
   readAssignedSentinelModelReview,
   readSentinelOperatorTrafficHint,
 } from "./sentinel_adaptive_runtime.ts";
-import { projectSentinelTrafficBlob } from "./sentinel_traffic_tool.ts";
+import {
+  projectSentinelTrafficBlob,
+  readSentinelTrafficAssetScope,
+} from "./sentinel_traffic_tool.ts";
 import type { SentinelAgentOptions } from "./sentinel_agent.ts";
 
 type Scope = Pick<
@@ -241,39 +244,11 @@ function assignedAsset(scope: Scope, revision: number) {
   )?.nodeId;
 }
 
-function findingTrafficReadAssets(path: string, revision: number) {
-  const runId = readSentinelRunIdForRevision(path, revision);
-  const snapshot = readSentinelAssessmentRevision(path, revision)?.result
-    .sharedGraph.snapshot;
-  if (!runId || !snapshot) return;
-  const saved = readSentinelOperatingConstraints(path, runId, revision)
-    ?.constraints;
-  const current = readSentinelOperatingConstraints(path, runId)?.constraints;
-  const priorAssets = saved?.allowedAssetIds && new Set(saved.allowedAssetIds);
-  const currentAssets = current?.allowedAssetIds &&
-    new Set(current.allowedAssetIds);
-  const denied = saved?.deniedKinds.includes("review_evidence") ||
-    current?.deniedKinds.includes("review_evidence");
-  return {
-    runId,
-    assets: new Set(
-      denied
-        ? []
-        : snapshot.nodes.flatMap((node) =>
-          node.kind === "asset" && (!priorAssets || priorAssets.has(node.id)) &&
-            (!currentAssets || currentAssets.has(node.id))
-            ? [node.id]
-            : []
-        ),
-    ),
-  };
-}
-
 function findingTrafficOriginal(
   path: string,
   caseId: string,
   revision: number,
-  policy: NonNullable<ReturnType<typeof findingTrafficReadAssets>>,
+  policy: NonNullable<ReturnType<typeof readSentinelTrafficAssetScope>>,
   findingId: string,
 ) {
   const original = readSentinelCaseFindingReceipts(path, [findingId])
@@ -294,7 +269,7 @@ export function currentSentinelFindingTrafficRead(
   const revision = args.revision;
   if (!positiveInteger(revision)) return false;
   const caseId = locateSentinelCase(path)?.caseId;
-  const scope = findingTrafficReadAssets(path, revision);
+  const scope = readSentinelTrafficAssetScope(path, revision);
   const page = JSON.parse(response);
   if (
     !caseId || !scope || page.caseId !== caseId ||
@@ -355,7 +330,7 @@ export function reopenSentinelLinkedTrafficPayload(
   allowAsset?: (id: string) => boolean,
 ): string {
   const selector = sentinelLinkedTrafficPayloadArgs(args);
-  const scope = findingTrafficReadAssets(snapshotPath, revision);
+  const scope = readSentinelTrafficAssetScope(snapshotPath, revision);
   if (selector?.revision !== revision || !scope) return unavailable;
   const {
     findingId,
@@ -387,10 +362,16 @@ export function reopenSentinelLinkedTrafficPayload(
   if (link?.caseId !== caseId || link.assetId !== original.targetId) {
     return unavailable;
   }
-  const receipt = readSentinelTrafficReceipt(snapshotPath, revision, {
-    evidenceId: link.trafficId,
-    digest: link.trafficDigest,
-  }, link.assetId);
+  const receipt = readSentinelTrafficReceipt(
+    snapshotPath,
+    revision,
+    {
+      evidenceId: link.trafficId,
+      digest: link.trafficDigest,
+    },
+    link.assetId,
+    scope.assets,
+  );
   if (!receipt || receipt.family !== link.trafficSource) return unavailable;
   const payload = projectSentinelTrafficBlob(
     receipt,
@@ -431,7 +412,7 @@ function listForScope(
     );
   }
   const selector = sentinelTrafficLinksArgs(args);
-  const policy = findingTrafficReadAssets(scope.snapshotPath, revision);
+  const policy = readSentinelTrafficAssetScope(scope.snapshotPath, revision);
   if (!selector || !policy) return unavailable;
   const allows = (asset: string) =>
     policy.assets.has(asset) && allowPayloadAsset?.(asset) !== false;
@@ -1433,7 +1414,7 @@ export function scopedSentinelFindingTrafficAssets(
       id === graphFindingId && kind === "finding"
     )
   ) return;
-  const allowed = findingTrafficReadAssets(path, revision)?.assets;
+  const allowed = readSentinelTrafficAssetScope(path, revision)?.assets;
   if (!allowed) return;
   const assets = new Set(
     graph.edges.flatMap(({ from, to, relation }) =>
@@ -1459,7 +1440,7 @@ export function allowsSentinelGraphFindingTrafficPage(
   assetId?: string,
 ): boolean {
   if (graphFindingId === undefined) {
-    const boundary = findingTrafficReadAssets(path, revision);
+    const boundary = readSentinelTrafficAssetScope(path, revision);
     return !!boundary &&
       links.every((link) =>
         link.caseId === caseId && link.evidenceRevision === revision &&

@@ -10,7 +10,12 @@ import {
 import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";
 import type { ToolDefinition } from "../core/types/tool.ts";
-import { withSentinelAssessmentWriteLock } from "../sentinel/assessment_store.ts";
+import {
+  readSentinelAssessmentRevision,
+  readSentinelOperatingConstraints,
+  readSentinelRunIdForRevision,
+  withSentinelAssessmentWriteLock,
+} from "../sentinel/assessment_store.ts";
 import { locateSentinelCase } from "../sentinel/cases.ts";
 import {
   readSentinelTrafficReceipt,
@@ -268,6 +273,59 @@ export function projectSentinelTrafficBlob(
   };
 }
 
+/** Intersect the original revision and current case asset boundaries. */
+export function readSentinelTrafficAssetScope(path: string, revision: number) {
+  const runId = readSentinelRunIdForRevision(path, revision);
+  const snapshot = readSentinelAssessmentRevision(path, revision)?.result
+    .sharedGraph.snapshot;
+  if (!runId || !snapshot) return;
+  const saved = readSentinelOperatingConstraints(path, runId, revision)
+    ?.constraints;
+  const current = readSentinelOperatingConstraints(path, runId)?.constraints;
+  const priorAssets = saved?.allowedAssetIds && new Set(saved.allowedAssetIds);
+  const currentAssets = current?.allowedAssetIds &&
+    new Set(current.allowedAssetIds);
+  const denied = saved?.deniedKinds.includes("review_evidence") ||
+    current?.deniedKinds.includes("review_evidence");
+  return {
+    runId,
+    snapshot,
+    assets: new Set(
+      denied
+        ? []
+        : snapshot.nodes.flatMap((node) =>
+          node.kind === "asset" && (!priorAssets || priorAssets.has(node.id)) &&
+            (!currentAssets || currentAssets.has(node.id))
+            ? [node.id]
+            : []
+        ),
+    ),
+  };
+}
+
+export function currentSentinelNativeTrafficRead(
+  path: string,
+  revision: number,
+  response: string,
+) {
+  const scope = readSentinelTrafficAssetScope(path, revision);
+  const caseId = locateSentinelCase(path)?.caseId;
+  const page = JSON.parse(response);
+  if (
+    !scope || !caseId || page.caseId !== caseId ||
+    page.evidenceRevision !== revision
+  ) return false;
+  const ids: readonly unknown[] = Array.isArray(page.receipts)
+    ? page.receipts.map(({ evidenceId }: SentinelTrafficReceipt) => evidenceId)
+    : [page.receipt?.evidenceId ?? page.evidenceId];
+  return ids.every((evidenceId) => {
+    const targets = scope.snapshot.edges.flatMap(({ from, relation, to }) =>
+      from === evidenceId && relation === "observed_on" ? [to] : []
+    );
+    return targets.length > 0 && targets.every((id) => scope.assets.has(id));
+  });
+}
+
 export function readProjectedSentinelTrafficReceipt(
   snapshotPath: string,
   caseId: string,
@@ -276,11 +334,14 @@ export function readProjectedSentinelTrafficReceipt(
   onlyAsset?: string,
   includePayloadMetadata = false,
 ) {
+  const scope = readSentinelTrafficAssetScope(snapshotPath, revision);
+  if (!scope) return;
   const receipt = readSentinelTrafficReceipt(
     snapshotPath,
     revision,
     exact,
     onlyAsset,
+    scope.assets,
   );
   return receipt && {
     caseId,
@@ -323,8 +384,9 @@ export function readProjectedSentinelTrafficPage(
   includePayloadMetadata = false,
 ) {
   const query = searchArgs(args, onlyAsset);
-  const page = query &&
-    readSentinelTrafficReceiptPage(snapshotPath, revision, query);
+  const scope = readSentinelTrafficAssetScope(snapshotPath, revision);
+  const page = query && scope &&
+    readSentinelTrafficReceiptPage(snapshotPath, revision, query, scope.assets);
   return page && {
     receipts: page.receipts.map((receipt) =>
       projectSentinelTrafficReceipt(receipt, onlyAsset, includePayloadMetadata)
@@ -357,12 +419,19 @@ export function reopenProjectedSentinelTrafficBlob(
   args: NonNullable<ReturnType<typeof sentinelTrafficBlobArgs>>,
   assetId?: string,
 ) {
-  if (args.revision !== revision) return;
+  const scope = readSentinelTrafficAssetScope(path, revision);
+  if (args.revision !== revision || !scope) return;
   const { evidenceId, digest, payloadPart, offset, byteLength } = args;
-  const receipt = readSentinelTrafficReceipt(path, revision, {
-    evidenceId,
-    digest,
-  }, assetId);
+  const receipt = readSentinelTrafficReceipt(
+    path,
+    revision,
+    {
+      evidenceId,
+      digest,
+    },
+    assetId,
+    scope.assets,
+  );
   if (!receipt) return;
   const page = projectSentinelTrafficBlob(
     receipt,

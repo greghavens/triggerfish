@@ -393,16 +393,38 @@ export function recordSentinelTrafficReceipt(
   return receipt;
 }
 
-function receiptsAtRevision(path: string, revision: number, exactId?: string) {
+function receiptsAtRevision(
+  path: string,
+  revision: number,
+  exactId?: string,
+  allowedAssetIds?: ReadonlySet<string>,
+  exactAssetId?: string,
+) {
   if (!Number.isSafeInteger(revision) || revision <= 0) return;
   const saved = readSentinelAssessmentRevision(path, revision);
   const snapshot = saved?.result.sharedGraph.snapshot;
   if (!snapshot || !timestamp(saved.updatedAt)) return;
-  const candidates = exactId
-    ? [exactId]
-    : snapshot.nodes.flatMap(({ id, kind }) =>
-      kind === "evidence" && EVIDENCE_ID.test(id) ? [id] : []
-    );
+  const links = new Map<string, string[]>();
+  for (const edge of snapshot.edges) {
+    if (edge.relation !== "observed_on") continue;
+    const assets = links.get(edge.from) ?? [];
+    assets.push(edge.to);
+    links.set(edge.from, assets);
+  }
+  const candidates =
+    (exactId
+      ? [exactId]
+      : snapshot.nodes.flatMap(({ id, kind }) =>
+        kind === "evidence" && EVIDENCE_ID.test(id) ? [id] : []
+      )).filter((id) => {
+        const assets = links.get(id);
+        if (exactAssetId !== undefined && !assets?.includes(exactAssetId)) {
+          return false;
+        }
+        return allowedAssetIds === undefined ||
+          (!!assets?.length &&
+            assets.every((asset) => allowedAssetIds.has(asset)));
+      });
   if (!candidates.length) return [];
   const db = openJournal(path, false);
   if (!db) return [];
@@ -412,13 +434,6 @@ function receiptsAtRevision(path: string, revision: number, exactId?: string) {
         node,
       ) => [node.id, node]),
     );
-    const links = new Map<string, string[]>();
-    for (const edge of snapshot.edges) {
-      if (edge.relation !== "observed_on") continue;
-      const assets = links.get(edge.from) ?? [];
-      assets.push(edge.to);
-      links.set(edge.from, assets);
-    }
     const rows = db.prepare(`
       SELECT record, proof FROM traffic_receipts_v1 WHERE retainedAt <= ? AND evidenceId IN (${
       candidates.map(() => "?").join(",")
@@ -461,16 +476,24 @@ export function readSentinelTrafficReceipt(
   revision: number,
   exact: { readonly evidenceId: string; readonly digest: string },
   exactAssetId?: string,
+  allowedAssetIds?: ReadonlySet<string>,
 ) {
   if (!EVIDENCE_ID.test(exact.evidenceId) || !DIGEST.test(exact.digest)) {
     return undefined;
   }
-  return receiptsAtRevision(path, revision, exact.evidenceId)?.find((
-    { evidenceId, digest, assetIds },
-  ) =>
-    evidenceId === exact.evidenceId && digest === exact.digest &&
-    (exactAssetId === undefined || assetIds.includes(exactAssetId))
-  );
+  return receiptsAtRevision(
+    path,
+    revision,
+    exact.evidenceId,
+    allowedAssetIds,
+    exactAssetId,
+  )
+    ?.find((
+      { evidenceId, digest, assetIds },
+    ) =>
+      evidenceId === exact.evidenceId && digest === exact.digest &&
+      (exactAssetId === undefined || assetIds.includes(exactAssetId))
+    );
 }
 
 export function validSentinelTrafficReceiptQuery(
@@ -522,6 +545,7 @@ export function readSentinelTrafficReceiptPage(
   path: string,
   revision: number,
   query: SentinelTrafficReceiptQuery = {},
+  allowedAssetIds?: ReadonlySet<string>,
 ) {
   const {
     family,
@@ -538,7 +562,12 @@ export function readSentinelTrafficReceiptPage(
     cursor,
   } = query;
   if (!validSentinelTrafficReceiptQuery(query)) return undefined;
-  const available = receiptsAtRevision(path, revision, evidenceId);
+  const available = receiptsAtRevision(
+    path,
+    revision,
+    evidenceId,
+    allowedAssetIds,
+  );
   if (!available) return undefined;
   const phrase = bodyContains?.toLowerCase();
   const results = available.filter(

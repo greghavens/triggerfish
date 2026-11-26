@@ -290,6 +290,7 @@ import {
   sentinelReporterTrafficAttachTool,
 } from "./sentinel_finding_traffic_tool.ts";
 import {
+  currentSentinelNativeTrafficRead,
   executeSentinelTrafficTool,
   isSentinelTrafficTool,
   readProjectedSentinelTrafficReceipt,
@@ -4557,7 +4558,7 @@ function createAgent(
     options.assessmentRevision === undefined &&
     options.assignedTaskId === undefined &&
     options.assignedTaskLeaseToken === undefined;
-  function stageFindingReadHistory(
+  function stageScopedReadHistory(
     turn: ActiveTurn,
     name: string,
     caseId: string,
@@ -5293,6 +5294,17 @@ function createAgent(
             context.input.tool_response,
           )
         ) return { ...result, allowed: false, action: "BLOCK" };
+        if (
+          result.allowed && name === "POST_TOOL_RESPONSE" &&
+          typeof toolName === "string" && isSentinelTrafficTool(toolName) &&
+          typeof context.input.tool_response === "string" &&
+          context.input.tool_response.startsWith("{") &&
+          (evidenceRevision === undefined || !currentSentinelNativeTrafficRead(
+            options.snapshotPath,
+            evidenceRevision,
+            context.input.tool_response,
+          ))
+        ) return { ...result, allowed: false, action: "BLOCK" };
         if (name === "PRE_TOOL_CALL" && plannerControl) {
           const permits = result.action === "REQUIRE_APPROVAL" ||
             (result.action === "ALLOW" && result.allowed);
@@ -5681,7 +5693,7 @@ function createAgent(
           if (!caseId || !revision) {
             return "Error: The finding traffic scope is unavailable.";
           }
-          stageFindingReadHistory(
+          stageScopedReadHistory(
             turn,
             name,
             caseId,
@@ -5699,7 +5711,34 @@ function createAgent(
         return result;
       }
       if (isSentinelTrafficTool(name)) {
-        return executeSentinelTrafficTool(options, name, args, turn.signal);
+        const result = executeSentinelTrafficTool(
+          options,
+          name,
+          args,
+          turn.signal,
+        );
+        if (fenceFindingReadHistory && result.startsWith("{")) {
+          const caseId = locateSentinelCase(options.snapshotPath)?.caseId;
+          const revision = sentinelTrafficPolicyRevision(args.revision);
+          if (!caseId || !revision) {
+            return "Error: The retained traffic scope is unavailable.";
+          }
+          stageScopedReadHistory(
+            turn,
+            name,
+            caseId,
+            revision,
+            args,
+            result,
+            () =>
+              currentSentinelNativeTrafficRead(
+                options.snapshotPath,
+                revision,
+                result,
+              ),
+          );
+        }
+        return result;
       }
       if (name === SENTINEL_GOAL_GRAPH_FACT_READ && canReadPlannerCase) {
         const selector = sentinelGoalReceiptReadArguments(name, args);
@@ -5912,7 +5951,7 @@ function createAgent(
                 revision,
                 requireCurrentRevision,
               );
-          stageFindingReadHistory(
+          stageScopedReadHistory(
             turn,
             name,
             caseId,
