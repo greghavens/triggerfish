@@ -183,6 +183,7 @@ async function withGateway(
       denyRunResponse: boolean;
       denyWorkflowMetadata: boolean;
       denySavedWorkflowSource?: string;
+      denyOriginalWorkflowSource?: string;
       denySharedAssetLinks: boolean;
       denyWorkerSourceBefore: boolean;
       denyWorkerSourceAfter: boolean;
@@ -214,6 +215,7 @@ async function withGateway(
     denyRunResponse: false,
     denyWorkflowMetadata: false,
     denySavedWorkflowSource: undefined as string | undefined,
+    denyOriginalWorkflowSource: undefined as string | undefined,
     denySharedAssetLinks: false,
     denyWorkerSourceBefore: false,
     denyWorkerSourceAfter: false,
@@ -272,6 +274,8 @@ async function withGateway(
       const allowed = (visibility?.allowsHook(hook, input) ?? true) &&
         !(input.tool_name === "sentinel_saved_workflow_receipt" &&
           hook === policy.denySavedWorkflowSource) &&
+        !(input.tool_name === "sentinel_live_workflow_status" &&
+          hook === policy.denyOriginalWorkflowSource) &&
         !(input.tool_name === "sentinel_shared_topology_source" &&
           hook === policy.denyTopologySourceHook) &&
         !(input.tool_name === "sentinel_shared_finding_source" &&
@@ -7034,7 +7038,7 @@ Deno.test("Owner gateway reviews exact single and batch archive purge and resume
   }
 });
 
-Deno.test("Gateway usage reauthorizes only exact saved workflow receipts after explicit opt-in", async () => {
+Deno.test("Gateway usage reauthorizes exact workflow receipts after explicit opt-in", async () => {
   const baseDir = await Deno.makeTempDir();
   const caseId = "restorable";
   const path = resolveSentinelCasePath(baseDir, caseId);
@@ -7054,6 +7058,7 @@ Deno.test("Gateway usage reauthorizes only exact saved workflow receipts after e
     const store = openSentinelAdaptiveStore(
       join(dirname(path), "sentinel-adaptive.db"),
     );
+    let originalTaskId: string;
     let savedTaskId: string;
     let exact: string;
     try {
@@ -7065,6 +7070,7 @@ Deno.test("Gateway usage reauthorizes only exact saved workflow receipts after e
       advanceAdaptiveSentinel(path, state);
       const source = store.claimModelReview(revision, MODEL_ASSIGNMENT_REASON);
       assert(source);
+      originalTaskId = source.task.id;
       const runs = [{ id: 20, status: "completed", conclusion: "success" }];
       const receipt = {
         repository: "owner/repo",
@@ -7158,11 +7164,14 @@ Deno.test("Gateway usage reauthorizes only exact saved workflow receipts after e
         runId: state.plan.runId,
         action: "case_local_tool_usage",
       };
-      const savedTotals = (response: string) => {
+      const savedTotals = (
+        response: string,
+        name = "sentinel_saved_workflow_receipt",
+      ) => {
         assert(response.startsWith("{"), response);
         return JSON.parse(response).totals.filter((
           { tool }: { tool: string },
-        ) => tool === "sentinel_saved_workflow_receipt");
+        ) => tool === name);
       };
       assertEquals(savedTotals(await turn(usage)), []);
       assertEquals(policy.workflowMetadataCalls, 0);
@@ -7196,6 +7205,37 @@ Deno.test("Gateway usage reauthorizes only exact saved workflow receipts after e
       policy.denyWorkflowMetadata = true;
       assertStringIncludes(await turn(included), "unavailable");
       assertEquals(policy.workflowMetadataCalls, 6);
+
+      const originalName = "sentinel_live_workflow_status";
+      assertEquals(savedTotals(visible, originalName), []);
+      policy.denyWorkflowMetadata = false;
+      const original = { ...usage, includeOriginalWorkflowReceipts: true };
+      const originalScope = await turn(original);
+      assertEquals(savedTotals(originalScope), []);
+      assertEquals(savedTotals(originalScope, originalName), [{
+        role: "worker",
+        tool: originalName,
+        calls: 1,
+        failed: 0,
+      }]);
+      assertEquals(policy.workflowMetadataCalls, 7);
+      assert(!originalScope.includes("owner/repo"));
+      assert(!originalScope.includes('"runs"'));
+      assert(!originalScope.includes(originalTaskId));
+      assertStringIncludes(
+        await turn({ ...original, revision: state.revision + 1 }),
+        "unavailable",
+      );
+      policy.denyOriginalWorkflowSource = "PRE_TOOL_CALL";
+      assertStringIncludes(await turn(original), "unavailable");
+      assertEquals(policy.workflowMetadataCalls, 7);
+      policy.denyOriginalWorkflowSource = "POST_TOOL_RESPONSE";
+      assertStringIncludes(await turn(original), "unavailable");
+      assertEquals(policy.workflowMetadataCalls, 8);
+      policy.denyOriginalWorkflowSource = undefined;
+      policy.denyWorkflowMetadata = true;
+      assertStringIncludes(await turn(original), "unavailable");
+      assertEquals(policy.workflowMetadataCalls, 9);
     });
   } finally {
     await Deno.remove(baseDir, { recursive: true });

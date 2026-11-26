@@ -1219,6 +1219,11 @@ export const operatorRunTool: ToolDefinition = {
       type: "string",
       description: "Cursor from the prior retained tool usage totals page.",
     },
+    includeOriginalWorkflowReceipts: {
+      type: "boolean",
+      description:
+        "Include original workflow status reads after checking access to the saved receipt. Never fetches new workflow runs.",
+    },
     includeSavedWorkflowReceipts: {
       type: "boolean",
       description:
@@ -1828,7 +1833,8 @@ export function sentinelOperatorCaseReadParameterAllowed(
     parameter === "includeRetainedTopology" ||
     parameter === "includeRetainedFindingSources" ||
     parameter === "includeRetainedTrafficMetadata" ||
-    parameter === "includeSavedWorkflowReceipts"
+    parameter === "includeSavedWorkflowReceipts" ||
+    parameter === "includeOriginalWorkflowReceipts"
   ) {
     return action === "case_local_tool_usage";
   }
@@ -9034,6 +9040,7 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
         const includeFindings = args.includeRetainedFindingSources;
         const includeTraffic = args.includeRetainedTrafficMetadata;
         const includeWorkflows = args.includeSavedWorkflowReceipts;
+        const includeOriginalWorkflows = args.includeOriginalWorkflowReceipts;
         if (
           ref.kind !== "sentinel" || ref.revision === undefined ||
           typeof args.runId !== "string" || !digestPattern.test(args.runId) ||
@@ -9045,6 +9052,8 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
             typeof includeTraffic !== "boolean") ||
           (includeWorkflows !== undefined &&
             typeof includeWorkflows !== "boolean") ||
+          (includeOriginalWorkflows !== undefined &&
+            typeof includeOriginalWorkflows !== "boolean") ||
           Object.keys(args).some((key) =>
             ![
               "action",
@@ -9056,6 +9065,7 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
               "includeRetainedFindingSources",
               "includeRetainedTrafficMetadata",
               "includeSavedWorkflowReceipts",
+              "includeOriginalWorkflowReceipts",
             ].includes(key)
           ) ||
           !await controller.inspect(ref)
@@ -9078,7 +9088,7 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
                 step.goalReceiptRead.args,
               )
             : undefined,
-          includeWorkflows === true
+          includeWorkflows === true || includeOriginalWorkflows === true
             ? async (step) => {
               const text = await execute({
                 action: "worker_trace_result",
@@ -9090,13 +9100,28 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
               }, context);
               if (!text.startsWith("{")) return false;
               const validated = JSON.parse(text);
-              return validated.runId === args.runId &&
-                validated.taskId === step.taskId &&
-                validated.index === step.ordinal &&
-                validated.result !== undefined &&
-                createHash("sha256").update(JSON.stringify(validated.result))
-                    .digest("hex") ===
-                  step.receiptSha256;
+              if (
+                validated.runId !== args.runId ||
+                validated.taskId !== step.taskId ||
+                validated.index !== step.ordinal ||
+                validated.result === undefined
+              ) return false;
+              if (step.tool === "sentinel_live_workflow_status") {
+                const receipt = readSentinelGitHubWorkflowReadReceipt(
+                  validated.result,
+                  revision,
+                );
+                return receipt !== undefined &&
+                  validated.result.targetId === step.assignedTarget &&
+                  receipt.repository === step.repository &&
+                  receipt.workflowId === step.workflowId &&
+                  receipt.connectorId === step.connectorId &&
+                  receipt.observedAt === step.observedAt &&
+                  receipt.resultSha256 === step.receiptSha256;
+              }
+              return createHash("sha256")
+                .update(JSON.stringify(validated.result)).digest("hex") ===
+                step.receiptSha256;
             }
             : undefined,
         );
@@ -11624,7 +11649,16 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
                   evidenceRevision,
                 );
                 const saved = savedStep(state);
-                return state?.goal.id === runId && saved?.tool === step.tool &&
+                const snapshot = readSentinelAssessmentRevision(
+                  path,
+                  evidenceRevision,
+                )?.result.sharedGraph.snapshot;
+                return !!snapshot && state?.goal.id === runId &&
+                  sentinelOperatingConstraintsAllow(
+                    readSentinelOperatingConstraints(path, runId)?.constraints,
+                    { kind: "review_evidence", nodeId: assetId },
+                    snapshot,
+                  ) && saved?.tool === step.tool &&
                   saved.target === task.nodeId &&
                   saved.outcome === "returned" &&
                   JSON.stringify(saved.githubWorkflowRead) ===
@@ -11638,6 +11672,7 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
               ) return unavailable;
               const retained = { targetId: task.nodeId, ...receipt };
               const checkSource = async () => {
+                if (!isCurrent()) return false;
                 const verified = await reader({
                   caseId: ref.id,
                   assetId,

@@ -46,17 +46,28 @@ export type SentinelTrafficUsageStep =
     | { readonly taskId: string; readonly assignedTarget: string }
   );
 
-export type SentinelSavedWorkflowUsageStep = Step & {
-  readonly tool: "sentinel_saved_workflow_receipt";
-  readonly taskId: string;
-  readonly assignedTarget: string;
-  readonly receiptSha256: string;
-};
+export type SentinelWorkflowUsageStep =
+  & Step
+  & {
+    readonly taskId: string;
+    readonly assignedTarget: string;
+    readonly receiptSha256: string;
+  }
+  & (
+    | { readonly tool: "sentinel_saved_workflow_receipt" }
+    | {
+      readonly tool: "sentinel_live_workflow_status";
+      readonly repository: string;
+      readonly workflowId: number;
+      readonly connectorId: string;
+      readonly observedAt: string;
+    }
+  );
 
 export type SentinelLocalUsageStep =
   | SentinelLinkedUsageStep
   | SentinelTrafficUsageStep
-  | SentinelSavedWorkflowUsageStep
+  | SentinelWorkflowUsageStep
   | (
     & Step
     & (
@@ -81,6 +92,7 @@ export function readSentinelLocalUsageSteps(
   includeRetainedFindingSources = false,
   includeRetainedTrafficMetadata = false,
   includeSavedWorkflowReceipts = false,
+  includeOriginalWorkflowReceipts = false,
 ): readonly SentinelLocalUsageStep[] | undefined {
   const path = join(dirname(snapshotPath), "sentinel-adaptive.db");
   try {
@@ -212,6 +224,12 @@ export function readSentinelLocalUsageSteps(
         json_extract(step.value, '$.goalReceiptRead.args.snapshotDigest') AS snapshotDigest,
         json_extract(step.value, '$.goalReceiptRead.sha256') AS digest,
         json_extract(step.value, '$.goalReceiptRead.args') AS exactArgs,
+        json_extract(step.value, '$.githubWorkflowRead.repository') AS workflowRepository,
+        json_extract(step.value, '$.githubWorkflowRead.workflowId') AS workflowId,
+        json_extract(step.value, '$.githubWorkflowRead.connectorId') AS workflowConnector,
+        json_extract(step.value, '$.githubWorkflowRead.observedAt') AS workflowObservedAt,
+        json_extract(step.value, '$.githubWorkflowRead.evidenceRevision') AS workflowRevision,
+        json_extract(step.value, '$.githubWorkflowRead.resultSha256') AS workflowSha,
         json_extract(step.value, '$.trafficRead.revision') AS trafficRevision,
         json_extract(step.value, '$.trafficRead.evidenceId') AS trafficEvidence,
         json_extract(step.value, '$.trafficRead.digest') AS trafficDigest,
@@ -224,6 +242,7 @@ export function readSentinelLocalUsageSteps(
             OR (? AND json_extract(step.value, '$.tool') = 'sentinel_shared_finding_source')
             OR (? AND json_extract(step.value, '$.tool') = 'sentinel_traffic_get')
             OR (? AND json_extract(step.value, '$.tool') = 'sentinel_saved_workflow_receipt')
+            OR (? AND json_extract(step.value, '$.tool') = 'sentinel_live_workflow_status')
           )))
       ORDER BY selected.id, ordinal LIMIT ?
     `).all(
@@ -232,6 +251,7 @@ export function readSentinelLocalUsageSteps(
       Number(includeRetainedFindingSources),
       Number(includeRetainedTrafficMetadata),
       Number(includeSavedWorkflowReceipts),
+      Number(includeOriginalWorkflowReceipts),
       budget + 1 - retained.length,
     );
     for (const row of rows) {
@@ -241,6 +261,31 @@ export function readSentinelLocalUsageSteps(
         typeof row.ordinal !== "number" || !Number.isSafeInteger(row.ordinal) ||
         (row.outcome !== "returned" && row.outcome !== "error")
       ) return;
+      if (row.tool === "sentinel_live_workflow_status") {
+        if (
+          row.target !== row.nodeId || row.workflowRevision !== revision ||
+          typeof row.workflowRepository !== "string" ||
+          typeof row.workflowId !== "number" ||
+          !Number.isSafeInteger(row.workflowId) || row.workflowId < 1 ||
+          typeof row.workflowConnector !== "string" ||
+          typeof row.workflowObservedAt !== "string" ||
+          typeof row.workflowSha !== "string" ||
+          !/^[a-f0-9]{64}$/.test(row.workflowSha)
+        ) return;
+        retained.push({
+          tool: row.tool,
+          taskId: row.id,
+          assignedTarget: row.nodeId,
+          ordinal: row.ordinal,
+          outcome: row.outcome,
+          receiptSha256: row.workflowSha,
+          repository: row.workflowRepository,
+          workflowId: row.workflowId,
+          connectorId: row.workflowConnector,
+          observedAt: row.workflowObservedAt,
+        });
+        continue;
+      }
       if (row.tool === "sentinel_saved_workflow_receipt") {
         if (
           row.exactArgs !== "{}" || typeof row.digest !== "string" ||

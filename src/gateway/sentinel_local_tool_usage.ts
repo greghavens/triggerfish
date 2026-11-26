@@ -4,7 +4,7 @@ import { canFlowTo } from "../core/types/classification.ts";
 import {
   readSentinelLocalUsageSteps,
   type SentinelLinkedUsageStep,
-  type SentinelSavedWorkflowUsageStep,
+  type SentinelWorkflowUsageStep,
 } from "../sentinel/local_tool_usage.ts";
 import type { OperatorRunToolContext } from "./operator_run_tool.ts";
 import { readSentinelFindingReceiptScope } from "./sentinel_worker_findings.ts";
@@ -18,8 +18,8 @@ export async function readAuthorizedSentinelLocalToolUsage(
   args: Record<string, unknown>,
   context: OperatorRunToolContext | undefined,
   reopenLinked?: (step: SentinelLinkedUsageStep) => Promise<string | undefined>,
-  authorizeSavedWorkflow?: (
-    step: SentinelSavedWorkflowUsageStep,
+  authorizeWorkflow?: (
+    step: SentinelWorkflowUsageStep,
   ) => Promise<boolean>,
 ) {
   const owner = context?.authorizeOwnerRunCall;
@@ -43,6 +43,7 @@ export async function readAuthorizedSentinelLocalToolUsage(
       args.includeRetainedFindingSources === true,
       args.includeRetainedTrafficMetadata === true,
       args.includeSavedWorkflowReceipts === true,
+      args.includeOriginalWorkflowReceipts === true,
     );
     if (
       !rows ||
@@ -63,9 +64,12 @@ export async function readAuthorizedSentinelLocalToolUsage(
     { role: "planner" | "worker"; tool: string; calls: number; failed: number }
   >();
   for (const step of selected.rows) {
-    if (step.tool === "sentinel_saved_workflow_receipt") {
+    if (
+      step.tool === "sentinel_saved_workflow_receipt" ||
+      step.tool === "sentinel_live_workflow_status"
+    ) {
       if (
-        !currentCase() || !await authorizeSavedWorkflow?.(step) ||
+        !currentCase() || !await authorizeWorkflow?.(step) ||
         !currentCase()
       ) return;
       const key = "worker/" + step.tool;
