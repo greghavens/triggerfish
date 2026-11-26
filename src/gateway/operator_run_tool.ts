@@ -8682,6 +8682,7 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
                   digest,
                 );
                 if (staged) {
+                  if (!staged.hintsValid) return unavailable;
                   for (const source of staged.trafficBatch) {
                     const sourceStep = savedStep(history, source.stepIndex);
                     if (

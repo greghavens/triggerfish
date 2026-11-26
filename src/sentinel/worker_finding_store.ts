@@ -52,6 +52,7 @@ export interface SentinelFindingTrafficPublication {
   readonly digest: string;
   readonly stepIndex: number;
   readonly resultSha256: string;
+  readonly sourceHintId?: number;
 }
 
 type StagedFindingPublication = {
@@ -100,6 +101,9 @@ export function stagedTrafficLinkMatches(
     link.assetId === finding.targetId &&
     link.authority.kind === "assignment" &&
     link.authority.taskId === finding.taskId &&
+    link.sourceHint?.id === item.sourceHintId &&
+    (item.sourceHintId === undefined ||
+      link.sourceHint?.runId === finding.runId) &&
     link.trafficId === item.evidenceId && link.trafficDigest === item.digest &&
     link.sourceStep?.stepIndex === item.stepIndex &&
     link.sourceStep.sha256 === item.resultSha256;
@@ -149,6 +153,8 @@ function canonicalFindingTrafficPublication(
     typeof raw.digest !== "string" || !/^[a-f0-9]{64}$/.test(raw.digest) ||
     typeof raw.resultSha256 !== "string" ||
     !/^[a-f0-9]{64}$/.test(raw.resultSha256) ||
+    (raw.sourceHintId !== undefined &&
+      (!Number.isSafeInteger(raw.sourceHintId) || raw.sourceHintId < 1)) ||
     !Number.isSafeInteger(raw.stepIndex) || raw.stepIndex < 0 ||
     raw.stepIndex >= 16
   ) return;
@@ -157,6 +163,7 @@ function canonicalFindingTrafficPublication(
     digest: raw.digest,
     stepIndex: raw.stepIndex,
     resultSha256: raw.resultSha256,
+    ...(raw.sourceHintId !== undefined && { sourceHintId: raw.sourceHintId }),
   };
 }
 

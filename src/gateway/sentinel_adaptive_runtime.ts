@@ -4976,7 +4976,7 @@ export function createSentinelModelPlanner(
       requestId: string,
     ) => {
       if (!caseId || !runId || !snapshot) return;
-      return lookupSentinelPendingTrafficFinding(
+      const pending = lookupSentinelPendingTrafficFinding(
         snapshotPath,
         {
           caseId,
@@ -4988,6 +4988,7 @@ export function createSentinelModelPlanner(
         requestId,
         graphDigest ??= digestSentinelSnapshot(snapshot),
       );
+      return pending?.hintsValid ? pending : undefined;
     };
     const lookupMutation = (
       taskId: string,

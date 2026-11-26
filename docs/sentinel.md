@@ -392,6 +392,9 @@ A leased worker can include `trafficEvidenceId` and `trafficDigest` in
 `sentinel_report_finding` after opening that exact retained traffic receipt
 for its assigned asset. Use `trafficRefs` for an ordered set of two to
 four exact evidence ID and digest pairs in place of the singular fields.
+The optional `sourceHintId` on the singular receipt or an individual
+`trafficRefs` member cites an approved operator hint for the same asset and
+receipt. The assignment must still open the receipt through the traffic tool.
 The finding becomes visible once every selected link is durable. Recovery reauthorizes the saved source and goes through the
 normal tool hooks before completing an interrupted publication. The link
 retains the source assignment and tool step. Archives preserve completed

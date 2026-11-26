@@ -358,10 +358,11 @@ function prepareTrafficBatch(
       input.recheckId !== recheckId ||
       input.reportVersion !== reportVersion ||
       input.authority.kind !== authority.kind ||
+      (input.sourceHint !== undefined && input.sourceHint.runId !== runId) ||
       (authority.kind === "assignment" &&
         (input.authority.kind !== "assignment" ||
           input.authority.taskId !== authority.taskId || !input.sourceStep ||
-          recheckId !== undefined || input.sourceHint !== undefined))
+          recheckId !== undefined))
     ) ||
     new Set(canonical.map(({ trafficId }) => trafficId)).size !==
       canonical.length
@@ -401,6 +402,8 @@ function sameBatchSource(
     expected.authority.kind === "assignment" &&
     link.authority.taskId === expected.authority.taskId &&
     link.requestId === expected.requestId &&
+    link.sourceHint?.id === expected.sourceHint?.id &&
+    link.sourceHint?.runId === expected.sourceHint?.runId &&
     link.sourceStep?.stepIndex === expected.sourceStep?.stepIndex &&
     link.sourceStep?.sha256 === expected.sourceStep?.sha256;
 }
@@ -776,6 +779,10 @@ function openLinks(snapshotPath: string, readOnly: boolean, now: () => number) {
     stagedPublication = false,
   ) {
     try {
+      if (
+        !stagedPublication &&
+        inputs.some(({ sourceHint }) => sourceHint !== undefined)
+      ) return;
       return transaction(db, () => {
         const preview = inspectBatch(requestId, runId, inputs);
         if (!preview || preview.saved) return preview?.saved;

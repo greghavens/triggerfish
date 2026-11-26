@@ -4,7 +4,10 @@ import {
   stagedTrafficLinkMatches,
 } from "./worker_finding_store.ts";
 import { parseOperatorRunAdmissionCategory } from "../core/operator_run_categories.ts";
-import { retainPortablePausedGraphCheckpoints } from "./adaptive_store.ts";
+import {
+  readAdaptiveOperatorTrafficHint,
+  retainPortablePausedGraphCheckpoints,
+} from "./adaptive_store.ts";
 import { decodeInconclusiveRecheck } from "./recheck_inconclusive.ts";
 import {
   decodeSentinelTrafficComposition,
@@ -889,6 +892,7 @@ function validateAuxiliary(
 function validateArchivedTrafficFindingPublications(
   findingsPath: string | undefined,
   linksPath: string | undefined,
+  adaptivePath: string | undefined,
   caseId: string,
 ) {
   const findings = findingsPath &&
@@ -933,6 +937,21 @@ function validateArchivedTrafficFindingPublications(
         );
       }
       const items = stagedTrafficItems(staged);
+      for (const item of items) {
+        if (item.sourceHintId === undefined) continue;
+        const ref = adaptivePath &&
+          readAdaptiveOperatorTrafficHint(
+            adaptivePath,
+            item.sourceHintId,
+            staged.finding.evidenceRevision,
+            staged.finding.runId,
+            staged.finding.targetId,
+          );
+        if (
+          !ref || ref.evidenceId !== item.evidenceId ||
+          ref.digest !== item.digest
+        ) throw new Error("Invalid archived Sentinel finding traffic hint");
+      }
       const batch = Array.isArray(staged.traffic) &&
         batches?.get(staged.finding.requestId);
       const bound = Array.isArray(staged.traffic)
@@ -1362,6 +1381,7 @@ export async function restoreVerifiedSentinelCaseArchive(
       ?.source,
     auxiliary.find(({ name }) => name === "sentinel-finding-traffic-links.db")
       ?.source,
+    adaptive,
     caseId,
   );
   const sourceBundles: { name: Artifact; source: string }[] = [];

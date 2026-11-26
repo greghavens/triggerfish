@@ -41,6 +41,7 @@ import {
   advanceAdaptiveSentinel,
   createSentinelModelPlanner,
   readAdaptiveSentinel,
+  readSentinelCaseHints,
 } from "../../src/gateway/sentinel_adaptive_runtime.ts";
 import {
   ensureSentinelFormalGoalContract,
@@ -5331,6 +5332,7 @@ async function verifyInitialTrafficPublication(
   assetId: string,
   neighbor: { evidenceId: string; digest: string },
   mode: "resume" | "revoked" | "stale",
+  hinted: boolean,
 ) {
   const ref = {
     kind: "sentinel",
@@ -5339,14 +5341,43 @@ async function verifyInitialTrafficPublication(
     runId: state.plan.runId,
   };
   const batch = traffic.length > 1;
-  const refs = traffic.map(({ evidenceId, digest }) => ({
-    evidenceId,
-    digest,
-  }));
+  const hintId = hinted
+    ? await (async () => {
+      const trafficReference = {
+        evidenceId: traffic[0].evidenceId,
+        digest: traffic[0].digest,
+      };
+      await withFindingAssignmentGateway(baseDir, () =>
+        Promise.resolve(true), async (turn) => {
+        const result = await turn({
+          ...ref,
+          action: "hint",
+          requestId: crypto.randomUUID(),
+          note: "Review this retained response.",
+          assetIds: [assetId],
+          trafficReference,
+        });
+        assert(!result.startsWith("Error:"), result);
+      });
+      const hint = readSentinelCaseHints(path, 10).find((row) =>
+        row.trafficReference?.evidenceId === trafficReference.evidenceId
+      );
+      assert(hint);
+      return hint.id;
+    })()
+    : undefined;
+  const refs: { evidenceId: string; digest: string; sourceHintId?: number }[] =
+    traffic.map(({ evidenceId, digest }, index) => ({
+      evidenceId,
+      digest,
+      ...(hintId !== undefined && index === 0 && { sourceHintId: hintId }),
+    }));
   const selectedArgs = (items: typeof refs) =>
     batch ? { trafficRefs: items } : {
       trafficEvidenceId: items[0].evidenceId,
       trafficDigest: items[0].digest,
+      ...(items[0].sourceHintId !== undefined &&
+        { sourceHintId: items[0].sourceHintId }),
     };
   const different = {
     evidenceId: neighbor.evidenceId,
@@ -5354,7 +5385,12 @@ async function verifyInitialTrafficPublication(
   };
   const stale = { evidenceId: refs.at(-1)!.evidenceId, digest: "f".repeat(64) };
   const denied = await workerTurn(path, source, [
-    [tool(assigned)],
+    [
+      tool(assigned),
+      ...(hintId !== undefined
+        ? [tool(report, { ...input, ...selectedArgs(refs) })]
+        : []),
+    ],
     traffic.map((value) => tool("sentinel_traffic_get", value)),
     [
       tool(report, {
@@ -5365,8 +5401,25 @@ async function verifyInitialTrafficPublication(
         ...input,
         ...selectedArgs([...refs.slice(0, -1), stale]),
       }),
+      ...(hintId !== undefined
+        ? [tool(report, {
+          ...input,
+          ...selectedArgs(
+            batch
+              ? refs.map(({ evidenceId, digest }, index) => ({
+                evidenceId,
+                digest,
+                ...(index === 1 && { sourceHintId: hintId }),
+              }))
+              : [{ ...refs[0], sourceHintId: hintId + 1000 }],
+          ),
+        })]
+        : []),
     ],
   ]);
+  if (hintId !== undefined) {
+    assertStringIncludes(denied.results[0][1], "Error:");
+  }
   assert(denied.results[2].every((result) => result.startsWith("Error:")));
   assertEquals(readSentinelWorkerFindingHistory(path), []);
   assertEquals(listSentinelFindingTrafficLinks(path), []);
@@ -5534,6 +5587,14 @@ async function verifyInitialTrafficPublication(
   );
   const attached: SentinelFindingTrafficLink[] = recovered.links ??
     [recovered.link];
+  assertEquals(
+    attached.map(({ sourceHint }) => sourceHint),
+    refs.map(({ sourceHintId }) =>
+      sourceHintId === undefined
+        ? undefined
+        : { id: sourceHintId, runId: ref.runId }
+    ),
+  );
   assertEquals(
     attached.map(({ findingId }) => findingId),
     traffic.map(() => recovered.record.id),
@@ -5762,6 +5823,7 @@ async function testScopedReporterRestart(
   useBatch: boolean,
   denyMember = false,
   initialPublication?: "resume" | "revoked" | "stale",
+  hinted = false,
 ) {
   const baseDir = await Deno.makeTempDir();
   const path = resolveSentinelCasePath(
@@ -5876,6 +5938,7 @@ async function testScopedReporterRestart(
         service.assetId,
         neighborReceipt,
         initialPublication,
+        hinted,
       );
       return;
     }
@@ -6708,3 +6771,9 @@ Deno.test("Sentinel planner queues a cold finding only after an authorized exact
     await Deno.remove(baseDir, { recursive: true });
   }
 });
+
+Deno.test("Sentinel recovers approved traffic hint provenance for mixed initial finding attachments", () =>
+  testScopedReporterRestart(true, false, "resume", true));
+
+Deno.test("Sentinel recovers approved traffic hint provenance for a singular initial finding attachment", () =>
+  testScopedReporterRestart(false, false, "resume", true));

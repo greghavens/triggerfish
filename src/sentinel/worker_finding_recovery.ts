@@ -1,4 +1,6 @@
 /** Canonical input and output for finding writes verified by their journal. */
+import { dirname, join } from "@std/path";
+import { readAdaptiveOperatorTrafficHint } from "./adaptive_store.ts";
 import { redactCredentialText } from "../core/logger/redactor.ts";
 import {
   INCONCLUSIVE_RECHECK_TOOL,
@@ -68,26 +70,39 @@ export function isSentinelFindingMutation(name: string): name is FindingTool {
 export function parseSentinelInitialTrafficSelection(
   args: Record<string, unknown>,
 ) {
-  const { trafficEvidenceId, trafficDigest, trafficRefs } = args;
-  const valid = (evidenceId: unknown, digest: unknown) =>
+  const { trafficEvidenceId, trafficDigest, trafficRefs, sourceHintId } = args;
+  const valid = (evidenceId: unknown, digest: unknown, hint: unknown) =>
     typeof evidenceId === "string" && evidenceId.length <= 100 &&
       !!evidenceId.trim() && !evidenceId.includes("\0") &&
-      typeof digest === "string" && /^[a-f0-9]{64}$/.test(digest)
-      ? { evidenceId, digest }
+      typeof digest === "string" && /^[a-f0-9]{64}$/.test(digest) &&
+      (hint === undefined ||
+        typeof hint === "number" && Number.isSafeInteger(hint) && hint > 0)
+      ? {
+        evidenceId,
+        digest,
+        ...(typeof hint === "number" && { sourceHintId: hint }),
+      }
       : undefined;
   if (trafficRefs !== undefined) {
     if (
       trafficEvidenceId !== undefined || trafficDigest !== undefined ||
+      sourceHintId !== undefined ||
       !Array.isArray(trafficRefs) || trafficRefs.length < 2 ||
       trafficRefs.length > MAX_FINDING_TRAFFIC_BATCH
     ) return;
-    const refs: { evidenceId: string; digest: string }[] = [];
+    const refs: {
+      evidenceId: string;
+      digest: string;
+      sourceHintId?: number;
+    }[] = [];
     for (const member of trafficRefs) {
       if (
         !member || typeof member !== "object" ||
-        Object.keys(member).length !== 2
+        Object.keys(member).some((key) =>
+          !["evidenceId", "digest", "sourceHintId"].includes(key)
+        )
       ) return;
-      const ref = valid(member.evidenceId, member.digest);
+      const ref = valid(member.evidenceId, member.digest, member.sourceHintId);
       if (
         !ref || refs.some(({ evidenceId }) => evidenceId === ref.evidenceId)
       ) return;
@@ -95,7 +110,7 @@ export function parseSentinelInitialTrafficSelection(
     }
     return { refs, batch: true as const };
   }
-  const ref = valid(trafficEvidenceId, trafficDigest);
+  const ref = valid(trafficEvidenceId, trafficDigest, sourceHintId);
   return ref ? { refs: [ref], batch: false as const } : undefined;
 }
 
@@ -109,8 +124,13 @@ export function sentinelFindingMutationArguments(
     ? [...fields[name], "evidenceVersion"] as const
     : name === "sentinel_report_finding" &&
         (input.trafficEvidenceId !== undefined ||
-          input.trafficDigest !== undefined)
-    ? [...fields[name], "trafficEvidenceId", "trafficDigest"] as const
+          input.trafficDigest !== undefined || input.sourceHintId !== undefined)
+    ? [
+      ...fields[name],
+      "trafficEvidenceId",
+      "trafficDigest",
+      ...(input.sourceHintId !== undefined ? ["sourceHintId"] as const : []),
+    ] as const
     : name === "sentinel_report_finding" && input.trafficRefs !== undefined
     ? [...fields[name], "trafficRefs"] as const
     : fields[name];
@@ -130,7 +150,7 @@ export function sentinelFindingMutationArguments(
       continue;
     }
     if (
-      key === "expectedVersion"
+      key === "expectedVersion" || key === "sourceHintId"
         ? typeof value !== "number" ||
           !Number.isSafeInteger(value) || value < 1
         : key === "evidenceVersion" || key === "trafficDigest"
@@ -159,6 +179,17 @@ export function lookupSentinelPendingTrafficFinding(
   const staged = readSentinelStagedTrafficFinding(path, scope, requestId);
   if (!staged || staged.finding.snapshotDigest !== snapshotDigest) return;
   const items = stagedTrafficItems(staged);
+  const hintsValid = !items.some((item) => {
+    if (item.sourceHintId === undefined) return false;
+    const ref = readAdaptiveOperatorTrafficHint(
+      join(dirname(path), "sentinel-adaptive.db"),
+      item.sourceHintId,
+      scope.evidenceRevision,
+      scope.runId,
+      scope.targetId,
+    );
+    return ref?.evidenceId !== item.evidenceId || ref.digest !== item.digest;
+  });
   const args = sentinelFindingMutationArguments("sentinel_report_finding", {
     ...Object.fromEntries(
       fields.sentinel_report_finding.map((key) => [key, staged.finding[key]]),
@@ -166,20 +197,24 @@ export function lookupSentinelPendingTrafficFinding(
     requestId,
     ...(Array.isArray(staged.traffic)
       ? {
-        trafficRefs: items.map(({ evidenceId, digest }) => ({
+        trafficRefs: items.map(({ evidenceId, digest, sourceHintId }) => ({
           evidenceId,
           digest,
+          ...(sourceHintId !== undefined && { sourceHintId }),
         })),
       }
       : {
         trafficEvidenceId: items[0].evidenceId,
         trafficDigest: items[0].digest,
+        ...(items[0].sourceHintId !== undefined &&
+          { sourceHintId: items[0].sourceHintId }),
       }),
   });
   if (!args) return;
   return {
     args,
     staged,
+    hintsValid,
     trafficBatch: items.map((
       { evidenceId, digest, stepIndex, resultSha256 },
     ) => ({
@@ -252,6 +287,7 @@ export function lookupSentinelFindingMutation(
       snapshotDigest,
     );
     if (pending) {
+      if (!pending.hintsValid) return;
       const attached = readStagedTrafficLinks(path, pending.staged);
       if (!attached || pending.staged.findingId !== receipt.id) return;
       const result = JSON.stringify({

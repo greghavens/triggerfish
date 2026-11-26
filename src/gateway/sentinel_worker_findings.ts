@@ -48,7 +48,10 @@ import {
   readSentinelCaseFindingReceipts,
   readSentinelWorkerFindingWriteReceipt,
 } from "../sentinel/worker_finding_store.ts";
-import { readAssignedSentinelModelReview } from "./sentinel_adaptive_runtime.ts";
+import {
+  readAssignedSentinelModelReview,
+  readSentinelOperatorTrafficHint,
+} from "./sentinel_adaptive_runtime.ts";
 import type { SentinelAgentOptions } from "./sentinel_agent.ts";
 
 type Scope = Pick<
@@ -115,13 +118,18 @@ export const sentinelFindingWriteTools: readonly ToolDefinition[] = [
       trafficRefs: {
         type: "array",
         description:
-          "Optional ordered set of two to four already-opened exact {evidenceId,digest} traffic receipts. Omit singular traffic fields when using this set.",
+          "Optional ordered set of two to four already-opened exact {evidenceId,digest,sourceHintId?} traffic receipts. Omit singular traffic fields when using this set.",
         items: { type: "object" },
       },
       trafficEvidenceId: {
         type: "string",
         description:
           "Optional exact retained traffic receipt already opened by this assignment.",
+      },
+      sourceHintId: {
+        type: "number",
+        description:
+          "Optional exact approved operator traffic hint for the singular receipt.",
       },
       trafficDigest: {
         type: "string",
@@ -672,14 +680,17 @@ export function executeSentinelWorkerFindingTool(
             initial && typeof title === "string" &&
             (args.trafficEvidenceId !== undefined ||
               args.trafficDigest !== undefined ||
-              args.trafficRefs !== undefined)
+              args.trafficRefs !== undefined || args.sourceHintId !== undefined)
           ) {
             const selected = parseSentinelInitialTrafficSelection(args);
             if (!selected) return;
             const attachments = [];
             for (
-              const { evidenceId: trafficEvidenceId, digest: trafficDigest }
-                of selected.refs
+              const {
+                evidenceId: trafficEvidenceId,
+                digest: trafficDigest,
+                sourceHintId,
+              } of selected.refs
             ) {
               const traffic = readSentinelTrafficReceipt(
                 scope.snapshotPath,
@@ -700,12 +711,26 @@ export function executeSentinelWorkerFindingTool(
                   traffic.family,
                 ));
               if (!traffic || !step) return;
+              const hint = sourceHintId === undefined
+                ? undefined
+                : readSentinelOperatorTrafficHint(
+                  scope.snapshotPath,
+                  state,
+                  sourceHintId,
+                  asset,
+                );
+              if (
+                sourceHintId !== undefined &&
+                (hint?.evidenceId !== trafficEvidenceId ||
+                  hint.digest !== trafficDigest)
+              ) return;
               attachments.push({
                 traffic,
                 step,
                 staged: {
                   evidenceId: trafficEvidenceId,
                   digest: trafficDigest,
+                  ...(sourceHintId !== undefined && { sourceHintId }),
                   stepIndex: step.stepIndex,
                   resultSha256: step.sha256,
                 },
@@ -729,7 +754,7 @@ export function executeSentinelWorkerFindingTool(
             );
             if (!staged) return;
             const inputs: SentinelFindingTrafficLinkInput[] = attachments.map((
-              { traffic, step },
+              { traffic, step, staged: source },
               index,
             ) => ({
               caseId,
@@ -742,6 +767,10 @@ export function executeSentinelWorkerFindingTool(
               trafficSource: traffic.family,
               authority: { kind: "assignment", taskId: receipt.taskId },
               sourceStep: step,
+              ...(source.sourceHintId !== undefined &&
+                {
+                  sourceHint: { id: source.sourceHintId, runId: receipt.runId },
+                }),
               requestId: selected.batch
                 ? sentinelTrafficBatchMemberRequestId(receipt.requestId, index)
                 : receipt.requestId,
