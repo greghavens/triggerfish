@@ -1356,6 +1356,19 @@ export function startSentinelAssessment(
             linkedStart?.graphDigest,
           );
           if (linkedStart) {
+            if (plan.goal !== undefined) {
+              if (
+                !db.prepare("PRAGMA table_info(assessment_run_revisions)").all()
+                  .some(({ name }) => name === "linkedStartGoalDigest")
+              ) {
+                db.exec(
+                  "ALTER TABLE assessment_run_revisions ADD COLUMN linkedStartGoalDigest TEXT",
+                );
+              }
+              db.prepare(
+                "UPDATE assessment_run_revisions SET linkedStartGoalDigest = ? WHERE revision = ?",
+              ).run(hashGoal(plan.goal), started.revision);
+            }
             recordOperatorRunLink(db, {
               ...linkedStart.input,
               origin: "spawn",
@@ -2159,6 +2172,33 @@ export function readSentinelOperatingConstraintVersion(
 ): SentinelOperatingConstraintRecord | undefined {
   if (!Number.isSafeInteger(version) || version < 1) return undefined;
   return operatingConstraintRecords(path, runId, 1, undefined, version)[0];
+}
+
+function hashGoal(goal: string): string {
+  return createHash("sha256").update(goal).digest("hex");
+}
+
+/** Match the originally approved goal even after the assessment advances. */
+export function matchesSentinelLinkedStartGoal(
+  path: string,
+  revision: number,
+  goal?: string,
+): boolean {
+  const db = openStore(path, false);
+  if (!db) return false;
+  try {
+    if (
+      !hasTable(db, "assessment_run_revisions") ||
+      !db.prepare("PRAGMA table_info(assessment_run_revisions)").all()
+        .some(({ name }) => name === "linkedStartGoalDigest")
+    ) return goal === undefined;
+    const digest = db.prepare(
+      "SELECT linkedStartGoalDigest FROM assessment_run_revisions WHERE revision = ?",
+    ).get(revision)?.linkedStartGoalDigest ?? undefined;
+    return digest === (goal === undefined ? undefined : hashGoal(goal));
+  } finally {
+    db.close();
+  }
 }
 
 export function readSentinelRunTimeoutForRevision(

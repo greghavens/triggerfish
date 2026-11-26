@@ -3051,12 +3051,30 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
         edges: [],
       };
       await Deno.writeTextFile(childPath, JSON.stringify(childGraph));
+      const childGoal = "Verify logging coverage on the child asset.";
       const sentinelSpawn = {
         ...spawn,
+        childGoal,
         targetKind: "sentinel",
         targetId: childCase,
         requestId: crypto.randomUUID(),
       };
+      const beforeChildGoalApproval = confirmations.length;
+      for (const invalid of [
+        { ...spawn, childGoal },
+        { ...sentinelSpawn, childGoal: " " },
+        { ...sentinelSpawn, childGoal: "x".repeat(501) },
+      ]) {
+        assertStringIncludes((await turn(invalid)).result, "unavailable");
+      }
+      assertEquals(confirmations.length, beforeChildGoalApproval);
+      approved = false;
+      assertStringIncludes(
+        (await turn(sentinelSpawn)).result,
+        "operator declined",
+      );
+      assertEquals(readSentinelAssessment(childPath), undefined);
+      approved = true;
       duringConfirmation = () => {
         Deno.writeTextFileSync(
           childPath,
@@ -3114,6 +3132,12 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
       assertEquals(linkedSentinel.link.origin, "spawn");
       assertEquals(linkedSentinel.link.left, linkedSentinel.run.ref);
       assertEquals(linkedSentinel.link.right, exact);
+      assertEquals(
+        JSON.parse(confirmations.at(-1)!.split("\n").at(-1)!).childGoal,
+        childGoal,
+      );
+      assertEquals(readSentinelAssessment(childPath)?.plan.goal, childGoal);
+      assert(readSentinelAssessment(path)?.plan.goal !== childGoal);
       const lastApproval = confirmations.length;
       await withGateway(async (reopenTurn) => {
         const reopened = JSON.parse((await reopenTurn(sentinelSpawn)).result);
@@ -3122,6 +3146,15 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
           reopened.run.details.runId,
           linkedSentinel.run.details.runId,
         );
+        for (const different of [
+          { ...sentinelSpawn, childGoal: "Check a different control." },
+          { ...sentinelSpawn, childGoal: undefined },
+        ]) {
+          assertStringIncludes(
+            (await reopenTurn(different)).result,
+            "unavailable",
+          );
+        }
         assertEquals(confirmations.length, lastApproval);
         assertStringIncludes(
           (await reopenTurn({
