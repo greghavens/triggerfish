@@ -3466,7 +3466,7 @@ Deno.test("Retained digest pages reauthorize every assignment before and after a
       path,
       JSON.stringify({
         version: 1,
-        nodes: ["allowed", "restricted"].map((id) => ({
+        nodes: ["allowed", "restricted", "also-allowed"].map((id) => ({
           id,
           kind: "asset",
           label: id,
@@ -3515,8 +3515,13 @@ Deno.test("Retained digest pages reauthorize every assignment before and after a
       kind: "asset" as const,
       label: "Allowed asset",
     };
-    const digests = openSentinelEvidenceDigests(directory);
+    let catalogClock = Date.now() + 1000;
+    const digests = openSentinelEvidenceDigests(
+      directory,
+      () => ++catalogClock,
+    );
     let ids: string[];
+    let alsoAllowed: string;
     try {
       const scope = { caseId, runId, evidenceRevision: state.revision };
       ids = [
@@ -3543,6 +3548,15 @@ Deno.test("Retained digest pages reauthorize every assignment before and after a
         assert(retained);
         return retained.id;
       });
+      const authorized = digests.record(scope, {
+        members: [{
+          id: "asset:also-allowed",
+          kind: "asset",
+          label: "Another authorized asset",
+        }],
+      });
+      assert(authorized);
+      alsoAllowed = authorized.id;
     } finally {
       digests.close();
     }
@@ -3557,16 +3571,25 @@ Deno.test("Retained digest pages reauthorize every assignment before and after a
       name: "digest-revocation-planner",
       supportsStreaming: false,
       complete(messages) {
-        if (messages.some(({ role }) => role === "tool")) {
-          return Promise.resolve(completion("[]"));
+        const reads = messages.filter(({ role }) => role === "tool");
+        if (reads.length < 2) {
+          return Promise.resolve(
+            completion("", "sentinel_list_evidence_digests", {
+              revision: state.revision,
+              limit: reads.length + 1,
+            }),
+          );
         }
-        return Promise.resolve(
-          completion("", "sentinel_expand_evidence_digest", {
-            revision: state.revision,
-            digestId: ids[1],
-            limit: 1,
-          }),
-        );
+        if (reads.length === 2) {
+          return Promise.resolve(
+            completion("", "sentinel_expand_evidence_digest", {
+              revision: state.revision,
+              digestId: ids[1],
+              limit: 1,
+            }),
+          );
+        }
+        return Promise.resolve(completion("[]"));
       },
     });
     providers.setDefault("digest-revocation-planner");
@@ -3604,14 +3627,18 @@ Deno.test("Retained digest pages reauthorize every assignment before and after a
       action: "planner_reads",
       plannerIdentity: round.identity,
       attempt: round.attempt,
-      ordinal: 1,
+      ordinal: 3,
       includeResult: true,
     };
+    const permittedCatalogRead = { ...retainedRead, ordinal: 1 };
+    const mixedCatalogRead = { ...retainedRead, ordinal: 2 };
+    const catalogRequest = { ...ref, action: "list_digests", limit: 1 };
     const cursors: string[] = [];
     const unavailable = "Error: This operation or exact run is unavailable.";
     const digestUnavailable =
       "Error: The requested evidence digest or revision is unavailable.";
     let allowedPage = "";
+    let retainedCatalog = "";
     await withArchivedPlannerRead(directory, async (read) => {
       for (const id of ids.slice(1)) {
         const { page } = JSON.parse(await read(request(id)));
@@ -3624,6 +3651,17 @@ Deno.test("Retained digest pages reauthorize every assignment before and after a
       ]);
       allowedPage = await read(request(ids[0]));
       assertEquals(JSON.parse(allowedPage).page.members, [publicMember]);
+      retainedCatalog = await read(permittedCatalogRead);
+      assertEquals(
+        JSON.parse(retainedCatalog).result.page.digests[0].id,
+        alsoAllowed,
+      );
+      assertEquals(
+        JSON.parse(await read(mixedCatalogRead)).result.page.digests.map(
+          ({ id }: { id: string }) => id,
+        ),
+        [alsoAllowed, ids.at(-1)],
+      );
     });
 
     let changedDuringSourceResponse = false;
@@ -3650,7 +3688,10 @@ Deno.test("Retained digest pages reauthorize every assignment before and after a
           expectedVersion: 0,
           requestId: crypto.randomUUID(),
           operatorScope: "digest-source-hook-fixture",
-          constraints: { deniedKinds: [], allowedAssetIds: ["allowed"] },
+          constraints: {
+            deniedKinds: [],
+            allowedAssetIds: ["allowed", "also-allowed"],
+          },
         }));
         changedDuringSourceResponse = true;
       },
@@ -3662,6 +3703,24 @@ Deno.test("Retained digest pages reauthorize every assignment before and after a
       await withArchivedPlannerRead(directory, async (read) => {
         assertEquals(await read(retainedRead), unavailable);
         assertEquals(await read(request(ids[0])), allowedPage);
+        assertEquals(await read(permittedCatalogRead), retainedCatalog);
+        assertEquals(await read(mixedCatalogRead), unavailable);
+        const page = JSON.parse(await read(catalogRequest)).page;
+        assertEquals(page.digests.map(({ id }: { id: string }) => id), [
+          alsoAllowed,
+        ]);
+        assertEquals(page.nextCursor, alsoAllowed);
+        const next =
+          JSON.parse(await read({ ...catalogRequest, cursor: page.nextCursor }))
+            .page;
+        assertEquals(next.digests.map(({ id }: { id: string }) => id), [
+          ids[0],
+        ]);
+        assertEquals(next.nextCursor, null);
+        assertEquals(
+          await read({ ...catalogRequest, cursor: ids.at(-1) }),
+          digestUnavailable,
+        );
         for (const [index, id] of ids.slice(1).entries()) {
           assertEquals(await read(request(id)), digestUnavailable);
           assertEquals(

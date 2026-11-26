@@ -26,6 +26,7 @@ import {
   openSentinelEvidenceDigests,
   readSentinelArchivedDigestCatalog,
   sentinelArchivedDigestFile,
+  type SentinelEvidenceDigestMember,
 } from "../sentinel/evidence_digests.ts";
 import {
   readSentinelAdaptiveEvidenceMapping,
@@ -145,43 +146,38 @@ export function allowSentinelDigestObservations(
   });
 }
 
-/** Authorize the whole sealed digest even when only one page was retained. */
-export function allowsRetainedSentinelDigest(
+/** Reauthorize each whole digest referenced by a retained page. */
+export function allowsRetainedSentinelDigests(
   baseDir: string,
   path: string,
   caseId: string,
   runId: string,
   revision: number,
-  digestId: string,
+  ids: readonly string[],
 ) {
   const currentId = readSentinelRunIdForRevision(path, revision) ??
     readSentinelAdaptiveEvidenceMapping(path, revision)?.goal.id;
   if (currentId !== runId) return false;
-  const archived = readSentinelArchivedDigestCatalog(
-    join(dirname(path), sentinelArchivedDigestFile),
-    { caseId },
-  ).find(({ digest }) =>
-    digest.id === digestId && digest.scope.runId === runId &&
-    digest.scope.evidenceRevision === revision
+  if (!ids.length) return true;
+  const archived = new Map(
+    readSentinelArchivedDigestCatalog(
+      join(dirname(path), sentinelArchivedDigestFile),
+      { caseId },
+    ).filter(({ digest }) =>
+      digest.scope.runId === runId && digest.scope.evidenceRevision === revision
+    ).map((entry) => [entry.digest.id, entry]),
   );
-  if (archived) {
-    return allowSentinelDigestObservations(
-      path,
-      runId,
-      revision,
-      archived.members,
-    );
-  }
-  const store = openSentinelEvidenceDigests(baseDir);
+  let store: ReturnType<typeof openSentinelEvidenceDigests> | undefined;
   try {
-    const entry = store.read(
-      { caseId, runId, evidenceRevision: revision },
-      digestId,
-    );
-    return !!entry &&
-      allowSentinelDigestObservations(path, runId, revision, entry.members);
+    const scope = { caseId, runId, evidenceRevision: revision };
+    return ids.every((id) => {
+      const entry = archived.get(id) ??
+        (store ??= openSentinelEvidenceDigests(baseDir)).read(scope, id);
+      return !!entry &&
+        allowSentinelDigestObservations(path, runId, revision, entry.members);
+    });
   } finally {
-    store.close();
+    store?.close();
   }
 }
 
@@ -236,7 +232,10 @@ export async function executeOperatorEvidenceDigest(
         digest.scope.evidenceRevision === revision
       );
       if (list) {
-        const archivedIndex = archived.findIndex(({ digest }) =>
+        const allow = (members: readonly SentinelEvidenceDigestMember[]) =>
+          allowSentinelDigestObservations(path, runId, revision, members);
+        const visibleArchive = archived.filter(({ members }) => allow(members));
+        const archivedIndex = visibleArchive.findIndex(({ digest }) =>
           digest.id === cursor
         );
         const live = archivedIndex < 0
@@ -245,13 +244,16 @@ export async function executeOperatorEvidenceDigest(
             limit,
             cursor,
             archived.map(({ digest }) => digest.id),
+            allow,
           )
           : { digests: [], nextCursor: null };
         if (!live) return unavailable;
         if (live.nextCursor) return { run: ref, page: live };
         const digests = [
           ...live.digests,
-          ...archived.slice(archivedIndex + 1).map(({ digest }) => digest),
+          ...visibleArchive.slice(archivedIndex + 1).map(({ digest }) =>
+            digest
+          ),
         ];
         const page = {
           digests: digests.slice(0, limit),

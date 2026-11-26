@@ -210,6 +210,11 @@ export function openSentinelEvidenceDigests(baseDir: string, now = Date.now) {
   const scoped = db.prepare(`
     SELECT * FROM evidence_digests WHERE caseId = ? AND runId = ? AND evidenceRevision = ? AND id = ?
   `);
+  const catalogEntry = (scope: SentinelEvidenceDigestScope, row: Row) =>
+    checkedCatalogEntry({
+      digest: summary(scope, row),
+      members: JSON.parse(String(row.members)),
+    });
   const insert = db.prepare(`
     INSERT INTO evidence_digests (id,caseId,runId,evidenceRevision,memberCount,members,createdAt)
     VALUES (?,?,?,?,?,?,?) RETURNING *
@@ -288,12 +293,7 @@ export function openSentinelEvidenceDigests(baseDir: string, now = Date.now) {
       if (rows.length > maximum) {
         throw new Error("Sentinel digest archive has too many entries.");
       }
-      return rows.map((row) =>
-        checkedCatalogEntry({
-          digest: summary(scope, row),
-          members: JSON.parse(String(row.members)),
-        })
-      );
+      return rows.map((row) => catalogEntry(scope, row));
     },
 
     list(
@@ -301,6 +301,7 @@ export function openSentinelEvidenceDigests(baseDir: string, now = Date.now) {
       limit = 10,
       cursor?: string,
       exclude: readonly string[] = [],
+      allow?: (members: readonly SentinelEvidenceDigestMember[]) => boolean,
     ) {
       const scope = scopeFor(rawScope);
       if (!scope || !validLimit(limit)) return undefined;
@@ -311,15 +312,32 @@ export function openSentinelEvidenceDigests(baseDir: string, now = Date.now) {
           return undefined;
         }
         const row = scoped.get(...params, cursor);
-        if (!row) return undefined;
+        if (!row || (allow && !allow(catalogEntry(scope, row).members))) {
+          return undefined;
+        }
         after = Number(row.sequence);
       }
-      const all = db.prepare(`
-        SELECT id, memberCount, createdAt FROM evidence_digests
+      const statement = db.prepare(`
+        SELECT ${
+        allow ? "*" : "id, memberCount, createdAt"
+      } FROM evidence_digests
         WHERE caseId = ? AND runId = ? AND evidenceRevision = ? AND sequence < ?
           AND id NOT IN (SELECT value FROM json_each(?))
         ORDER BY sequence DESC LIMIT ?
-      `).all(...params, after, JSON.stringify(exclude), limit + 1);
+      `);
+      const excluded = JSON.stringify(exclude);
+      const all: Row[] = [];
+      const batch = allow ? 32 : limit + 1;
+      while (all.length <= limit) {
+        const candidates = statement.all(...params, after, excluded, batch);
+        for (const row of candidates) {
+          if (allow && !allow(catalogEntry(scope, row).members)) continue;
+          all.push(row);
+          if (all.length > limit) break;
+        }
+        if (candidates.length < batch || !allow) break;
+        after = Number(candidates.at(-1)!.sequence);
+      }
       const rows = all.slice(0, limit);
       return {
         digests: rows.map((row) => summary(scope, row)),
@@ -333,10 +351,7 @@ export function openSentinelEvidenceDigests(baseDir: string, now = Date.now) {
         !scope || typeof digestId !== "string" || !digestPattern.test(digestId)
       ) return;
       const row = scoped.get(...scopeParams(scope), digestId);
-      return row && checkedCatalogEntry({
-        digest: summary(scope, row),
-        members: JSON.parse(String(row.members)),
-      });
+      return row && catalogEntry(scope, row);
     },
 
     expand(

@@ -4466,7 +4466,7 @@ function createAgent(
         ) return { ...result, allowed: false, action: "BLOCK" };
         if (
           result.allowed && name === "POST_TOOL_RESPONSE" &&
-          (provenanceRead || toolName === SENTINEL_DEFENSE_READ ||
+          (provenanceRead || digestRead || toolName === SENTINEL_DEFENSE_READ ||
             toolName === SENTINEL_INCIDENT_ALERTS_READ) &&
           canReadPlannerCase && (!turn || !currentPlannerReceiptScope(turn))
         ) return { ...result, allowed: false, action: "BLOCK" };

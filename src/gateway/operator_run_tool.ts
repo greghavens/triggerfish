@@ -332,7 +332,7 @@ import {
   updateSentinelWorkerLimit,
 } from "./sentinel_adaptive_runtime.ts";
 import {
-  allowsRetainedSentinelDigest,
+  allowsRetainedSentinelDigests,
   executeOperatorEvidenceDigest,
 } from "./operator_evidence_digests.ts";
 import {
@@ -9759,23 +9759,49 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
           }
           if (digest && digestArgs) {
             const result = JSON.parse(digest.text);
-            const allowsObservations = () =>
-              digestArgs.digestId === undefined ||
-              (typeof digestArgs.digestId === "string" &&
-                allowsRetainedSentinelDigest(
+            const catalog = digestArgs.digestId === undefined;
+            const digestIds = catalog
+              ? [
+                ...result.page.digests.map(({ id }: { id: string }) => id),
+                ...(typeof digestArgs.cursor === "string"
+                  ? [digestArgs.cursor]
+                  : []),
+              ]
+              : [String(digestArgs.digestId)];
+            const allowsObservations = async () => {
+              if (
+                !allowsRetainedSentinelDigests(
                   options.baseDir,
                   path,
                   ref.id,
                   runId,
                   ref.revision!,
-                  digestArgs.digestId,
-                ));
+                  digestIds,
+                )
+              ) return false;
+              if (!catalog || result.page.nextCursor === null) return true;
+              const next = await executeOperatorEvidenceDigest(
+                options.baseDir,
+                ref,
+                {
+                  action: "list_digests",
+                  limit: 1,
+                  cursor: result.page.nextCursor,
+                },
+                () => Promise.resolve(false),
+              );
+              const page = typeof next !== "string" && "page" in next
+                ? next.page
+                : undefined;
+              return !!page && typeof page === "object" && "digests" in page &&
+                Array.isArray(page.digests) && page.digests.length > 0;
+            };
             if (
               createHash("sha256").update(digest.text).digest("hex") !==
                 digest.sha256 ||
-              !allowsObservations() ||
+              !await allowsObservations() ||
               !await authorize(scope, read.tool, digestArgs, digest.text) ||
-              !allowsObservations() || !isCurrent()
+              !await allowsObservations() || !isCurrent()
             ) return unavailable;
             return safeProjection({ ...selected, result });
           }
