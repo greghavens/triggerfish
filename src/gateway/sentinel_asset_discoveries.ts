@@ -11,6 +11,7 @@ import {
   readSentinelAssessmentRevision,
   readSentinelLinkedSourcesForRevision,
   readSentinelOperatingConstraints,
+  readSentinelOperatingConstraintsForRevision,
   readSentinelRunIdForRevision,
   withSentinelAssessmentWriteLock,
 } from "../sentinel/assessment_store.ts";
@@ -19,6 +20,7 @@ import {
   type SentinelAssetDiscoveryClaim,
   type SentinelAssetDiscoveryCorrectionRequest,
   type SentinelAssetDiscoveryRecord,
+  type SentinelAssetDiscoveryRequest,
 } from "../sentinel/asset_discovery_store.ts";
 import {
   matchSentinelAssetDiscoveryDestination,
@@ -28,6 +30,11 @@ import { readSentinelChatSnapshot } from "../sentinel/chat_mode.ts";
 import { loadSentinelGraph } from "../sentinel/graph.ts";
 import { sentinelOperatingConstraintsAllow } from "../sentinel/operating_constraints.ts";
 import { normalizeSentinelWithdrawalHost } from "../sentinel/inventory_host_withdrawal.ts";
+import {
+  readSentinelCaseGraphFacts,
+  readSentinelWorkerGraphFact,
+  sentinelGraphFactScopeFilter,
+} from "../sentinel/worker_graph_facts.ts";
 import { digestSentinelSnapshot } from "../sentinel/shared_inventory.ts";
 import { withSentinelSourceSnapshotLock } from "../sentinel/source_snapshot_lock.ts";
 import { readAssignedSentinelModelReview } from "./sentinel_adaptive_runtime.ts";
@@ -78,6 +85,108 @@ export function submitSentinelAssetDiscovery(
   });
 }
 
+export function proposeSentinelGraphFactDiscovery(
+  baseDir: string,
+  caseId: string,
+  revision: number,
+  factId: string,
+  evidenceId: string,
+  requestId: string,
+) {
+  const path = resolveSentinelCasePath(baseDir, caseId);
+  return withSentinelAssessmentWriteLock(path, (state) => {
+    const runId = state?.plan.runId;
+    const snapshot = state?.result?.sharedGraph.snapshot;
+    if (!state?.active || state.revision !== revision || !runId || !snapshot) {
+      return;
+    }
+    const selected = readSentinelCaseGraphFacts(path, {
+      caseId,
+      runId,
+      evidenceRevision: revision,
+    }, { id: factId });
+    if (!selected || !("fact" in selected)) return;
+    const fact = selected.fact;
+    const { from, to, relation } = fact.relationship;
+    if (
+      from !== fact.targetId ||
+      (relation !== "depends_on" && relation !== "resolved_to" &&
+        relation !== "uses_hostname")
+    ) return;
+    const graph = loadSentinelGraph(snapshot);
+    const claim = verifySentinelAssetDiscovery(graph, {
+      kind: "relationship",
+      assetId: from,
+      to,
+      relation,
+      evidenceId,
+    });
+    if (!claim) return;
+    const candidate = {
+      sourceCaseId: caseId,
+      taskId: fact.taskId,
+      evidenceRevision: revision,
+      sourceDigest: fact.snapshotDigest,
+      claim,
+      graphFactSource: {
+        id: fact.id,
+        runId,
+        stepIndex: fact.sourceStepIndex,
+        resultSha256: fact.resultSha256,
+      },
+    };
+    if (!allowsDiscoveryGraphFact(path, candidate, graph)) return;
+    return discoveryStore(
+      baseDir,
+      (store) => store.propose(candidate, requestId),
+    );
+  });
+}
+
+function allowsDiscoveryGraphFact(
+  path: string,
+  record: SentinelAssetDiscoveryRequest,
+  graph: ReturnType<typeof loadSentinelGraph>,
+) {
+  const source = record.graphFactSource;
+  if (!source) return true;
+  const { claim } = record;
+  if (
+    claim.kind !== "relationship" ||
+    readSentinelRunIdForRevision(path, record.evidenceRevision) !== source.runId
+  ) return false;
+  const scope = {
+    caseId: record.sourceCaseId,
+    runId: source.runId,
+    evidenceRevision: record.evidenceRevision,
+    targetId: claim.assetId,
+    taskId: record.taskId,
+  };
+  const fact = readSentinelWorkerGraphFact(path, scope, source.id);
+  const snapshot = graph.snapshot();
+  const evidence = snapshot.nodes.find(({ id }) => id === claim.evidenceId);
+  const policy = readSentinelOperatingConstraintsForRevision(
+    path,
+    record.evidenceRevision,
+  );
+  return !!fact && fact.snapshotDigest === record.sourceDigest &&
+    fact.sourceStepIndex === source.stepIndex &&
+    fact.resultSha256 === source.resultSha256 &&
+    fact.relationship.from === claim.assetId &&
+    fact.relationship.to === claim.to &&
+    fact.relationship.relation === claim.relation &&
+    evidence?.kind === "evidence" && !evidence.executionSource &&
+    !evidence.nativeWorkflowSource &&
+    sentinelGraphFactScopeFilter(
+      snapshot,
+      (nodeId) =>
+        sentinelOperatingConstraintsAllow(policy?.constraints, {
+          kind: "review_evidence",
+          nodeId,
+        }, snapshot),
+    )(fact);
+}
+
 function archivedDiscoveryGraph(
   baseDir: string,
   record: Pick<
@@ -100,7 +209,8 @@ function archivedDiscovery(
   record: SentinelAssetDiscoveryRecord,
 ) {
   const source = archivedDiscoveryGraph(baseDir, record);
-  return source && verifySentinelAssetDiscovery(source.graph, record.claim)
+  return source && verifySentinelAssetDiscovery(source.graph, record.claim) &&
+      allowsDiscoveryGraphFact(source.path, record, source.graph)
     ? source
     : undefined;
 }
@@ -286,9 +396,16 @@ export async function correctSentinelAssetDiscovery(
     );
     if (!candidate) return readSaved();
     const preview = (
-      { id, version, evidenceRevision, sourceDigest, claim }:
+      { id, version, evidenceRevision, sourceDigest, claim, graphFactSource }:
         SentinelAssetDiscoveryRecord,
-    ) => ({ id, version, evidenceRevision, sourceDigest, claim });
+    ) => ({
+      id,
+      version,
+      evidenceRevision,
+      sourceDigest,
+      claim,
+      ...(graphFactSource && { graphFactSource }),
+    });
     if (
       !await review.confirm(
         `Replace this approved Sentinel discovery in case ${input.sourceCaseId}?
@@ -446,7 +563,9 @@ export async function readScopedSentinelSharedAssetDiscoveries(
       results.filter(({ id, version, mappedAssetId, mappedTo }) => {
         const current = store.get(id);
         return current?.status === "approved" && current.version === version &&
-          allowsAsset(mappedAssetId, mappedTo) && allowsRecord(current);
+          allowsAsset(mappedAssetId, mappedTo) && allowsRecord(current) &&
+          (!current.graphFactSource ||
+            !!archivedDiscovery(location.baseDir, current));
       }),
   );
 }

@@ -88,6 +88,11 @@ When a child asks for published findings, the selection also bounds
 operator-published findings backed by local control evidence. The exact
 source report and current policy must still permit the finding. Withdrawal
 hides it from fresh reads while saved citations remain inspectable.
+An owner can submit a committed local relationship fact for discovery review
+with `operator_runs propose_graph_fact_discovery`. Provide the original
+`factId`, an exact supporting evidence `node` observed on both assets, and
+a `requestId`. Approve the pending discovery in Tidepool before another case
+can reuse it. The approval retains the fact and its original tool-step reference.
 Sentinel workers use an allowlist of read-only evidence tools. This registry
 excludes HTTP clients, shells, target connections, and credential tools.
 Background workers read their assigned case and evidence revision. Shared

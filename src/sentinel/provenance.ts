@@ -12,6 +12,7 @@ import {
 } from "./adaptive_store.ts";
 import {
   normalizeSentinelAssetDiscoveryClaim,
+  parseDiscoveryGraphFactSource,
   type SentinelAssetDiscoveryRecord,
 } from "./asset_discovery_store.ts";
 import { isSentinelCaseId } from "./cases.ts";
@@ -1065,12 +1066,18 @@ export function verifiedSharedAssetDiscovery(
   }
   if (citation.evidenceId !== claim.evidenceId) return undefined;
   const { sourceCaseId, taskId, evidenceRevision, sourceDigest } = source;
+  const graphFactSource = parseDiscoveryGraphFactSource(source.graphFactSource);
+  if (
+    source.graphFactSource !== undefined &&
+    (!graphFactSource || claim.kind !== "relationship")
+  ) return undefined;
   const digest = createHash("sha256").update(JSON.stringify({
     sourceCaseId,
     taskId,
     evidenceRevision,
     sourceDigest,
     claim,
+    ...(graphFactSource && { graphFactSource }),
   })).digest("hex");
   if (source.id !== `asset-discovery:${digest}`) return undefined;
   const { id, status, version, proposedAt, updatedAt } = source;
@@ -1085,6 +1092,7 @@ export function verifiedSharedAssetDiscovery(
     evidenceRevision,
     sourceDigest,
     claim,
+    ...(graphFactSource && { graphFactSource }),
   };
 }
 

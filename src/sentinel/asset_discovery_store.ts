@@ -28,12 +28,20 @@ export type SentinelAssetDiscoveryClaim =
     readonly evidenceId: string;
   };
 
+export interface DiscoveryGraphFactSource {
+  readonly id: string;
+  readonly runId: string;
+  readonly stepIndex: number;
+  readonly resultSha256: string;
+}
+
 export interface SentinelAssetDiscoveryRequest {
   readonly sourceCaseId: string;
   readonly taskId: string;
   readonly evidenceRevision: number;
   readonly sourceDigest: string;
   readonly claim: SentinelAssetDiscoveryClaim;
+  readonly graphFactSource?: DiscoveryGraphFactSource;
 }
 
 export type SentinelAssetDiscoveryStatus = "pending" | "approved" | "withdrawn";
@@ -129,11 +137,42 @@ export function normalizeSentinelAssetDiscoveryClaim(
   throw new Error("Invalid Sentinel discovery claim");
 }
 
+export function parseDiscoveryGraphFactSource(
+  value: unknown,
+): DiscoveryGraphFactSource | undefined {
+  if (
+    !value || typeof value !== "object" || Array.isArray(value) ||
+    Object.keys(value).length !== 4
+  ) return;
+  const { id, runId, stepIndex, resultSha256 } = value as Record<
+    string,
+    unknown
+  >;
+  if (
+    typeof id !== "string" || !/^worker-graph-fact:[a-f0-9]{64}$/.test(id) ||
+    typeof runId !== "string" || !requestIdPattern.test(runId) ||
+    runId !== runId.toLowerCase() || typeof stepIndex !== "number" ||
+    !Number.isSafeInteger(stepIndex) || stepIndex < 0 || stepIndex >= 16 ||
+    typeof resultSha256 !== "string" || !/^[a-f0-9]{64}$/.test(resultSha256)
+  ) return;
+  return { id, runId, stepIndex, resultSha256 };
+}
+
 function normalizeRequest(
   request: SentinelAssetDiscoveryRequest,
 ): SentinelAssetDiscoveryRequest {
   const { sourceCaseId, taskId, evidenceRevision, sourceDigest, claim } =
     request;
+  const normalizedClaim = normalizeSentinelAssetDiscoveryClaim(claim);
+  const graphFactSource = parseDiscoveryGraphFactSource(
+    request.graphFactSource,
+  );
+  if (
+    request.graphFactSource !== undefined &&
+    (!graphFactSource || normalizedClaim.kind !== "relationship")
+  ) {
+    throw new Error("Invalid Sentinel graph fact discovery source");
+  }
   if (
     !isSentinelCaseId(sourceCaseId) || typeof taskId !== "string" ||
     !/^adaptive:[a-f0-9]{64}$/.test(taskId) ||
@@ -145,7 +184,8 @@ function normalizeRequest(
     taskId,
     evidenceRevision,
     sourceDigest,
-    claim: normalizeSentinelAssetDiscoveryClaim(claim),
+    claim: normalizedClaim,
+    ...(graphFactSource && { graphFactSource }),
   };
 }
 

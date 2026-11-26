@@ -144,6 +144,7 @@ async function withOwnerControl(
   sentinelProfiles?: Parameters<
     typeof createOperatorRunToolExecutor
   >[0]["sentinelProfiles"],
+  allowCall: () => boolean = () => true,
 ) {
   const approvals: string[] = [];
   const providers = createProviderRegistry();
@@ -187,6 +188,8 @@ async function withOwnerControl(
     providerRegistry: providers,
     hookRunner: {
       evaluateHook(hook, { session, input, auditInput }) {
+        const allowed = hook !== "PRE_TOOL_CALL" || !input.tool_call ||
+          allowCall();
         if (
           hook === "POST_TOOL_RESPONSE" && input.tool_name === "operator_runs"
         ) {
@@ -202,8 +205,8 @@ async function withOwnerControl(
           assertEquals(input.target_classification, session.taint);
         }
         return Promise.resolve({
-          allowed: true,
-          action: "ALLOW",
+          allowed,
+          action: allowed ? "ALLOW" : "BLOCK",
           ruleId: null,
           duration: 0,
         });
@@ -1063,6 +1066,157 @@ Deno.test("A linked child reuses only approved discoveries from its reviewed sou
     const parent = startSentinelAssessment(pathFor("main"));
     const source = startSentinelAssessment(pathFor("approved"));
     const other = startSentinelAssessment(pathFor("excluded"));
+    const sourcePath = pathFor("approved");
+    advanceAdaptiveSentinel(sourcePath, source);
+    const sourceQueue = openSentinelAdaptiveStore(
+      join(dirname(sourcePath), "sentinel-adaptive.db"),
+    );
+    const sourceRevision = adaptiveRevision(source);
+    let sourceLease;
+    try {
+      sourceQueue.sync(sourceRevision, [{
+        kind: "impact",
+        nodeId: "canonical-a",
+        reason: MODEL_ASSIGNMENT_REASON,
+      }], sourceRevision);
+      advanceAdaptiveSentinel(sourcePath, source);
+      sourceLease = sourceQueue.claimModelReview(
+        sourceRevision,
+        MODEL_ASSIGNMENT_REASON,
+        ({ nodeId }) => nodeId === "canonical-a",
+      );
+    } finally {
+      sourceQueue.close();
+    }
+    assert(sourceLease);
+    let fact:
+      | { id: string; sourceStepIndex: number; resultSha256: string }
+      | undefined;
+    const model = createProviderRegistry();
+    const factCalls = [{
+      name: "sentinel_assigned_target",
+      args: {},
+    }, {
+      name: "sentinel_publish_graph_fact",
+      args: {
+        from: "canonical-a",
+        to: "canonical-b",
+        relation: "depends_on",
+        requestId: crypto.randomUUID(),
+      },
+    }];
+    model.register({
+      name: "source-fact",
+      supportsStreaming: false,
+      complete(messages) {
+        const results = messages.filter(({ role }) => role === "tool");
+        const next = factCalls[results.length];
+        if (!next) {
+          const returned = JSON.parse(String(results.at(-1)?.content));
+          fact = returned.fact ?? returned;
+        }
+        return Promise.resolve({
+          content: next ? "" : "The exact relationship was recorded.",
+          usage: { inputTokens: 1, outputTokens: 1 },
+          toolCalls: next
+            ? [{
+              id: next.name,
+              type: "function",
+              function: {
+                name: next.name,
+                arguments: JSON.stringify(next.args),
+              },
+            }]
+            : [],
+        });
+      },
+    });
+    model.setDefault("source-fact");
+    const producer = createSentinelSubagent({
+      snapshotPath: sourcePath,
+      assessmentRevision: source.revision,
+      assignedTaskId: sourceLease.task.id,
+      assignedTaskLeaseToken: sourceLease.token,
+      providerRegistry: model,
+      hookRunner: hooks,
+      allowModelAccess: true,
+    });
+    try {
+      await producer.execute(
+        "Record the dependency in the assigned evidence.",
+        () => {},
+      );
+    } finally {
+      producer.clear();
+    }
+    assert(fact);
+    assert(fact.id.startsWith("worker-graph-fact:"));
+    const sourceRunId = source.plan.runId;
+    assert(sourceRunId);
+    const expectedFact = {
+      id: fact.id,
+      runId: sourceRunId,
+      stepIndex: fact.sourceStepIndex,
+      resultSha256: fact.resultSha256,
+    };
+    const requestProposal = {
+      action: "propose_graph_fact_discovery",
+      kind: "sentinel",
+      id: "approved",
+      revision: source.revision,
+      factId: fact.id,
+      node: "record",
+      requestId: crypto.randomUUID(),
+    };
+    let approved: { id: string; version: number; status: string } | undefined;
+    let allowProposal = false;
+    await withOwnerControl(
+      baseDir,
+      async (request) => {
+        assert((await request(requestProposal)).includes("blocked"));
+        allowProposal = true;
+        const { proposals } = JSON.parse(
+          await request({
+            kind: requestProposal.kind,
+            id: requestProposal.id,
+            revision: requestProposal.revision,
+            action: "discovery_proposals",
+          }),
+        );
+        assertEquals(proposals, []);
+        assert(
+          (await request({ ...requestProposal, node: "unknown-evidence" }))
+            .startsWith("Error:"),
+        );
+        assert(
+          (await request({ ...requestProposal, id: "excluded" })).startsWith(
+            "Error:",
+          ),
+        );
+        const { proposal } = JSON.parse(await request(requestProposal));
+        assertEquals(proposal.status, "pending");
+        assertEquals(proposal.graphFactSource, expectedFact);
+        assertEquals(
+          JSON.parse(await request(requestProposal)).proposal,
+          proposal,
+        );
+        approved = proposal;
+      },
+      undefined,
+      () => allowProposal,
+    );
+    assert(approved);
+    const approval = approved;
+    await withTidepoolSocket(baseDir, async (request) => {
+      const response = await request("asset_discovery_decision", {
+        caseId: "approved",
+        action: "approve",
+        id: approval.id,
+        version: approval.version,
+      });
+      assertEquals(response.type, "sentinel_asset_discovery_decision");
+      assertEquals((response.record as typeof approval).status, "approved");
+    });
     const sourceGraph = makeGraph();
     sourceGraph.nodes.push({
       kind: "asset",
@@ -1073,7 +1227,6 @@ Deno.test("A linked child reuses only approved discoveries from its reviewed sou
     const newer = refreshSentinelAssessment(pathFor("approved"));
     assert(newer && newer.revision > source.revision);
     const registry = openSentinelAssetDiscoveryStore(baseDir);
-    let approved: string;
     let excludedCase: string;
     let excludedRevision: string;
     try {
@@ -1100,14 +1253,11 @@ Deno.test("A linked child reuses only approved discoveries from its reviewed sou
         assert(registry.approve(record.id, record.version));
         return record.id;
       };
-      approved = publish("approved", source, "a");
       excludedCase = publish("excluded", other, "b");
       excludedRevision = publish("approved", newer, "c");
     } finally {
       registry.close();
     }
-    const sourceRunId = source.plan.runId;
-    assert(sourceRunId);
     const expected = [{
       caseId: "approved",
       revision: source.revision,
@@ -1165,7 +1315,7 @@ Deno.test("A linked child reuses only approved discoveries from its reviewed sou
             {},
             { id: excludedCase },
             { id: excludedRevision },
-            { id: approved },
+            { id: approval.id },
           ];
           if (results.length === args.length) {
             observed[role] = results.map(({ content }) => String(content));
@@ -1267,15 +1417,52 @@ Deno.test("A linked child reuses only approved discoveries from its reviewed sou
     for (const results of [observed.planner, observed.worker]) {
       assertEquals(
         JSON.parse(results[0]).discoveries.map(({ id }: { id: string }) => id),
-        [approved],
+        [approval.id],
       );
       assert(results[1].startsWith("Error:"));
       assert(results[2].startsWith("Error:"));
       const { discovery } = JSON.parse(results[3]);
-      assertEquals(discovery.id, approved);
+      assertEquals(discovery.id, approval.id);
+      assertEquals(discovery.graphFactSource, expectedFact);
       assertEquals(discovery.evidenceRevision, source.revision);
       assertEquals(discovery.mappedTo, "local-b");
     }
+    const exactBeforeWithdrawal = JSON.parse(observed.planner[3]);
+    const history = readAdaptiveSentinel(childPath, child, "revision");
+    const round = history?.modelPlannerHistory.find(({ reads }) =>
+      reads?.some(({ target }) => target === approval.id)
+    );
+    assert(round);
+    const exactOrdinal = (round.reads?.findIndex(({ target }) =>
+      target === approval.id
+    ) ?? -1) + 1;
+    assert(exactOrdinal > 0);
+    await withTidepoolSocket(baseDir, async (request) => {
+      const response = await request("asset_discovery_decision", {
+        caseId: "approved",
+        action: "withdraw",
+        id: approval.id,
+        version: approval.version + 1,
+      });
+      assertEquals((response.record as typeof approval).status, "withdrawn");
+    });
+    const currentReader = createSentinelSubagent({
+      snapshotPath: childPath,
+      assessmentRevision: child.revision,
+      plannerExecutionEvidenceRunId: child.plan.runId,
+      providerRegistry: modelFor("planner"),
+      hookRunner: hooks,
+      sharedInventoryBaseDir: baseDir,
+      allowModelAccess: true,
+    });
+    try {
+      await currentReader.execute("Confirm the current approval.", () => {});
+    } finally {
+      currentReader.clear();
+    }
+    assertEquals(JSON.parse(observed.planner[0]).discoveries, []);
+    assert(observed.planner[3].startsWith("Error:"));
+
     const scope = {
       kind: "sentinel",
       id: "child",
@@ -1304,6 +1491,11 @@ Deno.test("A linked child reuses only approved discoveries from its reviewed sou
         "succeeded",
       );
       await Deno.rename(dirname(childPath), join(baseDir, "prior-child"));
+      await Deno.rename(dirname(sourcePath), join(baseDir, "prior-source"));
+      await Deno.rename(
+        join(baseDir, "data", "sentinel-asset-discoveries.db"),
+        join(baseDir, "prior-discoveries.db"),
+      );
       assertEquals(
         JSON.parse(
           await request({
@@ -1318,6 +1510,20 @@ Deno.test("A linked child reuses only approved discoveries from its reviewed sou
       const restored = childState();
       assert(restored.paused);
       assertEquals(restored.plan.linkedCaseSources, expected);
+      const reopened = JSON.parse(
+        await request({
+          kind: scope.kind,
+          id: scope.id,
+          revision: scope.revision,
+          action: "planner_reads",
+          plannerIdentity: round.identity,
+          attempt: round.attempt,
+          ordinal: exactOrdinal,
+          includeResult: true,
+        }),
+      );
+      assertEquals(reopened.result.discovery.graphFactSource, expectedFact);
+      assertEquals(reopened.result, exactBeforeWithdrawal);
     });
   } finally {
     planner?.stop();

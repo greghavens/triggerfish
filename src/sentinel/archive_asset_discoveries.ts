@@ -4,6 +4,7 @@ import { openSentinelAdaptiveStore } from "./adaptive_store.ts";
 import { verifySentinelAssetDiscovery } from "./asset_discovery_evidence.ts";
 import {
   openSentinelAssetDiscoveryStore,
+  parseDiscoveryGraphFactSource,
   type SentinelAssetDiscoveryRecord,
 } from "./asset_discovery_store.ts";
 import {
@@ -90,6 +91,9 @@ function readBundle(path: string) {
       const graph = loadSentinelGraph(snapshot);
       if (
         record.status !== "approved" || result.has(record.id) ||
+        (record.graphFactSource !== undefined &&
+          (record.claim.kind !== "relationship" ||
+            !parseDiscoveryGraphFactSource(record.graphFactSource))) ||
         digestSentinelSnapshot(graph.snapshot()) !== record.sourceDigest ||
         !verifySentinelAssetDiscovery(graph, record.claim)
       ) throw new Error("Invalid archived discovery source");

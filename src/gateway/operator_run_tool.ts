@@ -11,6 +11,7 @@ import {
 import {
   correctSentinelAssetDiscovery,
   listSentinelAssetDiscoveryProposals,
+  proposeSentinelGraphFactDiscovery,
 } from "./sentinel_asset_discoveries.ts";
 import {
   delegatedSubagentIdentity,
@@ -381,6 +382,7 @@ export const operatorRunTool: ToolDefinition = {
         "withdraw_discoveries",
         "correct_discovery",
         "discovery_proposals",
+        "propose_graph_fact_discovery",
         "preview_inventory_withdrawal",
         "withdraw_inventory_host",
         "set_case_membership",
@@ -1412,70 +1414,11 @@ async function reopenSentinelSourceResult(
       )
     ) text = JSON.stringify(page.result);
   } else if (step.tool === "sentinel_shared_asset_discoveries") {
-    const citation = step.sharedAssetDiscovery;
     const caseId = locateSentinelCase(path)?.caseId;
     const runId = readSentinelRunIdForRevision(path, revision);
-    if (!caseId || !runId || !citation || selector.id !== citation.id) return;
-    const entry = readHistoricalDiscoveryEvidence(
-      baseDir,
-      path,
-      citation.id,
-      citation.version,
-    );
-    const snapshot = readSentinelAssessmentRevision(path, revision)?.result
-      .sharedGraph.snapshot;
-    const record = entry &&
-      verifiedSharedAssetDiscovery(
-        caseId,
-        new Map([[citation.id, entry.record]]),
-        step,
-      );
-    const match = record && snapshot && matchSentinelAssetDiscoveryDestination(
-      loadSentinelGraph(entry.snapshot),
-      loadSentinelGraph(snapshot),
-      record.claim,
-    );
-    const constraints = readSentinelOperatingConstraints(path, runId)
-      ?.constraints;
-    if (
-      record && match && sentinelOperatingConstraintsAllow(
-        constraints,
-        { kind: "review_evidence", nodeId: match.assetId },
-        snapshot,
-      ) && (match.to === undefined || sentinelOperatingConstraintsAllow(
-        constraints,
-        { kind: "review_evidence", nodeId: match.to },
-        snapshot,
-      ))
-    ) {
-      const {
-        sourceCaseId,
-        taskId,
-        evidenceRevision,
-        sourceDigest,
-        claim,
-        id,
-        status,
-        version,
-        proposedAt,
-        updatedAt,
-      } = record;
-      text = JSON.stringify({
-        discovery: {
-          sourceCaseId,
-          taskId,
-          evidenceRevision,
-          sourceDigest,
-          claim,
-          id,
-          status,
-          version,
-          proposedAt,
-          updatedAt,
-          mappedAssetId: match.assetId,
-          ...(match.to && { mappedTo: match.to }),
-        },
-      });
+    if (caseId && runId && selector.id === step.sharedAssetDiscovery?.id) {
+      text = reopenCitedDiscovery(baseDir, path, caseId, revision, runId, step)
+        ?.text;
     }
   } else if (step.tool === "sentinel_worker_findings") {
     const runId = readSentinelRunIdForRevision(path, revision);
@@ -1604,6 +1547,8 @@ function reopenCitedDiscovery(
       evidenceRevision: record.evidenceRevision,
       sourceDigest: record.sourceDigest,
       claim: record.claim,
+      ...(record.graphFactSource &&
+        { graphFactSource: record.graphFactSource }),
       id: record.id,
       status: record.status,
       version: record.version,
@@ -1632,6 +1577,8 @@ function reopenCitedDiscovery(
       sourceAssignmentId: record.taskId,
       discoveryId: record.id,
       approvalVersion: record.version,
+      ...(record.graphFactSource &&
+        { graphFactSource: record.graphFactSource }),
       evidence: { id: evidence.id, kind: evidence.kind, label: evidence.label },
     },
   };
@@ -3026,6 +2973,32 @@ export function createOperatorRunToolExecutor(options: {
           options.webContainmentConfigured,
         );
         return typeof result === "string" ? result : safeProjection(result);
+      }
+
+      if (action === "propose_graph_fact_discovery") {
+        const { factId, node, requestId } = args;
+        if (
+          ref.kind !== "sentinel" || ref.revision === undefined ||
+          !canFlowTo("INTERNAL", context?.ceiling ?? "INTERNAL") ||
+          typeof factId !== "string" ||
+          !/^worker-graph-fact:[a-f0-9]{64}$/.test(factId) ||
+          typeof node !== "string" || !node.trim() || node.length > 4096 ||
+          node.includes("\x00") ||
+          typeof requestId !== "string" || !digestPattern.test(requestId) ||
+          Object.keys(args).some((key) =>
+            !["action", "kind", "id", "revision", "factId", "node", "requestId"]
+              .includes(key)
+          ) || !await controller.inspect(ref)
+        ) return unavailable;
+        const proposed = proposeSentinelGraphFactDiscovery(
+          options.baseDir,
+          ref.id,
+          ref.revision,
+          factId,
+          node,
+          requestId,
+        );
+        return proposed ? safeProjection({ proposal: proposed }) : unavailable;
       }
 
       if (action === "discovery_proposals") {
