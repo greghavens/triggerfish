@@ -12,8 +12,10 @@ import {
 import { createAgentEventScheduler } from "../../src/scheduler/service_agent_events.ts";
 import {
   completeSentinelAssessmentGoal,
+  readSentinelCaseStatus,
   startSentinelAssessment,
 } from "../../src/sentinel/assessment_store.ts";
+import { reconcileSentinelDeadlineGoal } from "../../src/gateway/sentinel_goal_completion.ts";
 import { advanceAdaptiveSentinel } from "../../src/gateway/sentinel_adaptive_runtime.ts";
 import {
   adaptiveRevision,
@@ -196,9 +198,14 @@ Deno.test("Reviewed event subscription dispatches committed case metadata only o
       subscriptionSettings: {
         id: "new-main-review",
         agent: "review-agent",
-        kinds: ["task_created", "finding", "goal_completed", "tool_completed"],
+        kinds: [
+          "task_created",
+          "finding",
+          "goal_completed",
+          "tool_completed",
+          "timeout",
+        ],
         tool: "sentinel_assigned_target",
-        caseId: "main",
         merge: "by_case",
         maxConcurrent: 1,
         enabled: true,
@@ -312,6 +319,54 @@ Deno.test("Reviewed event subscription dispatches committed case metadata only o
     const final = await manage({ action: "agent_event_subscriptions" });
     assertEquals(JSON.parse(final).deliveries.length, 1);
     assertEquals(messages.length, 1);
+
+    scheduler.stop();
+    const timeoutCase = "deadline-case";
+    const timeoutPath = resolveSentinelCasePath(baseDir, timeoutCase);
+    await Deno.mkdir(dirname(timeoutPath), { recursive: true });
+    await Deno.copyFile(path, timeoutPath);
+    const timed = JSON.parse(
+      await manage({
+        action: "spawn",
+        kind: "sentinel",
+        id: "main",
+        revision: started.revision,
+        targetKind: "sentinel",
+        targetId: timeoutCase,
+        requestId: crypto.randomUUID(),
+        timeoutSeconds: 1,
+      }),
+    ).run;
+    assertEquals(timed.status, "running");
+    const cutoff = timed.details.deadlineAt;
+    assert(typeof cutoff === "number");
+    await new Promise((resolve) =>
+      setTimeout(resolve, Math.max(0, cutoff - Date.now()) + 10)
+    );
+    assert(reconcileSentinelDeadlineGoal(timeoutPath));
+    const settled = readSentinelCaseStatus(timeoutPath, true);
+    assertEquals(settled?.status, "timed_out");
+    const timedRunId = settled?.discovery?.runId;
+    assert(timedRunId);
+    scheduler.start();
+    // The authenticated owner waits for the scheduler's durable delivery ledger.
+    const deliveries = await manage({ action: "agent_event_subscriptions" });
+    assertEquals(JSON.parse(deliveries).deliveries.length, 2);
+    assertEquals(messages.length, 2);
+    assertStringIncludes(
+      messages[1],
+      JSON.stringify({
+        kind: "timeout",
+        receipt: timedRunId,
+        caseId: timeoutCase,
+        recordedAt: cutoff,
+      }),
+    );
+    scheduler.stop();
+    scheduler.start();
+    const afterRestart = await manage({ action: "agent_event_subscriptions" });
+    assertEquals(JSON.parse(afterRestart).deliveries.length, 2);
+    assertEquals(messages.length, 2);
   } finally {
     scheduler.stop();
     socket?.close();
