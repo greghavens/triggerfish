@@ -1109,10 +1109,8 @@ Deno.test("Gateway workers share an approved discovery with exact cross-case pro
       ...archiveArgs,
     }, confirm);
     assert(typeof archivedRun !== "string");
-    assertEquals(
-      (archivedRun.receipt as { status: string }).status,
-      "succeeded",
-    );
+    assert("receipt" in archivedRun);
+    assertEquals(archivedRun.receipt.status, "succeeded");
     await Deno.rename(dirname(consumerPath), join(baseDir, "old-consumer"));
     await Deno.remove(join(baseDir, "data", "sentinel-asset-discoveries.db"));
     await Deno.rename(sourcePath, join(baseDir, "old-source-snapshot.json"));
@@ -1136,7 +1134,8 @@ Deno.test("Gateway workers share an approved discovery with exact cross-case pro
       archiveId,
     }, confirm);
     assert(typeof incomplete !== "string");
-    assertEquals((incomplete.receipt as { status: string }).status, "failed");
+    assert("receipt" in incomplete);
+    assertEquals(incomplete.receipt.status, "failed");
     await Deno.rename(hiddenArtifact, artifact);
     const restoredRun = await executeOperatorRunArchive(baseDir, ref, {
       action: "restore",
@@ -1145,10 +1144,8 @@ Deno.test("Gateway workers share an approved discovery with exact cross-case pro
       archiveId,
     }, confirm);
     assert(typeof restoredRun !== "string");
-    assertEquals(
-      (restoredRun.receipt as { status: string }).status,
-      "succeeded",
-    );
+    assert("receipt" in restoredRun);
+    assertEquals(restoredRun.receipt.status, "succeeded");
     const restored = readAdaptiveSentinel(
       consumerPath,
       destination,
