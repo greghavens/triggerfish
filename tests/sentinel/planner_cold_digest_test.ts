@@ -2398,12 +2398,37 @@ Deno.test("Sentinel plans from an exact published case finding and keeps its evi
     const selectedReads: string[] = [];
     const selectedDone = Promise.withResolvers<void>();
     let readSelectedAgain = false;
+    const catalogReads: Array<
+      Array<{
+        localAssetId: string;
+        sourceCaseId: string;
+        sourceRunId: string;
+        sourceEvidenceRevision: number;
+        sourceAssetId: string;
+        findingId: string;
+      }>
+    > = [];
+    let selectedNow = Date.now();
+
     const selectedProviders = createProviderRegistry();
     selectedProviders.register({
       name: "selected-source-model",
       supportsStreaming: false,
       complete(messages) {
         const prior = messages.findLast(({ role }) => role === "tool");
+        if (!prior) {
+          const prompt = messages.findLast(({ role }) => role === "user")
+            ?.content;
+          if (
+            typeof prompt === "string" &&
+            prompt.includes('"approvedDiscoverySources"')
+          ) {
+            const input = JSON.parse(
+              prompt.slice(prompt.lastIndexOf("\n") + 1),
+            );
+            catalogReads.push(input.linkedFindingCandidates ?? []);
+          }
+        }
         if (readSelectedAgain) {
           if (!prior) {
             return Promise.resolve(
@@ -2425,10 +2450,14 @@ Deno.test("Sentinel plans from an exact published case finding and keeps its evi
             return Promise.resolve(
               completion("", discovery, findSelected("other-publication")),
             );
-          case 1:
-            return Promise.resolve(
-              completion("", discovery, findSelected(source)),
-            );
+          case 1: {
+            const [candidate] = catalogReads[0];
+            assert(candidate);
+            return Promise.resolve(completion("", discovery, {
+              ...findSelected(candidate.sourceCaseId),
+              asset: candidate.localAssetId,
+            }));
+          }
           case 2:
             return Promise.resolve(completion("", sourceRead, exactSelected));
           case 3:
@@ -2489,6 +2518,8 @@ Deno.test("Sentinel plans from an exact published case finding and keeps its evi
     selectedPlanner = createSentinelModelPlanner(
       selectedPath,
       createSelectedAgent,
+      undefined,
+      () => selectedNow,
     );
     selectedPlanner.advance(selected);
     const selectedTimeout = setTimeout(
@@ -2504,6 +2535,15 @@ Deno.test("Sentinel plans from an exact published case finding and keeps its evi
       await new Promise((resolve) => setTimeout(resolve, 5));
     }
     assert(!selectedPlanner.hasInFlightWork());
+    assertEquals(catalogReads, [[{
+      localAssetId: selectedAsset,
+      sourceCaseId: source,
+      sourceRunId,
+      sourceEvidenceRevision: sourceState.revision,
+      sourceAssetId: exact.sourceAsset,
+      findingId: exact.finding,
+    }]]);
+
     assertStringIncludes(selectedReads[0], "unavailable");
     assertEquals(
       JSON.parse(selectedReads[1]).findings.map(
@@ -2634,6 +2674,25 @@ Deno.test("Sentinel plans from an exact published case finding and keeps its evi
       });
     assert(sourcePolicy(0, true));
     assertEquals(await readSelected(), []);
+    await withArchivedPlannerRead(directory, async (read) => {
+      const response = await read({
+        ...selectedRef,
+        action: "hint",
+        note: "Check current reviewed sources.",
+        requestId: crypto.randomUUID(),
+      });
+      assert(!response.startsWith("Error:"), response);
+    });
+    selectedNow += 60_001;
+    selectedPlanner.advance(selected);
+    const catalogDeadline = Date.now() + 2500;
+    while (
+      (catalogReads.length < 2 || selectedPlanner.hasInFlightWork()) &&
+      Date.now() < catalogDeadline
+    ) await new Promise((resolve) => setTimeout(resolve, 5));
+    assertEquals(catalogReads.length, 2);
+    assertEquals(catalogReads[1], []);
+
     assert(sourcePolicy(1, false));
     assertEquals(
       (await readSelected()).map(

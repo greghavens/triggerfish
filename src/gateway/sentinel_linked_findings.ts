@@ -6,6 +6,11 @@ import {
   readSentinelRunIdForRevision,
 } from "../sentinel/assessment_store.ts";
 import { resolveSentinelCasePath } from "../sentinel/cases.ts";
+import {
+  indexArchivedSentinelAssetSource,
+  readSharedSentinelAssetLinks,
+} from "../sentinel/shared_inventory.ts";
+
 import { sentinelFindingTrafficEvidenceVersion } from "../sentinel/finding_traffic_links.ts";
 import type { GraphNode } from "../sentinel/graph.ts";
 import type { SentinelLinkedCaseSource } from "../sentinel/linked_case_sources.ts";
@@ -130,4 +135,80 @@ export function readLinkedFindingProof(
   } catch {
     return undefined;
   }
+}
+
+/** Bounded local source discovery only. Authenticated exact reads establish proof. */
+export async function discoverLinkedLocalFindings(
+  baseDir: string,
+  sources: readonly SentinelLinkedCaseSource[],
+  local: Parameters<typeof indexArchivedSentinelAssetSource>[0],
+  allowsAsset: (asset: string) => boolean,
+  signal: AbortSignal,
+) {
+  const assets = local.nodes.flatMap(({ id, kind }) =>
+    kind === "asset" && allowsAsset(id) ? [id] : []
+  ).slice(0, 4);
+  const bindings = new Map(sources.map((source) => [source.caseId, source]));
+  const pages = await Promise.all(assets.map(async (asset) => {
+    const { findings } = await readSharedSentinelAssetLinks(
+      baseDir,
+      asset,
+      0,
+      4,
+      signal,
+      local,
+      true,
+      {
+        selectedFindings: {
+          includesSource: (caseId) => bindings.has(caseId),
+          permits(caseId, sourceAssetId, finding) {
+            if (signal.aborted) return false;
+            const source = bindings.get(caseId);
+            if (!source) return false;
+            const proof = readLinkedFindingProof(
+              baseDir,
+              sources,
+              caseId,
+              sourceAssetId,
+              finding,
+            );
+            if (!proof || proof.execution) return false;
+            const path = resolveSentinelCasePath(baseDir, source.caseId);
+            const pinned = readSentinelAssessmentRevision(path, source.revision)
+              ?.result.sharedGraph.snapshot;
+            return !!pinned &&
+              !!indexArchivedSentinelAssetSource(
+                local,
+                pinned,
+                asset,
+                sourceAssetId,
+              );
+          },
+        },
+      },
+    );
+    return (findings ?? []).flatMap(({ caseId, assetId, finding }) => {
+      const source = bindings.get(caseId);
+      return source
+        ? [{
+          localAssetId: asset,
+          sourceCaseId: source.caseId,
+          sourceRunId: source.runId,
+          sourceEvidenceRevision: source.revision,
+          sourceAssetId: assetId,
+          findingId: finding.id,
+        }]
+        : [];
+    });
+  }));
+  return pages.flat().filter((pointer) => {
+    const proof = readLinkedFindingProof(
+      baseDir,
+      sources,
+      pointer.sourceCaseId,
+      pointer.sourceAssetId,
+      pointer.findingId,
+    );
+    return !!proof && !proof.execution && !signal.aborted;
+  }).slice(0, 4);
 }

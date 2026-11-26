@@ -5,7 +5,10 @@ import {
 } from "../sentinel/traffic_receipts.ts";
 import { notifyCommittedEvidence } from "../core/evidence_task_progression.ts";
 import { readScopedSentinelSharedAssetDiscoveries } from "./sentinel_asset_discoveries.ts";
-import { readLinkedFindingProof } from "./sentinel_linked_findings.ts";
+import {
+  discoverLinkedLocalFindings,
+  readLinkedFindingProof,
+} from "./sentinel_linked_findings.ts";
 import { reopenSentinelAssignedInventory } from "./sentinel_inventory_tool.ts";
 import { createEvidencePlanningGate } from "../core/evidence_task_progression.ts";
 import { reopenSentinelLinkedTrafficPayload } from "./sentinel_finding_traffic_tool.ts";
@@ -6397,6 +6400,20 @@ export function createSentinelModelPlanner(
             })
           ).catch(() => [])
           : [];
+        const linkedFindingCandidates = linkedSources?.length && location &&
+            worker.authorizeLinkedFinding && currentlyPlanning()
+          ? await discoverLinkedLocalFindings(
+            location.baseDir,
+            linkedSources,
+            snapshot,
+            (asset) =>
+              sentinelOperatingConstraintsAllow(constraints?.constraints, {
+                kind: "review_evidence",
+                nodeId: asset,
+              }, snapshot),
+            signal,
+          ).catch(() => [])
+          : [];
         if (linkedSources && !currentlyPlanning()) {
           controller.abort(superseded);
           return;
@@ -6406,6 +6423,11 @@ export function createSentinelModelPlanner(
           ...(linkedDiscoveryCandidates.length
             ? [
               "Reopen exact IDs in linkedDiscoveryCandidates with sentinel_shared_asset_discoveries. The pointers are discovery hints only and do not establish evidence.",
+            ]
+            : []),
+          ...(linkedFindingCandidates.length
+            ? [
+              "Use the localAssetId and sourceCaseId in linkedFindingCandidates to discover the exact approved finding with sentinel_shared_asset_links and includeFindings true. Then reopen the exact source to cite it. These pointers are not evidence.",
             ]
             : []),
           "Use only reviews of recorded findings, evidence or existing incident candidates, dependency impact, or relationship tracing.",
@@ -6499,6 +6521,7 @@ export function createSentinelModelPlanner(
           }),
           ...(linkedDiscoveryCandidates.length &&
             { linkedDiscoveryCandidates }),
+          ...(linkedFindingCandidates.length && { linkedFindingCandidates }),
           goal: state.plan.goal ??
             "Investigate high-priority evidence gaps",
           goalCompletion: goalCompletion && {
@@ -6623,6 +6646,8 @@ export function createSentinelModelPlanner(
               firstActionable > 0 && firstActionable === last ? last - 1 : last,
               1,
             );
+          } else if (inputs.linkedFindingCandidates?.length) {
+            inputs.linkedFindingCandidates.pop();
           } else if (inputs.linkedDiscoveryCandidates?.length) {
             inputs.linkedDiscoveryCandidates.pop();
           } else if (inputs.operatorHints.length) inputs.operatorHints.pop();
