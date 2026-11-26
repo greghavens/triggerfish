@@ -1,9 +1,13 @@
+import { dirname, join } from "@std/path";
 import { readSentinelWorkerEvidenceScope } from "../../sentinel_worker_evidence_scope.ts";
 import { scopedSentinelInventoryGraph } from "../../sentinel_agent.ts";
 import { sentinelOperatingConstraintsAllow } from "../../../sentinel/operating_constraints.ts";
 import type { ChatSession } from "../../chat_session_interface.ts";
 /** Authenticated Tidepool operations for the gateway-owned Sentinel assessment. */
-import { taskUpstreamCitations } from "../../../sentinel/adaptive_store.ts";
+import {
+  readScopedSentinelWorkerActivity,
+  taskUpstreamCitations,
+} from "../../../sentinel/adaptive_store.ts";
 import {
   correctSentinelAssetDiscovery,
   decideSentinelAssetDiscovery,
@@ -211,6 +215,19 @@ function scopedRetainedAssessment(
       sharedGraph: { snapshot, observations: [], observationLinks: [] },
     },
   };
+}
+
+function scopedWorkerHistory(path: string, revision: number, before?: number) {
+  const scope = readSentinelWorkerEvidenceScope(path, revision);
+  return scope
+    ? readScopedSentinelWorkerActivity(
+      join(dirname(path), "sentinel-adaptive.db"),
+      revision,
+      scope.runId,
+      scope.allowedTaskIds,
+      before,
+    )
+    : { history: [], historyCursor: null };
 }
 
 export function createTidepoolSentinelHandler(
@@ -1165,7 +1182,10 @@ export function createTidepoolSentinelHandler(
               "Select a retained evidence revision and history page.",
             );
           }
-          const page = readHistoricalAdaptiveSentinel(path, revision, before);
+          const scope = retainedTelemetryScope(path, revision);
+          const page = scope
+            ? scopedWorkerHistory(path, revision, before)
+            : readHistoricalAdaptiveSentinel(path, revision, before);
           send({
             topic: "sentinel",
             type: "sentinel_worker_history",
@@ -1237,6 +1257,12 @@ export function createTidepoolSentinelHandler(
           }
           const previousScope = previous &&
             retainedTelemetryScope(path, previous.revision);
+          const scopedHistory = scope
+            ? scopedWorkerHistory(path, revision)
+            : undefined;
+          const earlierHistory = previousScope && previous
+            ? scopedWorkerHistory(path, previous.revision)
+            : undefined;
           const selected = scope
             ? scopedRetainedAssessment(path, historical)
             : undefined;
@@ -1477,7 +1503,7 @@ export function createTidepoolSentinelHandler(
             alertFeedAvailable: scope
               ? !!fullAlertFeed()?.length
               : hasSavedSentinelAlerts(path, revision),
-            adaptive,
+            adaptive: scopedHistory ?? adaptive,
             focusId,
             selectedAssessmentReview: focusedReview?.task,
             notificationReceipt: readSentinelNotificationReceipt(
@@ -1525,8 +1551,10 @@ export function createTidepoolSentinelHandler(
               adaptiveGoal: earlierPlan?.goal.label ?? null,
               modelPlanner: earlierPlan?.modelPlanner ?? null,
               modelPlannerHistory: earlierPlan?.modelPlannerHistory ?? [],
-              workerHistory: earlierPlan?.history ?? null,
-              historyCursor: earlierPlan?.historyCursor ?? null,
+              workerHistory: earlierHistory?.history ?? earlierPlan?.history ??
+                null,
+              historyCursor: earlierHistory?.historyCursor ??
+                earlierPlan?.historyCursor ?? null,
             },
             provenance,
           });

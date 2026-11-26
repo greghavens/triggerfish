@@ -1,3 +1,4 @@
+import { DatabaseSync } from "node:sqlite";
 import { advanceAdaptiveSentinel } from "../../src/gateway/sentinel_adaptive_runtime.ts";
 import { adaptiveRevision } from "../../src/sentinel/adaptive_planner.ts";
 import {
@@ -5,7 +6,7 @@ import {
   type TelemetryAlert,
 } from "../../src/sentinel/telemetry.ts";
 import { assert, assertEquals, assertExists } from "@std/assert";
-import { dirname } from "@std/path";
+import { dirname, join } from "@std/path";
 import type { BootstrapResult } from "../../src/gateway/startup/bootstrap.ts";
 import { createTidepoolSentinelHandler } from "../../src/gateway/startup/services/tidepool_sentinel.ts";
 import {
@@ -149,6 +150,52 @@ Deno.test("Authenticated Tidepool hides revoked retained alert records and mixed
     assertEquals(beforeScope.type, "sentinel_state");
     assert(JSON.stringify(beforeScope).includes('"nodeId":"private"'));
 
+    const assignmentTasks = (beforeScope.adaptive as {
+      tasks: { id: string; kind: string; nodeId: string }[];
+    }).tasks;
+    const visibleTask = assignmentTasks.find(({ nodeId, kind }) =>
+      nodeId === "app" && kind === "trace"
+    );
+    const hiddenTask = assignmentTasks.find(({ nodeId, kind }) =>
+      nodeId === "private" && kind === "trace"
+    );
+    assertExists(visibleTask);
+    assertExists(hiddenTask);
+    const historyArgs = {
+      revision: next.revision,
+      before: Number.MAX_SAFE_INTEGER,
+    };
+    const activity = new DatabaseSync(
+      join(dirname(path), "sentinel-adaptive.db"),
+    );
+    const note = "unscoped worker narrative fixture";
+    try {
+      const event = activity.prepare(`
+      INSERT INTO adaptive_events (revision, taskId, event, attempt, at, note)
+      VALUES (?, ?, 'model_review_completed', 1, ?, ?)
+    `);
+      const timestamp = Date.now();
+      for (let sequence = 0; sequence < 105; sequence++) {
+        event.run(
+          assignment.revision,
+          visibleTask.id,
+          timestamp + sequence,
+          note,
+        );
+        event.run(
+          assignment.revision,
+          hiddenTask.id,
+          timestamp + sequence,
+          note,
+        );
+      }
+    } finally {
+      activity.close();
+    }
+    const previouslyVisible = await request("worker_history", historyArgs);
+    assert(JSON.stringify(previouslyVisible).includes(hiddenTask.id));
+    assert(JSON.stringify(previouslyVisible).includes(note));
+
     assert(recordSentinelOperatingConstraints(path, {
       runId,
       evidenceRevision: next.revision,
@@ -176,12 +223,51 @@ Deno.test("Authenticated Tidepool hides revoked retained alert records and mixed
     assertEquals(updated.type, "sentinel_state");
     assert(!JSON.stringify(updated).includes('"private"'));
 
+    const scopedPage = await request("worker_history", historyArgs);
+    assertEquals(scopedPage.type, "sentinel_worker_history");
+    assert(!JSON.stringify(scopedPage).includes(hiddenTask.id));
+    assert(!JSON.stringify(scopedPage).includes(note));
+
     const comparison = await request("revision", {
       revision: next.revision,
       baseline: saved.revision,
     });
     assertEquals(comparison.type, "sentinel_revision");
     assertEquals(comparison.scopeRestricted, true);
+    type ActivityPage = {
+      history: { cursor: number; taskId: string; note: null }[];
+      historyCursor: number | null;
+    };
+    const first = comparison.adaptive as ActivityPage;
+    assertExists(first.historyCursor);
+    assertEquals(first.history.length, 100);
+    assert(
+      first.history.every(({ taskId, note }) =>
+        taskId !== hiddenTask.id && note === null
+      ),
+    );
+    assert(first.history.some(({ taskId }) => taskId === visibleTask.id));
+    const cursorSequence = first.history.map(({ cursor }) => cursor);
+    assertEquals(cursorSequence[0] - cursorSequence[99], 99);
+    const older = await request("worker_history", {
+      revision: next.revision,
+      before: first.historyCursor,
+    });
+    const oldPage = older as unknown as ActivityPage;
+    assertEquals(oldPage.historyCursor, null);
+    assert(oldPage.history.length >= 5);
+    assert(
+      oldPage.history.every(({ cursor, taskId, note }) =>
+        cursor < first.historyCursor! && taskId !== hiddenTask.id &&
+        note === null
+      ),
+    );
+    assertEquals(
+      (scopedPage as unknown as ActivityPage).history,
+      first.history,
+    );
+    assert(!JSON.stringify(older).includes(hiddenTask.id));
+
     const serialized = JSON.stringify(comparison);
     assert(!serialized.includes('"private"'));
     assert(!serialized.includes("private-auth"));

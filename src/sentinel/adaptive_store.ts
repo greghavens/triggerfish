@@ -3179,6 +3179,67 @@ export function readSentinelEvidenceTaskRecipients(
   }
 }
 
+/** Page only authorized task activity. The cursor indexes visible events. */
+export function readScopedSentinelWorkerActivity(
+  path: string,
+  evidenceRevision: number,
+  runId: string,
+  taskIds: readonly string[],
+  before?: number,
+) {
+  const empty = { history: [], historyCursor: null };
+  if (!taskIds.length) return empty;
+  let db: DatabaseSync;
+  try {
+    db = openPrivateDatabase(path, true);
+  } catch (error) {
+    if (error instanceof Deno.errors.NotFound) return empty;
+    throw error;
+  }
+  try {
+    db.exec("PRAGMA busy_timeout = 250");
+    if (!hasAdaptiveObservationSchema(db)) return empty;
+    const rows = db.prepare(`
+      WITH mapping AS (
+        SELECT revision, goalId FROM adaptive_evidence_revisions
+        WHERE evidenceNumber = ? ORDER BY rowid DESC LIMIT 1
+      ), visible AS (
+        SELECT row_number() OVER (ORDER BY activity.rowid) AS cursor,
+          activity.revision, activity.taskId, activity.event, activity.attempt,
+          activity.at, task.kind, task.nodeId
+        FROM adaptive_events AS activity
+        JOIN mapping ON activity.revision = mapping.revision
+        JOIN adaptive_tasks AS task ON task.id = activity.taskId AND task.revision = mapping.revision
+        WHERE mapping.goalId = ? AND task.id IN (SELECT value FROM json_each(?))
+      )
+      SELECT * FROM visible WHERE (? IS NULL OR cursor < ?)
+      ORDER BY cursor DESC LIMIT 101
+    `).all(
+      evidenceRevision,
+      runId,
+      JSON.stringify(taskIds),
+      before ?? null,
+      before ?? null,
+    );
+    return {
+      history: rows.slice(0, 100).map((row) => ({
+        cursor: Number(row.cursor),
+        revision: String(row.revision),
+        taskId: String(row.taskId),
+        event: String(row.event),
+        attempt: Number(row.attempt),
+        at: new Date(Number(row.at)).toISOString(),
+        kind: typeof row.kind === "string" ? row.kind : undefined,
+        nodeId: typeof row.nodeId === "string" ? row.nodeId : undefined,
+        note: null,
+      })),
+      historyCursor: rows.length > 100 ? Number(rows[99].cursor) : null,
+    };
+  } finally {
+    db.close();
+  }
+}
+
 /** Read committed results from the exact archived evidence revision without opening a writer. */
 export function querySentinelWorkerObservations(
   path: string,
