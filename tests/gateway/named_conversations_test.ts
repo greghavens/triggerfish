@@ -19,11 +19,13 @@ Deno.test("Named conversations retain isolated turns and reviewed lifecycle acro
   let toolResult = "";
   let allow = true;
   let reviews = 0;
+  const started = Promise.withResolvers<AbortSignal>();
+  let interruptions = 0;
   const registry = createProviderRegistry();
   registry.register({
     name: "named-conversation-fixture",
     supportsStreaming: false,
-    complete(history) {
+    complete(history, _tools, options) {
       const usage = { inputTokens: 1, outputTokens: 1 };
       const last = history.at(-1);
       if (last?.role === "tool") {
@@ -42,6 +44,16 @@ Deno.test("Named conversations retain isolated turns and reviewed lifecycle acro
               arguments: JSON.stringify(args),
             },
           }],
+        });
+      }
+      if (last?.content === "Wait for the reviewed deletion.") {
+        const signal = options.signal as AbortSignal;
+        started.resolve(signal);
+        return new Promise((_resolve, reject) => {
+          signal.addEventListener("abort", () => {
+            interruptions++;
+            reject(signal.reason);
+          }, { once: true });
         });
       }
       const content = history.filter(({ role }) => role === "user").map(
@@ -190,15 +202,27 @@ Deno.test("Named conversations retain isolated turns and reviewed lifecycle acro
           { id: second, expectedVersion: 1 },
         ],
       };
-      allow = false;
-      assertStringIncludes(await manage(remove), "declined");
-      allow = true;
-      assertEquals(
-        JSON.parse(await manage(remove)).records.map((
-          { deleted }: { deleted: boolean },
-        ) => deleted),
-        [true, true],
-      );
+      await withGateway(async (otherTurn) => {
+        const pending = otherTurn(
+          `/conversation ${first} Wait for the reviewed deletion.`,
+        );
+        const signal = await started.promise;
+        allow = false;
+        assertStringIncludes(await manage(remove), "declined");
+        assertEquals(signal.aborted, false);
+        allow = true;
+        const saved = await manage(remove);
+        assertEquals(
+          JSON.parse(saved).records.map(
+            ({ deleted }: { deleted: boolean }) => deleted,
+          ),
+          [true, true],
+        );
+        assertEquals(signal.aborted, true);
+        assertEquals(await manage(remove), saved);
+        await pending;
+        assertEquals(interruptions, 1);
+      });
       assertEquals(
         JSON.parse(await manage({ action: "named_conversations" }))
           .conversations,

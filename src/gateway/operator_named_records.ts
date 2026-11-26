@@ -5,6 +5,7 @@ import {
 } from "../core/named_records.ts";
 import { canFlowTo } from "../core/types/classification.ts";
 import type { OperatorRunToolContext } from "./operator_run_tool.ts";
+import { stopNamedConversationTurns } from "./named_conversation_turns.ts";
 
 export const namedRecordReads = [
   "named_conversations",
@@ -133,6 +134,9 @@ export async function executeNamedRecordAction(
     }
     if (!await authorize(args)) return unavailable;
     const records = saved ?? store.apply(requestId, changes);
+    for (const record of records ?? []) {
+      if (record.deleted) stopNamedConversationTurns(baseDir, record.id);
+    }
     return records ? output({ records }) : unavailable;
   } catch {
     return unavailable;

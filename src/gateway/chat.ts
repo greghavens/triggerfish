@@ -1,6 +1,7 @@
 import { reviewedRuleActions } from "./operator_reviewed_rules.ts";
 import { namedConversations } from "../core/named_records.ts";
 import { namedRecordActions } from "./operator_named_records.ts";
+import { startNamedConversationTurn } from "./named_conversation_turns.ts";
 import { readAgentProfile } from "../core/agent_profiles.ts";
 import { withAgentProfileRuntime } from "../agent/orchestrator/agent_profile_runtime.ts";
 import { isAgentProfileAction } from "./operator_agent_profiles.ts";
@@ -1738,6 +1739,7 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
             type: "error",
             message: "The named conversation is unavailable.",
           });
+        let turn: ReturnType<typeof startNamedConversationTurn> | undefined;
         try {
           const selected =
             /^\/conversation ([a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}) ([\s\S]+)$/
@@ -1783,12 +1785,17 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
               },
             },
           });
+          turn = startNamedConversationTurn(config.customToolsBaseDir, id);
+          const turnSignal = signal
+            ? AbortSignal.any([signal, turn.signal])
+            : turn.signal;
           await child.executeAgentTurn(prompt, (event) => {
             if (isCurrent()) sendEvent(event);
-          }, signal);
+          }, turnSignal);
         } catch {
           unavailable();
         } finally {
+          turn?.finish();
           release();
         }
         return;
