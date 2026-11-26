@@ -29,6 +29,11 @@ import {
 } from "../sentinel/github_repository_visibility.ts";
 import { readAdaptiveRepositoryVisibility } from "../sentinel/adaptive_store.ts";
 import {
+  authorizeProtectedPassingRecheck,
+  protectedGateAncestors,
+  readProtectedPassingRecheck,
+} from "./sentinel_protected_recheck_gate.ts";
+import {
   listSentinelNativeRepositoryVerdictSelectors,
   readExactSentinelNativeRepositoryVerdict,
 } from "./sentinel_native_repository_recheck.ts";
@@ -4530,7 +4535,18 @@ function annotateDecisionHolds(
   });
 }
 
-export function advanceAdaptiveSentinel(snapshotPath: string, state: State) {
+type ProtectedRecheck = NonNullable<
+  ReturnType<typeof readProtectedPassingRecheck>
+>;
+
+export function advanceAdaptiveSentinel(
+  snapshotPath: string,
+  state: State,
+  protectedTransition?: {
+    taskId: string;
+    proofs: ReadonlyMap<string, ProtectedRecheck>;
+  },
+) {
   const inventory = state.result?.sharedGraph.snapshot;
   if (
     !state.active || state.paused || !inventory || !state.result ||
@@ -5513,21 +5529,44 @@ export function advanceAdaptiveSentinel(snapshotPath: string, state: State) {
           const eligible = decisionAllowsClaim(snapshotPath, current.revision);
           const queue = store.list(revision);
           const held = new Set(
-            queue.filter((task) => !eligible(task)).map(({ id }) => id),
+            queue.filter((task) =>
+              !eligible(task) ||
+              (protectedTransition && protectedTransition.taskId !== task.id)
+            ).map(({ id }) => id),
           );
           const caseId = locateSentinelCase(snapshotPath)?.caseId;
           const runId = current.plan.runId;
           const snapshot = current.result?.sharedGraph.snapshot;
+          const protectedRechecks = new Map<string, string>();
+          for (const [taskId, proof] of protectedTransition?.proofs ?? []) {
+            const task = queue.find(({ id }) => id === taskId);
+            if (
+              task && runId && isDeepStrictEqual(
+                readProtectedPassingRecheck(
+                  snapshotPath,
+                  runId,
+                  current.revision,
+                  task,
+                  proof.receipt.id,
+                ),
+                proof,
+              )
+            ) protectedRechecks.set(taskId, proof.receiptSha256);
+          }
           let graphDigest: string | undefined;
           let rechecks:
             | ReturnType<typeof readSentinelWorkerFindingHistory>
             | undefined;
           for (
-            let task = store.peekNextClaimable(revision, held);
+            let task = store.peekNextClaimable(
+              revision,
+              held,
+              protectedRechecks,
+            );
             task?.plannerRound && (task.plannerRound.graphFactOnly ||
               task.plannerRound.passingRecheckId ||
               task.plannerRound.passingRecheckForFindingId);
-            task = store.peekNextClaimable(revision, held)
+            task = store.peekNextClaimable(revision, held, protectedRechecks)
           ) {
             const round = task.plannerRound;
             if (round.passingRecheckId || round.passingRecheckForFindingId) {
@@ -5547,20 +5586,27 @@ export function advanceAdaptiveSentinel(snapshotPath: string, state: State) {
                       : []
                   );
               for (const id of ids) {
-                const receipt = currentPassingFindingRecheck(
-                  snapshotPath,
-                  current,
-                  id,
-                  task.nodeId,
-                  checkedAt,
-                );
+                const authorized = protectedRechecks.has(task.id)
+                  ? protectedTransition?.proofs.get(task.id)?.receipt
+                  : undefined;
+                const receipt =
+                  (authorized?.id === id ? authorized : undefined) ??
+                    currentPassingFindingRecheck(
+                      snapshotPath,
+                      current,
+                      id,
+                      task.nodeId,
+                      checkedAt,
+                    );
                 if (
-                  receipt && store.satisfyQueuedFindingRecheck(
+                  receipt &&
+                  store.satisfyQueuedFindingRecheck(
                     revision,
                     task.id,
                     receipt,
                     held,
                     checkedAt,
+                    protectedRechecks,
                   )
                 ) {
                   return {
@@ -5624,6 +5670,7 @@ export function advanceAdaptiveSentinel(snapshotPath: string, state: State) {
                 fact,
                 held,
                 snapshot,
+                protectedRechecks,
               )
             ) {
               return {
@@ -5633,23 +5680,32 @@ export function advanceAdaptiveSentinel(snapshotPath: string, state: State) {
             }
             held.add(task.id);
           }
-          const head = store.peekNextClaimable(revision, held);
+          const head = store.peekNextClaimable(
+            revision,
+            held,
+            protectedRechecks,
+          );
           const source = head && findEvidenceFact(head, queue);
           if (
-            head && source && store.satisfyQueuedTaskFromFact(revision, {
-              taskId: head.id,
-              sourceTaskId: source.id,
-              sourceObservationSha256: createHash("sha256").update(
-                JSON.stringify(source.observation),
-              ).digest("hex"),
-            }, held)
+            head && source && store.satisfyQueuedTaskFromFact(
+              revision,
+              {
+                taskId: head.id,
+                sourceTaskId: source.id,
+                sourceObservationSha256: createHash("sha256").update(
+                  JSON.stringify(source.observation),
+                ).digest("hex"),
+              },
+              held,
+              protectedRechecks,
+            )
           ) {
             return {
               kind: "satisfied" as const,
               continue: refillAfterCompletion(),
             };
           }
-          const claim = store.claim(revision, 60, held);
+          const claim = store.claim(revision, 60, held, protectedRechecks);
           return claim
             ? {
               kind: "claimed" as const,
@@ -5940,6 +5996,164 @@ export function createSentinelModelPlanner(
     constraintVersion?: number;
   }>();
 
+  let activeProtectedCheck: AbortController | undefined;
+  let nextProtectedCheckAt = -Infinity;
+  let lastProtectedGateCheck: string | undefined;
+
+  function authorizeProtectedGates(state: State, identity: string) {
+    const runId = state.plan.runId;
+    if (!runId || activeProtectedCheck) return;
+    const store = openSentinelAdaptiveStore(storePath(snapshotPath));
+    let tasks: readonly AdaptiveTask[];
+    let reviewed: Set<string>;
+    try {
+      const revision = revisionForStore(state, store);
+      tasks = store.list(revision);
+      reviewed = new Set(
+        store.modelReviewNotes(revision).map(({ taskId }) => taskId),
+      );
+    } finally {
+      store.close();
+    }
+    const requiresRecheck = (task: AdaptiveTask) =>
+      !!task.plannerRound?.passingRecheckId ||
+      !!task.plannerRound?.passingRecheckForFindingId;
+    if (!tasks.some(requiresRecheck)) return;
+    const constraints = operatingConstraints(snapshotPath, state);
+    const verdicts = readSentinelWorkerFindingHistory(
+      snapshotPath,
+      state.revision,
+    )
+      .flatMap((record) =>
+        record.kind === "recheck" &&
+          record.nativeRepositoryVisibility && record.outcome === "pass" &&
+          record.runId === runId && record.evidenceRevision === state.revision
+          ? [record]
+          : []
+      );
+    if (!verdicts.length) return;
+    const byId = new Map(tasks.map((task) => [task.id, task]));
+    const candidates = tasks.flatMap((task) => {
+      if (
+        task.retirementReason || task.dependencyRecommendation ||
+        (task.status !== "queued" && (task.status !== "completed" ||
+          reviewed.has(task.id) || task.factSatisfaction))
+      ) return [];
+      if (
+        task.prerequisites.some((id) => byId.get(id)?.status !== "completed")
+      ) {
+        return [];
+      }
+      const gates = new Map<
+        string,
+        { task: AdaptiveTask; verdictIds: string[] }
+      >();
+      if (requiresRecheck(task)) {
+        if (task.attempts !== 0) return [];
+        const round = task.plannerRound!;
+        const ids = verdicts.filter((record) =>
+          record.targetId === task.nodeId &&
+          (round.passingRecheckId
+            ? record.id === round.passingRecheckId
+            : record.findingId === round.passingRecheckForFindingId)
+        ).map(({ id }) => id);
+        if (!ids.length) return [];
+        gates.set(task.id, { task, verdictIds: ids });
+      }
+      for (const parent of protectedGateAncestors(task, byId)) {
+        gates.set(parent.gate.id, {
+          task: parent.gate,
+          verdictIds: [parent.verdictId],
+        });
+      }
+      return gates.size ? [{ task, gates: [...gates.values()] }] : [];
+    });
+    if (!candidates.length) return;
+    const check = JSON.stringify([
+      identity,
+      constraints?.digest,
+      candidates.map((
+        { task, gates },
+      ) => [task.id, task.status, gates.map(({ verdictIds }) => verdictIds)]),
+    ]);
+    if (lastProtectedGateCheck === check && now() < nextProtectedCheckAt) {
+      return;
+    }
+    lastProtectedGateCheck = check;
+    nextProtectedCheckAt = now() + 2_000;
+    const controller = new AbortController();
+    const signal = AbortSignal.any([
+      controller.signal,
+      AbortSignal.timeout(15_000),
+    ]);
+    activeProtectedCheck = controller;
+    const current = () => {
+      const latest = readSentinelAssessment(snapshotPath);
+      const latestConstraints = latest &&
+        operatingConstraints(snapshotPath, latest);
+      return !signal.aborted && !!latest?.active && !latest.paused &&
+        adaptiveRevision(latest) === identity &&
+        allowsSentinelAdaptiveWork(snapshotPath, latest.plan.admissionAt) &&
+        latestConstraints?.digest === constraints?.digest &&
+        latestConstraints?.version === constraints?.version;
+    };
+    Promise.resolve().then(async () => {
+      const agent = createWorker(state, undefined, undefined, "planner");
+      try {
+        for (const { task, gates } of candidates) {
+          if (!current()) break;
+          const authorized = await Promise.all(
+            gates.map(async ({ task: gate, verdictIds }) => {
+              for (const id of verdictIds) {
+                if (!gate.nodeId || !current()) break;
+                const asset = gate.nodeId;
+                const proof = await authorizeProtectedPassingRecheck(
+                  () =>
+                    readProtectedPassingRecheck(
+                      snapshotPath,
+                      runId,
+                      state.revision,
+                      gate,
+                      id,
+                    ),
+                  (reference, isCurrent) =>
+                    agent.authorizeRepositoryVisibility?.(
+                      runId,
+                      state.revision,
+                      asset,
+                      reference,
+                      signal,
+                      isCurrent,
+                    ) ?? Promise.resolve(false),
+                  current,
+                );
+                if (proof) return [gate.id, proof] as const;
+              }
+            }),
+          );
+          if (!current() || !authorized.every((entry) => entry !== undefined)) {
+            continue;
+          }
+          const transition = { taskId: task.id, proofs: new Map(authorized) };
+          if (task.status === "queued") {
+            advanceAdaptiveSentinel(snapshotPath, state, transition);
+          } else {
+            startReview(state, identity, transition);
+          }
+        }
+      } finally {
+        agent.clear();
+      }
+    }).catch(() => {
+      // A missing source or current authorization leaves queued work gated.
+    }).finally(() => {
+      if (activeProtectedCheck === controller) activeProtectedCheck = undefined;
+      if (!current()) return;
+      const latest = readSentinelAssessment(snapshotPath);
+      if (latest?.active && !latest.paused) coordinator.advance(latest);
+    });
+  }
+
   let activeFutureCheck: AbortController | undefined;
   let futureCheckRequested = false;
   const futureCheckCooldown = new Map<string, number>();
@@ -6058,6 +6272,7 @@ export function createSentinelModelPlanner(
 
   function abortWorkers() {
     activeFutureCheck?.abort();
+    activeProtectedCheck?.abort();
     activePlan?.controller.abort();
     for (const controller of activeReviews.keys()) controller.abort();
   }
@@ -6076,6 +6291,10 @@ export function createSentinelModelPlanner(
   function startReview(
     state: State,
     identity: string,
+    protectedTransition?: {
+      taskId: string;
+      proofs: ReadonlyMap<string, ProtectedRecheck>;
+    },
   ): "started" | "blocked" | "empty" {
     if (!reserve && activeReviews.size) return "blocked";
     const current = readSentinelAssessment(snapshotPath);
@@ -6603,14 +6822,36 @@ export function createSentinelModelPlanner(
     let revision: string;
     let claim: ReturnType<typeof store.claimModelReview>;
     let release: (() => void) | undefined;
+    let queue: readonly AdaptiveTask[] = [];
     try {
       revision = revisionForStore(state, store);
+      queue = store.list(revision);
+      const protectedRechecks = new Map<string, string>();
+      for (const [taskId, proof] of protectedTransition?.proofs ?? []) {
+        const gate = queue.find(({ id }) => id === taskId);
+        if (
+          gate && runId && isDeepStrictEqual(
+            readProtectedPassingRecheck(
+              snapshotPath,
+              runId,
+              current.revision,
+              gate,
+              proof.receipt.id,
+            ),
+            proof,
+          )
+        ) protectedRechecks.set(taskId, proof.receiptSha256);
+      }
       const reviewing = new Set(
         [...activeReviews.values()].map(({ task }) => task.id),
       );
       const allowed = decisionAllowsClaim(snapshotPath, current.revision);
+      const byId = new Map(queue.map((item) => [item.id, item]));
       const eligible = (task: AdaptiveTask) =>
-        !reviewing.has(task.id) && allowed(task);
+        !reviewing.has(task.id) && allowed(task) &&
+        (protectedTransition
+          ? protectedTransition.taskId === task.id
+          : protectedGateAncestors(task, byId).length === 0);
       store.reconcileWorkerPublications(
         revision,
         current.revision,
@@ -6619,7 +6860,12 @@ export function createSentinelModelPlanner(
         lookupPendingTrafficFinding,
       );
       if (
-        !store.modelReviewAvailable(revision, MODEL_ASSIGNMENT_REASON, eligible)
+        !store.modelReviewAvailable(
+          revision,
+          MODEL_ASSIGNMENT_REASON,
+          eligible,
+          protectedRechecks,
+        )
       ) {
         return "empty";
       }
@@ -6629,6 +6875,7 @@ export function createSentinelModelPlanner(
         revision,
         MODEL_ASSIGNMENT_REASON,
         eligible,
+        protectedRechecks,
       );
     } catch (error) {
       release?.();
@@ -6641,6 +6888,8 @@ export function createSentinelModelPlanner(
       return "empty";
     }
     const { task, token } = claim;
+    const byId = new Map(queue.map((item) => [item.id, item]));
+    const protectedGates = protectedGateAncestors(task, byId);
     const constraints = operatingConstraints(snapshotPath, current);
     const matchesConstraints = (state: State) => {
       const current = operatingConstraints(snapshotPath, state);
@@ -6755,7 +7004,48 @@ export function createSentinelModelPlanner(
             matchesConstraints(latest) &&
             decisionAllowsClaim(snapshotPath, latest.revision)(task);
         };
+        const authorizeGates = async () => {
+          if (!protectedGates.length) return true;
+          const currentLease = () =>
+            currentSource() && !!readAssignedSentinelModelReview(
+              snapshotPath,
+              state.revision,
+              task.id,
+              token,
+            );
+          for (const { gate, verdictId } of protectedGates) {
+            if (!gate.nodeId || !runId) return false;
+            const asset = gate.nodeId;
+            const proof = await authorizeProtectedPassingRecheck(
+              () =>
+                readProtectedPassingRecheck(
+                  snapshotPath,
+                  runId,
+                  state.revision,
+                  gate,
+                  verdictId,
+                ),
+              (reference, isCurrent) =>
+                worker.authorizeRepositoryVisibility?.(
+                  runId,
+                  state.revision,
+                  asset,
+                  reference,
+                  signal,
+                  isCurrent,
+                ) ?? Promise.resolve(false),
+              currentLease,
+            );
+            if (
+              !proof ||
+              proof.receiptSha256 !==
+                gate.factSatisfaction?.sourceObservationSha256
+            ) return false;
+          }
+          return true;
+        };
         const authorizeSources = async () => {
+          if (!await authorizeGates()) return false;
           const visibility = task.plannerRound?.repositoryVisibility;
           if (
             visibility &&
@@ -7063,7 +7353,10 @@ export function createSentinelModelPlanner(
                 version: constraints.version,
                 digest: constraints.digest,
               },
-              workerBoundary: (phase) => {
+              workerBoundary: async (phase) => {
+                if (protectedGates.length && !await authorizeGates()) {
+                  return { stop: true };
+                }
                 const current = readSentinelAssessment(snapshotPath);
                 if (
                   !current?.active || current.paused || signal.aborted ||
@@ -7788,6 +8081,7 @@ export function createSentinelModelPlanner(
       }
       const identity = adaptiveRevision(state);
       authorizeFutureWorkflowGates(state, identity);
+      authorizeProtectedGates(state, identity);
       const hints = readHints(state, 3);
       const decisions = plannerDecisions(snapshotPath, state.revision);
       const goalCompletion = ensureSentinelFormalGoalContract(
@@ -10098,7 +10392,7 @@ export function createSentinelModelPlanner(
     },
     hasInFlightWork() {
       return activePlan !== undefined || activeReviews.size > 0 ||
-        activeFutureCheck !== undefined;
+        activeFutureCheck !== undefined || activeProtectedCheck !== undefined;
     },
     stop() {
       permitPlannerWake = false;

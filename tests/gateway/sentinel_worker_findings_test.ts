@@ -9,7 +9,10 @@ import {
 } from "../../src/sentinel/sentinel_archive_restore.ts";
 import { createOperatorWorkflowRuns } from "../../src/gateway/operator_workflow_runs.ts";
 import { createWorkflowObservationVerifier } from "../../src/gateway/scheduled_observation_tool.ts";
-import { subscribeCommittedEvidence } from "../../src/core/evidence_task_progression.ts";
+import {
+  notifyCommittedEvidence,
+  subscribeCommittedEvidence,
+} from "../../src/core/evidence_task_progression.ts";
 import { DatabaseSync } from "node:sqlite";
 import { INCONCLUSIVE_RECHECK_TOOL } from "../../src/sentinel/recheck_inconclusive.ts";
 import { createFindingEvidenceDownload } from "../../tidepool-ui/src/screens/Sentinel/finding_evidence_download.ts";
@@ -8249,6 +8252,11 @@ for (
         nodes: [
           { id: "app", kind: "asset", label: "Assigned application" },
           {
+            id: "dependent-app",
+            kind: "asset",
+            label: "Dependent application",
+          },
+          {
             id: "gap",
             kind: "finding",
             label: "Repository exposure",
@@ -8340,6 +8348,82 @@ for (
         revision: state.revision,
         runId,
       };
+      const usage = { inputTokens: 1, outputTokens: 1 };
+      const pendingProtectedGate = () =>
+        readAdaptiveSentinel(path, state, "revision")?.tasks.find(
+          ({ plannerRound }) =>
+            plannerRound?.passingRecheckForFindingId === finding.id,
+        );
+      const protectedDependent = () =>
+        readAdaptiveSentinel(path, state, "revision")?.tasks.find(
+          ({ nodeId, kind, prerequisites }) =>
+            nodeId === "dependent-app" && kind === "impact" &&
+            prerequisites.includes(pendingProtectedGate()?.id ?? ""),
+        );
+      if (scenario.outcome === "pass" && !branchMode) {
+        const gatePlanner = createProviderRegistry();
+        gatePlanner.register({
+          name: "native-protected-gate-planner",
+          supportsStreaming: false,
+          complete(messages) {
+            const input = JSON.parse(
+              String(messages.findLast(({ role }) => role === "user")?.content)
+                .split("\n").at(-1)!,
+            );
+            assert(
+              input.pendingRecheckFindings.some(({ id }: { id: string }) =>
+                id === finding.id
+              ),
+            );
+            return Promise.resolve({
+              content: JSON.stringify([
+                {
+                  kind: "trace",
+                  nodeId: "app",
+                  depth: 1,
+                  passingRecheckForFindingId: finding.id,
+                },
+                { kind: "impact", nodeId: "dependent-app", dependsOn: [0] },
+              ]),
+              toolCalls: [],
+              usage,
+            });
+          },
+        });
+        gatePlanner.setDefault("native-protected-gate-planner");
+        coordinator = createSentinelModelPlanner(
+          path,
+          (current, taskId) =>
+            taskId
+              ? { execute: () => Promise.resolve(), clear() {} }
+              : createSentinelSubagent({
+                snapshotPath: path,
+                sharedInventoryBaseDir: baseDir,
+                assessmentRevision: current.revision,
+                plannerExecutionEvidenceRunId: runId,
+                providerRegistry: gatePlanner,
+                allowModelAccess: true,
+                hookRunner: {
+                  evaluateHook: () =>
+                    Promise.resolve({
+                      allowed: true,
+                      action: "ALLOW",
+                      ruleId: null,
+                      duration: 0,
+                    }),
+                },
+              }),
+          () => !pendingProtectedGate() ? () => {} : undefined,
+        );
+        await waitForCondition(
+          () => !!protectedDependent(),
+          () => coordinator?.advance(state),
+        );
+        assertEquals(pendingProtectedGate()?.status, "queued");
+        assertEquals(protectedDependent()?.status, "queued");
+        coordinator.stop();
+        await waitForCondition(() => !coordinator?.hasInFlightWork(), () => {});
+      }
       let selectedTask: string | undefined;
       await withFindingAssignmentGateway(
         baseDir,
@@ -8482,7 +8566,6 @@ for (
           }),
       });
       const model = createProviderRegistry();
-      const usage = { inputTokens: 1, outputTokens: 1 };
       const requestId = crypto.randomUUID();
       model.register({
         name: "native-repository-remediation-worker",
@@ -8925,6 +9008,119 @@ for (
       if (scenario.outcome !== "pass") return;
       coordinator.stop();
 
+      if (!branchMode) {
+        coordinator.stop();
+        availableCredential = false;
+        let schedulerReads = 0;
+        let dependentCalls = 0;
+        const dependentId = protectedDependent()?.id;
+        assert(dependentId);
+        const dependentRegistry = createProviderRegistry();
+        dependentRegistry.register({
+          name: "native-protected-gate-dependent",
+          supportsStreaming: false,
+          complete() {
+            dependentCalls++;
+            return Promise.resolve({
+              content:
+                '{"summary":"Reviewed the authorized dependent asset.","followUps":[]}',
+              toolCalls: [],
+              usage,
+            });
+          },
+        });
+        dependentRegistry.setDefault("native-protected-gate-dependent");
+        let gateClock = Date.now();
+        coordinator = createSentinelModelPlanner(
+          path,
+          (current, taskId, lease) =>
+            taskId && taskId !== dependentId
+              ? { execute: () => Promise.resolve(), clear() {} }
+              : createSentinelSubagent({
+                snapshotPath: path,
+                sharedInventoryBaseDir: baseDir,
+                assessmentRevision: current.revision,
+                ...(taskId
+                  ? { assignedTaskId: taskId, assignedTaskLeaseToken: lease }
+                  : { plannerExecutionEvidenceRunId: runId }),
+                providerRegistry: dependentRegistry,
+                readRepositoryVisibility: reader,
+                authorizeExecutionTracePayload: (payload) =>
+                  Promise.resolve(
+                    payload.kind === original.kind &&
+                      payload.repo === original.repo &&
+                      payload.repositoryId === original.repositoryId,
+                  ),
+                allowModelAccess: true,
+                hookRunner: {
+                  evaluateHook(hook, { input }) {
+                    if (
+                      !taskId && hook === "PRE_TOOL_CALL" &&
+                      input.tool_name === liveTool &&
+                      typeof input.url === "string"
+                    ) {
+                      schedulerReads++;
+                    }
+                    return Promise.resolve({
+                      allowed: true,
+                      action: "ALLOW",
+                      ruleId: null,
+                      duration: 0,
+                    });
+                  },
+                },
+              }),
+          () =>
+            protectedDependent()?.status === "completed" ? () => {} : undefined,
+          () => gateClock,
+        );
+        const wakes = startSentinelAssessmentCoordinator({
+          snapshotPath: path,
+          advanceAdaptive: (current) => coordinator?.advance(current),
+        });
+        try {
+          await waitForCondition(
+            () => schedulerReads > 0 && !coordinator?.hasInFlightWork(),
+            () => {},
+          );
+          assertEquals(pendingProtectedGate()?.status, "queued");
+          assertEquals(protectedDependent()?.status, "queued");
+          assertEquals(dependentCalls, 0);
+          availableCredential = true;
+          gateClock += 2_001;
+          const { caseId, runId, evidenceRevision, id } = receipt;
+          notifyCommittedEvidence({
+            case: caseId,
+            run_id: runId,
+            revision: evidenceRevision,
+            observation_id: id,
+          });
+          await waitForCondition(
+            () =>
+              !!readAdaptiveSentinel(path, state, "revision")?.modelReviews
+                .some(
+                  ({ taskId }) => taskId === dependentId,
+                ),
+            () => {},
+            10_000,
+          );
+          assertEquals(pendingProtectedGate()?.status, "completed");
+          assertEquals(pendingProtectedGate()?.attempts, 0);
+          assertEquals(
+            pendingProtectedGate()?.factSatisfaction
+              ?.protectedRepositoryVerdict,
+            { ...receipt.nativeRepositoryVisibility, verdictId: receipt.id },
+          );
+          const gateId = pendingProtectedGate()?.id;
+          assert(gateId);
+          assertEquals(protectedDependent()?.prerequisites, [gateId]);
+          assertEquals(dependentCalls, 1);
+          assertEquals(fetches, 1);
+        } finally {
+          wakes.stop();
+        }
+      }
+
       const savedTool = "sentinel_saved_repository_visibility";
       const wrongVerdict = `worker-recheck:${"d".repeat(64)}`;
       let selectedVerdict = wrongVerdict;
@@ -9273,6 +9469,32 @@ for (
         )?.plannerRound?.repositoryVisibility,
         expected.reference,
       );
+      if (!branchMode) {
+        const gate = pendingProtectedGate();
+        assert(gate?.factSatisfaction?.protectedRepositoryVerdict);
+        await withTidepool(baseDir, async (_list, _provenance, request) => {
+          const focusId = `observation:adaptive:${receipt.id}`;
+          const response = await request("revision", {
+            caseId,
+            revision: restored.revision,
+            focusId,
+          });
+          assertEquals(response.type, "sentinel_revision");
+          const graph = response.provenance as {
+            nodes: { id: string; remediationRecheck?: { outcome?: string } }[];
+            edges: { from: string; to: string; relation: string }[];
+          };
+          assert(
+            graph.edges.some(({ from, to, relation }) =>
+              from === `task:adaptive:${gate.id}` && to === focusId &&
+              relation === "references"
+            ),
+          );
+          const source = graph.nodes.find(({ id }) => id === focusId);
+          assert(source?.remediationRecheck);
+          assertEquals(source.remediationRecheck.outcome, undefined);
+        });
+      }
       assertEquals(fetches, 1);
       if (branchMode) return;
     } finally {

@@ -1312,11 +1312,23 @@ function validateArchivedRepositoryVerdictCitations(
         "SELECT name FROM pragma_table_info('adaptive_tasks') WHERE name = 'plannerRound'",
       ).get()
     ) return;
-    const citations = adaptive.prepare(`
-      SELECT revision, nodeId, plannerRound FROM adaptive_tasks
+    const selections = adaptive.prepare(`
+      SELECT revision, nodeId, plannerRound, NULL AS satisfaction,
+        status, attempts, kind, depth FROM adaptive_tasks
       WHERE json_valid(plannerRound)
         AND json_type(plannerRound, '$.repositoryVisibility.verdictId') IS NOT NULL
     `).all();
+    const gateSatisfactions = adaptive.prepare(
+        "SELECT name FROM pragma_table_info('adaptive_tasks') WHERE name = 'factSatisfaction'",
+      ).get()
+      ? adaptive.prepare(`
+        SELECT revision, nodeId, plannerRound, factSatisfaction AS satisfaction,
+          status, attempts, kind, depth FROM adaptive_tasks
+        WHERE json_valid(factSatisfaction)
+          AND json_type(factSatisfaction, '$.protectedRepositoryVerdict') IS NOT NULL
+      `).all()
+      : [];
+    const citations = [...selections, ...gateSatisfactions];
     if (!citations.length) return;
     const invalid = () =>
       new Error("Invalid archived Sentinel repository verdict citation");
@@ -1335,11 +1347,17 @@ function validateArchivedRepositoryVerdictCitations(
         ReturnType<typeof readSentinelDedicatedRecheckSettlements>
       >();
       for (const citation of citations) {
-        const reference = typeof citation.plannerRound === "string"
-          ? repositoryVisibilityReference(
-            JSON.parse(citation.plannerRound).repositoryVisibility,
-          )
+        const round = typeof citation.plannerRound === "string"
+          ? JSON.parse(citation.plannerRound)
           : undefined;
+        const satisfaction = typeof citation.satisfaction === "string"
+          ? JSON.parse(citation.satisfaction)
+          : undefined;
+        const reference = repositoryVisibilityReference(
+          satisfaction
+            ? satisfaction.protectedRepositoryVerdict
+            : round?.repositoryVisibility,
+        );
         if (!reference?.verdictId || typeof citation.revision !== "string") {
           throw invalid();
         }
@@ -1355,6 +1373,26 @@ function validateArchivedRepositoryVerdictCitations(
             reference.sourceStepIndex ||
           receipt.nativeRepositoryVisibility.resultSha256 !==
             reference.resultSha256
+        ) throw invalid();
+        if (
+          satisfaction && (
+            citation.status !== "completed" || citation.attempts !== 0 ||
+            citation.kind !== "trace" || citation.depth !== 1 ||
+            receipt.outcome !== "pass" ||
+            satisfaction.findingRecheckId !== receipt.id ||
+            satisfaction.sourceTaskId !== receipt.taskId ||
+            satisfaction.evidenceRevision !== receipt.evidenceRevision ||
+            !Number.isFinite(Date.parse(satisfaction.checkedAt)) ||
+            Date.parse(satisfaction.checkedAt) >=
+              Date.parse(receipt.validUntil) ||
+            satisfaction.sourceObservationSha256 !==
+              createHash("sha256").update(JSON.stringify(receipt)).digest(
+                "hex",
+              ) ||
+            (round?.passingRecheckId
+              ? round.passingRecheckId !== receipt.id
+              : round?.passingRecheckForFindingId !== receipt.findingId)
+          )
         ) throw invalid();
         const scopedSettlements = settlements.get(citation.revision) ??
           readSentinelDedicatedRecheckSettlements(

@@ -8925,10 +8925,13 @@ function createAgent(
     );
     if (!original || !current()) return;
     const call = executionTracePayloadCall(original.payload);
+    // This scoped replay can itself be requested by the worker boundary.
+    // Keep the configured policy hooks without recursively reentering that boundary.
+    const sourcePolicy = { ...config, hookRunner: options.hookRunner };
     if (
       !await authorizeSavedToolCalls(
         [call],
-        config,
+        sourcePolicy,
         session,
         undefined,
         signal,
@@ -8939,7 +8942,7 @@ function createAgent(
         original.classification,
       ) ||
       !current() ||
-      (await enforcePostToolResponse(call.name, config, session, {
+      (await enforcePostToolResponse(call.name, sourcePolicy, session, {
         resultText: executionTracePayloadResponse(original.payload),
         blocked: false,
       })).blocked ||

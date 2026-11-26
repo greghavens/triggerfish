@@ -15,7 +15,10 @@ import {
 import { isModelRouteIdentity } from "../core/model_route_identity.ts";
 import { readVerifiedPassingFindingRecheck } from "./worker_finding_evidence.ts";
 import { sentinelOperatingConstraintsAllow } from "./operating_constraints.ts";
-import type { SentinelWorkerFindingRecheckRecord } from "./worker_finding_store.ts";
+import {
+  readSentinelCaseFindingReceipts,
+  type SentinelWorkerFindingRecheckRecord,
+} from "./worker_finding_store.ts";
 import type { TodoItem, TodoList } from "../tools/todo_defs.ts";
 import { createEvidenceTaskSettler } from "../core/evidence_task_progression.ts";
 import { createAssignmentObservationJournal } from "../core/assignment_observations.ts";
@@ -1334,6 +1337,7 @@ export interface AdaptiveFactSatisfaction {
   readonly sourceObservationSha256: string;
   readonly graphFactId?: string;
   readonly findingRecheckId?: string;
+  readonly protectedRepositoryVerdict?: SentinelRepositoryVisibilityReference;
   readonly workflowObservationId?: string;
   readonly evidenceRevision?: number;
   readonly checkedAt?: string;
@@ -4990,7 +4994,11 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
     }
     & (
       | { initialGraphFactId: string; graphFactId: string }
-      | { findingId: string; findingRecheckId: string }
+      | {
+        findingId: string;
+        findingRecheckId: string;
+        protectedRepositoryVerdict?: SentinelRepositoryVisibilityReference;
+      }
     );
 
   function controlProofsForTask(
@@ -5039,12 +5047,51 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
       : null;
   }
 
+  function readProtectedReceipt(
+    revision: string,
+    task: AdaptiveTask,
+    verdict: SentinelRepositoryVisibilityReference,
+    digest: string,
+    caseId: string,
+    runId: string,
+    evidenceRevision: number,
+    time: number,
+  ) {
+    const exact = repositoryVisibilityReference(verdict);
+    if (!exact?.verdictId || !task.nodeId) return;
+    const { verdictId, ...source } = exact;
+    const snapshotPath = join(dirname(path), "sentinel.json");
+    const receipt = readSentinelCaseFindingReceipts(snapshotPath, [verdictId])
+      .get(verdictId);
+    if (
+      receipt?.kind !== "recheck" || receipt.outcome !== "pass" ||
+      receipt.caseId !== caseId || receipt.runId !== runId ||
+      receipt.evidenceRevision !== evidenceRevision ||
+      receipt.targetId !== task.nodeId || receipt.taskId === task.id ||
+      lookup.get(receipt.taskId)?.revision !== revision ||
+      Date.parse(receipt.validUntil) <= time ||
+      !isDeepStrictEqual(receipt.nativeRepositoryVisibility, source) ||
+      createHash("sha256").update(JSON.stringify(receipt)).digest("hex") !==
+        digest
+    ) return;
+    const saved = readAdaptiveRepositoryVisibility(
+      path,
+      runId,
+      evidenceRevision,
+      source.taskId,
+      task.nodeId,
+      true,
+    );
+    return isDeepStrictEqual(saved?.reference, source) ? receipt : undefined;
+  }
+
   /** Reopen the exact saved prerequisite before leasing any dependent. */
   function controlBlockedTasks(
     revision: string,
     time: number,
     checked?: Map<string, ControlClaimProof>,
     blockedRoots?: Set<string>,
+    protectedRechecks?: ReadonlyMap<string, string> | "claimed",
   ): ReadonlySet<string> {
     const completed = completedControlRequirements.all(revision);
     if (!completed.length) return new Set();
@@ -5091,18 +5138,33 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
               snapshot,
             )
           ) return [task.id];
-          const receipt = readVerifiedPassingFindingRecheck(
-            snapshotPath,
-            snapshot,
-            {
-              caseId,
-              runId,
-              targetId: task.nodeId,
-              evidenceRevision,
-              evaluatedAt: new Date(time).toISOString(),
-            },
-            binding.findingRecheckId,
-          );
+          const protectedVerdict = binding.protectedRepositoryVerdict;
+          const receipt = protectedVerdict
+            ? ((protectedRechecks === "claimed" ||
+              protectedRechecks?.get(task.id) ===
+                binding.sourceObservationSha256) &&
+              readProtectedReceipt(
+                revision,
+                task,
+                protectedVerdict,
+                binding.sourceObservationSha256,
+                caseId,
+                runId,
+                evidenceRevision,
+                time,
+              )) || undefined
+            : readVerifiedPassingFindingRecheck(
+              snapshotPath,
+              snapshot,
+              {
+                caseId,
+                runId,
+                targetId: task.nodeId,
+                evidenceRevision,
+                evaluatedAt: new Date(time).toISOString(),
+              },
+              binding.findingRecheckId,
+            );
           if (
             receipt && receipt.taskId === binding.sourceTaskId &&
             passingRecheckSettled(
@@ -5123,6 +5185,8 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
           ) {
             checked?.set(task.id, {
               findingId: receipt.findingId,
+              ...(protectedVerdict &&
+                { protectedRepositoryVerdict: protectedVerdict }),
               findingRecheckId: receipt.id,
               sourceTaskId: receipt.taskId,
               sourceObservationSha256: binding.sourceObservationSha256,
@@ -5249,7 +5313,9 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
     time: number,
   ): boolean {
     const checked = new Map<string, ControlClaimProof>();
-    if (controlBlockedTasks(revision, time, checked).has(id)) return false;
+    if (
+      controlBlockedTasks(revision, time, checked, undefined, "claimed").has(id)
+    ) return false;
     const controlPrerequisites = controlProofsForTask(revision, id, checked);
     const saved = modelClaimProof.get(revision, id, attempt)?.note ?? null;
     if (
@@ -5263,7 +5329,10 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
     const graphProofs = controlPrerequisites.filter((proof) =>
       "graphFactId" in proof
     );
-    return graphProofs.length !== controlPrerequisites.length &&
+    return !controlPrerequisites.some((proof) =>
+      "protectedRepositoryVerdict" in proof
+    ) &&
+      graphProofs.length !== controlPrerequisites.length &&
       saved ===
         (graphProofs.length
           ? JSON.stringify({ controlPrerequisites: graphProofs })
@@ -5275,8 +5344,15 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
     excludedTaskIds: ReadonlySet<string>,
     time: number,
     checked?: Map<string, ControlClaimProof>,
+    protectedRechecks?: ReadonlyMap<string, string>,
   ) {
-    const blocked = controlBlockedTasks(revision, time, checked);
+    const blocked = controlBlockedTasks(
+      revision,
+      time,
+      checked,
+      undefined,
+      protectedRechecks,
+    );
     const filter = excludedTaskIds.size || blocked.size;
     const ready = db.prepare(`
       SELECT task.* FROM adaptive_tasks AS task
@@ -7556,6 +7632,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
       }
         WHERE t.revision = ? AND t.status = 'completed'
           AND NOT ${protectedReviewSql("t")}
+          AND json_extract(t.factSatisfaction, '$.protectedRepositoryVerdict') IS NULL
           AND t.observation IS NOT NULL
           AND (? IS NULL OR t.id IN (SELECT value FROM json_each(?)))
       )
@@ -8911,6 +8988,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
       revision: string,
       leaseSeconds = 60,
       excludedTaskIds: ReadonlySet<string> = new Set(),
+      protectedRechecks?: ReadonlyMap<string, string>,
     ): { task: AdaptiveTask; leaseToken: string } | null {
       revision = revisionKey(revision);
       if (
@@ -8931,6 +9009,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
           excludedTaskIds,
           time,
           checked,
+          protectedRechecks,
         );
         if (!next) return null;
         const leaseToken = randomUUID();
@@ -8954,13 +9033,20 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
     peekNextClaimable(
       revision: string,
       excludedTaskIds: ReadonlySet<string> = new Set(),
+      protectedRechecks?: ReadonlyMap<string, string>,
     ): AdaptiveTask | undefined {
       revision = revisionKey(revision);
       return transaction(db, () => {
         if (activeRevision() !== revision) return;
         const time = now();
         recover(revision, time);
-        const next = nextClaimableTask(revision, excludedTaskIds, time);
+        const next = nextClaimableTask(
+          revision,
+          excludedTaskIds,
+          time,
+          undefined,
+          protectedRechecks,
+        );
         return next ? decodeTask(next) : undefined;
       });
     },
@@ -8972,6 +9058,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
       fact: SentinelWorkerGraphFact,
       excludedTaskIds: ReadonlySet<string>,
       snapshot?: ReturnType<ReturnType<typeof loadSentinelGraph>["snapshot"]>,
+      protectedRechecks?: ReadonlyMap<string, string>,
     ): boolean {
       revision = revisionKey(revision);
       id = taskId(id);
@@ -8983,7 +9070,13 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
         ) return false;
         const time = now();
         recover(revision, time);
-        const row = nextClaimableTask(revision, excludedTaskIds, time);
+        const row = nextClaimableTask(
+          revision,
+          excludedTaskIds,
+          time,
+          undefined,
+          protectedRechecks,
+        );
         if (!row || row.id !== id || row.attempts !== 0) return false;
         const task = decodeTask(row);
         const round = task.plannerRound;
@@ -9081,6 +9174,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
       recheck: SentinelWorkerFindingRecheckRecord,
       excludedTaskIds: ReadonlySet<string>,
       checkedAt: string,
+      protectedRechecks?: ReadonlyMap<string, string>,
     ): boolean {
       revision = revisionKey(revision);
       id = taskId(id);
@@ -9100,7 +9194,13 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
         ) return false;
         const time = now();
         recover(revision, time);
-        const row = nextClaimableTask(revision, excludedTaskIds, time);
+        const row = nextClaimableTask(
+          revision,
+          excludedTaskIds,
+          time,
+          undefined,
+          protectedRechecks,
+        );
         if (!row || row.id !== id || row.attempts !== 0) return false;
         const task = decodeTask(row);
         const round = task.plannerRound;
@@ -9121,11 +9221,36 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
         ) {
           return false;
         }
+        const digest = createHash("sha256").update(JSON.stringify(recheck))
+          .digest("hex");
+        const protectedRepositoryVerdict = recheck.nativeRepositoryVisibility &&
+          {
+            ...recheck.nativeRepositoryVisibility,
+            verdictId: recheck.id,
+          };
+        if (
+          protectedRepositoryVerdict &&
+          (protectedRechecks?.get(id) !== digest ||
+            !Number.isFinite(Date.parse(checkedAt)) ||
+            Date.parse(checkedAt) < Date.parse(recheck.recordedAt) ||
+            Date.parse(checkedAt) >= Date.parse(recheck.validUntil) ||
+            !readProtectedReceipt(
+              revision,
+              task,
+              protectedRepositoryVerdict,
+              digest,
+              recheck.caseId,
+              recheck.runId,
+              recheck.evidenceRevision,
+              time,
+            ))
+        ) {
+          return false;
+        }
         const receipt: AdaptiveFactSatisfaction = {
           sourceTaskId: recheck.taskId,
-          sourceObservationSha256: createHash("sha256").update(
-            JSON.stringify(recheck),
-          ).digest("hex"),
+          sourceObservationSha256: digest,
+          ...(protectedRepositoryVerdict && { protectedRepositoryVerdict }),
           findingRecheckId: recheck.id,
           evidenceRevision: recheck.evidenceRevision,
           checkedAt,
@@ -9138,7 +9263,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
               findingRecheckId: recheck.id,
               findingId: recheck.findingId,
               evidenceId: recheck.evidenceId,
-              outcome: recheck.outcome,
+              ...(!protectedRepositoryVerdict && { outcome: recheck.outcome }),
             }),
             receipt,
           })
@@ -9151,7 +9276,9 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
           "fact_satisfied",
           0,
           time,
-          `Verified passing recheck ${recheck.id} for finding ${recheck.findingId} in evidence revision ${recheck.evidenceRevision}.`,
+          protectedRepositoryVerdict
+            ? `Verified exact protected recheck receipt ${recheck.id} in evidence revision ${recheck.evidenceRevision}.`
+            : `Verified passing recheck ${recheck.id} for finding ${recheck.findingId} in evidence revision ${recheck.evidenceRevision}.`,
         );
         return true;
       });
@@ -9162,6 +9289,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
       revision: string,
       request: AdaptiveFactSatisfaction & { readonly taskId: string },
       excludedTaskIds: ReadonlySet<string> = new Set(),
+      protectedRechecks?: ReadonlyMap<string, string>,
     ): boolean {
       revision = revisionKey(revision);
       const id = taskId(request.taskId);
@@ -9174,7 +9302,13 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
         if (activeRevision() !== revision) return false;
         const time = now();
         recover(revision, time);
-        const target = nextClaimableTask(revision, excludedTaskIds, time);
+        const target = nextClaimableTask(
+          revision,
+          excludedTaskIds,
+          time,
+          undefined,
+          protectedRechecks,
+        );
         const source = lookup.get(sourceTaskId);
         if (
           target?.id !== id || target.attempts !== 0 ||
@@ -11420,10 +11554,17 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
       revision: string,
       reason: string,
       eligible: (task: AdaptiveTask) => boolean = () => true,
+      protectedRechecks?: ReadonlyMap<string, string>,
     ): boolean {
       if (activeRevision() !== revision) return false;
       const time = now();
-      const blocked = controlBlockedTasks(revision, time);
+      const blocked = controlBlockedTasks(
+        revision,
+        time,
+        undefined,
+        undefined,
+        protectedRechecks,
+      );
       return nextModelReview.all(revision, reason, time)
         .some((row) =>
           !blocked.has(String(row.id)) && eligible(decodeTask(row))
@@ -11434,13 +11575,20 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
       revision: string,
       reason: string,
       eligible: (task: AdaptiveTask) => boolean = () => true,
+      protectedRechecks?: ReadonlyMap<string, string>,
     ) {
       return transaction(db, () => {
         if (activeRevision() !== revision) return null;
         const time = now();
         recordExpiredModelReviews(revision, time);
         const checked = new Map<string, ControlClaimProof>();
-        const blocked = controlBlockedTasks(revision, time, checked);
+        const blocked = controlBlockedTasks(
+          revision,
+          time,
+          checked,
+          undefined,
+          protectedRechecks,
+        );
         const row = nextModelReview.all(revision, reason, time)
           .find((row) =>
             !blocked.has(String(row.id)) && eligible(decodeTask(row))

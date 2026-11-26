@@ -1184,15 +1184,29 @@ function addAdaptive(
           : task.prerequisites.includes(fact.taskId))
       );
     if (relationshipFact) graphSatisfactions.set(task.id, relationshipFact.id);
-    const recheck = receipt?.findingRecheckId &&
-      rechecks.get(receipt.findingRecheckId);
-    const verifiedRecheck = recheck && task.status === "completed" &&
+    const recheck = receipt?.findingRecheckId
+      ? rechecks.get(receipt.findingRecheckId)
+      : undefined;
+    const protectedVerdict = repositoryVisibilityReference(
+      receipt?.protectedRepositoryVerdict,
+    );
+    const protectedSource = repositoryVisibilityReference(
+      recheck && recheck.nativeRepositoryVisibility,
+    );
+    const verifiedPass = protectedSource
+      ? protectedVerdict?.verdictId === recheck?.id &&
+        protectedVerdict?.taskId === protectedSource.taskId &&
+        protectedVerdict?.sourceStepIndex === protectedSource.sourceStepIndex &&
+        protectedVerdict?.resultSha256 === protectedSource.resultSha256
+      : recheck && recheck.outcome === "pass" && !protectedVerdict;
+    const verifiedRecheck = recheck && verifiedPass &&
+      task.status === "completed" &&
       (recheck.id === task.plannerRound?.passingRecheckId ||
         recheck.findingId === task.plannerRound?.passingRecheckForFindingId) &&
       recheck.caseId === view.caseId && recheck.runId === view.goal.id &&
       recheck.evidenceRevision === view.evidenceRevision &&
       recheck.evidenceRevision === receipt?.evidenceRevision &&
-      recheck.targetId === task.nodeId && recheck.outcome === "pass" &&
+      recheck.targetId === task.nodeId &&
       recheck.taskId === receipt.sourceTaskId &&
       assignments.has(recheck.taskId) &&
       recheck.receiptSha256 === receipt.sourceObservationSha256;
