@@ -370,6 +370,7 @@ import {
   attachOperatorSentinelFindingTrafficBatch,
   editOperatorSentinelFindingTrafficSet,
   executeSentinelFindingTrafficTool,
+  readAuthorizedSentinelFindingTrafficScope,
   reopenSentinelLinkedTrafficPayload,
   sentinelFindingTrafficAttachTool,
   sentinelFindingTrafficListTool,
@@ -10444,35 +10445,30 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
         } = args;
         if (
           ref.kind !== "sentinel" || ref.revision === undefined ||
+          context?.authorizeSentinelCaseRead?.(ref.id, ref.revision) ===
+            false ||
           typeof receiptId !== "string" ||
           !/^worker-finding:[a-f0-9]{64}$/.test(receiptId) ||
           Object.hasOwn(filters, "assetId") ||
           !await controller.inspect(ref)
         ) return unavailable;
         const path = resolveSentinelCasePath(options.baseDir, ref.id);
-        const runId = readSentinelRunIdForRevision(path, ref.revision);
-        if (!runId || !hasSentinelWorkerFindingJournal(path)) {
-          return unavailable;
-        }
-        const journal = openSentinelWorkerFindingStore(path);
-        try {
-          const finding = journal.readFinding(receiptId);
-          if (
-            finding?.caseId !== ref.id || finding.runId !== runId ||
-            finding.evidenceRevision > ref.revision
-          ) return unavailable;
-          const page = readProjectedSentinelTrafficPage(
-            path,
-            ref.revision,
-            filters,
-            finding.targetId,
-          );
-          return page
-            ? safeProjection({ run: ref, findingId: receiptId, page })
-            : unavailable;
-        } finally {
-          journal.close();
-        }
+        const scope = readAuthorizedSentinelFindingTrafficScope(
+          path,
+          ref.id,
+          ref.revision,
+          receiptId,
+        );
+        if (!scope) return unavailable;
+        const page = readProjectedSentinelTrafficPage(
+          path,
+          ref.revision,
+          filters,
+          scope.original.targetId,
+        );
+        return page
+          ? safeProjection({ run: ref, findingId: receiptId, page })
+          : unavailable;
       }
       if (
         action === "preview_finding_publication" ||
@@ -10546,6 +10542,7 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
         if (
           ref.kind !== "sentinel" || ref.revision === undefined ||
           !context?.authenticatedOwnerSessionId ||
+          context.authorizeSentinelCaseRead?.(ref.id, ref.revision) === false ||
           !canFlowTo("INTERNAL", context.ceiling ?? "PUBLIC") ||
           typeof receiptId !== "string" ||
           !/^worker-finding:[a-f0-9]{64}$/.test(receiptId) ||
@@ -10569,6 +10566,13 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
           ) || !await controller.inspect(ref)
         ) return unavailable;
         const path = resolveSentinelCasePath(options.baseDir, ref.id);
+        const scope = readAuthorizedSentinelFindingTrafficScope(
+          path,
+          ref.id,
+          ref.revision,
+          receiptId,
+        );
+        if (!scope) return unavailable;
         const receipt = readSentinelTrafficCompositionReceipt(
           path,
           ref.revision,
@@ -10577,7 +10581,7 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
         );
         if (
           !receipt || receipt.caseId !== ref.id ||
-          receipt.runId !== readSentinelRunIdForRevision(path, ref.revision)
+          receipt.runId !== scope.runId
         ) return unavailable;
         if (receipt.operation !== "reorder") return safeProjection({ receipt });
         const { linkIds, ...identity } = receipt;
@@ -10738,6 +10742,8 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
         } = args;
         if (
           ref.kind !== "sentinel" || ref.revision === undefined ||
+          context?.authorizeSentinelCaseRead?.(ref.id, ref.revision) ===
+            false ||
           !canFlowTo("INTERNAL", context?.ceiling ?? "INTERNAL") ||
           (includeReportEvidence !== undefined && (
             includeReportEvidence !== true || trafficLinkId !== undefined ||
@@ -10782,6 +10788,13 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
         ) return unavailable;
         const snapshotPath = resolveSentinelCasePath(options.baseDir, ref.id);
         if (typeof trafficLinkId === "string") {
+          const scope = readAuthorizedSentinelFindingTrafficScope(
+            snapshotPath,
+            ref.id,
+            ref.revision,
+            receiptId,
+          );
+          if (!scope) return unavailable;
           const [link] = listSentinelFindingTrafficLinks(snapshotPath, {
             id: trafficLinkId,
             evidenceRevision: ref.revision,
@@ -10790,33 +10803,18 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
             ...(includeWithdrawn === true && { includeWithdrawn }),
             limit: 1,
           });
-          if (link?.caseId !== ref.id) return unavailable;
+          if (
+            link?.caseId !== ref.id || link.assetId !== scope.original.targetId
+          ) return unavailable;
           if (payloadPart !== undefined) {
-            const runId = readSentinelRunIdForRevision(
-              snapshotPath,
-              ref.revision,
-            );
-            const selected = readSentinelAssessmentRevision(
-              snapshotPath,
-              ref.revision,
-            );
             const current = readSentinelAssessment(snapshotPath);
-            const snapshot = selected?.result.sharedGraph.snapshot;
+            const snapshot = scope.snapshot;
             const target = {
               kind: "review_evidence",
               nodeId: link.assetId,
             } as const;
             if (
-              !runId || !snapshot || !current?.plan.runId ||
-              !sentinelOperatingConstraintsAllow(
-                readSentinelOperatingConstraints(
-                  snapshotPath,
-                  runId,
-                  ref.revision,
-                )?.constraints,
-                target,
-                snapshot,
-              ) ||
+              !current?.plan.runId ||
               !sentinelOperatingConstraintsAllow(
                 readSentinelOperatingConstraints(
                   snapshotPath,
@@ -10835,6 +10833,7 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
               digest: link.trafficDigest,
             },
             link.assetId,
+            scope.assets,
           );
           if (!receipt || receipt.family !== link.trafficSource) {
             return unavailable;

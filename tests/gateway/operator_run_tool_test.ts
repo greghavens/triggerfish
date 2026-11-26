@@ -3510,6 +3510,23 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
       assertStringIncludes((await turn(trafficHint)).result, "unavailable");
       assertEquals(confirmations.length, beforeMembership + 1);
 
+      for (
+        const hiddenTraffic of [
+          candidates,
+          followLink,
+          { ...followLink, includeWithdrawn: true },
+          {
+            ...largeList,
+            action: "finding_traffic_set_receipt",
+            trafficSetReceiptId: largeReceipt.id,
+          },
+        ]
+      ) {
+        const result = (await turn(hiddenTraffic)).result;
+        assertStringIncludes(result, "unavailable");
+        assert(!result.includes(trafficLink.id));
+      }
+
       const exactMembershipBeforeReview = readSentinelOperatingConstraints(
         peerPath,
         peerRunId,
@@ -3562,10 +3579,7 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
         (await turn({ ...continuation, revision: nextPeer.revision })).result,
         "unavailable",
       );
-      assertEquals(
-        JSON.parse((await turn(followLink)).result).receipt.digest,
-        traffic.digest,
-      );
+      assertStringIncludes((await turn(followLink)).result, "unavailable");
       assertStringIncludes(
         (await turn({ ...followLink, revision: nextPeer.revision })).result,
         "unavailable",

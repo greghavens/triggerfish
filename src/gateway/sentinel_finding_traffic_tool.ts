@@ -259,6 +259,20 @@ function findingTrafficOriginal(
   ) return original;
 }
 
+/** Resolve one attachment subject through its exact saved/current case policy. */
+export function readAuthorizedSentinelFindingTrafficScope(
+  path: string,
+  caseId: string,
+  revision: number,
+  findingId: string,
+) {
+  if (locateSentinelCase(path)?.caseId !== caseId) return;
+  const scope = readSentinelTrafficAssetScope(path, revision);
+  const original = scope &&
+    findingTrafficOriginal(path, caseId, revision, scope, findingId);
+  return scope && original ? { ...scope, original } : undefined;
+}
+
 /** Check the selected finding and the exact returned attachments before delivery. */
 export function currentSentinelFindingTrafficRead(
   path: string,
