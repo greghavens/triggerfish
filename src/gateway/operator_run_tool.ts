@@ -2847,7 +2847,7 @@ ${
           : action === "rename_run_category" && category
           ? { kind: "rename", ...category, title: name }
           : { kind: "delete", ...category! };
-        async function visibleTargets() {
+        const visibleTargets = async () => {
           for (const item of runsToCategorize ?? []) {
             const { runId, ...ref } = item;
             const run = await controller.inspect(ref);
@@ -2862,7 +2862,7 @@ ${
             ) return false;
           }
           return true;
-        }
+        };
         if (!await visibleTargets()) return unavailable;
         const id = requestId.toLowerCase();
         const before = links.categories.review(id, change);
