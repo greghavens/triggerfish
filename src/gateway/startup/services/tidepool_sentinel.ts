@@ -25,12 +25,16 @@ import {
   readSentinelGoalCompletionForState,
 } from "../../sentinel_goal_completion.ts";
 import { executeSentinelInventoryTool } from "../../sentinel_inventory_tool.ts";
-import { readSentinelFindingReceiptScope } from "../../sentinel_worker_findings.ts";
+import { exportSentinelFindingTrafficLinks } from "../../../sentinel/finding_traffic_links.ts";
+import {
+  readScopedSentinelWorkerFindingReport,
+  readSentinelFindingReceiptScope,
+} from "../../sentinel_worker_findings.ts";
 import {
   hasSentinelWorkerFindingJournal,
   openSentinelWorkerFindingStore,
+  readSentinelCaseFindingReceipts,
   readSentinelWorkerFindingHistory,
-  readSentinelWorkerFindingReport,
 } from "../../../sentinel/worker_finding_store.ts";
 import {
   applySentinelWorkerControlRequest,
@@ -1587,11 +1591,45 @@ export function createTidepoolSentinelHandler(
               ? readAdaptiveSentinel(path, current, "revision") ?? undefined
               : readHistoricalAdaptiveSentinel(path, state.revision) ??
                 undefined;
+          const receiptScope = format === "markdown" || format === "provenance"
+            ? readSentinelFindingReceiptScope(path, state.revision)
+            : undefined;
+          const scopedAdaptive = adaptive && {
+            ...adaptive,
+            remediationRechecks: adaptive.remediationRechecks.filter((item) =>
+              !!receiptScope && item.caseId === caseId &&
+              item.runId === receiptScope.runId &&
+              item.evidenceRevision === state.revision &&
+              receiptScope.allows(item.targetId) &&
+              receiptScope.allows(item.evidenceId)
+            ),
+          };
+          const findingTrafficLinks = format === "provenance"
+            ? exportSentinelFindingTrafficLinks(path, state.revision)
+            : [];
+          const linkedFindings = readSentinelCaseFindingReceipts(
+            path,
+            [...new Set(findingTrafficLinks.map(({ findingId }) => findingId))],
+          );
           const exportState = {
             ...state,
             workerFindings: format === "markdown" || format === "provenance"
-              ? readSentinelWorkerFindingReport(path, state.revision)
+              ? readScopedSentinelWorkerFindingReport(
+                path,
+                caseId,
+                state.revision,
+              )
               : undefined,
+            findingTrafficLinks: findingTrafficLinks.filter((link) => {
+              const original = linkedFindings.get(link.findingId);
+              return !!receiptScope && link.caseId === caseId &&
+                original?.kind === "finding" &&
+                original.caseId === caseId &&
+                original.runId === receiptScope.runId &&
+                original.targetId === link.assetId &&
+                original.evidenceRevision <= state.revision &&
+                receiptScope.allows(link.assetId);
+            }),
             findingReviews: format === "inventory" || format === "alerts"
               ? undefined
               : readSentinelFindingReviews(path, state.revision),
@@ -1604,14 +1642,19 @@ export function createTidepoolSentinelHandler(
             : format === "markdown"
             ? renderSentinelInvestigationMarkdown(
               exportState,
-              adaptive,
+              scopedAdaptive,
               language,
             )
             : format === "inventory"
             ? JSON.stringify(inventory) + "\n"
             : format === "alerts" && alerts
             ? renderSentinelAlertsJson(caseId, state.revision, alerts)
-            : renderSentinelProvenanceJson(caseId, exportState, adaptive, path);
+            : renderSentinelProvenanceJson(
+              caseId,
+              exportState,
+              scopedAdaptive,
+              path,
+            );
           send({
             topic: "sentinel",
             type: "export",

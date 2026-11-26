@@ -54,6 +54,7 @@ import {
   openSentinelWorkerFindingStore,
   readSentinelCaseFindingReceipts,
   readSentinelStagedTrafficFinding,
+  readSentinelWorkerFindingReport,
   readSentinelWorkerFindingWriteReceipt,
   readStagedTrafficLinks,
 } from "../sentinel/worker_finding_store.ts";
@@ -119,6 +120,39 @@ export function readSentinelFindingReceiptScope(
       return sentinelOperatingConstraintsAllow(saved, target, snapshot) &&
         sentinelOperatingConstraintsAllow(current, target, snapshot);
     },
+  };
+}
+
+/** Build the worker evidence section from visible case/run records only. */
+export function readScopedSentinelWorkerFindingReport(
+  path: string,
+  caseId: string,
+  revision: number,
+) {
+  const scope = readSentinelFindingReceiptScope(path, revision);
+  const report = scope && readSentinelWorkerFindingReport(path, revision);
+  if (!scope || !report) return null;
+  const allows = ({ caseId: recordCase, runId, evidenceRevision, targetId }: {
+    caseId: string;
+    runId: string;
+    evidenceRevision: number;
+    targetId: string;
+  }) =>
+    recordCase === caseId && runId === scope.runId &&
+    evidenceRevision <= revision && scope.allows(targetId);
+  const findings = report.findings.filter(allows);
+  if (!findings.length) return null;
+  const visible = new Set(findings.map(({ id }) => id));
+  return {
+    findings,
+    rechecks: report.rechecks.filter((item) =>
+      visible.has(item.findingId) && allows(item) &&
+      scope.allows(item.evidenceId)
+    ),
+    amendments: report.amendments.filter((item) =>
+      visible.has(item.findingId) && allows(item)
+    ),
+    reports: report.reports.filter(({ finding }) => visible.has(finding.id)),
   };
 }
 

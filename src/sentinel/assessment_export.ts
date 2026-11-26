@@ -52,8 +52,13 @@ export type SentinelAssessmentExportInput =
   & {
     readonly incidentReviews?: readonly SentinelIncidentReview[];
     readonly findingReviews?: readonly SentinelFindingReview[];
-    readonly workerFindings?: ReturnType<
-      typeof readSentinelWorkerFindingReport
+    readonly workerFindings?:
+      | ReturnType<
+        typeof readSentinelWorkerFindingReport
+      >
+      | null;
+    readonly findingTrafficLinks?: ReturnType<
+      typeof exportSentinelFindingTrafficLinks
     >;
   };
 
@@ -120,11 +125,13 @@ export function renderSentinelProvenanceJson(
 ): string {
   const planningAttempts = adaptive?.provenancePlanningAttempts ??
     adaptive?.modelPlannerHistory ?? [];
-  const workerFindings = assessment.workerFindings ??
-    readSentinelWorkerFindingReport(path, assessment.revision);
+  const workerFindings = assessment.workerFindings === undefined
+    ? readSentinelWorkerFindingReport(path, assessment.revision)
+    : assessment.workerFindings;
   const exactCase = locateSentinelCase(path)?.caseId === caseId;
   const findingTrafficLinks = exactCase
-    ? exportSentinelFindingTrafficLinks(path, assessment.revision)
+    ? assessment.findingTrafficLinks ??
+      exportSentinelFindingTrafficLinks(path, assessment.revision)
     : [];
   const operatingConstraints = exactCase
     ? readSentinelOperatingConstraintsForRevision(path, assessment.revision)

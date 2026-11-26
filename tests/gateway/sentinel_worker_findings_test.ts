@@ -1369,6 +1369,24 @@ Deno.test("Leased Sentinel workers report, recheck, and amend findings visible i
       assertEquals(await list(first.revision), []);
       assertEquals(await list(second.revision), []);
       assertEquals(await list(), []);
+      const hiddenProvenance = JSON.parse(String(
+        (await request("export", {
+          format: "provenance",
+          revision: second.revision,
+        })).content,
+      ));
+      assertEquals(hiddenProvenance.workerFindings, undefined);
+      assert(
+        !hiddenProvenance.provenance.nodes.some(
+          ({ sourceId }: { sourceId: string }) => sourceId === check!.id,
+        ),
+      );
+      const hiddenMarkdown = await request("export", {
+        format: "markdown",
+        revision: second.revision,
+      });
+      assertEquals(hiddenMarkdown.type, "export");
+      assert(!String(hiddenMarkdown.content).includes(original.title));
       const matchingRun = readSentinelAssessment(path);
       assert(matchingRun?.plan.runId);
       const priorPolicyVersion = readSentinelOperatingConstraints(
@@ -6094,6 +6112,8 @@ Deno.test("Stopping an exact recheck preserves its staged evidence without publi
   verifyReceiptFamily("native workflow result", "stop-after-result"));
 
 async function verifyNativeFindingTrafficReadScope(
+  baseDir: string,
+  caseId: string,
   path: string,
   state: State,
   findingId: string,
@@ -6331,6 +6351,17 @@ async function verifyNativeFindingTrafficReadScope(
     assertStringIncludes(await turn(nativeReceipt), "unavailable");
     name = "sentinel_traffic_search";
     assertEquals(JSON.parse(await turn({ limit: 10 })).receipts, []);
+    await withTidepool(baseDir, async (_list, _provenance, request) => {
+      const exported = await request("export", {
+        caseId,
+        revision: state.revision,
+        format: "provenance",
+      });
+      assertEquals(exported.type, "export");
+      const report = JSON.parse(String(exported.content));
+      assertEquals(report.findingTrafficLinks, undefined);
+      assertEquals(report.workerFindings, undefined);
+    });
     setPolicy(6, []);
   } finally {
     socket.close();
@@ -6690,6 +6721,8 @@ async function verifyInitialTrafficPublication(
   );
   if (hinted === "set") {
     await verifyNativeFindingTrafficReadScope(
+      baseDir,
+      ref.id,
       path,
       state,
       recovered.record.id,
@@ -6699,7 +6732,7 @@ async function verifyInitialTrafficPublication(
     );
   }
   const readTidepoolLinks = async () => {
-    let links: SentinelFindingTrafficLink[] = [];
+    let links: SentinelFindingTrafficLink[] | undefined;
     await withTidepool(baseDir, async (_list, _provenance, request) => {
       const result = await request("export", {
         format: "provenance",
@@ -6803,6 +6836,7 @@ async function verifyInitialTrafficPublication(
     );
   }
   const liveTidepoolLinks = await readTidepoolLinks();
+  assert(liveTidepoolLinks);
   assertEquals(liveTidepoolLinks.toSorted(byId), attached.toSorted(byId));
   await restoreArchive();
   await readInitialClassification();
@@ -6841,6 +6875,7 @@ async function verifyInitialTrafficPublication(
     (hook, input) =>
       !(hook === "PRE_TOOL_CALL" && input.tool_name === "sentinel_traffic_get"),
   );
+  assertEquals(await readTidepoolLinks(), liveTidepoolLinks);
   await verifyTidepoolTrafficDownload(
     baseDir,
     path,
@@ -6848,7 +6883,7 @@ async function verifyInitialTrafficPublication(
     state.revision,
     attached[0],
   );
-  assertEquals(await readTidepoolLinks(), liveTidepoolLinks);
+  assertEquals(await readTidepoolLinks(), undefined);
 }
 
 async function verifyTidepoolTrafficDownload(
@@ -6899,7 +6934,10 @@ async function verifyTidepoolTrafficDownload(
           assert(recordSentinelOperatingConstraints(path, {
             runId: current.plan.runId,
             evidenceRevision: current.revision,
-            expectedVersion: 0,
+            expectedVersion: readSentinelOperatingConstraints(
+              path,
+              current.plan.runId,
+            )?.version ?? 0,
             requestId: crypto.randomUUID(),
             operatorScope: "traffic-download-fixture",
             constraints: { deniedKinds: ["review_evidence"] },
