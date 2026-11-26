@@ -11,14 +11,12 @@ import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";
 import type { ToolDefinition } from "../core/types/tool.ts";
 import {
-  readSentinelAssessmentRevision,
-  readSentinelOperatingConstraints,
-  readSentinelRunIdForRevision,
   withSentinelAssessmentWriteLock,
 } from "../sentinel/assessment_store.ts";
 import { locateSentinelCase } from "../sentinel/cases.ts";
 import {
   projectSentinelTrafficMetadata,
+  readSentinelTrafficAssetScope,
   readSentinelTrafficReceipt,
   readSentinelTrafficReceiptPage,
   type SentinelTrafficReceipt,
@@ -27,6 +25,8 @@ import {
 } from "../sentinel/traffic_receipts.ts";
 import type { SentinelAgentOptions } from "./sentinel_agent.ts";
 import { readAssignedSentinelModelReview } from "./sentinel_adaptive_runtime.ts";
+
+export { readSentinelTrafficAssetScope } from "../sentinel/traffic_receipts.ts";
 
 type TrafficScope =
   & Pick<
@@ -273,35 +273,6 @@ export function projectSentinelTrafficBlob(
 }
 
 /** Intersect the original revision and current case asset boundaries. */
-export function readSentinelTrafficAssetScope(path: string, revision: number) {
-  const runId = readSentinelRunIdForRevision(path, revision);
-  const snapshot = readSentinelAssessmentRevision(path, revision)?.result
-    .sharedGraph.snapshot;
-  if (!runId || !snapshot) return;
-  const saved = readSentinelOperatingConstraints(path, runId, revision)
-    ?.constraints;
-  const current = readSentinelOperatingConstraints(path, runId)?.constraints;
-  const priorAssets = saved?.allowedAssetIds && new Set(saved.allowedAssetIds);
-  const currentAssets = current?.allowedAssetIds &&
-    new Set(current.allowedAssetIds);
-  const denied = saved?.deniedKinds.includes("review_evidence") ||
-    current?.deniedKinds.includes("review_evidence");
-  return {
-    runId,
-    snapshot,
-    assets: new Set(
-      denied
-        ? []
-        : snapshot.nodes.flatMap((node) =>
-          node.kind === "asset" && (!priorAssets || priorAssets.has(node.id)) &&
-            (!currentAssets || currentAssets.has(node.id))
-            ? [node.id]
-            : []
-        ),
-    ),
-  };
-}
-
 export function currentSentinelNativeTrafficRead(
   path: string,
   revision: number,

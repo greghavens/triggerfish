@@ -908,11 +908,30 @@ async function verifyPausedGraphWorker(
   stopAt?: "running" | "paused",
   pinnedTemplate = false,
   askCheckpoint?: "approved" | "missing",
+  trafficCheckpoint = false,
 ) {
   const baseDir = await Deno.makeTempDir();
   const caseId = cold ? "portable-worker" : "main";
   const path = resolveSentinelCasePath(baseDir, caseId);
-  const approvalPath = join(baseDir, "worker-approvals.db");
+  const trafficFixture = {
+    startedDateTime: new Date(Date.now() - 60_000).toISOString(),
+    request: { method: "GET", url: "https://portable.example/retained" },
+    response: { status: 200, content: { text: "private-response-fixture" } },
+  };
+  const heldAsset = trafficCheckpoint
+    ? importSentinelHar({
+      log: { version: "1.2", entries: [trafficFixture] },
+    }, "portable").observations[0].assetId
+    : "held-graph";
+  let exactTraffic:
+    | { revision: number; evidenceId: string; digest: string }
+    | undefined;
+  let originalTraffic: string | undefined;
+  let heldAssignmentId: string | undefined;
+  const approvalTool = trafficCheckpoint
+    ? "sentinel_traffic_get"
+    : "sentinel_assigned_target";
+  const approvalPath = join(baseDir, "tool-approvals.db");
   const toolApprovalInbox = askCheckpoint
     ? createToolApprovalService(approvalPath)
     : undefined;
@@ -936,7 +955,7 @@ async function verifyPausedGraphWorker(
       supportsStreaming: false,
       async complete(messages) {
         const saved = messages.findLast(({ role }) => role === "tool");
-        if (pinnedTemplate && id === "held-graph" && reused) {
+        if (pinnedTemplate && id === heldAsset && reused) {
           assert(/blocked|denied/i.test(String(saved?.content)));
           pinnedDenied = true;
           return {
@@ -950,15 +969,44 @@ async function verifyPausedGraphWorker(
           return {
             content: "",
             usage,
-            toolCalls: [{
-              id: `read-${id}`,
-              type: "function",
-              function: { name: "sentinel_assigned_target", arguments: "{}" },
-            }],
+            toolCalls: [
+              {
+                id: `read-${id}`,
+                type: "function",
+                function: { name: "sentinel_assigned_target", arguments: "{}" },
+              },
+              ...(trafficCheckpoint && id === heldAsset
+                ? [{
+                  id: "portable-traffic",
+                  type: "function" as const,
+                  function: {
+                    name: "sentinel_traffic_get",
+                    arguments: JSON.stringify(exactTraffic),
+                  },
+                }]
+                : []),
+            ],
           };
         }
         assert(String(saved.content).includes(id));
-        if (id === "held-graph") {
+        if (id === heldAsset) {
+          if (trafficCheckpoint) {
+            const [target, traffic] = messages.filter(({ role }) =>
+              role === "tool"
+            );
+            assert(String(target?.content).includes(heldAsset));
+            assert(traffic && exactTraffic);
+            const text = String(traffic.content);
+            const result = JSON.parse(text);
+            assertEquals(result.caseId, caseId);
+            assertEquals(result.evidenceRevision, exactTraffic.revision);
+            assertEquals(result.receipt.evidenceId, exactTraffic.evidenceId);
+            assertEquals(result.receipt.digest, exactTraffic.digest);
+            assertEquals(result.receipt.assetIds, [heldAsset]);
+            assert(!text.includes("private-response-fixture"));
+            if (heldStep) assertEquals(text, originalTraffic);
+            else originalTraffic = text;
+          }
           if (!heldStep) {
             heldStep = true;
             await release.promise;
@@ -996,7 +1044,7 @@ async function verifyPausedGraphWorker(
     registry.setDefault(name);
     return registry;
   };
-  const heldProvider = provider("held-graph");
+  const heldProvider = provider(heldAsset);
   const peerProvider = provider("peer-graph");
   const workerPool = createSentinelWorkerPool(2);
   const hookRunner: HookRunner = {
@@ -1040,7 +1088,7 @@ async function verifyPausedGraphWorker(
             send({
               type: "response",
               text: JSON.stringify([
-                { kind: "impact", nodeId: "held-graph" },
+                { kind: "impact", nodeId: heldAsset },
                 { kind: "impact", nodeId: "peer-graph" },
               ]),
               taint: "INTERNAL",
@@ -1051,7 +1099,7 @@ async function verifyPausedGraphWorker(
         };
       }
       const target = adaptive()?.tasks.find(({ id }) => id === taskId)?.nodeId;
-      const registry = target === "held-graph" ? heldProvider : peerProvider;
+      const registry = target === heldAsset ? heldProvider : peerProvider;
       return createSentinelSubagent({
         snapshotPath: path,
         assessmentRevision: state.revision,
@@ -1067,15 +1115,25 @@ async function verifyPausedGraphWorker(
   };
   try {
     await Deno.mkdir(dirname(path), { recursive: true });
+    if (trafficCheckpoint) {
+      await ingestSentinelTraffic(
+        new Blob([JSON.stringify(trafficFixture)]).stream(),
+        "portable",
+        path,
+        "har",
+        true,
+      );
+    }
     await Deno.writeTextFile(
       path,
       JSON.stringify({
         version: 1,
-        nodes: ["held-graph", "peer-graph"].map((id) => ({
-          kind: "asset",
-          id,
-          label: id,
-        })),
+        nodes: (trafficCheckpoint ? ["peer-graph"] : [heldAsset, "peer-graph"])
+          .map((id) => ({
+            kind: "asset",
+            id,
+            label: id,
+          })),
         edges: [],
       }),
     );
@@ -1108,14 +1166,14 @@ async function verifyPausedGraphWorker(
                 tool: "sentinel_trace",
                 effect: "block",
                 enabled: true,
-                assetId: "held-graph",
+                assetId: heldAsset,
               },
               ...(askCheckpoint
                 ? [{
-                  tool: "sentinel_assigned_target",
+                  tool: approvalTool,
                   effect: "ask" as const,
                   enabled: true,
-                  assetId: "held-graph",
+                  assetId: heldAsset,
                 }]
                 : []),
             ],
@@ -1123,12 +1181,25 @@ async function verifyPausedGraphWorker(
         },
       }).state
       : startSentinelAssessment(path, { goal: "Review two graph assets." });
+    if (trafficCheckpoint) {
+      const receipt = readSentinelTrafficReceiptPage(
+        path,
+        initial.revision,
+        { authority: "portable.example" },
+      )?.receipts[0];
+      assert(receipt);
+      exactTraffic = {
+        revision: initial.revision,
+        evidenceId: receipt.evidenceId,
+        digest: receipt.digest,
+      };
+    }
     advanceAdaptiveSentinel(path, initial);
     const first = startPlanner();
     first.advance(initial);
     await until(() =>
       !!adaptive()?.tasks.find(({ nodeId, status }) =>
-        nodeId === "held-graph" && status === "completed"
+        nodeId === heldAsset && status === "completed"
       )
     );
     first.advance(initial);
@@ -1147,12 +1218,15 @@ async function verifyPausedGraphWorker(
             }
           }
           assert(pending);
-          assertEquals(pending.tool, "sentinel_assigned_target");
+          assertEquals(pending.tool, approvalTool);
           assertEquals(pending.runId, initial.plan.runId);
+          assert(pending.assignmentId);
           assertEquals(
-            pending.assignmentId,
-            adaptive()?.tasks.find(({ nodeId }) => nodeId === "held-graph")?.id,
+            adaptive()?.tasks.find(({ id }) => id === pending.assignmentId)
+              ?.nodeId,
+            heldAsset,
           );
+          heldAssignmentId = pending.assignmentId;
           assertEquals(
             (await inbox({
               type: "approval_inbox_decide",
@@ -1169,7 +1243,9 @@ async function verifyPausedGraphWorker(
     }
     await until(() => heldStep);
     const status = adaptive()!;
-    const held = status.tasks.find(({ nodeId }) => nodeId === "held-graph")!;
+    const held = status.tasks.find(({ id, nodeId }) =>
+      nodeId === heldAsset && (!heldAssignmentId || id === heldAssignmentId)
+    )!;
     const pause = {
       action: "pause_assignment",
       kind: "sentinel",
@@ -1223,7 +1299,7 @@ async function verifyPausedGraphWorker(
                   },
                   {
                     kind: "trace",
-                    nodeId: "held-graph",
+                    nodeId: heldAsset,
                     depth: 2,
                     cancelledTaskRequestId: stop.requestId,
                   },
@@ -1278,7 +1354,7 @@ async function verifyPausedGraphWorker(
           assertEquals(planningInput, [{
             requestId: stop.requestId,
             taskId: held.id,
-            nodeId: "held-graph",
+            nodeId: heldAsset,
             reason,
           }]);
           await until(() =>
@@ -1307,7 +1383,7 @@ async function verifyPausedGraphWorker(
           })).includes("unavailable"));
           assertEquals(approvals.length, 0);
         });
-        assertEquals(sourceCalls.get("held-graph"), 1);
+        assertEquals(sourceCalls.get(heldAsset), 1);
         assertEquals(reused, false);
       } finally {
         coordinator.stop();
@@ -1329,7 +1405,7 @@ async function verifyPausedGraphWorker(
       await until(() => peerStarted);
       releasePeer.resolve();
       await until(() => peerCompleted);
-      assertEquals(sourceCalls.get("held-graph"), 1);
+      assertEquals(sourceCalls.get(heldAsset), 1);
     });
     first.stop();
     release.resolve();
@@ -1375,6 +1451,39 @@ async function verifyPausedGraphWorker(
         );
         assertEquals(readSentinelAssessment(path)?.revision, initial.revision);
       });
+    }
+    if (trafficCheckpoint && cold) {
+      const decisions = JSON.parse(
+        await Deno.readTextFile(
+          join(dirname(path), "sentinel-tool-decisions.json"),
+        ),
+      ).decisions;
+      assert(!Object.hasOwn(decisions[0], "binding"));
+      assertEquals(
+        decisions.map((
+          { tool, decision, dispatchOutcome }: ApprovalInboxRecord,
+        ) => [tool, decision, dispatchOutcome]),
+        [["sentinel_traffic_get", "approved", "returned"]],
+      );
+      const checkpointStore = new DatabaseSync(
+        join(dirname(path), "sentinel-adaptive.db"),
+        { readOnly: true },
+      );
+      try {
+        const saved = checkpointStore.prepare(
+          "SELECT checkpoint FROM adaptive_worker_checkpoints WHERE taskId = ?",
+        ).get(held.id);
+        assert(typeof saved?.checkpoint === "string");
+        assert(!saved.checkpoint.includes("private-response-fixture"));
+        assertEquals(
+          JSON.parse(saved.checkpoint).history.findLast(
+            ({ role }: { role: string }) => role === "tool",
+          )?.content,
+          originalTraffic,
+        );
+      } finally {
+        checkpointStore.close();
+      }
     }
     if (askCheckpoint === "missing") {
       const db = new DatabaseSync(approvalPath);
@@ -1426,7 +1535,7 @@ async function verifyPausedGraphWorker(
     if (askCheckpoint === "missing") {
       await until(() => !resumed.hasInFlightWork());
       assertEquals(reused, false);
-      assertEquals(sourceCalls.get("held-graph"), 1);
+      assertEquals(sourceCalls.get(heldAsset), 1);
       assertEquals(
         toolApprovalInbox?.list().records.filter(({ status }) =>
           status === "completed"
@@ -1438,11 +1547,11 @@ async function verifyPausedGraphWorker(
     if (denySavedRead) {
       await until(() => blockedSavedRead > 0 && !resumed.hasInFlightWork());
       assertEquals(reused, false);
-      assertEquals(sourceCalls.get("held-graph"), 1);
+      assertEquals(sourceCalls.get(heldAsset), 1);
       return;
     }
     await until(() => reused);
-    assertEquals(sourceCalls.get("held-graph"), 1);
+    assertEquals(sourceCalls.get(heldAsset), 1);
     await until(() =>
       adaptive()?.modelReviewStates.some(({ taskId, status }) =>
         taskId === held.id && status === "completed"
@@ -1480,6 +1589,11 @@ Deno.test("Portable resumed Sentinel worker reuses only an exactly approved pinn
   await verifyPausedGraphWorker(true, false, undefined, true, "approved");
   await verifyPausedGraphWorker(true, false, undefined, true, "missing");
   await verifyPausedGraphWorker(true, true, undefined, true, "approved");
+});
+
+Deno.test("Portable Sentinel worker restores exact approved traffic metadata and target reads", async () => {
+  await verifyPausedGraphWorker(true, false, undefined, true, "approved", true);
+  await verifyPausedGraphWorker(true, false, undefined, true, "missing", true);
 });
 
 Deno.test("Owner gateway restores a portable paused graph worker before reusing its checkpoint", () =>

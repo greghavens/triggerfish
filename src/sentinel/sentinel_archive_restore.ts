@@ -67,6 +67,7 @@ import {
 } from "./case_execution_evidence.ts";
 import {
   projectSentinelTrafficMetadata,
+  readPortableSentinelTrafficMetadata,
   readSentinelTrafficReceipt,
 } from "./traffic_receipts.ts";
 import { createHash } from "node:crypto";
@@ -1139,7 +1140,20 @@ function restoreAdaptive(
         );
       }
       retainArchivedWorkerTraceMetadata(db, caseId);
-      retainPortablePausedGraphCheckpoints(db, revision, true);
+      retainPortablePausedGraphCheckpoints(
+        db,
+        revision,
+        true,
+        (args, targetId) =>
+          readPortableSentinelTrafficMetadata(
+            join(dirname(assessment), "sentinel.json"),
+            caseId,
+            runId,
+            revision,
+            targetId,
+            args,
+          ),
+      );
       if (tables.has(visibilityResultsTable)) {
         db.exec(
           "DELETE FROM adaptive_repository_visibility_results WHERE sourceStepIndex IS NULL",

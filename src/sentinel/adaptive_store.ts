@@ -685,11 +685,114 @@ function normalizeWorkerCheckpoint(
     toolCallCounts: counts,
   };
 }
+function portablePausedWorkerRead(
+  raw: unknown,
+  evidenceRevision: number,
+) {
+  const call = raw as {
+    id?: unknown;
+    function?: { name?: unknown; arguments?: unknown };
+  } | undefined;
+  if (
+    typeof call?.id !== "string" ||
+    typeof call.function?.arguments !== "string"
+  ) return;
+  try {
+    const args: unknown = JSON.parse(call.function.arguments);
+    if (
+      call.function.name === ASSIGNED_TARGET_CHECKPOINT_TOOL &&
+      args && typeof args === "object" && !Array.isArray(args) &&
+      Object.keys(args).length === 0
+    ) return { id: call.id, tool: ASSIGNED_TARGET_CHECKPOINT_TOOL } as const;
+    if (call.function.name !== SENTINEL_TRAFFIC_READ) return;
+    const traffic = sentinelTrafficReadArgs(args);
+    if (traffic?.revision !== evidenceRevision) return;
+    return { id: call.id, tool: SENTINEL_TRAFFIC_READ, traffic } as const;
+  } catch {
+    return undefined;
+  }
+}
+
+type PortableTrafficRead = (
+  args: NonNullable<ReturnType<typeof sentinelTrafficReadArgs>>,
+  targetId: string,
+) => string | undefined;
+
+function portablePausedWorkerProgress(
+  value: AgentTurnCheckpoint,
+  steps: readonly SentinelReviewStep[],
+  evidenceRevision: number,
+  taskId: string,
+  nodeId: string,
+  readTraffic?: PortableTrafficRead,
+): SentinelReviewStep[] | undefined {
+  const calls = value.history.flatMap(({ tool_calls = [] }) => tool_calls);
+  const results = value.history.filter(({ role }) => role === "tool");
+  if (
+    !calls.length || calls.length > 15 || calls.length !== steps.length ||
+    calls.length !== results.length
+  ) return;
+  const safe: SentinelReviewStep[] = [];
+  for (const [index, raw] of calls.entries()) {
+    const call = portablePausedWorkerRead(raw, evidenceRevision);
+    const step = steps[index];
+    const result = results[index];
+    if (
+      !call || result.tool_call_id !== call.id ||
+      typeof result.content !== "string" || step?.tool !== call.tool ||
+      step.outcome !== "returned"
+    ) return;
+    const hash = createHash("sha256").update(result.content).digest("hex");
+    if (call.tool === SENTINEL_TRAFFIC_READ) {
+      const proof = { ...call.traffic, sha256: hash };
+      if (
+        !isDeepStrictEqual(step.trafficRead, proof) ||
+        readTraffic?.(call.traffic, nodeId) !== result.content
+      ) return;
+      safe.push({
+        tool: SENTINEL_TRAFFIC_READ,
+        outcome: "returned",
+        trafficRead: proof,
+      });
+      continue;
+    }
+    const graph = JSON.parse(result.content);
+    const linked = step.assignedTarget?.linkedNodeIds;
+    if (
+      step.assignedTarget?.targetId !== nodeId ||
+      step.resultSnapshot?.sha256 !== hash ||
+      !Array.isArray(linked) || linked.length > 200 ||
+      linked.some((id) =>
+        typeof id !== "string" || !id || id.length > 4096 ||
+        redactCredentialText(id) !== id
+      ) ||
+      graph.taskId !== taskId || graph.revision !== evidenceRevision ||
+      graph.target?.id !== nodeId || !Array.isArray(graph.linked) ||
+      !isDeepStrictEqual(
+        graph.linked.flatMap(
+          (node: { kind?: string; id?: string } | null) =>
+            node?.kind === "evidence" ? [node.id] : [],
+        ),
+        linked,
+      )
+    ) return;
+    safe.push({
+      tool: ASSIGNED_TARGET_CHECKPOINT_TOOL,
+      outcome: "returned",
+      target: nodeId,
+      assignedTarget: { targetId: nodeId, linkedNodeIds: linked },
+      resultSnapshot: { sha256: hash, excerpt: "", truncated: true },
+    });
+  }
+  return safe;
+}
+
 /** Keep only a validated portable checkpoint for an explicitly held local graph assignment. */
 export function retainPortablePausedGraphCheckpoints(
   db: DatabaseSync,
   evidenceRevision: number,
   verifyingArchive = false,
+  readTraffic?: PortableTrafficRead,
 ) {
   const hasTable = (name: string) =>
     !!db.prepare(
@@ -779,52 +882,17 @@ export function retainPortablePausedGraphCheckpoints(
           hold.scope.evidenceRevision !== evidenceRevision ||
           hold.scope.attempt !== Number(row.attempts) + 1 ||
           hold.checkpointSha256 !==
-            createHash("sha256").update(checkpoint).digest("hex") ||
-          value.history?.length !== 3 ||
-          value.history[1]?.tool_calls?.length !== 1 ||
-          value.history[1].tool_calls[0]?.function?.name !==
-            ASSIGNED_TARGET_CHECKPOINT_TOOL
+            createHash("sha256").update(checkpoint).digest("hex")
         ) continue;
-        const [step, ...rest] = JSON.parse(
-          progress.steps,
-        ) as SentinelReviewStep[];
-        const graph = JSON.parse(value.history[2]?.content);
-        if (
-          !step || rest.length ||
-          step.tool !== ASSIGNED_TARGET_CHECKPOINT_TOOL ||
-          step.outcome !== "returned" ||
-          step.assignedTarget?.targetId !== nodeId ||
-          !Array.isArray(step.assignedTarget.linkedNodeIds) ||
-          step.assignedTarget.linkedNodeIds.length > 200 ||
-          step.assignedTarget.linkedNodeIds.some((id) =>
-            typeof id !== "string" || !id || id.length > 4096 ||
-            redactCredentialText(id) !== id
-          ) ||
-          graph.taskId !== taskId || graph.revision !== evidenceRevision ||
-          graph.target?.id !== nodeId || !Array.isArray(graph.linked) ||
-          !isDeepStrictEqual(
-            graph.linked.flatMap((
-              node: { kind?: string; id?: string } | null,
-            ) => node?.kind === "evidence" ? [node.id] : []),
-            step.assignedTarget.linkedNodeIds,
-          )
-        ) continue;
-        const safeSteps: SentinelReviewStep[] = [{
-          tool: ASSIGNED_TARGET_CHECKPOINT_TOOL,
-          outcome: "returned",
-          target: nodeId,
-          assignedTarget: {
-            targetId: nodeId,
-            linkedNodeIds: step.assignedTarget.linkedNodeIds,
-          },
-          ...(step.resultSnapshot && {
-            resultSnapshot: {
-              sha256: step.resultSnapshot.sha256,
-              excerpt: "",
-              truncated: true,
-            },
-          }),
-        }];
+        const safeSteps = portablePausedWorkerProgress(
+          value,
+          JSON.parse(progress.steps),
+          evidenceRevision,
+          taskId,
+          nodeId,
+          readTraffic,
+        );
+        if (!safeSteps) continue;
         const normalized = normalizeWorkerCheckpoint(
           value,
           promptSha256,
@@ -8142,9 +8210,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
         if (
           !calls.length ||
           calls.some((call) =>
-            (call as { function?: { name?: string } } | null)?.function
-              ?.name !==
-              "sentinel_assigned_target"
+            !portablePausedWorkerRead(call, evidenceRevision)
           )
         ) return;
         const checkpointSha256 = createHash("sha256").update(

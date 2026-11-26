@@ -1,6 +1,7 @@
 import { SENTINEL_LIVE_REPOSITORY_VISIBILITY } from "./github_repository_visibility.ts";
 import { readSentinelCaseFindingReceipts } from "./worker_finding_store.ts";
 import { retainPortablePausedGraphCheckpoints } from "./adaptive_store.ts";
+import { readPortableSentinelTrafficMetadata } from "./traffic_receipts.ts";
 import { isDeepStrictEqual } from "node:util";
 import {
   assetLinkProof,
@@ -837,7 +838,9 @@ export function retainArchivedWorkerTraceMetadata(
 function scrubAdaptive(
   db: DatabaseSync,
   caseId: string,
+  runId: string,
   evidenceRevision: number,
+  snapshotPath: string,
 ) {
   clearRows(db, [
     "adaptive_active",
@@ -872,7 +875,20 @@ function scrubAdaptive(
   }
   discardStepExcerpts(db, "adaptive_note_steps");
   retainArchivedWorkerTraceMetadata(db, caseId);
-  retainPortablePausedGraphCheckpoints(db, evidenceRevision);
+  retainPortablePausedGraphCheckpoints(
+    db,
+    evidenceRevision,
+    false,
+    (args, targetId) =>
+      readPortableSentinelTrafficMetadata(
+        snapshotPath,
+        caseId,
+        runId,
+        evidenceRevision,
+        targetId,
+        args,
+      ),
+  );
 }
 
 function copyDatabase(
@@ -990,16 +1006,6 @@ export function captureStoppedSentinelCaseArtifacts(
         artifact(directory, "sentinel.json"),
         artifact(directory, "sentinel-assessment.db"),
       ];
-      const adaptive = join(caseDir, "sentinel-adaptive.db");
-      if (privateFile(adaptive, true)) {
-        copyDatabase(
-          adaptive,
-          join(directory, "sentinel-adaptive.db"),
-          adaptiveTables,
-          (db) => scrubAdaptive(db, scope.caseId, scope.evidenceRevision),
-        );
-        files.push(artifact(directory, "sentinel-adaptive.db"));
-      }
       const publications = readSentinelWorkerFindingPublications(
         source,
         caseId,
@@ -1067,6 +1073,24 @@ export function captureStoppedSentinelCaseArtifacts(
           },
         );
         files.push(artifact(directory, name));
+      }
+      // Seal a checkpoint only against the evidence actually staged with it.
+      const adaptive = join(caseDir, "sentinel-adaptive.db");
+      if (privateFile(adaptive, true)) {
+        copyDatabase(
+          adaptive,
+          join(directory, "sentinel-adaptive.db"),
+          adaptiveTables,
+          (db) =>
+            scrubAdaptive(
+              db,
+              scope.caseId,
+              scope.runId,
+              scope.evidenceRevision,
+              join(directory, "sentinel.json"),
+            ),
+        );
+        files.push(artifact(directory, "sentinel-adaptive.db"));
       }
       return files;
     });

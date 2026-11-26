@@ -7,7 +7,11 @@ import { createHash } from "node:crypto";
 import { isIP } from "node:net";
 import { redactCredentialText } from "../core/logger/redactor.ts";
 import { DatabaseSync } from "node:sqlite";
-import { readSentinelAssessmentRevision } from "./assessment_store.ts";
+import {
+  readSentinelAssessmentRevision,
+  readSentinelOperatingConstraints,
+  readSentinelRunIdForRevision,
+} from "./assessment_store.ts";
 import type { loadSentinelGraph } from "./graph.ts";
 import { isReviewedHarRoute, type SentinelHarObservation } from "./har.ts";
 
@@ -530,6 +534,61 @@ export function projectSentinelTrafficMetadata(
         timestamp: observation.timestamp,
       },
   };
+}
+
+export function readSentinelTrafficAssetScope(path: string, revision: number) {
+  const runId = readSentinelRunIdForRevision(path, revision);
+  const snapshot = readSentinelAssessmentRevision(path, revision)?.result
+    .sharedGraph.snapshot;
+  if (!runId || !snapshot) return;
+  const saved = readSentinelOperatingConstraints(path, runId, revision)
+    ?.constraints;
+  const current = readSentinelOperatingConstraints(path, runId)?.constraints;
+  const priorAssets = saved?.allowedAssetIds && new Set(saved.allowedAssetIds);
+  const currentAssets = current?.allowedAssetIds &&
+    new Set(current.allowedAssetIds);
+  const denied = saved?.deniedKinds.includes("review_evidence") ||
+    current?.deniedKinds.includes("review_evidence");
+  return {
+    runId,
+    snapshot,
+    assets: new Set(
+      denied
+        ? []
+        : snapshot.nodes.flatMap((node) =>
+          node.kind === "asset" && (!priorAssets || priorAssets.has(node.id)) &&
+            (!currentAssets || currentAssets.has(node.id))
+            ? [node.id]
+            : []
+        ),
+    ),
+  };
+}
+
+/** Verify a metadata-only checkpoint against the exact retained graph and source journal. */
+export function readPortableSentinelTrafficMetadata(
+  path: string,
+  caseId: string,
+  runId: string,
+  revision: number,
+  targetId: string,
+  selector: { evidenceId: string; digest: string },
+) {
+  const scope = readSentinelTrafficAssetScope(path, revision);
+  if (scope?.runId !== runId || !scope.assets.has(targetId)) return;
+  const receipt = readSentinelTrafficReceipt(
+    path,
+    revision,
+    selector,
+    targetId,
+    scope.assets,
+  );
+  return receipt && JSON.stringify({
+    caseId,
+    evidenceRevision: revision,
+    _classification: "INTERNAL",
+    receipt: projectSentinelTrafficMetadata(receipt, targetId),
+  });
 }
 
 function validReviewedSearchPhrase(phrase: unknown): boolean {
