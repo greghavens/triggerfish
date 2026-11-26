@@ -508,10 +508,20 @@ Deno.test("Gateway traces a follow-up to an exact retained incident-member alert
   const alternateAlert = {
     ...alert,
     asset: alternate.id,
-    subject: "Separate asset event",
+    subject: "Shared dependency subject",
+    observedAt: "2026-01-01T00:10:00.000Z",
     evidenceIds: ["other-asset-fixture"],
   };
+  const linkedLocal = {
+    ...alternateAlert,
+    asset: asset.id,
+    type: "network_security_alert" as const,
+    triggeringAction: undefined,
+    evidenceIds: ["local-dependency-event"],
+  };
+  const linkedLocalId = sentinelAlertReference(linkedLocal);
   const alternateAlertId = sentinelAlertReference(alternateAlert);
+  let incidentId = "";
   const checkId = "cloudtrail_logging_stopped";
   const registry = createProviderRegistry();
   registry.register({
@@ -519,7 +529,7 @@ Deno.test("Gateway traces a follow-up to an exact retained incident-member alert
     supportsStreaming: false,
     complete(messages) {
       const prompt = String(
-        messages.findLast(({ role }) => role === "user")?.content,
+        messages.find(({ role }) => role === "user")?.content,
       );
       const isPlanner = prompt.startsWith("Plan a defensive investigation");
       if (!isPlanner && !prompt.includes(alertId)) {
@@ -537,7 +547,7 @@ Deno.test("Gateway traces a follow-up to an exact retained incident-member alert
       }
       if (!isPlanner && reads.length === 1) {
         assertStringIncludes(String(read?.content), "did not match");
-        assert(!String(read?.content).includes(alternateAlert.subject));
+        assert(!String(read?.content).includes(alternateAlertId));
         return Promise.resolve(completion("", "sentinel_defense", {
           upstreamCheck: checkId,
         }));
@@ -548,12 +558,21 @@ Deno.test("Gateway traces a follow-up to an exact retained incident-member alert
           alertId,
         }));
       }
-      assertEquals(
-        JSON.parse(String(read.content)).matches.map((
-          { alertId }: { alertId: string },
-        ) => alertId),
-        [alertId],
-      );
+      if (reads.length === (isPlanner ? 1 : 2)) {
+        assertEquals(
+          JSON.parse(String(read.content)).matches.map((
+            { alertId }: { alertId: string },
+          ) => alertId),
+          [alertId],
+        );
+        return Promise.resolve(completion("", "sentinel_incident_alerts", {
+          incidentId,
+          limit: 1,
+        }));
+      }
+      const members = JSON.parse(String(read.content));
+      assertEquals(members.total, isPlanner ? 2 : 1);
+      assertEquals(members.alerts[0].asset, asset.id);
       if (!isPlanner) {
         return Promise.resolve(
           completion(
@@ -596,12 +615,17 @@ Deno.test("Gateway traces a follow-up to an exact retained incident-member alert
       await Deno.mkdir(dirname(selected), { recursive: true });
       await Deno.writeTextFile(
         selected,
-        JSON.stringify({ version: 1, nodes: [asset, alternate], edges: [] }),
+        JSON.stringify({
+          version: 1,
+          nodes: [asset, alternate],
+          edges: [{ from: asset.id, to: alternate.id, relation: "depends_on" }],
+        }),
       );
       await Deno.writeTextFile(
         sentinelAlertsPath(selected),
         JSON.stringify([
           { ...alert, subject },
+          linkedLocal,
           alternateAlert,
           ...Array.from({ length: 26 }, (_, index) => ({
             ...alert,
@@ -619,9 +643,13 @@ Deno.test("Gateway traces a follow-up to an exact retained incident-member alert
     const incident = state.result?.sharedGraph.observations.find(({ task }) =>
       task === "incident_correlation"
     )?.facts;
-    assert(
-      Array.isArray(incident?.candidates) && incident.candidates.length > 0,
+    assert(Array.isArray(incident?.candidates));
+    const linked = incident.candidates.find(({ alertReferences }) =>
+      alertReferences.includes(alternateAlertId) &&
+      alertReferences.includes(linkedLocalId)
     );
+    assert(linked);
+    incidentId = linked.id;
     assert(
       !buildSentinelProvenance(state.result).snapshot().nodes.some((
         { sourceId },
@@ -670,7 +698,11 @@ Deno.test("Gateway traces a follow-up to an exact retained incident-member alert
         goalReceiptRead.args.upstreamCheck === checkId &&
         !("alertId" in goalReceiptRead.args),
     );
+    const incidentWorkerStep = workerRead()?.steps.findIndex(
+      ({ tool }) => tool === "sentinel_incident_alerts",
+    );
     assert(report && workerStepIndex !== undefined && workerStepIndex >= 0);
+    assert(incidentWorkerStep !== undefined && incidentWorkerStep >= 0);
     const runId = state.plan.runId;
     assert(runId);
     const ref = {
@@ -692,7 +724,21 @@ Deno.test("Gateway traces a follow-up to an exact retained incident-member alert
       taskId: followup.id,
       stepIndices: [workerStepIndex],
     };
+    const plannerIncident = { ...plannerRead, ordinal: 2 };
+    const workerIncident = {
+      ...workerTrace,
+      stepIndices: [incidentWorkerStep],
+    };
+    let incidentHistory: string[] = [];
     await withArchivedPlannerRead(base, async (read) => {
+      incidentHistory = [
+        await read(plannerIncident),
+        await read(workerIncident),
+      ];
+      assertEquals(
+        incidentHistory.map((text) => JSON.parse(text).result.total),
+        [2, 1],
+      );
       for (const selected of [plannerRead, workerTrace]) {
         assertEquals(
           JSON.parse(await read(selected)).result.matches.map((
@@ -733,6 +779,10 @@ Deno.test("Gateway traces a follow-up to an exact retained incident-member alert
       revision: refreshed.revision,
     }, runId);
     await withArchivedPlannerRead(base, async (read) => {
+      assertEquals(
+        [await read(plannerIncident), await read(workerIncident)],
+        incidentHistory,
+      );
       for (const selected of [plannerRead, workerTrace]) {
         assertEquals(
           JSON.parse(await read(selected)).result.matches.map((
@@ -749,7 +799,14 @@ Deno.test("Gateway traces a follow-up to an exact retained incident-member alert
         requestId: crypto.randomUUID(),
         constraints: { deniedKinds: [], allowedAssetIds: [alternate.id] },
       }));
-      for (const selected of [plannerRead, workerTrace]) {
+      for (
+        const selected of [
+          plannerRead,
+          workerTrace,
+          plannerIncident,
+          workerIncident,
+        ]
+      ) {
         assertStringIncludes(await read(selected), "unavailable");
       }
     });

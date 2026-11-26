@@ -2050,10 +2050,15 @@ async function reopenSentinelSourceResult(
     }
   } else if (step.tool === "sentinel_incident_alerts") {
     if (selector.incidentId === step.target) {
-      text = queryIncidentAlerts({
-        snapshotPath: path,
-        assessmentRevision: revision,
-      }, selector);
+      text = queryIncidentAlerts(
+        {
+          snapshotPath: path,
+          assessmentRevision: revision,
+        },
+        selector,
+        false,
+        {},
+      );
     }
   } else if (
     step.tool === "sentinel_defense" &&
@@ -7630,6 +7635,7 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
                   args,
                   task.kind === "review_incident" &&
                     task.nodeId === args.incidentId,
+                  { assignment: task },
                 )
                 : step.tool === "sentinel_defense"
                 ? await readDefenseCoverage(readOptions, args, {
@@ -7678,6 +7684,15 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
                 createHash("sha256").update(text).digest("hex") !==
                   citation.sha256 ||
                 !await authorize(scope, step.tool, args, text) ||
+                (step.tool === "sentinel_incident_alerts" &&
+                  queryIncidentAlerts(
+                      readOptions,
+                      args,
+                      task.kind === "review_incident",
+                      {
+                        assignment: task,
+                      },
+                    ) !== text) ||
                 (step.tool === "sentinel_defense" &&
                   await readDefenseCoverage(readOptions, args, {
                       assignment: task,
@@ -9625,6 +9640,7 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
             includeResult && [
               "sentinel_worker_observation",
               "sentinel_defense",
+              "sentinel_incident_alerts",
               "sentinel_provenance_node",
               "sentinel_provenance_search",
               "sentinel_graph_overview",
