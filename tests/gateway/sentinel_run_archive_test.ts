@@ -164,6 +164,8 @@ async function withGateway(
     policy: {
       denyArchive: boolean;
       denyReportAmendment: boolean;
+      denyDispositionReview: boolean;
+      afterConfirmation?: () => void;
       declineConfirmation: boolean;
       denyTrafficBefore: boolean;
       denyRunResponse: boolean;
@@ -182,6 +184,8 @@ async function withGateway(
   const policy = {
     denyArchive: false,
     denyReportAmendment: false,
+    denyDispositionReview: false,
+    afterConfirmation: undefined as (() => void) | undefined,
     declineConfirmation: false,
     denyTrafficBefore: false,
     denyRunResponse: false,
@@ -242,6 +246,10 @@ async function withGateway(
         call?.args?.action === "archive") &&
         !(policy.denyReportAmendment && hook === "PRE_TOOL_CALL" &&
           call?.args?.action === "amend_finding_report") &&
+        !(policy.denyDispositionReview && hook === "PRE_TOOL_CALL" &&
+          ["review_finding", "review_incident"].includes(
+            String(call?.args?.action),
+          )) &&
         !(policy.denyTrafficBefore && hook === "PRE_TOOL_CALL" &&
           ["traffic_search", "traffic_get", "traffic_blob"].includes(
             String(call?.args?.action),
@@ -322,6 +330,7 @@ async function withGateway(
       }),
       confirm(text) {
         approvals.push(text);
+        policy.afterConfirmation?.();
         return Promise.resolve(!policy.declineConfirmation);
       },
     }),
@@ -4731,7 +4740,22 @@ async function verifyPlannerArchive(
           `Later recorded review ${index}.`,
         ));
       }
-      await withGateway(baseDir, async (turn, approvals) => {
+      await withGateway(baseDir, async (turn, approvals, policy) => {
+        const history = {
+          kind: "sentinel",
+          id: caseId,
+          revision: state.revision,
+          action: "decision_history",
+          findingId: findingReviewRequest.findingId,
+        };
+        const prior = await turn(history);
+        policy.afterConfirmation = () => {
+          policy.denyDispositionReview = true;
+        };
+        assertStringIncludes(await turn(findingReviewRequest), "unavailable");
+        policy.afterConfirmation = undefined;
+        policy.denyDispositionReview = false;
+        assertEquals(await turn(history), prior);
         findingReview = JSON.parse(await turn(findingReviewRequest)).review;
         assert(findingReview);
         assertEquals(
@@ -4742,7 +4766,7 @@ async function verifyPlannerArchive(
           await turn({ ...findingReviewRequest, disposition: "dismissed" }),
           "unavailable",
         );
-        assertEquals(approvals.length, 1);
+        assertEquals(approvals.length, 2);
       });
     } else if (mode === "coverage-rollup") {
       assertEquals(observed.assets.length, 1);
@@ -4869,7 +4893,7 @@ async function verifyPlannerArchive(
     let incidentReview: unknown;
     let outsideWorker: { taskId: string; result: unknown } | undefined;
     if (mode === "telemetry") {
-      await withGateway(baseDir, async (turn, approvals) => {
+      await withGateway(baseDir, async (turn, approvals, policy) => {
         assertStringIncludes(
           await turn({
             ...incidentReviewRequest,
@@ -4878,6 +4902,21 @@ async function verifyPlannerArchive(
           "unavailable",
         );
         assertEquals(approvals.length, 0);
+        const history = {
+          kind: "sentinel",
+          id: caseId,
+          revision: state.revision,
+          action: "decision_history",
+          incidentId: incidentReviewRequest.incidentId,
+        };
+        const prior = await turn(history);
+        policy.afterConfirmation = () => {
+          policy.denyDispositionReview = true;
+        };
+        assertStringIncludes(await turn(incidentReviewRequest), "unavailable");
+        policy.afterConfirmation = undefined;
+        policy.denyDispositionReview = false;
+        assertEquals(await turn(history), prior);
         incidentReview = JSON.parse(await turn(incidentReviewRequest)).review;
         assert(incidentReview);
         assertEquals(
@@ -4888,7 +4927,7 @@ async function verifyPlannerArchive(
           await turn({ ...incidentReviewRequest, disposition: "dismissed" }),
           "unavailable",
         );
-        assertEquals(approvals.length, 1);
+        assertEquals(approvals.length, 2);
         const exact = {
           kind: "sentinel",
           id: caseId,

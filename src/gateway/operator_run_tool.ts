@@ -7067,6 +7067,7 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
         return page ? safeProjection({ run: ref, page }) : unavailable;
       }
       if (action === "review_incident" || action === "review_finding") {
+        const authorize = context?.authorizeOwnerRunCall;
         const kind = action === "review_incident" ? "incident" : "finding";
         const selector = kind === "incident" ? "incidentId" : "findingId";
         const subjectId = args[selector];
@@ -7076,6 +7077,7 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
         const findingDecision = kind === "finding" &&
           sentinelFindingDispositions.find((value) => value === disposition);
         if (
+          !authorize || !context?.authenticatedOwnerSessionId ||
           ref.kind !== "sentinel" || ref.revision === undefined ||
           !canFlowTo("INTERNAL", context?.ceiling ?? "INTERNAL") ||
           typeof subjectId !== "string" || !subjectId.trim() ||
@@ -7139,6 +7141,7 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
             }`,
           )
         ) return "Error: The operator declined the run action.";
+        if (!await authorize(args)) return unavailable;
         const committed = incidentDecision
           ? recordSentinelIncidentReview(
             path,
