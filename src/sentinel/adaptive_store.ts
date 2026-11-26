@@ -10890,7 +10890,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
       return matched;
     },
 
-    modelReviewNotes(revision: string) {
+    modelReviewNotes(revision?: string) {
       const hasConstraintProof = db.prepare(
         "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'adaptive_model_review_constraint_proofs'",
       ).get();
@@ -10926,23 +10926,27 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
           ? "LEFT JOIN adaptive_model_review_constraint_proofs AS proof ON proof.note_id = note.rowid"
           : ""
       }
-        WHERE task.revision = ? AND task.status = 'completed'
+        WHERE task.status = 'completed' ${
+        revision === undefined ? "" : "AND task.revision = ?"
+      }
         ORDER BY task.rowid
-      `).all(revisionKey(revision)).map((row) => {
-        const operatingConstraints = normalizePlannerConstraintProof({
-          version: row.constraintVersion,
-          digest: row.constraintDigest,
-        });
-        return {
-          taskId: String(row.taskId),
-          summary: String(row.summary),
-          at: new Date(Number(row.at)).toISOString(),
-          steps: typeof row.steps === "string"
-            ? JSON.parse(row.steps) as SentinelReviewStep[]
-            : [],
-          ...(operatingConstraints && { operatingConstraints }),
-        };
-      });
+      `).all(...(revision === undefined ? [] : [revisionKey(revision)])).map(
+        (row) => {
+          const operatingConstraints = normalizePlannerConstraintProof({
+            version: row.constraintVersion,
+            digest: row.constraintDigest,
+          });
+          return {
+            taskId: String(row.taskId),
+            summary: String(row.summary),
+            at: new Date(Number(row.at)).toISOString(),
+            steps: typeof row.steps === "string"
+              ? JSON.parse(row.steps) as SentinelReviewStep[]
+              : [],
+            ...(operatingConstraints && { operatingConstraints }),
+          };
+        },
+      );
     },
 
     controlTaskHolds(revision: string, at = now(), exactTaskId?: string) {

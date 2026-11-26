@@ -1,9 +1,9 @@
 /** Project committed Sentinel state into scheduler event metadata. */
-import { join } from "@std/path";
+import { dirname, join } from "@std/path";
 import { openExecutionTraces } from "../core/execution_traces.ts";
+import { openSentinelAdaptiveStore } from "../sentinel/adaptive_store.ts";
 import type { AgentEventSchedulerConfig } from "../scheduler/service_agent_events.ts";
 import {
-  readSentinelAssessment,
   readSentinelGoalCompletionEvents,
   readSentinelRunStartEvents,
   readSentinelTimeoutEvents,
@@ -13,7 +13,6 @@ import {
   resolveSentinelCasePath,
 } from "../sentinel/cases.ts";
 import { readSentinelWorkerFindingHistory } from "../sentinel/worker_finding_store.ts";
-import { readAdaptiveSentinel } from "./sentinel_adaptive_runtime.ts";
 
 export function sentinelAgentEventSources(
   baseDir: string,
@@ -68,24 +67,31 @@ export function sentinelAgentEventSources(
           }
         }
         if (kinds.has("tool_completed")) {
-          const assessment = readSentinelAssessment(path);
-          if (!assessment) continue;
-          for (
-            const review
-              of readAdaptiveSentinel(path, assessment)?.modelReviews ?? []
-          ) {
-            for (const [index, step] of review.steps.entries()) {
-              if (step.outcome !== "returned" || !toolNames.has(step.tool)) {
-                continue;
+          const history = join(dirname(path), "sentinel-adaptive.db");
+          try {
+            Deno.lstatSync(history);
+          } catch (error) {
+            if (error instanceof Deno.errors.NotFound) continue;
+            throw error;
+          }
+          const store = openSentinelAdaptiveStore(history);
+          try {
+            for (const review of store.modelReviewNotes()) {
+              for (const [index, step] of review.steps.entries()) {
+                if (step.outcome !== "returned" || !toolNames.has(step.tool)) {
+                  continue;
+                }
+                publish({
+                  kind: "tool_completed",
+                  receipt: `${review.taskId}:${index}`,
+                  caseId,
+                  tool: step.tool,
+                  recordedAt: Date.parse(review.at),
+                });
               }
-              publish({
-                kind: "tool_completed",
-                receipt: `${review.taskId}:${index}`,
-                caseId,
-                tool: step.tool,
-                recordedAt: Date.parse(review.at),
-              });
             }
+          } finally {
+            store.close();
           }
         }
       }

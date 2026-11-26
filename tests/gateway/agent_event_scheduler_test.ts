@@ -456,6 +456,40 @@ Deno.test("Reviewed event subscription dispatches committed case metadata only o
     scheduler.stop();
     const closed = startSentinelAssessment(path, { goal: "Retained goal" });
     assert(closed.plan.runId);
+    advanceAdaptiveSentinel(path, closed);
+    const endedRevision = adaptiveRevision(closed);
+    const endedQueue = openSentinelAdaptiveStore(
+      join(dirname(path), "sentinel-adaptive.db"),
+    );
+    let endedTaskId: string;
+    try {
+      endedQueue.sync(endedRevision, [{
+        kind: "trace",
+        nodeId: "local",
+        depth: 9,
+        reason: MODEL_ASSIGNMENT_REASON,
+      }], endedRevision);
+      advanceAdaptiveSentinel(path, closed);
+      const claim = endedQueue.claimModelReview(
+        endedRevision,
+        MODEL_ASSIGNMENT_REASON,
+        (task) => task.nodeId === "local",
+      );
+      assert(claim);
+      endedTaskId = claim.task.id;
+      assert(
+        endedQueue.finishModelReview(endedRevision, endedTaskId, claim.token, {
+          note: "Private historical tool result.",
+          steps: [{
+            tool: "sentinel_assigned_target",
+            outcome: "returned",
+            target: "local",
+          }],
+        }),
+      );
+    } finally {
+      endedQueue.close();
+    }
     const closedFindings = openSentinelWorkerFindingStore(path);
     let closedFindingId: string;
     try {
@@ -463,7 +497,7 @@ Deno.test("Reviewed event subscription dispatches committed case metadata only o
         caseId: "main",
         runId: closed.plan.runId,
         evidenceRevision: closed.revision,
-        taskId,
+        taskId: endedTaskId,
         targetId: "local",
         graphFindingId: "retained-finding",
         controlId: "local-control",
@@ -501,6 +535,9 @@ Deno.test("Reviewed event subscription dispatches committed case metadata only o
     assertStringIncludes(messages[3], '"kind":"finding"');
     assertStringIncludes(messages[3], closedFindingId);
     assert(!messages[3].includes("Private historical finding"));
+    assertStringIncludes(messages[3], '"kind":"tool_completed"');
+    assertStringIncludes(messages[3], `${endedTaskId}:0`);
+    assert(!messages[3].includes("Private historical tool result"));
     for (const run of [closed, replacement]) {
       assertStringIncludes(
         messages[3],
