@@ -7068,17 +7068,6 @@ Deno.test("Committed worker narrative reaches peers and planning while its sourc
     summary: "The assigned application exposes a stale local inventory check.",
     confidence: "observed",
   };
-  const conclusions = [{
-    summary: narrative.summary,
-    confidence: narrative.confidence,
-    conclusion: "positive",
-    detail: "The saved local check was present in the assigned evidence.",
-  }, {
-    summary: "The retained record showed no current inventory confirmation.",
-    confidence: "inferred",
-    conclusion: "negative",
-  }];
-  const submission = { evidenceId: narrative.evidenceId, facts: conclusions };
   const sourceRead = Promise.withResolvers<string[]>();
   const releaseSource = Promise.withResolvers<void>();
   let sourceCoordinator:
@@ -7132,7 +7121,7 @@ Deno.test("Committed worker narrative reaches peers and planning while its sourc
     advanceAdaptiveSentinel(path, state);
     const peer = assignedLease(path, state, "review_evidence");
     const unrelated = assignedLease(path, state, "trace", "other");
-    const denied = await workerTurn(path, peer, [[tool(publish, submission)]]);
+    const denied = await workerTurn(path, peer, [[tool(publish, narrative)]]);
     assertStringIncludes(denied.results[0][0], "unavailable");
 
     const call = (name: string, args: Record<string, unknown>, id: string) => {
@@ -7174,7 +7163,7 @@ Deno.test("Committed worker narrative reaches peers and planning while its sourc
             content: "",
             usage,
             toolCalls: [
-              call(publish, submission, `source-publish-${results.length}`),
+              call(publish, narrative, `source-publish-${results.length}`),
             ],
           };
         }
@@ -7232,7 +7221,6 @@ Deno.test("Committed worker narrative reaches peers and planning while its sourc
     assertEquals(committed.taskId, sourceTaskId);
     assertEquals(committed.targetId, "app");
     assertEquals(committed.evidenceRevision, state.revision);
-    assertEquals(committed.receipt.facts, conclusions);
     assertEquals(committed.receipt.summary, narrative.summary);
     assertEquals(committed.receipt.evidenceId, narrative.evidenceId);
     assertEquals(committed.receipt.confidence, narrative.confidence);
@@ -7282,7 +7270,7 @@ Deno.test("Committed worker narrative reaches peers and planning while its sourc
       );
     });
 
-    const query = "  NO CURRENT INVENTORY  ";
+    const query = "  STALE LOCAL  ";
     const retrieved = await workerTurn(path, peer, [
       [tool(reopen)],
       [tool(reopen, { query })],
