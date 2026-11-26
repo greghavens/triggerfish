@@ -3981,7 +3981,7 @@ export function allowsSavedSentinelProvenancePath(
 }
 
 /** Project the direct graph before any model-facing count, ranking or traversal. */
-function scopedSentinelInventoryGraph(
+export function scopedSentinelInventoryGraph(
   path: string,
   revision: number,
   graph: Graph,

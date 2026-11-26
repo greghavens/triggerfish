@@ -1,3 +1,7 @@
+import {
+  sentinelAlertKey,
+  type TelemetryAlert,
+} from "../../src/sentinel/telemetry.ts";
 import { assert, assertEquals, assertExists } from "@std/assert";
 import { dirname } from "@std/path";
 import type { BootstrapResult } from "../../src/gateway/startup/bootstrap.ts";
@@ -135,6 +139,53 @@ Deno.test("Authenticated Tidepool hides revoked retained alert records and mixed
       operatorScope: "fixture-owner",
       constraints: { deniedKinds: [], allowedAssetIds: ["app", "proxy"] },
     }));
+
+    const comparison = await request("revision", {
+      revision: next.revision,
+      baseline: saved.revision,
+    });
+    assertEquals(comparison.type, "sentinel_revision");
+    assertEquals(comparison.scopeRestricted, true);
+    const serialized = JSON.stringify(comparison);
+    assert(!serialized.includes('"private"'));
+    assert(!serialized.includes("private-auth"));
+    assert(!serialized.includes(mixed.sourceId));
+    const compared = comparison.comparison as {
+      fullAlerts: { earlier: TelemetryAlert[]; later: TelemetryAlert[] };
+      incidentNodes: { sourceId: string }[];
+      graph: { nodes: { id: string }[] };
+    };
+    assertEquals(compared.graph.nodes.map(({ id }) => id), ["app", "proxy"]);
+    for (
+      const feed of [compared.fullAlerts.earlier, compared.fullAlerts.later]
+    ) {
+      assertEquals(feed.map(({ asset }) => asset), ["app", "app", "proxy"]);
+    }
+    assertEquals(compared.incidentNodes.map(({ sourceId }) => sourceId), [
+      allowed.sourceId,
+    ]);
+    assertEquals(
+      (await request("revision", { focusIncidentId: mixed.sourceId })).type,
+      "error",
+    );
+    const allowedFocus = await request("revision", {
+      focusIncidentId: allowed.sourceId,
+    });
+    assertEquals(allowedFocus.type, "sentinel_revision");
+    assertEquals(
+      allowedFocus.focusId,
+      `observation:assessment:${allowed.sourceId}`,
+    );
+    const revokedAlert = (raw.alerts as TelemetryAlert[]).find(({ asset }) =>
+      asset === "private"
+    );
+    assertExists(revokedAlert);
+    assertEquals(
+      (await request("revision", {
+        focusAlertKey: sentinelAlertKey(revokedAlert),
+      })).type,
+      "error",
+    );
 
     const scoped = await request("revision_alerts");
     assertEquals(

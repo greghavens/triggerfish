@@ -1,3 +1,4 @@
+import { scopedSentinelInventoryGraph } from "../../sentinel_agent.ts";
 import { sentinelOperatingConstraintsAllow } from "../../../sentinel/operating_constraints.ts";
 import type { ChatSession } from "../../chat_session_interface.ts";
 /** Authenticated Tidepool operations for the gateway-owned Sentinel assessment. */
@@ -91,6 +92,7 @@ import { mergeSentinelSnapshots } from "../../../sentinel/merge.ts";
 import { withSentinelSourceSnapshotLock } from "../../../sentinel/source_snapshot_lock.ts";
 import {
   readSavedSentinelIncident,
+  readSavedSentinelIncidentAssetScopes,
   readSavedSentinelIncidentCandidate,
   readSavedSentinelIncidentPage,
   readSavedSentinelPlanningEvidence,
@@ -125,6 +127,7 @@ import {
 } from "../../../sentinel/telemetry.ts";
 import {
   buildSentinelProvenance,
+  projectSentinelProvenance,
   sentinelAlertProvenanceId,
   sentinelIncidentProvenanceId,
 } from "../../../sentinel/provenance.ts";
@@ -164,14 +167,48 @@ function retainedTelemetryScope(path: string, revision: number) {
   const snapshot = readSentinelAssessmentRevision(path, revision)?.result
     .sharedGraph.snapshot;
   const resolve = snapshot && sentinelTelemetryAssetResolver(snapshot, policy);
+  let incidents: ReturnType<typeof readSavedSentinelIncidentAssetScopes>;
+  const allowsNode = (nodeId: string) =>
+    sentinelOperatingConstraintsAllow(
+      policy,
+      { kind: "review_evidence", nodeId },
+      snapshot,
+    );
   return {
     allowAlert: (alert: TelemetryAlert) => !!resolve?.(alert),
-    allowFinding: (nodeId: string) =>
-      sentinelOperatingConstraintsAllow(
-        policy,
-        { kind: "review_evidence", nodeId },
-        snapshot,
-      ),
+    allowFinding: allowsNode,
+    allowIncident(id: string) {
+      incidents ??= readSavedSentinelIncidentAssetScopes(path, revision) ??
+        new Map<string, readonly string[]>();
+      const assets = incidents.get(id);
+      return !!assets?.length && assets.every(allowsNode);
+    },
+  };
+}
+
+function scopedRetainedAssessment(
+  path: string,
+  saved: NonNullable<ReturnType<typeof readSentinelAssessmentRevision>>,
+) {
+  const { revision, updatedAt, result } = saved;
+  const original = result.sharedGraph.snapshot;
+  const snapshot = original
+    ? scopedSentinelInventoryGraph(path, revision, loadSentinelGraph(original))
+      .snapshot()
+    : null;
+  return {
+    revision,
+    updatedAt,
+    reviews: [],
+    result: {
+      version: result.version,
+      revision: result.revision,
+      previousRevision: result.previousRevision,
+      summary: { completed: 0, waiting: 0, skipped: 0 },
+      tasks: [],
+      transitions: [],
+      sharedGraph: { snapshot, observations: [], observationLinks: [] },
+    },
   };
 }
 
@@ -1191,22 +1228,46 @@ export function createTidepoolSentinelHandler(
               "The comparison revision is no longer retained.",
             );
           }
-          const adaptive = readHistoricalAdaptiveSentinel(path, revision);
-          const earlierPlan = previous
+          const scope = retainedTelemetryScope(path, revision);
+          if (scope && priorTask) {
+            throw new SentinelAssignmentError(
+              "The prior investigation is unavailable in this evidence revision.",
+            );
+          }
+          const previousScope = previous &&
+            retainedTelemetryScope(path, previous.revision);
+          const selected = scope
+            ? scopedRetainedAssessment(path, historical)
+            : undefined;
+          const earlier = previousScope && previous
+            ? scopedRetainedAssessment(path, previous)
+            : undefined;
+          const adaptive = scope
+            ? null
+            : readHistoricalAdaptiveSentinel(path, revision);
+          const earlierPlan = previous && !previousScope
             ? readHistoricalAdaptiveSentinel(path, previous.revision)
             : null;
+          const revisionFeed = (
+            number: number,
+            scope?: ReturnType<typeof retainedTelemetryScope>,
+          ) => {
+            const alerts = readSentinelAssessmentAlerts(path, number);
+            return scope ? alerts?.filter(scope.allowAlert) : alerts;
+          };
           const baselineAlerts = previous
-            ? readSentinelAssessmentAlerts(path, previous.revision)
+            ? revisionFeed(previous.revision, previousScope)
             : undefined;
           const selectedAlerts = baselineAlerts
-            ? readSentinelAssessmentAlerts(path, revision)
+            ? revisionFeed(revision, scope)
             : undefined;
           const { focusIncidentId } = message;
           let focusedIncident: Record<string, unknown> | undefined;
           if (focusIncidentId !== undefined) {
             if (
               typeof focusIncidentId === "string" &&
-              /^incident:[a-f0-9]{64}$/.test(focusIncidentId)
+              /^incident:[a-f0-9]{64}$/.test(focusIncidentId) &&
+              (!scope || scope.allowIncident(focusIncidentId))
             ) {
               const candidates = historical.result.sharedGraph.observations
                 .find(
@@ -1229,20 +1290,79 @@ export function createTidepoolSentinelHandler(
               );
             }
           }
-          const incidentReviews = readSentinelIncidentReviews(path, revision);
-          const baselineNodes = previous
-            ? buildSentinelProvenance(previous.result).snapshot().nodes
-            : [];
-          const findingReviews = readSentinelFindingReviews(path, revision);
+          const savedIncidentReviews = readSentinelIncidentReviews(
+            path,
+            revision,
+          );
+          const incidentReviews = scope
+            ? savedIncidentReviews.filter(({ incidentId }) =>
+              scope.allowIncident(incidentId)
+            )
+            : savedIncidentReviews;
+          const baselineGraph = previous &&
+            buildSentinelProvenance(previous.result);
+          const baselineNodes = (previousScope && baselineGraph
+            ? projectSentinelProvenance(
+              baselineGraph,
+              (node) =>
+                "alert" in node && node.alert
+                  ? previousScope.allowAlert(node.alert)
+                  : "incident" in node && !!node.incident &&
+                    previousScope.allowIncident(node.sourceId),
+              () =>
+                false,
+              (node) =>
+                "incident" in node && node.incident
+                  ? {
+                    ...node,
+                    incident: {
+                      ...node.incident,
+                      findingIds: node.incident.findingIds.filter(
+                        previousScope.allowFinding,
+                      ),
+                    },
+                  }
+                  : node,
+            )
+            : baselineGraph)?.snapshot().nodes ?? [];
+          const savedFindingReviews = readSentinelFindingReviews(
+            path,
+            revision,
+          );
+          const findingReviews = scope
+            ? savedFindingReviews.filter(({ findingId }) =>
+              scope.allowFinding(findingId)
+            )
+            : savedFindingReviews;
+          if (
+            scope && focusedIncident &&
+            Array.isArray(focusedIncident.findingIds)
+          ) {
+            focusedIncident = {
+              ...focusedIncident,
+              findingIds: focusedIncident.findingIds.filter((id) =>
+                typeof id === "string" && scope.allowFinding(id)
+              ),
+            };
+          }
           const focusedIncidentAlerts =
             focusedIncident && typeof focusIncidentId === "string"
               ? readSavedSentinelIncident(path, revision, focusIncidentId, true)
                 .members
               : undefined;
+          if (
+            scope && focusedIncident &&
+            (!focusedIncidentAlerts?.length ||
+              !focusedIncidentAlerts.every(scope.allowAlert))
+          ) {
+            throw new SentinelAssignmentError(
+              "The incident is unavailable in this evidence revision.",
+            );
+          }
           const focusAlertKey = message.focusAlertKey;
           let revisionAlerts = selectedAlerts;
           const fullAlertFeed = () =>
-            revisionAlerts ??= readSentinelAssessmentAlerts(path, revision);
+            revisionAlerts ??= revisionFeed(revision, scope);
           let focusedAlert = typeof focusAlertKey === "string" &&
               focusAlertKey.length <= 13_000
             ? (focusedIncident ? focusedIncidentAlerts : fullAlertFeed())
@@ -1307,7 +1427,7 @@ export function createTidepoolSentinelHandler(
             }
           }
           const provenance = buildSentinelProvenance(
-            historical.result,
+            selected?.result ?? historical.result,
             adaptive ?? undefined,
             focusedAlert,
             incidentReviews,
@@ -1327,9 +1447,9 @@ export function createTidepoolSentinelHandler(
               node.origin === "imported" && node.sourceId === taskTarget
             )
             : undefined;
-          const focusedReview = historical.reviews.find(({ task }) =>
-            message.focusId === `review:assessment:${task}`
-          );
+          const focusedReview = (selected?.reviews ?? historical.reviews).find((
+            { task },
+          ) => message.focusId === `review:assessment:${task}`);
           const focusId = focusedAlert
             ? sentinelAlertProvenanceId(focusedAlert)
             : focusedIncident && typeof focusIncidentId === "string"
@@ -1346,13 +1466,16 @@ export function createTidepoolSentinelHandler(
             topic: "sentinel",
             type: "sentinel_revision",
             caseId,
-            historical: {
+            historical: selected ?? {
               ...historical,
               ...(historical.plan && { plan: historicalPlan }),
             },
+            ...(scope && { scopeRestricted: true }),
             incidentReviews,
             findingReviews,
-            alertFeedAvailable: hasSavedSentinelAlerts(path, revision),
+            alertFeedAvailable: scope
+              ? !!fullAlertFeed()?.length
+              : hasSavedSentinelAlerts(path, revision),
             adaptive,
             focusId,
             selectedAssessmentReview: focusedReview?.task,
@@ -1360,7 +1483,7 @@ export function createTidepoolSentinelHandler(
               path,
               revision,
             ),
-            ...((focusedAlert || focusedIncident) &&
+            ...(!scope && (focusedAlert || focusedIncident) &&
               { revisions: readSentinelAssessmentRevisionIndex(path) }),
             ...(priorTask &&
               {
@@ -1369,10 +1492,15 @@ export function createTidepoolSentinelHandler(
               }),
             comparison: previous && {
               revision: previous.revision,
-              graph: previous.result?.sharedGraph.snapshot ?? null,
+              graph: earlier
+                ? earlier.result.sharedGraph.snapshot
+                : previous.result?.sharedGraph.snapshot ?? null,
+              ...(previousScope && { scopeRestricted: true }),
               findingReviews: readSentinelFindingReviews(
                 path,
                 previous.revision,
+              ).filter(({ findingId }) =>
+                !previousScope || previousScope.allowFinding(findingId)
               ),
               alertNodes: baselineNodes.filter((node) =>
                 "alert" in node && node.alert
@@ -1383,11 +1511,15 @@ export function createTidepoolSentinelHandler(
               incidentReviews: readSentinelIncidentReviews(
                 path,
                 previous.revision,
+              ).filter(({ incidentId }) =>
+                !previousScope || previousScope.allowIncident(incidentId)
               ),
               ...(baselineAlerts && selectedAlerts && {
                 fullAlerts: { earlier: baselineAlerts, later: selectedAlerts },
               }),
-              observations: previous.result?.sharedGraph.observations ?? [],
+              observations: previousScope
+                ? []
+                : previous.result?.sharedGraph.observations ?? [],
               adaptiveTasks: earlierPlan?.tasks ?? null,
               adaptiveGoal: earlierPlan?.goal.label ?? null,
               modelPlanner: earlierPlan?.modelPlanner ?? null,
