@@ -1145,7 +1145,8 @@ export const operatorRunTool: ToolDefinition = {
     stepIndices: {
       type: "array",
       items: { type: "integer" },
-      description: "Exact worker step indices for the selected assignment",
+      description:
+        "Exact step indices. Worker results return up to five followed by omitted indices when needed.",
     },
     scope: {
       type: "string",
@@ -2418,7 +2419,7 @@ export function createOperatorRunToolExecutor(options: {
     options,
   );
 
-  return async (args, context) => {
+  const execute: OperatorRunToolExecutor = async (args, context) => {
     const authorizeCaseRead = context?.authorizeSentinelCaseRead;
     if (authorizeCaseRead) {
       const { action, id, kind, revision } = args;
@@ -6787,6 +6788,69 @@ ${JSON.stringify({ run: ref, runId: exactRunId, adaptiveRevision, ...scope })}`,
           const worker = history?.modelReviewStates.find((item) =>
             item.taskId === taskId
           );
+          if (
+            action === "worker_trace_result" &&
+            Array.isArray(stepIndices) && stepIndices.length > 1
+          ) {
+            if (
+              args.offset !== undefined || args.limit !== undefined ||
+              workflowRunNumber !== undefined
+            ) {
+              return unavailable;
+            }
+            const indices = [...new Set(stepIndices as number[])];
+            if (indices.length === 1) {
+              return await execute({ ...args, stepIndices: indices }, context);
+            }
+
+            const policy = () => {
+              const current = readSentinelOperatingConstraints(path, runId);
+              return JSON.stringify([current?.version, current?.digest]);
+            };
+            const initialPolicy = policy();
+            const steps: { index: number; result: unknown }[] = [];
+            const unavailableStepIndices: number[] = [];
+            const omittedStepIndices = indices.slice(5);
+            const project = () =>
+              safeProjection({
+                run: ref,
+                runId,
+                taskId,
+                steps,
+                ...(unavailableStepIndices.length &&
+                  { unavailableStepIndices }),
+                ...(omittedStepIndices.length && { omittedStepIndices }),
+              });
+            for (const index of indices.slice(0, 5)) {
+              const single = await execute(
+                { ...args, stepIndices: [index] },
+                context,
+              );
+              if (!single.startsWith("{")) {
+                unavailableStepIndices.push(index);
+                continue;
+              }
+              const returned = JSON.parse(single);
+              if (
+                returned?._classification !== "INTERNAL" ||
+                returned.runId !== runId || returned.taskId !== taskId ||
+                returned.index !== index || !Object.hasOwn(returned, "result")
+              ) {
+                return unavailable;
+              }
+              steps.push({ index, result: returned.result });
+              if (project().startsWith("Error:")) {
+                steps.pop();
+                omittedStepIndices.push(index);
+              }
+            }
+            omittedStepIndices.sort((left, right) =>
+              indices.indexOf(left) - indices.indexOf(right)
+            );
+            return steps.length && policy() === initialPolicy
+              ? project()
+              : unavailable;
+          }
           if (result) {
             const workerStatus = worker?.archivedProgress &&
                 worker.status !== "stopped"
@@ -11245,4 +11309,5 @@ ${JSON.stringify({ run: ref, runId: exactRunId, adaptiveRevision, ...scope })}`,
       links.close();
     }
   };
+  return execute;
 }

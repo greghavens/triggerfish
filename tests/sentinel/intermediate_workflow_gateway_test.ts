@@ -106,7 +106,7 @@ import {
   resolveSentinelCasePath,
 } from "../../src/sentinel/cases.ts";
 
-type TraceDenial = boolean | "source" | "source-pre";
+type TraceDenial = boolean | "source" | "source-pre" | "trace-search";
 
 async function withOperator(
   baseDir: string,
@@ -184,7 +184,9 @@ async function withOperator(
             input.tool_name === "sentinel_intermediate_workflow_observation" ||
             input.tool_name === "sentinel_worker_trace_search";
           const allowed = !(hook === "POST_TOOL_RESPONSE" &&
-            (withhold === true || withhold === "source" && retainedSource)) &&
+            (withhold === true || withhold === "source" && retainedSource ||
+              withhold === "trace-search" &&
+                input.tool_name === "sentinel_worker_trace_search")) &&
             !(hook === "PRE_TOOL_CALL" && withhold === "source-pre" &&
               retainedSource);
           return Promise.resolve({
@@ -1729,6 +1731,34 @@ Deno.test("Gateway workers cite an intermediate observation while its source rev
         assertEquals(finished.totalSteps, 1);
         assertEquals(finished.steps[0].taskId, peer.id);
         assertEquals(JSON.parse(await turn(peerTrace)).result, observation);
+        const batch = {
+          ...peerTrace,
+          stepIndices: [peerStep, 0, peerStep - 1, peerStep, 19, 20, 21],
+        };
+        const retainedBatch = JSON.parse(await turn(batch));
+        assertEquals(retainedBatch.steps, [
+          { index: peerStep, result: observation },
+          { index: 0, result: peerProgress },
+          { index: peerStep - 1, result: expectedPeerPage },
+        ]);
+        assertEquals(retainedBatch.unavailableStepIndices, [19, 20]);
+        assertEquals(retainedBatch.omittedStepIndices, [21]);
+        const partial = JSON.parse(await turn(batch, "trace-search"));
+        assertEquals(partial.steps, [
+          retainedBatch.steps[0],
+          retainedBatch.steps[2],
+        ]);
+        assertEquals(partial.unavailableStepIndices, [0, 19, 20]);
+        assertEquals(partial.omittedStepIndices, [21]);
+        assertStringIncludes(await turn(batch, "source"), "unavailable");
+        assertEquals(
+          await turn(batch, true),
+          "Tool response withheld by policy.",
+        );
+        assertStringIncludes(
+          await turn({ ...batch, revision: ref.revision + 1 }),
+          "unavailable",
+        );
         const metadataBeforeDenial = metadataChecks;
         assertStringIncludes(
           await turn(peerTrace, "source-pre"),
