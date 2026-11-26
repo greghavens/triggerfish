@@ -184,7 +184,10 @@ import {
   type TelemetryAlert,
 } from "../sentinel/telemetry.ts";
 import { parseSentinelTelemetryAlert } from "../sentinel/case_report.ts";
-import { assessSentinelDefenseCoverage } from "../sentinel/defense_coverage.ts";
+import {
+  assessSentinelDefenseCoverage,
+  sentinelTelemetryAssetResolver,
+} from "../sentinel/defense_coverage.ts";
 
 import {
   createOrchestrator,
@@ -1070,18 +1073,13 @@ function sentinelTelemetryEvidenceFilter(
     .sharedGraph.snapshot;
   const runId = readSentinelRunIdForRevision(path, revision);
   if (!snapshot || !runId) return;
-  const graph = loadSentinelGraph(snapshot);
   const policy = readSentinelOperatingConstraints(path, runId)?.constraints;
+  const resolveAsset = sentinelTelemetryAssetResolver(snapshot, policy);
   const { assignment } = scope;
   return (alert) => {
-    const asset = graph.resolveAssetId(alert.asset);
+    const asset = resolveAsset(alert);
     return !!asset && (!assignment || assignment.kind === "review_incident" ||
-      assignment.nodeId === asset) &&
-      sentinelOperatingConstraintsAllow(
-        policy,
-        { kind: "review_evidence", nodeId: asset },
-        snapshot,
-      );
+      assignment.nodeId === asset);
   };
 }
 

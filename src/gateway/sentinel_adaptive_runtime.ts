@@ -144,7 +144,9 @@ import {
   readSavedSentinelPlanningEvidence,
 } from "../sentinel/incident_archive.ts";
 import {
+  assessSentinelDefenseCoverage,
   matchesSentinelUpstreamCheck,
+  sentinelTelemetryAssetResolver,
   sentinelUpstreamChecks,
 } from "../sentinel/defense_coverage.ts";
 import { compareSentinelIncidentPriority } from "../sentinel/incident_correlation.ts";
@@ -6579,18 +6581,20 @@ export function createSentinelModelPlanner(
           controller.abort(superseded);
           return;
         }
-        const savedChecks = state.result?.sharedGraph.observations.find(
-          ({ task }) => task === "defense_coverage",
-        )?.facts.upstreamChecks;
-        const upstreamChecks = Array.isArray(savedChecks)
-          ? sentinelUpstreamChecks.flatMap(({ id }) => {
-            const count = savedChecks.find((check) => check?.id === id)
-              ?.alertCount;
-            return Number.isSafeInteger(count) && count > 0
-              ? [{ id, count }]
-              : [];
-          })
-          : [];
+        const resolveAlertAsset = sentinelTelemetryAssetResolver(
+          snapshot,
+          constraints?.constraints,
+        );
+        const savedAlerts = readSentinelAssessmentAlerts(
+          snapshotPath,
+          state.revision,
+        );
+        const upstreamChecks = assessSentinelDefenseCoverage({
+          alerts: savedAlerts,
+          allowAlert: (alert) => resolveAlertAsset(alert) !== undefined,
+        }).upstreamChecks.flatMap(({ id, records }) =>
+          records.length ? [{ id, count: records.length }] : []
+        );
         const inventory = snapshot.nodes.filter(({ id }) => id.length <= 100)
           .slice(0, 30).map((node) => ({
             id: node.id,
@@ -7589,15 +7593,17 @@ export function createSentinelModelPlanner(
                 neighborIds.get(to)?.add(from);
               }
               const upstreamAlerts = new Map<string, string>();
-              let graph: ReturnType<typeof loadSentinelGraph> | undefined;
+              const resolveAlertAsset = sentinelTelemetryAssetResolver(
+                snapshot,
+                constraints?.constraints,
+              );
               for (
                 const alert of readSentinelAssessmentAlerts(
                   snapshotPath,
                   state.revision,
                 ) ?? []
               ) {
-                const asset = (graph ??= loadSentinelGraph(snapshot))
-                  .resolveAssetId(alert.asset);
+                const asset = resolveAlertAsset(alert);
                 if (!asset) continue;
                 for (const check of sentinelUpstreamChecks) {
                   if (matchesSentinelUpstreamCheck(check, alert)) {

@@ -3552,10 +3552,25 @@ Deno.test("Scoped incident discovery and assignment require every retained membe
     await Deno.writeTextFile(
       sentinelAlertsPath(path),
       JSON.stringify([
-        alert("approved", "integrity_change", "Allowed cohort", "00"),
+        {
+          ...alert("approved", "integrity_change", "Allowed cohort", "00"),
+          triggeringAction: "cloudtrail.amazonaws.com:StopLogging",
+        },
         alert("approved", "network_security_alert", "Allowed cohort", "00"),
         alert("approved", "integrity_change", "Mixed cohort", "10"),
         alert("excluded", "network_security_alert", "Mixed cohort", "10"),
+        {
+          ...alert("excluded", "integrity_change", "Excluded same check", "20"),
+          triggeringAction: "cloudtrail.amazonaws.com:StopLogging",
+        },
+        {
+          ...alert("excluded", "integrity_change", "Excluded only check", "30"),
+          triggeringAction: "cloudtrail.amazonaws.com:DeleteTrail",
+        },
+        {
+          ...alert("unmapped", "integrity_change", "Unmapped source", "40"),
+          triggeringAction: "cloudtrail.amazonaws.com:StopLogging",
+        },
       ]),
       { mode: 0o600 },
     );
@@ -3671,6 +3686,11 @@ Deno.test("Scoped incident discovery and assignment require every retained membe
     assertStringIncludes(prompt, allowedIncident);
     assert(!prompt.includes(mixedIncident));
     assert(!prompt.includes("Mixed cohort"));
+    const visible = JSON.parse(prompt.slice(prompt.lastIndexOf("\n") + 1));
+    assertEquals(visible.upstreamChecks, [
+      { id: "cloudtrail_logging_stopped", count: 1 },
+    ]);
+    assert(!prompt.includes("cloudtrail_audit_configuration_changed"));
     await withArchivedPlannerRead(directory, async (read) => {
       assertEquals(
         JSON.parse(await read(narrow(1, ["spare"])))

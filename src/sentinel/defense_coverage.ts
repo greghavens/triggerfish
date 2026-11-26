@@ -1,6 +1,11 @@
 /** Assess defensive visibility by behavior, using imported Sentinel alert evidence. */
 
 import { parseSentinelTelemetryAlert } from "./case_report.ts";
+import { loadSentinelGraph } from "./graph.ts";
+import {
+  type SentinelOperatingConstraints,
+  sentinelOperatingConstraintsAllow,
+} from "./operating_constraints.ts";
 import type { TelemetryAlert } from "./telemetry.ts";
 
 type Signal = TelemetryAlert["type"];
@@ -776,6 +781,24 @@ export function matchesSentinelUpstreamCheck(
 ): boolean {
   return alert.type === check.type && alert.triggeringAction !== undefined &&
     check.actions.includes(alert.triggeringAction);
+}
+
+/** Resolve an alert to an authorized canonical asset without exposing unmapped records. */
+export function sentinelTelemetryAssetResolver(
+  snapshot: ReturnType<ReturnType<typeof loadSentinelGraph>["snapshot"]>,
+  constraints: SentinelOperatingConstraints | undefined,
+) {
+  const graph = loadSentinelGraph(snapshot);
+  return (alert: TelemetryAlert): string | undefined => {
+    const nodeId = graph.resolveAssetId(alert.asset);
+    return nodeId && sentinelOperatingConstraintsAllow(
+        constraints,
+        { kind: "review_evidence", nodeId },
+        snapshot,
+      )
+      ? nodeId
+      : undefined;
+  };
 }
 
 export interface SentinelDefenseCoverageOptions {
