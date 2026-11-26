@@ -661,7 +661,7 @@ Deno.test("Leased trace search exposes completed peers only on the exact assigne
           store.complete({
             taskId: id,
             leaseToken: worker.leaseToken,
-            observation: {},
+            observation: { summary: `Saved fixture observation for ${nodeId}` },
           }),
         );
         const review = store.claimModelReview(
@@ -753,6 +753,43 @@ Deno.test("Leased trace search exposes completed peers only on the exact assigne
         "alpha",
       );
       assertStringIncludes(planner.resultFrames[1], "unavailable");
+      const queries = [
+        { task: idFor("alpha") },
+        { task: idFor("beta") },
+        { query: "Saved fixture observation" },
+      ];
+      const workerObservations = await query(
+        main,
+        queries,
+        undefined,
+        lease,
+        undefined,
+        "sentinel_worker_observation",
+      );
+      assertStringIncludes(
+        workerObservations.resultFrames[0],
+        "Saved fixture observation for alpha",
+      );
+      assertStringIncludes(workerObservations.resultFrames[1], "unavailable");
+      assertEquals(
+        JSON.parse(workerObservations.resultFrames[2]).observations.map(
+          ({ id }: { id: string }) => id,
+        ),
+        [idFor("alpha")],
+      );
+      const plannerObservations = await query(main, queries, undefined, {
+        assessmentRevision: state.revision,
+        plannerExecutionEvidenceRunId: state.plan.runId,
+      }, {
+        operatingConstraints: {
+          version: constraints.version,
+          digest: constraints.digest,
+        },
+      }, "sentinel_worker_observation");
+      assertEquals(
+        plannerObservations.resultFrames,
+        workerObservations.resultFrames,
+      );
     } finally {
       store.close();
     }

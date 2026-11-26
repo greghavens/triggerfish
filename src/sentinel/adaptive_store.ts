@@ -3044,6 +3044,7 @@ export function querySentinelWorkerObservations(
     | {
       readonly query: string;
       readonly offset: number;
+      readonly allowedTaskIds?: readonly string[];
       readonly saved?: { runId: string; ids: readonly string[] };
     },
 ) {
@@ -3079,17 +3080,24 @@ export function querySentinelWorkerObservations(
       ).get(revision, taskId(request.task));
       return typeof row?.observation === "string" ? row.observation : undefined;
     }
+    const scopedFilter = request.allowedTaskIds === undefined
+      ? ""
+      : " AND id IN (SELECT value FROM json_each(?))";
+    const scope = request.allowedTaskIds === undefined
+      ? []
+      : [JSON.stringify(request.allowedTaskIds)];
     if (request.saved) {
       const mapping = db.prepare(`SELECT goalId FROM adaptive_evidence_revisions
         WHERE evidenceNumber = ? ORDER BY rowid DESC LIMIT 1`).get(revision);
       if (mapping?.goalId !== request.saved.runId) return;
       const row = db.prepare(`SELECT id, kind, substr(nodeId, 1, 100) AS nodeId,
         substr(json_extract(observation, '$.summary'), 1, 96) AS summary
-        ${lookup} AND id = ? AND (instr(lower(observation), lower(?)) > 0
+        ${lookup}${scopedFilter} AND id = ? AND (instr(lower(observation), lower(?)) > 0
           OR instr(lower(COALESCE(nodeId, '')), lower(?)) > 0)`);
       const observations = request.saved.ids.flatMap((id) => {
         const retained = row.get(
           revision,
+          ...scope,
           taskId(id),
           request.query,
           request.query,
@@ -3101,10 +3109,10 @@ export function querySentinelWorkerObservations(
     }
     const rows = db.prepare(`SELECT id, kind, substr(nodeId, 1, 100) AS nodeId,
       substr(json_extract(observation, '$.summary'), 1, 96) AS summary
-      ${lookup} AND (instr(lower(observation), lower(?)) > 0
+      ${lookup}${scopedFilter} AND (instr(lower(observation), lower(?)) > 0
         OR instr(lower(COALESCE(nodeId, '')), lower(?)) > 0)
       ORDER BY rowid DESC LIMIT 6 OFFSET ?`)
-      .all(revision, request.query, request.query, request.offset);
+      .all(revision, ...scope, request.query, request.query, request.offset);
     return {
       observations: rows.slice(0, 5),
       nextOffset: rows.length > 5 ? request.offset + 5 : null,

@@ -1,3 +1,4 @@
+import { readSentinelWorkerEvidenceScope } from "./sentinel_worker_evidence_scope.ts";
 import { MAX_SENTINEL_FINDING_RESULT_CHARS } from "../sentinel/worker_finding_recovery.ts";
 import { redactCredentialText } from "../core/logger/redactor.ts";
 import { isDeepStrictEqual } from "node:util";
@@ -76,23 +77,33 @@ export function validateSavedSentinelObservationSearch(
   revision: number,
   args: { query: string; revision?: number; offset?: number },
   result: string,
+  assignmentId?: string,
 ) {
   if (args.revision !== undefined && args.revision !== revision) return false;
+  const scope = readSentinelWorkerEvidenceScope(path, revision, assignmentId);
+  if (!scope || scope.runId !== runId) return false;
   const saved = parseSavedSentinelObservationSearch(
     result,
     revision,
     args.offset ?? 0,
   );
   if (!saved) return false;
-  const retained = querySentinelWorkerObservations(
-    join(dirname(path), "sentinel-adaptive.db"),
-    revision,
-    {
-      query: args.query,
-      offset: args.offset ?? 0,
-      saved: { runId, ids: saved.ids },
-    },
-  );
+  const database = join(dirname(path), "sentinel-adaptive.db");
+  const query = {
+    query: args.query,
+    offset: args.offset ?? 0,
+    allowedTaskIds: scope.allowedTaskIds,
+  };
+  const retained = querySentinelWorkerObservations(database, revision, {
+    ...query,
+    saved: { runId, ids: saved.ids },
+  });
+  if (saved.page.nextOffset !== null) {
+    const current = querySentinelWorkerObservations(database, revision, query);
+    if (typeof current !== "object" || current.nextOffset === null) {
+      return false;
+    }
+  }
   return typeof retained === "object" &&
     isDeepStrictEqual(
       JSON.parse(JSON.stringify(retained.observations)),
@@ -335,6 +346,15 @@ export function reopenSentinelGoalReceiptRead(
   if (args.task) {
     if (
       args.revision !== undefined && args.revision !== scope.evidenceRevision
+    ) return;
+    const recipient = readSentinelWorkerEvidenceScope(
+      path,
+      scope.evidenceRevision,
+      scope.taskId,
+    );
+    if (
+      !recipient || recipient.runId !== scope.runId ||
+      !recipient.allowedTaskIds.includes(args.task)
     ) return;
     const json = querySentinelWorkerObservations(
       join(dirname(path), "sentinel-adaptive.db"),

@@ -172,6 +172,7 @@ async function withGateway(
       denyWorkerSourceBefore: boolean;
       denyWorkerSourceAfter: boolean;
       workerSourceHooks: string[];
+      afterWorkerObservation?: () => void;
       workflowMetadataCalls: number;
     },
     decideApproval: (id: string) => Promise<Record<string, unknown>>,
@@ -189,6 +190,7 @@ async function withGateway(
     denyWorkerSourceBefore: false,
     denyWorkerSourceAfter: false,
     workerSourceHooks: [] as string[],
+    afterWorkerObservation: undefined as (() => void) | undefined,
     workflowMetadataCalls: 0,
   };
   const registry = createProviderRegistry();
@@ -229,6 +231,13 @@ async function withGateway(
           "sentinel_case_execution_evidence",
         ].includes(String(input.tool_name));
       if (workerSource) policy.workerSourceHooks.push(hook);
+      if (
+        hook === "POST_TOOL_RESPONSE" &&
+        input.tool_name === "sentinel_worker_observation"
+      ) {
+        policy.afterWorkerObservation?.();
+      }
+
       const allowed = !(policy.denyArchive && hook === "PRE_TOOL_CALL" &&
         call?.args?.action === "archive") &&
         !(policy.denyReportAmendment && hook === "PRE_TOOL_CALL" &&
@@ -5507,14 +5516,23 @@ async function verifyPlannerArchive(
         policy.denyWorkerSourceAfter = false;
         assert(run.runId);
         const prior = readSentinelOperatingConstraints(path, run.runId);
-        assert(recordSentinelOperatingConstraints(path, {
-          evidenceRevision: run.revision,
-          runId: run.runId,
-          requestId: crypto.randomUUID(),
-          expectedVersion: prior?.version ?? 0,
-          operatorScope: "fixture-current-owner",
-          constraints: { deniedKinds: [], allowedAssetIds: ["app"] },
-        }));
+        let narrowed = false;
+        policy.afterWorkerObservation = () => {
+          narrowed = true;
+          assert(recordSentinelOperatingConstraints(path, {
+            evidenceRevision: run.revision,
+            runId: run.runId!,
+            requestId: crypto.randomUUID(),
+            expectedVersion: prior?.version ?? 0,
+            operatorScope: "fixture-current-owner",
+            constraints: { deniedKinds: [], allowedAssetIds: ["app"] },
+          }));
+        };
+        const deniedObservation = await turn({ ...resultRead, ordinal: 11 });
+        policy.afterWorkerObservation = undefined;
+        assert(narrowed);
+        assertStringIncludes(deniedObservation, "unavailable");
+        assert(!deniedObservation.includes(observedTaskId!));
         const deniedTrace = await turn({ ...resultRead, ordinal: 12 });
         assertStringIncludes(deniedTrace, "unavailable");
         assert(!deniedTrace.includes(observedTaskId!));

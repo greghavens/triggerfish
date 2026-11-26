@@ -1,3 +1,4 @@
+import { readSentinelWorkerEvidenceScope } from "./sentinel_worker_evidence_scope.ts";
 import {
   INCONCLUSIVE_RECHECK_ID,
   INCONCLUSIVE_RECHECK_TOOL,
@@ -1574,17 +1575,29 @@ function reopenSentinelObservationSearch(
   revision: number,
   runId: string,
   page: NonNullable<ReturnType<typeof readSentinelObservationSearchReference>>,
+  assignmentId?: string,
 ) {
+  const scope = readSentinelWorkerEvidenceScope(path, revision, assignmentId);
+  if (!scope || scope.runId !== runId) return;
   if (
     typeof page.args.query !== "string" ||
     (page.args.revision !== undefined && page.args.revision !== revision)
   ) return;
   const offset = page.args.offset ?? 0;
-  const rows = querySentinelWorkerObservations(
-    join(dirname(path), "sentinel-adaptive.db"),
-    revision,
-    { query: page.args.query, offset, saved: { runId, ids: page.ids } },
-  );
+  const database = join(dirname(path), "sentinel-adaptive.db");
+  const query = {
+    query: page.args.query,
+    offset,
+    allowedTaskIds: scope.allowedTaskIds,
+  };
+  const rows = querySentinelWorkerObservations(database, revision, {
+    ...query,
+    saved: { runId, ids: page.ids },
+  });
+  if (page.nextOffset !== null) {
+    const current = querySentinelWorkerObservations(database, revision, query);
+    if (typeof current !== "object" || current.nextOffset === null) return;
+  }
   if (!rows || typeof rows !== "object") return;
   return JSON.stringify({
     revision,
@@ -1841,6 +1854,7 @@ async function reopenSentinelSourceResult(
       text = inspectSentinelWorkerObservation(
         { snapshotPath: path, assessmentRevision: revision },
         selector,
+        true,
       );
     }
   } else if (step.tool === "sentinel_goal_state") {
@@ -7596,17 +7610,21 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
               if (
                 !await authorize(scope, step.tool, page.args)
               ) return unavailable;
-              const text = reopenSentinelObservationSearch(
-                path,
-                ref.revision,
-                runId,
-                page,
-              );
+              const reopen = () =>
+                reopenSentinelObservationSearch(
+                  path,
+                  ref.revision!,
+                  runId,
+                  page,
+                  task.id,
+                );
+              const text = reopen();
               if (
                 !text ||
                 createHash("sha256").update(text).digest("hex") !==
                   page.sha256 ||
-                !await authorize(scope, step.tool, page.args, text)
+                !await authorize(scope, step.tool, page.args, text) ||
+                reopen() !== text
               ) return unavailable;
               const current = readHistoricalAdaptiveSentinel(
                 path,
@@ -7648,23 +7666,26 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
                 ...(page.offset && { offset: page.offset }),
               };
               if (!await authorize(scope, step.tool, call)) return unavailable;
-              const retained = reopenSentinelGoalReceiptRead(
-                path,
-                {
-                  caseId: ref.id,
-                  runId,
-                  taskId: task.id,
-                  evidenceRevision: ref.revision,
-                  targetId: task.nodeId,
-                },
-                step.tool,
-                call,
-              );
+              const reopen = () =>
+                reopenSentinelGoalReceiptRead(
+                  path,
+                  {
+                    caseId: ref.id,
+                    runId,
+                    taskId: task.id,
+                    evidenceRevision: ref.revision!,
+                    targetId: task.nodeId!,
+                  },
+                  step.tool,
+                  call,
+                );
+              const retained = reopen();
               if (
                 !retained ||
                 createHash("sha256").update(retained.result).digest("hex") !==
                   page.sha256 ||
-                !await authorize(scope, step.tool, call, retained.result)
+                !await authorize(scope, step.tool, call, retained.result) ||
+                reopen()?.result !== retained.result
               ) return unavailable;
               const current = readHistoricalAdaptiveSentinel(
                 path,
@@ -9323,6 +9344,16 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
           if (!text || !await authorize(scope, read.tool, selector, text)) {
             return unavailable;
           }
+          if (
+            includeResult && read.tool === "sentinel_worker_observation" &&
+            text !== await reopenSentinelSourceResult(
+                options.baseDir,
+                path,
+                ref.revision,
+                read,
+                selector,
+              )
+          ) return unavailable;
           return isCurrent()
             ? safeProjection(
               includeResult

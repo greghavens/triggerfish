@@ -1,3 +1,4 @@
+import { readSentinelWorkerEvidenceScope } from "./sentinel_worker_evidence_scope.ts";
 import { INCONCLUSIVE_RECHECK_TOOL } from "../sentinel/recheck_inconclusive.ts";
 import {
   readSentinelPeerCoverageReceipt,
@@ -170,7 +171,6 @@ import {
   readSentinelGitHubWorkflowReadReceipt,
   readSentinelLinkedSourcesForRevision,
   readSentinelOperatingConstraints,
-  readSentinelRunIdForRevision,
   recordSentinelWorkerGoalProposal,
   type SentinelGitHubWorkflowReadReceipt,
   type SentinelReviewStep,
@@ -2863,34 +2863,18 @@ function workerTraceMatches(
 ) {
   let eligibleTasks: ReadonlySet<string> | undefined;
   if (workerRead) {
-    const path = options.snapshotPath;
-    const history = readHistoricalAdaptiveSentinel(path, revision);
-    const exact = readSentinelAssessmentRevision(path, revision);
-    const snapshot = exact?.result.sharedGraph.snapshot;
     if (
-      !history || !snapshot ||
-      readSentinelRunIdForRevision(path, revision) !== history.goal.id
-    ) return [];
-    const { assignedTaskId, assignedTaskLeaseToken } = options;
-    const assignedAsset = assignedTaskId &&
-      history.tasks.find(({ id }) => id === assignedTaskId)?.nodeId;
-    if (
-      (assignedTaskId && !assignedAsset) ||
-      (assignedTaskLeaseToken &&
-        !liveProgressConsumer(options, revision))
-    ) return [];
-    const constraints = readSentinelOperatingConstraints(path, history.goal.id)
-      ?.constraints;
-    eligibleTasks = new Set(
-      history.tasks.filter(({ nodeId }) =>
-        (!assignedAsset || assignedAsset === nodeId) &&
-        sentinelOperatingConstraintsAllow(
-          constraints,
-          { kind: "review_evidence", nodeId },
-          snapshot,
-        )
-      ).map(({ id }) => id),
+      options.assignedTaskLeaseToken && !liveProgressConsumer(options, revision)
+    ) {
+      return [];
+    }
+    const scope = readSentinelWorkerEvidenceScope(
+      options.snapshotPath,
+      revision,
+      options.assignedTaskId,
     );
+    if (!scope) return [];
+    eligibleTasks = new Set(scope.allowedTaskIds);
   }
   const requested = args.stepIndices ? new Set(args.stepIndices) : undefined;
   return graph.searchReviewSteps(args.query ?? "", args.task).filter(
@@ -3183,6 +3167,8 @@ export function searchSentinelWorkerTraces(
 export function inspectSentinelWorkerObservation(
   options: ProvenanceScope,
   args: Record<string, unknown>,
+  scoped = options.assignedTaskId !== undefined ||
+    options.assignedTaskLeaseToken !== undefined,
 ): string {
   const { task, query, revision, offset = 0 } = args;
   const exact = typeof task === "string" &&
@@ -3215,11 +3201,28 @@ export function inspectSentinelWorkerObservation(
     if (selected === undefined) {
       return "Error: No saved observation revision is available.";
     }
+    const scope = scoped && readSentinelWorkerEvidenceScope(
+      options.snapshotPath,
+      selected,
+      options.assignedTaskId,
+    );
+    if (
+      scoped && (!scope ||
+        (options.assignedTaskLeaseToken &&
+          !liveProgressConsumer(options, selected)) ||
+        (exact && !scope.allowedTaskIds.includes(task as string)))
+    ) {
+      return "Error: The saved observation is unavailable in this case and revision.";
+    }
     if (search) {
       const results = readSentinelWorkerObservation(
         options.snapshotPath,
         selected,
-        { query, offset },
+        {
+          query,
+          offset,
+          ...(scope && { allowedTaskIds: scope.allowedTaskIds }),
+        },
       );
       return boundResult({
         revision: selected,
@@ -3232,7 +3235,7 @@ export function inspectSentinelWorkerObservation(
     const json = readSentinelWorkerObservation(
       options.snapshotPath,
       selected,
-      { task: task as string },
+      { task: task as string, ...(scope && { runId: scope.runId }) },
     );
     if (typeof json !== "string") {
       return "Error: The saved observation is unavailable in this case and revision.";
@@ -5285,7 +5288,16 @@ function createAgent(
         );
       }
       if (name === "sentinel_worker_observation") {
-        return inspectSentinelWorkerObservation(options, args);
+        if (canReadPlannerCase && !currentPlannerReceiptScope(turn)) {
+          return "Error: The worker observation scope is unavailable.";
+        }
+        return inspectSentinelWorkerObservation(
+          options,
+          args,
+          canReadPlannerCase || turn.requiresLiveAssignment ||
+            options.assignedTaskId !== undefined ||
+            options.assignedTaskLeaseToken !== undefined,
+        );
       }
       if (name === SENTINEL_PROVENANCE_NODE_READ) {
         return inspectSentinelProvenance(options, args);
@@ -6824,6 +6836,7 @@ function createAgent(
                         revision,
                         { ...search, query: search.query },
                         saved,
+                        task.id,
                       )
                     ) return false;
                     continue;
