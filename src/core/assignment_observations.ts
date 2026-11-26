@@ -20,6 +20,7 @@ export function createAssignmentObservationJournal<T>(
   assignments: string,
   prefix: string,
   decodeReceipt: (raw: unknown, revision: number) => T | undefined,
+  cardinality: "assignment" | "source_step" = "assignment",
 ) {
   if (
     ![table, assignments].every((name) => /^[a-z][a-z0-9_]*$/.test(name)) ||
@@ -34,6 +35,62 @@ export function createAssignmentObservationJournal<T>(
   const hasPublicationStep = () =>
     db.prepare(`PRAGMA table_info(${table})`).all()
       .some(({ name }) => name === "publicationStepIndex");
+
+  const columns =
+    `id, revision, taskId, targetId, evidenceRevision, stepIndex, receipt`;
+  function createTable() {
+    db.exec(`CREATE TABLE IF NOT EXISTS ${table} (
+      id TEXT PRIMARY KEY,
+      revision TEXT NOT NULL,
+      taskId TEXT NOT NULL REFERENCES ${assignments}(id),
+      targetId TEXT NOT NULL,
+      evidenceRevision INTEGER NOT NULL,
+      stepIndex INTEGER NOT NULL,
+      receipt TEXT NOT NULL,
+      UNIQUE (revision, taskId, evidenceRevision${
+      cardinality === "source_step" ? ", stepIndex" : ""
+    })
+    )`);
+  }
+
+  function preparePublication() {
+    const legacyKey = "revision,taskId,evidenceRevision";
+    let migrate = false;
+    if (cardinality === "source_step" && exists()) {
+      const keys = db.prepare(`SELECT (
+        SELECT group_concat(name, ',') FROM (
+          SELECT name FROM pragma_index_info(indexes.name) ORDER BY seqno
+        )
+      ) AS columns FROM pragma_index_list(?) AS indexes WHERE origin = 'u'`)
+        .all(table).map(({ columns }) => columns);
+      if (
+        keys.length !== 1 ||
+        (keys[0] !== legacyKey && keys[0] !== legacyKey + ",stepIndex")
+      ) {
+        throw new Error("Invalid committed assignment observation key");
+      }
+      migrate = keys[0] === legacyKey;
+    }
+    if (migrate) {
+      // Publication callers hold the journal write transaction. Existing IDs
+      // and insertion order are part of historical evidence and paging.
+      const legacy = table + "_assignment_legacy";
+      const retainPublicationStep = hasPublicationStep();
+      const copied = retainPublicationStep
+        ? columns + ", publicationStepIndex"
+        : columns;
+      db.exec(`ALTER TABLE ${table} RENAME TO ${legacy}`);
+      createTable();
+      if (retainPublicationStep) {
+        db.exec(`ALTER TABLE ${table} ADD COLUMN publicationStepIndex INTEGER`);
+      }
+      db.exec(`INSERT INTO ${table}(rowid, ${copied})
+        SELECT rowid, ${copied} FROM ${legacy} ORDER BY rowid;
+        DROP TABLE ${legacy}`);
+    } else createTable();
+    db.exec(`CREATE INDEX IF NOT EXISTS ${table}_by_scope
+      ON ${table}(revision, targetId, evidenceRevision)`);
+  }
 
   function decode(row: Row) {
     const evidenceRevision = Number(row.evidenceRevision);
@@ -68,18 +125,37 @@ export function createAssignmentObservationJournal<T>(
           receipt,
         ])).digest("hex")
       }`;
-      db.exec(`CREATE TABLE IF NOT EXISTS ${table} (
-        id TEXT PRIMARY KEY,
-        revision TEXT NOT NULL,
-        taskId TEXT NOT NULL REFERENCES ${assignments}(id),
-        targetId TEXT NOT NULL,
-        evidenceRevision INTEGER NOT NULL,
-        stepIndex INTEGER NOT NULL,
-        receipt TEXT NOT NULL,
-        UNIQUE (revision, taskId, evidenceRevision)
-      );
-      CREATE INDEX IF NOT EXISTS ${table}_by_scope
-        ON ${table}(revision, targetId, evidenceRevision);`);
+      preparePublication();
+      const serialized = JSON.stringify(receipt);
+      if (cardinality === "source_step") {
+        const occupied = db.prepare(`SELECT * FROM ${table}
+          WHERE revision = ? AND taskId = ? AND evidenceRevision = ?
+            AND stepIndex = ?`).get(
+          revision,
+          taskId,
+          evidenceRevision,
+          stepIndex,
+        );
+        if (occupied) {
+          return occupied.id === id
+            ? { observation: decode(occupied), created: false }
+            : undefined;
+        }
+        const duplicate = db.prepare(`SELECT * FROM ${table}
+          WHERE revision = ? AND taskId = ? AND evidenceRevision = ?
+            AND targetId = ? AND stepIndex < ? AND receipt = ?
+          ORDER BY rowid LIMIT 1`).get(
+          revision,
+          taskId,
+          evidenceRevision,
+          targetId,
+          stepIndex,
+          serialized,
+        );
+        if (duplicate) {
+          return { observation: decode(duplicate), created: false };
+        }
+      }
       const saved = db.prepare(`INSERT OR IGNORE INTO ${table}
         (id, revision, taskId, targetId, evidenceRevision, stepIndex, receipt)
         VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING *`).get(
@@ -89,7 +165,7 @@ export function createAssignmentObservationJournal<T>(
         targetId,
         evidenceRevision,
         stepIndex,
-        JSON.stringify(receipt),
+        serialized,
       );
       const row = saved ?? db.prepare(`SELECT * FROM ${table}
         WHERE id = ? AND revision = ? AND taskId = ?`).get(
@@ -167,6 +243,18 @@ export function createAssignmentObservationJournal<T>(
         WHERE revision = ? AND taskId = ? AND evidenceRevision = ?`)
         .get(revision, taskId, evidenceRevision);
       return row && decode(row);
+    },
+    listByAssignment(
+      revision: string,
+      taskId: string,
+      evidenceRevision: number,
+    ) {
+      if (!exists()) return [];
+      return db.prepare(`SELECT * FROM ${table}
+        WHERE revision = ? AND taskId = ? AND evidenceRevision = ?
+        ORDER BY stepIndex`).all(revision, taskId, evidenceRevision).map(
+        decode,
+      );
     },
     attachPublicationStep(
       revision: string,

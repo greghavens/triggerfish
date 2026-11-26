@@ -171,6 +171,7 @@ import {
   type AdaptivePeerFindingCitation,
   type AdaptiveTask,
   MAX_ADAPTIVE_TASKS,
+  MAX_WORKER_NARRATIVES,
   openSentinelAdaptiveStore,
   sentinelGraphPublicationArguments,
   taskWorkerSources,
@@ -1458,6 +1459,7 @@ interface ActiveTurn {
     string,
     { stepIndex: number; sha256: string }
   >;
+  narrativeBatchStart?: number;
   narrativeSource?: { stepIndex: number; sha256: string };
   narrativeSearchFence?: { response: string; isCurrent: () => boolean };
   readonly stagedGraphFacts: ReturnType<typeof stageSentinelGraphFacts>;
@@ -8459,6 +8461,8 @@ function createAgent(
         const token = options.assignedTaskLeaseToken;
         if (
           !task?.nodeId || !token || !source ||
+          (turn.narrativeBatchStart !== undefined &&
+            source.stepIndex >= turn.narrativeBatchStart) ||
           Object.hasOwn(args, "sourceSha256")
         ) return unavailable;
         const receipt = readWorkerNarrativeReceipt({
@@ -8523,7 +8527,7 @@ function createAgent(
             /[\p{Cc}\p{Cf}]/u.test(query) ||
             redactCredentialText(query) !== query)) ||
           typeof offset !== "number" || !Number.isSafeInteger(offset) ||
-          offset < 0 || offset > 4096
+          offset < 0 || offset > MAX_WORKER_NARRATIVES
         ) return unavailable;
         const scope = currentWorkerNarrativeScope(
           options.snapshotPath,
@@ -8539,7 +8543,7 @@ function createAgent(
               { targetIds: [task.nodeId], excludeTaskId: task.id }),
           },
           (asset, evidence) => !!scope(asset, evidence),
-          query === undefined ? 7 : MAX_ADAPTIVE_TASKS,
+          query === undefined ? 7 : MAX_WORKER_NARRATIVES,
           query === undefined ? offset : 0,
         );
         let records = candidates;
@@ -9649,6 +9653,7 @@ function createAgent(
             },
           }),
           beforeToolBatch: onMutationBoundary && ((batch, calls) => {
+            turn.narrativeBatchStart = turn.traceStepCount;
             if (pendingMutations.length) {
               throw new Error("An earlier mutation is unresolved");
             }

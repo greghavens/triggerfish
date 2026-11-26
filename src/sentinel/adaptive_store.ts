@@ -137,6 +137,7 @@ import { dirname, join, resolve } from "@std/path";
 const APPLICATION_ID = 0x53414450;
 const VERSION = 1;
 export const MAX_ADAPTIVE_TASKS = 1000;
+export const MAX_WORKER_NARRATIVES = MAX_ADAPTIVE_TASKS * 16;
 export const MAX_SENTINEL_DEPENDENCY_CONFIRMATION_CHARS = 8_000;
 const MAX_DEPENDENCY_REASON_CHARS = 300;
 export const MAX_ADAPTIVE_TASK_ATTEMPTS = 3;
@@ -153,6 +154,7 @@ export type SentinelJournalMutationLookup = (
   targetId: string,
   tool: string,
   requestId: string,
+  narrative?: WorkerNarrativeRecoverySelector,
 ) => {
   readonly id: string;
   readonly args: Record<string, unknown>;
@@ -251,6 +253,7 @@ function normalizeWorkerCheckpoint(
   lookupMutation?: (
     tool: string,
     requestId: string,
+    selector?: WorkerNarrativeRecoverySelector,
   ) => ReturnType<SentinelJournalMutationLookup>,
   reopenLinkedPayload?: ReopenLinkedTrafficPayload,
   keepReopenableReferences = false,
@@ -436,8 +439,11 @@ function normalizeWorkerCheckpoint(
         if (reference) {
           const marker = `${reference}:${receipt.sha256}`;
           if (tool.content === marker) {
-            const reopened = lookupMutation?.(name, JSON.stringify(input))
-              ?.result;
+            const reopened = lookupMutation?.(
+              name,
+              JSON.stringify(input),
+              { resultSha256: receipt.sha256 },
+            )?.result;
             if (
               !reopened ||
               createHash("sha256").update(reopened).digest("hex") !==
@@ -3170,14 +3176,25 @@ function openWorkerNarrativeJournal(db: DatabaseSync) {
     "adaptive_tasks",
     "worker-narrative",
     readWorkerNarrativeReceipt,
+    "source_step",
   );
 }
+
+export type WorkerNarrativeRecoverySelector =
+  | { readonly resultSha256: string }
+  | {
+    readonly stepIndex: number;
+    readonly sourceSha256: string;
+    readonly argsDigest: string;
+  };
 
 export function readAdaptiveWorkerNarrative(
   path: string,
   runId: string,
   evidenceRevision: number,
-  select: { id: string } | { taskId: string },
+  select:
+    | { id: string }
+    | ({ taskId: string } & WorkerNarrativeRecoverySelector),
 ) {
   const db = openPrivateDatabase(path, true);
   try {
@@ -3186,9 +3203,31 @@ export function readAdaptiveWorkerNarrative(
     ).get(evidenceRevision);
     if (map?.goalId !== runId || typeof map.revision !== "string") return;
     const journal = openWorkerNarrativeJournal(db);
-    return "id" in select
-      ? journal.readById(map.revision, select.id)
-      : journal.readByAssignment(map.revision, select.taskId, evidenceRevision);
+    if ("id" in select) return journal.readById(map.revision, select.id);
+    const records = journal.listByAssignment(
+      map.revision,
+      select.taskId,
+      evidenceRevision,
+    );
+    if ("resultSha256" in select) {
+      return records.find((record) =>
+        createHash("sha256")
+          .update(JSON.stringify({ _classification: "INTERNAL", ...record }))
+          .digest("hex") === select.resultSha256
+      );
+    }
+    const occupied = records.find(({ stepIndex }) =>
+      stepIndex === select.stepIndex
+    );
+    return (occupied ? [occupied] : records).find(({ stepIndex, receipt }) => {
+      const { summary, confidence, evidenceId, sourceSha256 } = receipt;
+      return stepIndex <= select.stepIndex &&
+        sourceSha256 === select.sourceSha256 &&
+        createHash("sha256").update(
+            JSON.stringify({ summary, confidence, evidenceId }),
+          )
+            .digest("hex") === select.argsDigest;
+    });
   } finally {
     db.close();
   }
@@ -8119,14 +8158,27 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
     ) {
       if (
         !Number.isSafeInteger(limit) || limit < 1 ||
-        limit > MAX_ADAPTIVE_TASKS ||
-        !validWorkflowObservationPage(offset, 1)
+        limit > MAX_WORKER_NARRATIVES ||
+        !Number.isSafeInteger(offset) || offset < 0 ||
+        offset > MAX_WORKER_NARRATIVES
       ) return [];
-      return narrativeJournal.list(revision, 0, MAX_ADAPTIVE_TASKS, {
-        ...options,
-        latestFirst: true,
-      }).filter((record) => allowed(record.targetId, record.receipt.evidenceId))
-        .slice(offset, offset + limit);
+      const records: ReturnType<typeof narrativeJournal.list> = [];
+      const pageSize = 128;
+      let authorized = 0;
+      for (let start = 0; start < MAX_WORKER_NARRATIVES; start += pageSize) {
+        const page = narrativeJournal.list(revision, start, pageSize, {
+          ...options,
+          latestFirst: true,
+        });
+        for (const record of page) {
+          if (!allowed(record.targetId, record.receipt.evidenceId)) continue;
+          if (authorized++ < offset) continue;
+          records.push(record);
+          if (records.length === limit) return records;
+        }
+        if (page.length < pageSize) break;
+      }
+      return records;
     },
 
     commitLeasedWorkflowObservation(
@@ -8331,7 +8383,8 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
           assignmentPublication(revision, id, evidenceRevision),
           this.modelReviewControls(revision, id).steering,
           lookupMutation &&
-            ((tool, requestId) => lookupMutation(id, nodeId, tool, requestId)),
+            ((tool, requestId, selector) =>
+              lookupMutation(id, nodeId, tool, requestId, selector)),
           reopenLinkedPayload,
         );
       });
@@ -8378,7 +8431,8 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
           assignmentPublication(revision, id, evidenceRevision),
           this.modelReviewControls(revision, id).steering,
           lookupMutation &&
-            ((tool, requestId) => lookupMutation(id, nodeId, tool, requestId)),
+            ((tool, requestId, selector) =>
+              lookupMutation(id, nodeId, tool, requestId, selector)),
         );
         if (!normalized) return false;
         return checkpoints.write(
@@ -10508,8 +10562,69 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
             result: string;
             id?: string;
           }[] = [];
+          let recoveredNarrativeProgress = false;
           for (const [index, tool] of marker.tools.entries()) {
             if (typeof tool !== "string") break;
+            const stepIndex = earlierResults.length + index;
+            if (
+              tool === SENTINEL_WORKER_NARRATIVE_COMMIT && !alreadySaved &&
+              stepIndex < 16 && progress.length === stepIndex
+            ) {
+              const admitted = marker.journalRequests?.[index];
+              const sourceIndex = progress.slice(0, earlierResults.length)
+                .findLastIndex(({ tool, outcome }) =>
+                  tool === ASSIGNED_TARGET_CHECKPOINT_TOOL &&
+                  outcome === "returned"
+                );
+              const source = progress[sourceIndex];
+              const sourceSha256 = source?.resultSnapshot?.sha256;
+              const sourceResult = earlierResults[sourceIndex]?.content;
+              if (
+                typeof admitted?.requestId !== "string" ||
+                typeof admitted.argsDigest !== "string" ||
+                !sourceSha256 || typeof sourceResult !== "string" ||
+                source.assignedTarget?.targetId !== row.nodeId ||
+                !source.assignedTarget.linkedNodeIds.includes(
+                  admitted.requestId,
+                ) ||
+                createHash("sha256").update(sourceResult).digest("hex") !==
+                  sourceSha256
+              ) break;
+              const verified = lookupMutation?.(
+                id,
+                row.nodeId,
+                tool,
+                admitted.requestId,
+                {
+                  stepIndex: sourceIndex,
+                  sourceSha256,
+                  argsDigest: admitted.argsDigest,
+                },
+              );
+              if (
+                !verified || verified.args.evidenceId !== admitted.requestId ||
+                createHash("sha256").update(JSON.stringify(verified.args))
+                    .digest("hex") !== admitted.argsDigest
+              ) break;
+              progress.push({
+                tool,
+                outcome: "returned",
+                target: verified.id,
+                goalReceiptRead: {
+                  args: verified.args,
+                  sha256: createHash("sha256").update(verified.result).digest(
+                    "hex",
+                  ),
+                },
+              });
+              recoveredNarrativeProgress = true;
+              batch.push({
+                ...verified,
+                tool,
+                callId: `recovery-${tool}-${stepIndex}`,
+              });
+              continue;
+            }
             if (
               isSentinelGoalReceiptRead(tool) &&
               !isSentinelRetainedReadReceipt(
@@ -10538,6 +10653,10 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
                 row.nodeId,
                 tool,
                 JSON.stringify(args),
+                tool === SENTINEL_WORKER_NARRATIVE_COMMIT &&
+                  step.goalReceiptRead
+                  ? { resultSha256: step.goalReceiptRead.sha256 }
+                  : undefined,
               );
               if (
                 !verified ||
@@ -10930,8 +11049,14 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
             observation,
             this.modelReviewControls(revision, id).steering,
             lookupMutation &&
-              ((tool, requestId) =>
-                lookupMutation(id, String(row.nodeId), tool, requestId)),
+              ((tool, requestId, selector) =>
+                lookupMutation(
+                  id,
+                  String(row.nodeId),
+                  tool,
+                  requestId,
+                  selector,
+                )),
             lookupMutation && ((asset, args) =>
               lookupMutation(
                 id,
@@ -10948,6 +11073,16 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
               { ...normalized, controlClaimSha256: saved.controlClaimSha256 },
             )
           ) continue;
+          if (recoveredNarrativeProgress) {
+            db.prepare(`UPDATE adaptive_worker_progress SET steps = ?
+              WHERE revision = ? AND taskId = ? AND controlClaimSha256 IS ?`)
+              .run(
+                JSON.stringify(progress),
+                revision,
+                id,
+                saved.controlClaimSha256 ?? null,
+              );
+          }
           event.run(
             revision,
             id,

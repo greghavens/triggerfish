@@ -149,6 +149,7 @@ import {
   type SentinelQueuedCancellation,
   taskUpstreamCitations,
   taskWorkerSources,
+  type WorkerNarrativeRecoverySelector,
   workerSteeringCheckpointIds,
 } from "../sentinel/adaptive_store.ts";
 import {
@@ -5968,6 +5969,7 @@ export function createSentinelModelPlanner(
       targetId: string,
       tool: string,
       requestId: string,
+      narrative?: WorkerNarrativeRecoverySelector,
     ) => {
       if (!caseId || !runId || !snapshot) return;
       const scope = {
@@ -6008,25 +6010,37 @@ export function createSentinelModelPlanner(
         tool === SENTINEL_WORKER_NARRATIVE_READ ||
         tool === SENTINEL_WORKER_NARRATIVE_COMMIT
       ) {
-        const args = sentinelGoalReceiptReadArguments(
-          tool,
-          JSON.parse(requestId),
-        );
+        const committedBeforeProgress = narrative && "stepIndex" in narrative;
+        const requested = committedBeforeProgress
+          ? undefined
+          : sentinelGoalReceiptReadArguments(tool, JSON.parse(requestId));
         const selecting = tool === SENTINEL_WORKER_NARRATIVE_READ;
-        if (!args || (selecting && !args.id)) return;
+        const selection = selecting
+          ? requested?.id && { id: requested.id }
+          : narrative && (requested || committedBeforeProgress) &&
+            { taskId, ...narrative };
+        if (!selection) return;
         const record = readAdaptiveWorkerNarrative(
           storePath(snapshotPath),
           runId,
           current.revision,
-          selecting ? { id: args.id! } : { taskId },
+          selection,
         );
+        if (!record || record.targetId !== targetId) return;
+        const { evidenceId, summary, confidence } = record.receipt;
+        const args = committedBeforeProgress
+          ? sentinelGoalReceiptReadArguments(tool, {
+            summary,
+            confidence,
+            evidenceId,
+          })
+          : requested;
         if (
-          record?.targetId !== targetId ||
-          (selecting
+          !args || (selecting
             ? record.taskId === taskId
-            : record.receipt.summary !== args.summary ||
-              record.receipt.confidence !== args.confidence ||
-              record.receipt.evidenceId !== args.evidenceId) ||
+            : summary !== args.summary || confidence !== args.confidence ||
+              evidenceId !== args.evidenceId ||
+              (committedBeforeProgress && evidenceId !== requestId)) ||
           !currentWorkerNarrative(
             snapshotPath,
             runId,
@@ -6034,7 +6048,9 @@ export function createSentinelModelPlanner(
             record.id,
             targetId,
           )
-        ) return;
+        ) {
+          return;
+        }
         return {
           id: record.id,
           args,

@@ -1,5 +1,6 @@
 import { assert, assertEquals } from "@std/assert";
-import { dirname } from "@std/path";
+import { dirname, join } from "@std/path";
+import { createHash } from "node:crypto";
 import { createProviderRegistry } from "../../src/agent/llm.ts";
 import {
   notifyCommittedEvidence,
@@ -13,6 +14,7 @@ import {
 } from "../../src/gateway/sentinel_adaptive_runtime.ts";
 import { createSentinelSubagent } from "../../src/gateway/sentinel_agent.ts";
 import { startSentinelAssessmentCoordinator } from "../../src/gateway/sentinel_assessment_service.ts";
+import { readAdaptiveWorkerNarrative } from "../../src/sentinel/adaptive_store.ts";
 import { startSentinelAssessment } from "../../src/sentinel/assessment_store.ts";
 import { resolveSentinelCasePath } from "../../src/sentinel/cases.ts";
 
@@ -38,7 +40,7 @@ async function waitFor(
   assert(condition(), label);
 }
 
-Deno.test("Committed worker narrative wakes a settled coordinator through cooldown and duplicate delivery", async () => {
+Deno.test("Committed worker narratives wake a settled coordinator for each material source step", async () => {
   const baseDir = await Deno.makeTempDir();
   const caseId = "narrative-wake";
   const path = resolveSentinelCasePath(baseDir, caseId);
@@ -46,6 +48,7 @@ Deno.test("Committed worker narrative wakes a settled coordinator through cooldo
   const open = "sentinel_worker_narrative";
   const summary = "The retained application check is due for review.";
   const allowPublication = Promise.withResolvers<void>();
+  const allowLaterPublication = Promise.withResolvers<void>();
   const finishSource = Promise.withResolvers<void>();
   let planner: ReturnType<typeof createSentinelModelPlanner> | undefined;
   let coordinator:
@@ -55,7 +58,8 @@ Deno.test("Committed worker narrative wakes a settled coordinator through cooldo
   let sourceTaskId: string | undefined;
   let sourceAtPublication = false;
   let created: Record<string, unknown> | undefined;
-  let reopened: unknown;
+  const reopened: unknown[] = [];
+  let later: Record<string, unknown> | undefined;
   let sourceFinished = false;
   let duplicateAcknowledged = false;
   let offset = 0;
@@ -63,13 +67,24 @@ Deno.test("Committed worker narrative wakes a settled coordinator through cooldo
   let coordinatorAdvances = 0;
   const wakeIds: string[] = [];
   const hooks: HookRunner = {
-    evaluateHook: () =>
-      Promise.resolve({
-        allowed: true,
-        action: "ALLOW",
-        ruleId: null,
-        duration: 0,
-      }),
+    async evaluateHook(hook, { input }) {
+      if (
+        hook === "POST_TOOL_RESPONSE" && input.tool_name === commit &&
+        typeof input.tool_response === "string" &&
+        input.tool_response.startsWith("{")
+      ) {
+        const response = JSON.parse(input.tool_response);
+        if (response.receipt.evidenceId === "later-check") {
+          later = response;
+          await finishSource.promise;
+          sourceFinished = true;
+        } else if (created) {
+          assertEquals(response, created);
+          duplicateAcknowledged = true;
+        }
+      }
+      return { allowed: true, action: "ALLOW", ruleId: null, duration: 0 };
+    },
   };
   try {
     await Deno.mkdir(dirname(path), { recursive: true });
@@ -80,8 +95,16 @@ Deno.test("Committed worker narrative wakes a settled coordinator through cooldo
         nodes: [
           { id: "app", kind: "asset", label: "Application" },
           { id: "check", kind: "evidence", label: "Local inventory check" },
+          {
+            id: "later-check",
+            kind: "evidence",
+            label: "Local configuration check",
+          },
         ],
-        edges: [{ from: "check", to: "app", relation: "observed_on" }],
+        edges: [
+          { from: "check", to: "app", relation: "observed_on" },
+          { from: "later-check", to: "app", relation: "observed_on" },
+        ],
       }),
     );
     const state = startSentinelAssessment(path);
@@ -122,7 +145,8 @@ Deno.test("Committed worker narrative wakes a settled coordinator through cooldo
             toolCalls: [toolCall(open, { id: narrativeId })],
           });
         }
-        reopened = JSON.parse(String(result.content));
+        reopened.push(JSON.parse(String(result.content)));
+        if (reopened.length === 1) offset += 58_750;
         return Promise.resolve({
           usage,
           content: JSON.stringify([{
@@ -165,20 +189,24 @@ Deno.test("Committed worker narrative wakes a settled coordinator through cooldo
         }
         if (results.length === 2) {
           created = JSON.parse(String(results[1].content));
+          await allowLaterPublication.promise;
           return {
             usage,
             content: "",
-            toolCalls: [toolCall(commit, publishArgs)],
+            toolCalls: [toolCall("sentinel_assigned_target", {})],
           };
         }
-        assertEquals(JSON.parse(String(results[2].content)), created);
-        duplicateAcknowledged = true;
-        await finishSource.promise;
-        sourceFinished = true;
         return {
           usage,
-          content: '{"summary":"Review complete.","followUps":[]}',
-          toolCalls: [],
+          content: "",
+          toolCalls: [
+            toolCall(commit, publishArgs),
+            toolCall(commit, {
+              summary: "The later retained configuration check needs review.",
+              confidence: "observed",
+              evidenceId: "later-check",
+            }),
+          ],
         };
       },
     });
@@ -227,7 +255,7 @@ Deno.test("Committed worker narrative wakes a settled coordinator through cooldo
     allowPublication.resolve();
     await waitFor(
       "Publication must notify the assessment service",
-      () => !!created && duplicateAcknowledged,
+      () => !!created,
     );
     const narrativeId = created!.id as string;
     assertEquals(wakeIds.filter((id) => id === narrativeId), [narrativeId]);
@@ -241,7 +269,7 @@ Deno.test("Committed worker narrative wakes a settled coordinator through cooldo
       "Cooldown retry must plan from the committed narrative",
       () => !!followup(),
     );
-    assertEquals(reopened, created);
+    assertEquals(reopened, [created]);
     assertEquals(sourceFinished, false);
     assertEquals(followup()?.nodeId, "app");
     assertEquals(starts, 2);
@@ -273,11 +301,52 @@ Deno.test("Committed worker narrative wakes a settled coordinator through cooldo
       ).length,
       1,
     );
+
+    allowLaterPublication.resolve();
+    await waitFor(
+      "A new source step must publish different retained evidence",
+      () => !!later,
+    );
+    assert(duplicateAcknowledged);
+    assertEquals(wakeIds.filter((id) => id === narrativeId).length, 3);
+    assertEquals(later?.stepIndex, 2);
+    assertEquals(later?.taskId, created?.taskId);
+    assertEquals(later?.evidenceRevision, state.revision);
+    const laterId = later!.id as string;
+    assert(laterId !== narrativeId);
+    assertEquals(wakeIds.filter((id) => id === laterId), [laterId]);
+    await waitFor(
+      "The newer exact observation must wake another scoped plan",
+      () =>
+        adaptive()?.tasks.some(({ plannerRound }) =>
+          plannerRound?.workerNarrativeId === laterId
+        ) === true,
+    );
+    assertEquals(starts, 3);
+    assertEquals(reopened, [created, later]);
+    assertEquals(sourceFinished, false);
+    assert(sourceTaskId);
+    for (const response of [created, later]) {
+      assert(response);
+      const record = readAdaptiveWorkerNarrative(
+        join(dirname(path), "sentinel-adaptive.db"),
+        runId,
+        state.revision,
+        {
+          taskId: sourceTaskId,
+          resultSha256: createHash("sha256").update(JSON.stringify(response))
+            .digest("hex"),
+        },
+      );
+      assert(record);
+      assertEquals({ _classification: "INTERNAL", ...record }, response);
+    }
   } finally {
     unsubscribe?.();
     coordinator?.stop();
     planner?.stop();
     allowPublication.resolve();
+    allowLaterPublication.resolve();
     finishSource.resolve();
     await waitFor(
       "Stopped planner must release its workers",
