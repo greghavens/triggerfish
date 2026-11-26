@@ -1,8 +1,3 @@
-import type {
-  CompletedSentinelGraphFollowupBinding,
-  CompletedSentinelGraphFollowupReceipt,
-  CompletedSentinelGraphFollowupRequest,
-} from "./completed_graph_followup.ts";
 import {
   parseSentinelModelRoute,
   type SentinelModelRoute,
@@ -3127,100 +3122,6 @@ export function settleSentinelAssessmentDeadline(
           .run(SENTINEL_ASSESSMENT_TIMED_OUT);
       }
       return true;
-    });
-  } finally {
-    db.close();
-  }
-}
-
-/** Bind and commit a read-only follow-up while holding the exact completed case lock. */
-export function reviewSentinelCompletedGraphFollowup(
-  path: string,
-  request: CompletedSentinelGraphFollowupRequest,
-  approved?: {
-    readonly binding: CompletedSentinelGraphFollowupBinding;
-    readonly execute: (
-      state: StoredAssessment,
-      constraints?: SentinelOperatingConstraints,
-    ) => CompletedSentinelGraphFollowupReceipt["observation"];
-  },
-) {
-  const db = openStore(path, false);
-  if (!db) return;
-  try {
-    return transact(db, () => {
-      const row = getRow(db);
-      if (row?.active !== 3 || row.revision !== request.evidenceRevision) {
-        return;
-      }
-      const state = readState(db, row);
-      const completion = state.completion;
-      const snapshot = state.result?.sharedGraph.snapshot;
-      if (
-        state.plan.runId !== request.runId || !completion || !snapshot ||
-        state.plan.activeFormalGoalIds?.length ||
-        !snapshot.nodes.some(({ id, kind }) =>
-          id === request.nodeId && kind === "asset"
-        )
-      ) return;
-      const policy = readSentinelOperatingConstraints(
-        path,
-        request.runId,
-        state.revision,
-      );
-      if (
-        !sentinelOperatingConstraintsAllow(
-          policy?.constraints,
-          request,
-          snapshot,
-        )
-      ) return;
-      const binding: CompletedSentinelGraphFollowupBinding = {
-        ...request,
-        graphSha256: createHash("sha256").update(JSON.stringify(snapshot))
-          .digest("hex"),
-        completionSha256: createHash("sha256").update(
-          JSON.stringify(completion),
-        ).digest("hex"),
-        constraintsVersion: policy?.version ?? 0,
-      };
-      if (hasTable(db, "assessment_completed_graph_followups")) {
-        const saved = db.prepare(
-          "SELECT receipt FROM assessment_completed_graph_followups WHERE requestId = ?",
-        ).get(request.requestId);
-        if (saved) {
-          const receipt = JSON.parse(
-            String(saved.receipt),
-          ) as CompletedSentinelGraphFollowupReceipt;
-          const {
-            observation: _observation,
-            completedAt: _completedAt,
-            ...recorded
-          } = receipt;
-          return isDeepStrictEqual(recorded, binding) ? { receipt } : undefined;
-        }
-      }
-      if (!approved) return { binding };
-      if (!isDeepStrictEqual(approved.binding, binding)) return;
-      db.exec(`CREATE TABLE IF NOT EXISTS assessment_completed_graph_followups (
-        requestId TEXT PRIMARY KEY, receipt TEXT NOT NULL
-      ) STRICT`);
-      if (
-        Number(
-          db.prepare(
-            "SELECT COUNT(*) AS count FROM assessment_completed_graph_followups",
-          ).get()?.count,
-        ) >= 128
-      ) return;
-      const receipt = {
-        ...binding,
-        completedAt: new Date().toISOString(),
-        observation: approved.execute(state, policy?.constraints),
-      };
-      db.prepare(
-        "INSERT INTO assessment_completed_graph_followups VALUES (?, ?)",
-      ).run(request.requestId, JSON.stringify(receipt));
-      return { receipt };
     });
   } finally {
     db.close();

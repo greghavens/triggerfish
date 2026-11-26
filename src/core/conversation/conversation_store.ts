@@ -61,6 +61,9 @@ function buildRecord(
     timestamp: new Date().toISOString(),
     sequence,
     compacted: false,
+    ...(input.role === "compaction_summary" && input.compaction && {
+      compaction: input.compaction,
+    }),
     ...(input.lineage_id !== undefined ? { lineage_id: input.lineage_id } : {}),
     ...(input.tool_name !== undefined ? { tool_name: input.tool_name } : {}),
     ...(input.tool_args !== undefined

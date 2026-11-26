@@ -34,6 +34,10 @@ interface ConversationFields {
   readonly content: string;
   readonly classification: ClassificationLevel;
   readonly lineage_id?: string;
+  readonly compaction?: {
+    readonly sourceMessageIds: readonly string[];
+    readonly throughSequence: number;
+  };
   readonly tool_name?: string;
   readonly tool_args?: Record<string, unknown>;
   readonly managedTranscriptIdentity?: ManagedTranscriptIdentity;

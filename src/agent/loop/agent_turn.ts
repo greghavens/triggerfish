@@ -124,12 +124,27 @@ export async function restoreSessionHistoryIfEmpty(
   const existing = histories.get(sessionKey);
   if (existing && existing.length > 0) return;
 
-  const records = await config.messageStore.loadActive(sessionKey);
+  const records = (await config.messageStore.loadActive(sessionKey))
+    .sort((left, right) => left.sequence - right.sequence);
   if (records.length === 0) return;
 
-  // Check for compaction summary — if present, use only that
-  const summaryRecord = records.find((r) => r.role === "compaction_summary");
-  const toRestore = summaryRecord ? [summaryRecord] : records;
+  const summary = records.findLast((record) =>
+    record.role === "compaction_summary" && record.compaction &&
+    canFlowTo(record.classification, sessionTaint)
+  );
+  const throughSequence = summary?.compaction?.throughSequence;
+  const toRestore = summary && throughSequence !== undefined
+    ? [
+      summary,
+      ...records.filter((record) =>
+        record.role !== "compaction_summary" &&
+        record.sequence > throughSequence
+      ),
+    ]
+    : records.filter((record) =>
+      record.role !== "compaction_summary" ||
+      (!record.compaction && !record.content.startsWith("[Compaction]"))
+    );
 
   const entries: HistoryEntry[] = [];
   for (const record of toRestore) {

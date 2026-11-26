@@ -1,3 +1,4 @@
+import { checkpointOwnerCompaction } from "./chat_compaction.ts";
 import { sentinelAssessmentModelRouting } from "./sentinel_model_routing.ts";
 import type { ManagedGoalTraceAccess } from "../core/goal_completion.ts";
 import type { ManagedTranscriptGrantReader } from "../core/conversation/managed_evidence.ts";
@@ -121,28 +122,24 @@ async function compactChatHistory(
   getSession: () => SessionState,
   sendEvent: ChatEventSender,
   config: ChatSessionConfig,
+  getTaint: () => ClassificationLevel,
 ): Promise<void> {
   sendEvent({ type: "compact_start" });
   try {
-    const result = await orchestrator.compactHistory(getSession().id);
-
-    if (config.messageStore && result.messagesAfter > 0) {
-      const sessionId = getSession().id as string;
-      const sessionTaint = config.getSessionTaint?.() ??
-        "PUBLIC" as ClassificationLevel;
-      // Mark all prior records as compacted
-      await config.messageStore.markCompacted(
-        sessionId,
-        0,
-        result.messagesBefore - 1,
+    const session = getSession();
+    const id = session.id;
+    let result;
+    if (config.messageStore) {
+      const checkpoint = await checkpointOwnerCompaction(
+        config,
+        session,
+        getTaint(),
+        config.messageStore,
       );
-      await config.messageStore.append({
-        session_id: sessionId,
-        role: "compaction_summary",
-        content:
-          `[Compaction] ${result.messagesBefore} → ${result.messagesAfter} messages, ${result.tokensBefore} → ${result.tokensAfter} tokens`,
-        classification: sessionTaint,
-      });
+      if (checkpoint.saved) orchestrator.clearHistory(id);
+      result = checkpoint.result;
+    } else {
+      result = await orchestrator.compactHistory(id);
     }
 
     sendEvent({
@@ -152,13 +149,8 @@ async function compactChatHistory(
       tokensBefore: result.tokensBefore,
       tokensAfter: result.tokensAfter,
     });
-  } catch (err: unknown) {
-    sendEvent({
-      type: "error",
-      message: `Compact failed: ${
-        err instanceof Error ? err.message : String(err)
-      }`,
-    });
+  } catch {
+    sendEvent({ type: "error", message: "Chat compaction failed." });
   }
 }
 
@@ -1332,8 +1324,30 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
         });
       }
     },
-    compact: (sendEvent) =>
-      compactChatHistory(orchestrator, getSession, sendEvent, config),
+    async compact(sendEvent) {
+      const release = await acquireTurnMutex(state);
+      try {
+        if (
+          state.activeSessionId !== state.ownerSessionId ||
+          !canFlowTo(getSessionTaint(), ownerTargetClassification)
+        ) {
+          sendEvent({
+            type: "error",
+            message: "Chat compaction is unavailable.",
+          });
+          return;
+        }
+        await compactChatHistory(
+          orchestrator,
+          getSession,
+          sendEvent,
+          config,
+          getSessionTaint,
+        );
+      } finally {
+        release();
+      }
+    },
     handleTriggerPromptResponse(source, accepted, sendEvent) {
       if (!accepted) {
         chatLog.debug("Trigger prompt declined", {

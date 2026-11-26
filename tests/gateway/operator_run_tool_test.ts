@@ -4106,14 +4106,6 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
                 label: "Committed defensive check",
               },
             ],
-            edges: [
-              {
-                from: "child-asset",
-                to: "other-child-asset",
-                relation: "depends_on",
-              },
-              { from: "proof", to: "child-asset", relation: "observed_on" },
-            ],
           }),
         );
         const started = JSON.parse(
@@ -4126,21 +4118,6 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
             timeoutSeconds: 30,
           })).result,
         ).run;
-
-        if (scenario === "verified") {
-          const restricted = JSON.parse(
-            (await turn({
-              ...started.ref,
-              action: "narrow_constraints",
-              runId: started.details.runId,
-              requestId: crypto.randomUUID(),
-              expectedVersion: 0,
-              deniedKinds: [],
-              allowedAssetIds: ["child-asset"],
-            })).result,
-          );
-          assertEquals(restricted.record.version, 1);
-        }
         const cutoff = started.details.deadlineAt;
         const policy = scenario === "operator" ? "operator" : "automatic";
         const reference = scenario === "missing" ? "missing-proof" : "proof";
@@ -4210,90 +4187,6 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
             const after = JSON.parse((await restartTurn(inspect)).result).run;
             assertEquals(after, settled);
             assertEquals(dispatched, 0);
-            const followup = {
-              ...started.ref,
-              action: "completed_graph_followup",
-              runId: started.details.runId,
-              requestId: crypto.randomUUID(),
-              taskKind: "trace",
-              node: "child-asset",
-            };
-            if (scenario === "verified") {
-              const beforeFollowupApproval = confirmations.length;
-              for (
-                const invalid of [
-                  { ...followup, node: "proof" },
-                  { ...followup, node: "foreign-asset" },
-                  { ...followup, node: "other-child-asset" },
-                  { ...followup, taskKind: "review_evidence" },
-                  { ...followup, runId: crypto.randomUUID() },
-                  { ...followup, revision: started.ref.revision + 1 },
-                ]
-              ) {
-                assertStringIncludes(
-                  (await restartTurn(invalid)).result,
-                  "unavailable",
-                );
-              }
-              denied = "PRE_TOOL_CALL";
-              await restartTurn(followup);
-              denied = undefined;
-              assertEquals(confirmations.length, beforeFollowupApproval);
-              approved = false;
-              assertStringIncludes(
-                (await restartTurn(followup)).result,
-                "operator declined",
-              );
-              approved = true;
-              const result = JSON.parse((await restartTurn(followup)).result);
-              assertEquals(result.receipt.nodeId, followup.node);
-              assertEquals(result.receipt.runId, followup.runId);
-              assertEquals(result.receipt.constraintsVersion, 1);
-              assert(
-                !JSON.stringify(result.receipt.observation).includes(
-                  "other-child-asset",
-                ),
-              );
-
-              assertEquals(
-                result.receipt.evidenceRevision,
-                started.ref.revision,
-              );
-              assert(
-                result.receipt.observation.relatedNodeIds.includes(
-                  followup.node,
-                ),
-              );
-              assertEquals(
-                readSentinelAssessment(casePath)?.completion,
-                state?.completion,
-              );
-              assertEquals(
-                JSON.parse((await restartTurn(inspect)).result).run,
-                settled,
-              );
-              assertEquals(dispatched, 0);
-              const approvedCount = confirmations.length;
-              await withGateway(async (reopenTurn) => {
-                assertEquals(
-                  JSON.parse((await reopenTurn(followup)).result),
-                  result,
-                );
-                assertStringIncludes(
-                  (await reopenTurn({ ...followup, taskKind: "impact" }))
-                    .result,
-                  "unavailable",
-                );
-                assertEquals(confirmations.length, approvedCount);
-                assertEquals(
-                  readSentinelAssessment(casePath)?.completion,
-                  state?.completion,
-                );
-              }, reopenedWorkflows);
-            } else {
-              const rejected = (await restartTurn(followup)).result;
-              assertStringIncludes(rejected, "unavailable");
-            }
           } finally {
             coordinator.stop();
           }

@@ -1,4 +1,3 @@
-import { executeCompletedSentinelGraphFollowup } from "../sentinel/completed_graph_followup.ts";
 import { normalizeSentinelHintAssets } from "../sentinel/adaptive_store.ts";
 import { applyOperatorRunBatch } from "./operator_run_batch_control.ts";
 import {
@@ -185,7 +184,6 @@ import {
   recordSentinelIncidentReview,
   recordSentinelOperatingConstraints,
   replaceSentinelModelRoute,
-  reviewSentinelCompletedGraphFollowup,
   sentinelFindingDispositions,
   type SentinelFormalGoalApproval,
   sentinelIncidentDispositions,
@@ -420,7 +418,6 @@ export const operatorRunTool: ToolDefinition = {
         "pause_runs",
         "resume_runs",
         "retry_graph_tasks",
-        "completed_graph_followup",
         "set_case_membership",
         "traces",
         "search_case_traces",
@@ -3640,60 +3637,6 @@ ${
             ? "applied"
             : "dismissed",
         });
-      }
-      if (action === "completed_graph_followup") {
-        const { runId, requestId, taskKind, node } = args;
-        if (
-          ref.kind !== "sentinel" || ref.revision === undefined ||
-          !canFlowTo("INTERNAL", context?.ceiling ?? "INTERNAL") ||
-          typeof runId !== "string" || !digestPattern.test(runId) ||
-          typeof requestId !== "string" || !digestPattern.test(requestId) ||
-          (taskKind !== "trace" && taskKind !== "impact") ||
-          typeof node !== "string" || !node.trim() || node.length > 100 ||
-          node.includes("\0") ||
-          Object.keys(args).some((key) =>
-            ![
-              "action",
-              "kind",
-              "id",
-              "revision",
-              "runId",
-              "requestId",
-              "taskKind",
-              "node",
-            ].includes(key)
-          ) ||
-          !await controller.inspect(ref)
-        ) return unavailable;
-        const path = resolveSentinelCasePath(options.baseDir, ref.id);
-        const request = {
-          runId: runId.toLowerCase(),
-          requestId: requestId.toLowerCase(),
-          evidenceRevision: ref.revision,
-          kind: taskKind,
-          nodeId: node,
-        } as const;
-        const before = reviewSentinelCompletedGraphFollowup(path, request);
-        if (before?.receipt) {
-          return safeProjection({ run: ref, receipt: before.receipt });
-        }
-        if (!before?.binding) return unavailable;
-        if (
-          !await options.confirm(
-            `Run this exact graph investigation on the completed assessment?\n${
-              JSON.stringify({ run: ref, depth: 1, ...before.binding })
-            }`,
-          )
-        ) return "Error: The operator declined the run action.";
-        const binding = before.binding;
-        const result = reviewSentinelCompletedGraphFollowup(path, request, {
-          binding,
-          execute: (state, constraints) =>
-            executeCompletedSentinelGraphFollowup(state, binding, constraints),
-        });
-        return result?.receipt
-          ? safeProjection({ run: ref, receipt: result.receipt })
-          : unavailable;
       }
       if (action === "retry_graph_tasks") {
         const { runId, adaptiveRevision, requestId, taskIds } = args;
