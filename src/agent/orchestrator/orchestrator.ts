@@ -180,10 +180,11 @@ export function createOrchestrator(config: OrchestratorConfig) {
     clearHistory: (id) => histories.delete(id as string),
     compactHistory: (id) => {
       const taint = config.getSessionTaint?.() ?? "PUBLIC";
+      const registry = config.providerRegistry;
       return compactSessionHistory(
         id,
         histories,
-        config.providerRegistry,
+        registry.snapshotForTurn?.() ?? registry,
         compactor,
         taint,
       );

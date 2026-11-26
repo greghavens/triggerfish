@@ -370,6 +370,19 @@ export async function orchestrateAgentTurn(
     refreshCommittedHistory,
     onToolBatchCheckpoint,
   } = options;
+  if (state.config.providerRegistry.snapshotForTurn) {
+    try {
+      state = {
+        ...state,
+        config: {
+          ...state.config,
+          providerRegistry: state.config.providerRegistry.snapshotForTurn(),
+        },
+      };
+    } catch {
+      return { ok: false, error: "The approved model route is unavailable." };
+    }
+  }
   const protectedResume = resumeClassification !== undefined ||
     resumeToolCalls !== undefined || authorizeResumeSources !== undefined;
   if (!protectedResume) {
@@ -545,7 +558,10 @@ export async function orchestrateAgentTurn(
       ? async (results) => {
         const activeIndex = ctx.history.indexOf(activeUser);
         if (activeIndex < 1 || signal?.aborted) return;
-        const replacement = await refreshCommittedHistory(results);
+        const replacement = await refreshCommittedHistory(
+          results,
+          turnState.config.providerRegistry,
+        );
         if (replacement && !signal?.aborted) {
           ctx.history.splice(0, activeIndex, ...replacement);
         }

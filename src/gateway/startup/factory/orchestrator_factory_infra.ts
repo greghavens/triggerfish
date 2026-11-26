@@ -1,3 +1,4 @@
+import { enableLiveProviderRoutes } from "../../../agent/providers/live_routes.ts";
 /**
  * Orchestrator factory infrastructure — shared setup utilities.
  *
@@ -86,8 +87,14 @@ export function initializeFactoryInfra(
   readonly hookRunner: ReturnType<typeof createHookRunner>;
   readonly spinePath: string;
 } {
-  const registry = createProviderRegistry();
-  loadProvidersFromConfig(config.models as ModelsConfig, registry);
+  const providers = createProviderRegistry();
+  const models = config.models as ModelsConfig;
+  loadProvidersFromConfig(models, providers);
+  const registry = enableLiveProviderRoutes(
+    providers,
+    baseDir,
+    models.live_route_allowlists,
+  );
 
   const engine = createPolicyEngine();
   for (

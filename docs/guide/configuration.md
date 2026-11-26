@@ -29,6 +29,26 @@ triggerfish config validate
 
 The `models` section configures your LLM providers and failover behavior.
 
+To reload approved chat providers between turns, set
+`models.live_route_allowlists` to a mapping such as
+`{ INTERNAL: [anthropic, openai] }`. The allowlist takes effect at startup.
+Under the gateway base directory, create the operator-controlled
+`data/model-routes.json` with one exact provider and model per allowlisted
+classification. This example selects OpenAI for INTERNAL turns.
+
+```json
+{"INTERNAL":{"provider":"openai","model":"gpt-4o"}}
+```
+
+Use a private file and replace it atomically to select a different approved
+route. The provider and model must already exist in the configured provider
+registry. Each new turn reads the same selection across gateway and
+background agents. Uninterrupted turns keep their existing routes. A turn recovered from a
+checkpoint resolves the current route on restart. Missing,
+invalid, or revoked selections stop new turns while reload is enabled.
+Unlisted classifications retain their startup routes. Omit the allowlist to
+leave live reload disabled.
+
 ```yaml
 models:
   # Which provider and model to use by default

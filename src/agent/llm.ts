@@ -33,6 +33,11 @@ export function listEffectiveModelProfiles(
   registry: LlmProviderRegistry,
   ceiling: ClassificationLevel,
 ): readonly EffectiveModelProfile[] {
+  try {
+    registry = registry.snapshotForTurn?.() ?? registry;
+  } catch {
+    return [];
+  }
   const levels = ["PUBLIC", "INTERNAL", "CONFIDENTIAL", "RESTRICTED"] as const;
   return levels.flatMap((classification) => {
     if (!canFlowTo(classification, ceiling)) return [];

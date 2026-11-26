@@ -1,3 +1,4 @@
+import type { ModelProfileAllowlists } from "../../core/model_profile_selection.ts";
 /**
  * Provider configuration loader.
  *
@@ -53,6 +54,7 @@ export interface ClassificationModelRef {
 /** Full models section from triggerfish.yaml. */
 export interface ModelsConfig {
   readonly primary: PrimaryModelRef;
+  readonly live_route_allowlists?: ModelProfileAllowlists;
   /** Optional vision model for describing images when the primary model lacks vision. */
   readonly vision?: string;
   /** Enable streaming responses from the LLM provider. Default: true. */

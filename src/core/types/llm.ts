@@ -118,6 +118,8 @@ export interface LlmProvider {
  * Optionally supports per-classification-level provider overrides.
  */
 export interface LlmProviderRegistry {
+  /** Resolve operator-selected provider bindings once for a new turn. */
+  readonly snapshotForTurn?: () => LlmProviderRegistry;
   /** Register a provider. Replaces any existing provider with the same name. */
   register(provider: LlmProvider): void;
   /** Get a provider by name, or undefined if not registered. */

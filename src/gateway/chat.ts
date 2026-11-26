@@ -134,8 +134,12 @@ async function compactChatHistory(
     const id = session.id;
     let result;
     if (config.messageStore) {
+      const registry = config.providerRegistry;
       const checkpoint = await checkpointOwnerCompaction(
-        config,
+        {
+          ...config,
+          providerRegistry: registry.snapshotForTurn?.() ?? registry,
+        },
         session,
         getTaint(),
         config.messageStore,
@@ -1311,7 +1315,7 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
         signal,
         undefined,
         compactionStore
-          ? async (results) => {
+          ? async (results, providerRegistry) => {
             if (
               signal?.aborted || !results.some((result) =>
                 result.toolName === compactOwnerContext.name &&
@@ -1322,7 +1326,7 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
             if (!canFlowTo(taint, ownerTargetClassification)) return;
             try {
               const checkpoint = await checkpointOwnerCompaction(
-                config,
+                { ...config, providerRegistry },
                 getSession(),
                 taint,
                 compactionStore,

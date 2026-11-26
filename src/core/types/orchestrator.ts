@@ -1,3 +1,4 @@
+import type { LlmProviderRegistry } from "./llm.ts";
 import type { ExecutionTraceApprovedPayload } from "../execution_traces.ts";
 /**
  * Orchestrator interface and related message-processing types.
@@ -144,6 +145,7 @@ export interface ProcessMessageOptions {
       content: string;
       blocked?: boolean;
     }[],
+    providers: LlmProviderRegistry,
   ) => Promise<readonly HistoryEntry[] | undefined>;
   /** Persist an entire tool batch before another provider call can begin. */
   readonly onToolBatchCheckpoint?: (

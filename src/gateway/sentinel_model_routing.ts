@@ -1,3 +1,4 @@
+import type { ClassificationLevel } from "../core/types/classification.ts";
 /** Select an assessment model using the session's fixed data classification. */
 import {
   listSelectableModelProfiles,
@@ -149,41 +150,57 @@ export function sentinelAssessmentModelRouting(
 ) {
   const resolve = (profile: SelectedModelProfile) =>
     selectedModelProvider(registry, profile, "INTERNAL", allowlists);
-  const defaultProvider = () =>
-    registry.getForClassification("INTERNAL") ?? registry.getDefault();
-  const optionsFor = (provider: LlmProvider | undefined) => ({
-    providerRegistry: provider
-      ? {
-        ...registry,
-        getForClassification: (classification) =>
-          classification === "INTERNAL"
-            ? provider
-            : registry.getForClassification(classification),
-      } satisfies LlmProviderRegistry
-      : registry,
-    allowModelAccess: provider !== undefined,
-  });
+  function withSelection(
+    select: (base: LlmProviderRegistry) => LlmProvider | undefined,
+  ) {
+    const override = (base: LlmProviderRegistry, provider: LlmProvider) => ({
+      ...base,
+      getForClassification: (classification: ClassificationLevel) =>
+        classification === "INTERNAL"
+          ? provider
+          : base.getForClassification(classification),
+    });
+    const selected = select(registry);
+    if (!selected) {
+      return { providerRegistry: registry, allowModelAccess: false };
+    }
+    const snapshot = registry.snapshotForTurn;
+    const scoped = override(registry, selected);
+    return {
+      providerRegistry: snapshot
+        ? {
+          ...scoped,
+          snapshotForTurn() {
+            const base = snapshot();
+            const provider = select(base);
+            if (!provider) throw new Error("Sentinel model route unavailable.");
+            return override(base, provider);
+          },
+        }
+        : scoped,
+      allowModelAccess: true,
+    };
+  }
+  function routedRunOptions(run: Parameters<typeof runModelProvider>[0]) {
+    return withSelection((base) =>
+      runModelProvider(
+        run,
+        resolve,
+        () => base.getForClassification("INTERNAL") ?? base.getDefault(),
+      )
+    );
+  }
   return {
     list: () => listSelectableModelProfiles(registry, "INTERNAL", allowlists),
     interactiveOptions(path: string, role: SentinelModelRole = "interactive") {
-      return optionsFor(
-        runModelProvider(
-          { path, interactive: true, role },
-          resolve,
-          defaultProvider,
-        ),
-      );
+      return routedRunOptions({ path, interactive: true, role });
     },
     workerOptions(profile?: SelectedModelProfile, run?: SentinelModelRun) {
-      if (profile === undefined && !run) {
+      if (run) return routedRunOptions(run);
+      if (profile === undefined) {
         return { providerRegistry: registry, allowModelAccess: true };
       }
-      // Revoking or changing the active profile takes effect before the next outbound call.
-      return optionsFor(
-        run
-          ? runModelProvider(run, resolve, defaultProvider)
-          : profile && resolve(profile),
-      );
+      return withSelection(() => resolve(profile));
     },
   };
 }
