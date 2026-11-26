@@ -1,3 +1,6 @@
+import { resolveSentinelCaseMembership } from "../../src/sentinel/case_membership.ts";
+import { recordSentinelCompanyScope } from "../../src/sentinel/company_scope.ts";
+import { readSharedSentinelAssetCatalog } from "../../src/sentinel/shared_inventory.ts";
 import { routeHostRequest } from "../../src/tools/tidepool/host/host_server.ts";
 import type { A2UIHostState } from "../../src/tools/tidepool/host/host_types.ts";
 import { createGatewayServer } from "../../src/gateway/server/server.ts";
@@ -33,6 +36,7 @@ import {
   MODEL_ASSIGNMENT_REASON,
 } from "../../src/sentinel/adaptive_planner.ts";
 import {
+  readSentinelOperatingConstraints,
   recordSentinelOperatingConstraints,
   refreshSentinelAssessment,
   startSentinelAssessment,
@@ -60,8 +64,8 @@ Deno.test("Gateway workers share an approved discovery with exact cross-case pro
   const graph = {
     version: 1,
     nodes: [
-      { id: "canonical-a", kind: "asset", label: "Application" },
-      { id: "canonical-b", kind: "asset", label: "Dependency" },
+      { id: "canonical-a", kind: "asset", label: "https://app.example.test" },
+      { id: "canonical-b", kind: "asset", label: "https://dep.example.test" },
       { id: "record", kind: "evidence", label: "Exact observed topology" },
     ],
     edges: [
@@ -272,9 +276,76 @@ Deno.test("Gateway workers share an approved discovery with exact cross-case pro
   }
   try {
     await Deno.mkdir(dirname(consumerPath), { recursive: true });
-    await Deno.writeTextFile(sourcePath, JSON.stringify(graph));
+    await Deno.writeTextFile(
+      sourcePath,
+      JSON.stringify({
+        version: 1,
+        nodes: graph.nodes.filter(({ id }) => id === "canonical-b"),
+        edges: [],
+      }),
+    );
     await Deno.writeTextFile(consumerPath, JSON.stringify(consumer));
-    const source = startSentinelAssessment(sourcePath);
+    const initial = startSentinelAssessment(sourcePath);
+    const runId = initial.plan.runId;
+    assert(runId && initial.result);
+    const rules = [{ kind: "domain", value: "example.test" }] as const;
+    const membership = resolveSentinelCaseMembership(
+      initial.result.sharedGraph.snapshot,
+      {
+        caseId: "main",
+        evidenceRevision: initial.revision,
+        selector: {
+          kind: "rules",
+          rules,
+          reason: "Approved example service ownership.",
+        },
+      },
+    );
+    assert(membership);
+    assertEquals(membership.assetIds, ["canonical-b"]);
+    assert(recordSentinelOperatingConstraints(sourcePath, {
+      runId,
+      evidenceRevision: initial.revision,
+      expectedVersion: 0,
+      requestId: crypto.randomUUID(),
+      operatorScope: "workspace-owner",
+      constraints: { allowedAssetIds: membership.assetIds, deniedKinds: [] },
+      membership,
+    }));
+    const company = recordSentinelCompanyScope(baseDir, {
+      organizationId: "fixture-company",
+      organizationName: "Example company",
+      reason: "Approved example service ownership.",
+      rules,
+      expectedVersion: 0,
+      requestId: crypto.randomUUID(),
+    });
+    assert(company);
+
+    await Deno.writeTextFile(sourcePath, JSON.stringify(graph));
+    const source = refreshSentinelAssessment(sourcePath);
+    assert(source && source.revision > initial.revision);
+    const currentScope = readSentinelOperatingConstraints(sourcePath, runId);
+    assertEquals(currentScope?.constraints.allowedAssetIds, [
+      "canonical-a",
+      "canonical-b",
+    ]);
+    assertEquals(currentScope?.membership?.selector, membership.selector);
+    const companyInventory = await readSharedSentinelAssetCatalog(baseDir, {
+      organizationId: company.organizationId,
+      caseId: "main",
+    });
+    const catalog = companyInventory.assets.find(({ id }) =>
+      id === "canonical-a"
+    );
+    assert(catalog);
+    assertEquals(
+      catalog.sources.map((
+        { caseId, assetId, organizationRuleVersion },
+      ) => [caseId, assetId, organizationRuleVersion]),
+      [["main", "canonical-a", company.version]],
+    );
+    assertEquals(readSentinelOperatingConstraints(consumerPath), undefined);
     advanceAdaptiveSentinel(sourcePath, source);
     const unrelated = openSentinelAssetDiscoveryStore(baseDir);
     try {
@@ -377,6 +448,13 @@ Deno.test("Gateway workers share an approved discovery with exact cross-case pro
     const approved = view.assetDiscoveries.find(({ id }) => id === proposal.id);
     assert(approved);
     assertEquals(approved.status, "approved");
+    assertEquals(approved.evidenceRevision, source.revision);
+    assertEquals(approved.sourceDigest, catalog.sources[0].snapshotDigest);
+    assertEquals(
+      approved.sourceDigest,
+      currentScope?.membership?.snapshotDigest,
+    );
+    assertEquals(approved.taskId, sourceReview?.taskId);
     const citation = view.modelReviews.find(({ taskId }) =>
       taskId === followUp.reviewedFrom
     )
@@ -686,7 +764,7 @@ Deno.test("Gateway workers share an approved discovery with exact cross-case pro
         nodes: [...graph.nodes, {
           id: "canonical-c",
           kind: "asset",
-          label: "Actual dependency",
+          label: "https://replacement.example.test",
         }, {
           id: replacementEvidence,
           kind: "evidence",
