@@ -501,6 +501,14 @@ Deno.test("Gateway traces a follow-up to an exact retained incident-member alert
     evidenceIds: ["retained-upstream-fixture"],
   };
   const alertId = sentinelAlertReference(alert);
+  const blockedAlert = {
+    ...alert,
+    asset: "other-delivery",
+    observedAt: "2026-01-01T00:20:00.000Z",
+    evidenceIds: ["hook-denied-defensive-alert"],
+  };
+  const blockedAlertId = sentinelAlertReference(blockedAlert);
+  let blockedExact = false;
   const alternate = {
     id: "other-delivery",
     kind: "asset",
@@ -553,13 +561,22 @@ Deno.test("Gateway traces a follow-up to an exact retained incident-member alert
           upstreamCheck: checkId,
         }));
       }
-      if (!read) {
+      if (isPlanner && reads.length === 0) {
+        return Promise.resolve(completion("", "sentinel_defense", {
+          upstreamCheck: checkId,
+          alertId: blockedAlertId,
+        }));
+      }
+      if (isPlanner && reads.length === 1) {
+        assert(blockedExact);
+        assert(!String(read?.content).includes(blockedAlertId));
         return Promise.resolve(completion("", "sentinel_defense", {
           upstreamCheck: checkId,
           alertId,
         }));
       }
-      if (reads.length === (isPlanner ? 1 : 2)) {
+      assert(read);
+      if (reads.length === 2) {
         assertEquals(
           JSON.parse(String(read.content)).matches.map((
             { alertId }: { alertId: string },
@@ -587,6 +604,18 @@ Deno.test("Gateway traces a follow-up to an exact retained incident-member alert
         depth: 3,
         upstreamCheckId: checkId,
         sourceAlertId: alertId,
+      }, {
+        kind: "trace",
+        nodeId: alternate.id,
+        depth: 4,
+        upstreamCheckId: checkId,
+        sourceAlertId: blockedAlertId,
+      }, {
+        kind: "trace",
+        nodeId: alternate.id,
+        depth: 5,
+        upstreamCheckId: checkId,
+        sourceAlertId: alternateAlertId,
       }])));
     },
   });
@@ -601,7 +630,20 @@ Deno.test("Gateway traces a follow-up to an exact retained incident-member alert
         assignedTaskId: taskId,
         assignedTaskLeaseToken: token,
         providerRegistry: registry,
-        hookRunner: allowHooks,
+        hookRunner: {
+          evaluateHook(hook, { input }) {
+            const blocked = hook === "POST_TOOL_RESPONSE" &&
+              input.tool_name === "sentinel_defense" &&
+              String(input.tool_response).includes(blockedAlertId);
+            if (blocked) blockedExact = true;
+            return Promise.resolve({
+              allowed: !blocked,
+              action: blocked ? "BLOCK" : "ALLOW",
+              duration: 0,
+              ruleId: null,
+            });
+          },
+        },
         allowModelAccess: true,
       }),
   );
@@ -626,6 +668,7 @@ Deno.test("Gateway traces a follow-up to an exact retained incident-member alert
         sentinelAlertsPath(selected),
         JSON.stringify([
           { ...alert, subject },
+          blockedAlert,
           linkedLocal,
           alternateAlert,
           ...Array.from({ length: 26 }, (_, index) => ({
@@ -670,6 +713,15 @@ Deno.test("Gateway traces a follow-up to an exact retained incident-member alert
       if (!followup) await new Promise((resolve) => setTimeout(resolve, 10));
     }
     assert(followup);
+    assert(
+      !readAdaptiveSentinel(path, state)?.tasks.some((
+        { plannerRound, evidenceIds },
+      ) =>
+        plannerRound?.upstreamCheckId === checkId &&
+        (evidenceIds.includes(blockedAlertId) ||
+          evidenceIds.includes(alternateAlertId))
+      ),
+    );
     await Deno.writeTextFile(sentinelAlertsPath(path), "[]");
     const reviewDeadline = Date.now() + 2_500;
     const workerRead = () =>
@@ -711,12 +763,21 @@ Deno.test("Gateway traces a follow-up to an exact retained incident-member alert
       id: caseId,
       revision: state.revision,
     };
+    const plannerAlertIndex = report.reads?.findIndex(({ goalReceiptRead }) =>
+      goalReceiptRead && "alertId" in goalReceiptRead.args &&
+      goalReceiptRead.args.alertId === alertId
+    );
+    const plannerIncidentIndex = report.reads?.findIndex(({ tool }) =>
+      tool === "sentinel_incident_alerts"
+    );
+    assert(plannerAlertIndex !== undefined && plannerAlertIndex >= 0);
+    assert(plannerIncidentIndex !== undefined && plannerIncidentIndex >= 0);
     const plannerRead = {
       ...ref,
       action: "planner_reads",
       plannerIdentity: report.identity,
       attempt: report.attempt,
-      ordinal: 1,
+      ordinal: plannerAlertIndex + 1,
       includeResult: true,
     };
     const workerTrace = {
@@ -725,7 +786,10 @@ Deno.test("Gateway traces a follow-up to an exact retained incident-member alert
       taskId: followup.id,
       stepIndices: [workerStepIndex],
     };
-    const plannerIncident = { ...plannerRead, ordinal: 2 };
+    const plannerIncident = {
+      ...plannerRead,
+      ordinal: plannerIncidentIndex + 1,
+    };
     const workerIncident = {
       ...workerTrace,
       stepIndices: [incidentWorkerStep],
@@ -3509,6 +3573,13 @@ Deno.test("Scoped incident discovery and assignment require every retained membe
     observedAt: observedAt.replace("00:00:00", `00:${minute}:00`),
     evidenceIds: [`${asset}-${type}-${minute}`],
   });
+  const availableAlert = {
+    ...alert("approved", "integrity_change", "Allowed cohort", "00"),
+    severity: "high" as const,
+    type: "integrity_change" as const,
+    triggeringAction: "cloudtrail.amazonaws.com:StopLogging",
+  };
+  const availableAlertId = sentinelAlertReference(availableAlert);
   const plannerInput = Promise.withResolvers<string>();
   const held = Promise.withResolvers<void>();
   let allowedIncident = "";
@@ -3538,12 +3609,25 @@ Deno.test("Scoped incident discovery and assignment require every retained membe
           observationRead.resolve(text);
           return completion("[]");
         }
+        const checked = messages.findLast(({ role }) => role === "tool");
+        if (!checked) {
+          return completion("", "sentinel_defense", {
+            upstreamCheck: "cloudtrail_logging_stopped",
+            alertId: availableAlertId,
+          });
+        }
+        assertEquals(
+          JSON.parse(String(checked.content)).matches[0].alertId,
+          availableAlertId,
+        );
         plannerInput.resolve(prompt);
         await held.promise;
         return completion(JSON.stringify([{
           kind: "trace",
           nodeId: "approved",
           depth: 8,
+          upstreamCheckId: "cloudtrail_logging_stopped",
+          sourceAlertId: availableAlertId,
         }]));
       }
       const saved = messages.findLast(({ role }) => role === "tool");
@@ -3595,10 +3679,7 @@ Deno.test("Scoped incident discovery and assignment require every retained membe
     await Deno.writeTextFile(
       sentinelAlertsPath(path),
       JSON.stringify([
-        {
-          ...alert("approved", "integrity_change", "Allowed cohort", "00"),
-          triggeringAction: "cloudtrail.amazonaws.com:StopLogging",
-        },
+        availableAlert,
         alert("approved", "network_security_alert", "Allowed cohort", "00"),
         alert("approved", "integrity_change", "Mixed cohort", "10"),
         alert("excluded", "network_security_alert", "Mixed cohort", "10"),
@@ -3749,8 +3830,11 @@ Deno.test("Scoped incident discovery and assignment require every retained membe
     }
     assert(!planner.hasInFlightWork());
     assert(
-      !readAdaptiveSentinel(path, state)?.tasks.some(({ depth }) =>
-        depth === 8
+      !readAdaptiveSentinel(path, state)?.tasks.some((
+        { plannerRound, evidenceIds },
+      ) =>
+        plannerRound?.upstreamCheckId === "cloudtrail_logging_stopped" &&
+        evidenceIds.includes(availableAlertId)
       ),
     );
   } finally {

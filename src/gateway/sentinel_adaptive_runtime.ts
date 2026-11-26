@@ -6535,6 +6535,7 @@ export function createSentinelModelPlanner(
         string,
         { nodeId: string; hashes: ReadonlySet<string> }
       >();
+      const presentedUpstreamAlerts = new Set<string>();
       const presentedWorkerResults = new Set<string>();
       const completeWorkerResults = new Set<string>();
       const workerResultOffsets = new Map<string, number>();
@@ -6745,7 +6746,7 @@ export function createSentinelModelPlanner(
             : []),
           ...(upstreamChecks.length
             ? [
-              "To cite an upstream alert for a trace or impact assignment on its exact asset, set upstreamCheckId and sourceAlertId to the check ID and alertId returned by sentinel_defense. You may also cite saved worker results for the same assignment. You may repeat the same assignment with another exact alert to attach both citations. Omit dependsOn when adding evidence to an existing assignment; its prerequisites are preserved.",
+              "To cite an upstream alert for a trace or impact assignment on its exact asset, first open the exact retained alert with sentinel_defense by passing both upstreamCheck and alertId, then set upstreamCheckId and sourceAlertId to the returned check ID and alertId. You may also cite saved worker results for the same assignment. You may repeat the same assignment with another exact alert to attach both citations. Omit dependsOn when adding evidence to an existing assignment; its prerequisites are preserved.",
             ]
             : []),
           "Read an exact execution-evidence node with sentinel_case_execution_evidence when this tool is available. Use review_evidence on that same node for follow-up.",
@@ -7297,6 +7298,17 @@ export function createSentinelModelPlanner(
                   },
                 );
                 if (
+                  recorded && outcome === "returned" &&
+                  tool === "sentinel_defense" && goalReceiptRead &&
+                  "upstreamCheck" in goalReceiptRead.args &&
+                  "alertId" in goalReceiptRead.args
+                ) {
+                  const { upstreamCheck, alertId } = goalReceiptRead.args;
+                  presentedUpstreamAlerts.add(
+                    JSON.stringify([upstreamCheck, alertId]),
+                  );
+                }
+                if (
                   recorded && outcome === "returned" && target &&
                   recheckFindingIds?.length &&
                   tool === "sentinel_case_execution_evidence"
@@ -7608,12 +7620,14 @@ export function createSentinelModelPlanner(
               ) {
                 const asset = resolveAlertAsset(alert);
                 if (!asset) continue;
+                const alertId = sentinelAlertReference(alert);
                 for (const check of sentinelUpstreamChecks) {
-                  if (matchesSentinelUpstreamCheck(check, alert)) {
-                    upstreamAlerts.set(
-                      JSON.stringify([check.id, sentinelAlertReference(alert)]),
-                      asset,
-                    );
+                  const key = JSON.stringify([check.id, alertId]);
+                  if (
+                    presentedUpstreamAlerts.has(key) &&
+                    matchesSentinelUpstreamCheck(check, alert)
+                  ) {
+                    upstreamAlerts.set(key, asset);
                   }
                 }
               }

@@ -1,4 +1,7 @@
-import type { SentinelAgent } from "../../src/gateway/sentinel_agent.ts";
+import {
+  readDefenseCoverage,
+  type SentinelAgent,
+} from "../../src/gateway/sentinel_agent.ts";
 import { sentinelWorkerObservationPage } from "../../src/gateway/sentinel_goal_receipt_read.ts";
 import { compareSentinelIncidentPriority } from "../../src/sentinel/incident_correlation.ts";
 import {
@@ -2559,7 +2562,14 @@ for (const newerObservation of [false, true]) {
       store.close();
       const finished = Promise.withResolvers<void>();
       const planner = createSentinelModelPlanner(path, () => ({
-        execute(_message, send) {
+        async execute(_message, send, _signal, trace) {
+          await openPlannerTestAlert(
+            path,
+            state.revision,
+            "cloudtrail_logging_stopped",
+            alertId,
+            trace,
+          );
           send({
             type: "response",
             taint: "INTERNAL",
@@ -2905,6 +2915,32 @@ Deno.test("A hint saved during a model review reaches planning before the remain
     await Deno.remove(dir, { recursive: true });
   }
 });
+
+async function openPlannerTestAlert(
+  path: string,
+  revision: number,
+  upstreamCheck: string,
+  alertId: string,
+  trace: Parameters<SentinelAgent["execute"]>[3],
+) {
+  assert(trace);
+  const args = { upstreamCheck, alertId };
+  const result = await readDefenseCoverage(
+    { snapshotPath: path, assessmentRevision: revision },
+    args,
+    {},
+  );
+  assertEquals(JSON.parse(result).matches[0].alertId, alertId);
+  trace({
+    tool: "sentinel_defense",
+    outcome: "returned",
+    plannerDefenseContainment: null,
+    goalReceiptRead: {
+      args,
+      sha256: createHash("sha256").update(result).digest("hex"),
+    },
+  });
+}
 
 function openPlannerTestWorkerResult(
   path: string,
@@ -4087,7 +4123,7 @@ Deno.test("The planner receives upstream match counts from its saved evidence re
   let otherWorkerSource: string;
   let reusableSource: string;
   const planner = createSentinelModelPlanner(path, () => ({
-    execute(message, send, _signal, trace) {
+    async execute(message, send, _signal, trace) {
       if (String(message).startsWith("Plan a defensive investigation")) {
         const input = JSON.parse(String(message).split("\n").at(-1)!);
         assert(
@@ -4110,6 +4146,21 @@ Deno.test("The planner receives upstream match counts from its saved evidence re
             );
           }
         }
+        const revision = readSentinelAssessment(path)!.revision;
+        await openPlannerTestAlert(
+          path,
+          revision,
+          "cloudtrail_logging_stopped",
+          sourceAlertId,
+          trace,
+        );
+        await openPlannerTestAlert(
+          path,
+          revision,
+          "cloudtrail_audit_configuration_changed",
+          secondAlertId,
+          trace,
+        );
         completed.resolve(String(message));
         send({
           type: "response",
