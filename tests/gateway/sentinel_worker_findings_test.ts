@@ -10218,7 +10218,10 @@ async function verifyReceiptFamily(
     | "mixed-assignment" = false,
 ) {
   const baseDir = await Deno.makeTempDir();
-  const caseId = manual ? "native-remediation" : "main";
+  const caseId =
+    manual && !(family === "branch protection" && manual === "reporter-history")
+      ? "native-remediation"
+      : "main";
   const path = resolveSentinelCasePath(baseDir, caseId);
   let receiptPlanner:
     | ReturnType<typeof createSentinelModelPlanner>
@@ -10633,6 +10636,18 @@ async function verifyReceiptFamily(
           stepIndices: [sourceIndex],
         };
         const traceName = "sentinel_worker_trace_search";
+        const sourceTool = native
+          ? "sentinel_live_workflow_status"
+          : "github_repos";
+        const authorizeImported = native ? undefined : (
+          payload: Parameters<
+            NonNullable<SentinelAgentOptions["authorizeExecutionTracePayload"]>
+          >[0],
+        ) => {
+          assertEquals(payload, branchPayload);
+          reporterProbes++;
+          return Promise.resolve(reporterAccess);
+        };
         const prompt = "Cite the exact originating finding publication.";
         type Checkpoint = NonNullable<
           NonNullable<
@@ -10678,6 +10693,8 @@ async function verifyReceiptFamily(
             assignedTaskId: claimed.task.id,
             assignedTaskLeaseToken: claimed.token,
             readRetainedWorkflow: reader,
+            sharedInventoryBaseDir: baseDir,
+            authorizeExecutionTracePayload: authorizeImported,
             providerRegistry: providers,
             allowModelAccess: true,
             hookRunner: {
@@ -10687,7 +10704,7 @@ async function verifyReceiptFamily(
                     (input.tool_call as { name?: string } | undefined)?.name,
                 );
                 if (
-                  name === traceName || name === "sentinel_live_workflow_status"
+                  name === traceName || name === sourceTool
                 ) hooks.push(`${hook}:${name}`);
                 if (
                   revokeOnOutput && hook === "PRE_OUTPUT" &&
@@ -10696,7 +10713,7 @@ async function verifyReceiptFamily(
                 ) {
                   reporterAccess = false;
                 }
-                const allowed = !(name === "sentinel_live_workflow_status" &&
+                const allowed = !(name === sourceTool &&
                   hook === denyHook);
                 return Promise.resolve({
                   allowed,
@@ -10734,9 +10751,9 @@ async function verifyReceiptFamily(
         assert(!result.includes("repositoryId"));
         assert(hooks.includes(`PRE_TOOL_CALL:${traceName}`));
         assert(hooks.includes(`POST_TOOL_RESPONSE:${traceName}`));
-        assert(hooks.includes("PRE_TOOL_CALL:sentinel_live_workflow_status"));
+        assert(hooks.includes(`PRE_TOOL_CALL:${sourceTool}`));
         assert(
-          hooks.includes("POST_TOOL_RESPONSE:sentinel_live_workflow_status"),
+          hooks.includes(`POST_TOOL_RESPONSE:${sourceTool}`),
         );
         const resumeOptions = { resume: checkpoint };
         denyHook = "PRE_TOOL_CALL";
@@ -10803,10 +10820,10 @@ async function verifyReceiptFamily(
         const receipt = reporterSteps[0]?.workerTracePage;
         assert(receipt, JSON.stringify(reporterSteps));
         const {
-          reporterNativeWorkflowBinding,
+          reporterConnectorBinding,
           reopenSentinelWorkerTraceSearch,
         } = await import("../../src/gateway/sentinel_agent.ts");
-        const binding = reporterNativeWorkflowBinding({
+        const binding = reporterConnectorBinding({
           snapshotPath: path,
           assignedTaskId: claimed.task.id,
         }, state.revision);
@@ -10842,6 +10859,9 @@ async function verifyReceiptFamily(
           undefined,
           undefined,
           reader,
+          false,
+          undefined,
+          authorizeImported,
         );
         return;
       } finally {
@@ -15112,3 +15132,6 @@ Deno.test("A leased reporter reauthorizes both endpoints of its retained origina
 
 Deno.test("A leased reporter reauthorizes a retained native workflow publication on resume", () =>
   verifyReceiptFamily("native workflow result", "reporter-history"));
+
+Deno.test("A leased reporter reauthorizes a retained delegated branch publication on resume", () =>
+  verifyReceiptFamily("branch protection", "reporter-history"));

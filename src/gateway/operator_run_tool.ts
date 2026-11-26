@@ -311,6 +311,7 @@ import {
   queryIncidentAlerts,
   readDefenseCoverage,
   readHistoricalSentinelGoalState,
+  readReporterImportedBranchEvidence,
   readScopedSentinelTopologySource,
   readSentinelCarriedEvidence,
   readSentinelGraphOverview,
@@ -320,7 +321,7 @@ import {
   reopenSentinelProvenanceNode,
   reopenSentinelProvenanceSearch,
   reopenSentinelWorkerTraceSearch,
-  reporterNativeWorkflowBinding,
+  reporterConnectorBinding,
   searchSentinelProvenance,
   searchSentinelWorkerTraces,
   type SentinelReadTrace,
@@ -8876,34 +8877,52 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
                 !await authorize(scope, step.tool, page.args)
               ) return unavailable;
               const binding = () =>
-                reporterNativeWorkflowBinding({
+                reporterConnectorBinding({
                   snapshotPath: path,
                   assessmentRevision: ref.revision,
                   assignedTaskId: task.id,
                 }, ref.revision!);
-              const native = task.kind === "report_finding"
+              const connector = task.kind === "report_finding"
                 ? binding()
                 : undefined;
-              const currentNative = () =>
-                isDeepStrictEqual(binding(), native) &&
+              const currentConnector = () =>
+                isDeepStrictEqual(binding(), connector) &&
                 context.authorizeSentinelCaseRead?.(ref.id, ref.revision!) !==
                   false;
-              const authorizeNative = async () =>
-                !native || !!await readAuthorizedCaseEvidence(
+              const authorizeConnector = async () => {
+                if (!connector) return true;
+                const read = () =>
+                  readReporterImportedBranchEvidence(
+                    options.baseDir,
+                    path,
+                    ref.revision!,
+                    connector,
+                  );
+                const imported = connector.kind === "imported" && await read();
+                if (
+                  connector.kind === "imported" && !imported ||
+                  !currentConnector()
+                ) return false;
+                const proof = await readAuthorizedCaseEvidence(
                   ref.id,
                   path,
                   ref.revision!,
-                  native.evidenceId,
+                  connector.evidenceId,
                   context,
-                  currentNative,
+                  currentConnector,
                 );
-              if (!await authorizeNative()) return unavailable;
+                return !!proof &&
+                  (!imported || (isDeepStrictEqual(proof, imported) &&
+                    isDeepStrictEqual(await read(), imported))) &&
+                  currentConnector();
+              };
+              if (!await authorizeConnector()) return unavailable;
               const text = reopenSentinelWorkerTraceSearch(
                 path,
                 ref.revision,
                 task.id,
                 page,
-                native,
+                connector,
               );
               if (
                 !text ||
@@ -8911,13 +8930,13 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
                   page.sha256 ||
                 !await authorize(scope, step.tool, page.args, text) ||
                 (task.kind === "report_finding" && (
-                  !await authorizeNative() || !currentNative() ||
+                  !await authorizeConnector() || !currentConnector() ||
                   reopenSentinelWorkerTraceSearch(
                       path,
                       ref.revision,
                       task.id,
                       page,
-                      native,
+                      connector,
                     ) !== text
                 ))
               ) return unavailable;
