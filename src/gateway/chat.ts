@@ -392,7 +392,8 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
                 ...(call.args?.kind === "sentinel" &&
                   (action === "narrow_constraints" ||
                     action === "constraints" || action === "steer" ||
-                    action === "hint_batch" || action === "assign_batch") &&
+                    action === "hint_batch" || action === "assign_batch" ||
+                    action === "append_goals") &&
                   {
                     case_id: typeof call.args?.id === "string" &&
                         isSentinelCaseId(call.args.id)
@@ -803,7 +804,7 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
       definition: {
         ...operatorRunTool,
         description:
-          "Read saved Sentinel evidence. In the selected active case, inspect restrictions or request reviewed task-kind restrictions, planner hints, local graph assignments, or targeted worker guidance.",
+          "Read saved Sentinel evidence. In the selected active case, inspect restrictions or request reviewed formal goals, task-kind restrictions, planner hints, local graph assignments, or targeted worker guidance.",
         parameters: {
           ...Object.fromEntries(
             [
@@ -874,9 +875,13 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
           if (!selectedControl) return !!casePath;
           if (casePath !== selectedPath) return false;
           const assessment = readSentinelAssessment(selectedPath);
-          return assessment?.active === true &&
-            assessment.revision === revision &&
-            assessment.plan.runId === runId;
+          if (!assessment || assessment.plan.runId !== runId) return false;
+          // Goal append issues a new revision and can reopen a completed run.
+          // Only the handler's exact saved receipt can replay an older request.
+          return action === "append_goals"
+            ? (assessment.active || assessment.completion !== undefined) &&
+              assessment.revision >= revision
+            : assessment.active && assessment.revision === revision;
         };
         if (!current()) return unavailable;
         const authority = savedToolAuthorization(

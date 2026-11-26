@@ -13,6 +13,7 @@ import {
   type UserId,
 } from "../../src/core/types/session.ts";
 import { createChatSession } from "../../src/gateway/chat.ts";
+import { createOperatorRunToolExecutor } from "../../src/gateway/operator_run_tool.ts";
 import { createSentinelSubagent } from "../../src/gateway/sentinel_agent.ts";
 import { readSentinelGoalCompletion } from "../../src/gateway/sentinel_goal_completion.ts";
 import {
@@ -86,18 +87,67 @@ Deno.test("authenticated Sentinel chat drafts, approves and extends independentl
   const rounds: { revision: number; goalIds: string[]; criteria: string[] }[] =
     [];
   const errors: unknown[] = [];
+  const reviewedModelGoalRequests: string[] = [];
+  let denyModelGoal = false;
+  let revokeModelGoalOnConfirmation = false;
+  let sawClassifiedModelGoalResult = false;
 
   async function withGateway(
     run: (
       turn: (content: string) => Promise<string>,
       tick: () => Promise<void>,
+      operator: (args: Record<string, unknown>) => Promise<string>,
     ) => Promise<void>,
   ) {
     const registry = createProviderRegistry();
+    let nextOperatorCall: Record<string, unknown> | undefined;
+    let showOperatorResult = false;
+    let operatorResult = "";
     registry.register({
       name: "fixture",
       supportsStreaming: false,
-      complete(messages) {
+      complete(messages, tools) {
+        const usage = { inputTokens: 1, outputTokens: 1 };
+        if (nextOperatorCall) {
+          const definitions = tools as {
+            function?: {
+              name?: string;
+              parameters?: { properties?: { action?: { enum?: string[] } } };
+            };
+          }[];
+          const operator = definitions.find((tool) =>
+            tool.function?.name === "operator_runs"
+          );
+          const actions = operator?.function?.parameters?.properties?.action
+            ?.enum;
+          assert(actions);
+          assert(actions.includes("append_goals"));
+          assert(!actions.includes("revise_goals"));
+          const args = nextOperatorCall;
+          nextOperatorCall = undefined;
+          showOperatorResult = true;
+          return Promise.resolve({
+            content: "",
+            toolCalls: [{
+              id: crypto.randomUUID(),
+              type: "function",
+              function: {
+                name: "operator_runs",
+                arguments: JSON.stringify(args),
+              },
+            }],
+            usage,
+          });
+        }
+        if (showOperatorResult) {
+          const reply = messages.findLast(({ role }) => role === "tool");
+          if (reply) operatorResult = String(reply.content);
+          return Promise.resolve({
+            content: "Reviewed the selected case request.",
+            toolCalls: [],
+            usage,
+          });
+        }
         draftPrompts.push(JSON.stringify(messages));
         return Promise.resolve({
           content: JSON.stringify({
@@ -179,14 +229,56 @@ Deno.test("authenticated Sentinel chat drafts, approves and extends independentl
       () => 100_000,
     );
 
+    const normalHooks = createHookRunner(createPolicyEngine());
     const chatSession = createChatSession({
       session: createSession({
         userId: "owner" as UserId,
         channelId: "test" as ChannelId,
       }),
       providerRegistry: registry,
-      hookRunner: createHookRunner(createPolicyEngine()),
+      hookRunner: {
+        ...normalHooks,
+        evaluateHook(hook, context) {
+          const call = context.input.tool_call as {
+            name?: string;
+            args?: Record<string, unknown>;
+          } | undefined;
+          if (
+            hook === "PRE_TOOL_CALL" && call?.name === "operator_runs" &&
+            call.args?.action === "append_goals" && denyModelGoal
+          ) {
+            return Promise.resolve({
+              allowed: false,
+              action: "BLOCK",
+              ruleId: null,
+              duration: 0,
+            });
+          }
+          if (
+            hook === "POST_TOOL_RESPONSE" &&
+            context.input.tool_name === "operator_runs" &&
+            typeof context.input.tool_response === "string" &&
+            context.input.tool_response.includes('"receipt"')
+          ) {
+            assertEquals(context.session.taint, "INTERNAL");
+            sawClassifiedModelGoalResult = true;
+          }
+          return normalHooks.evaluateHook(hook, context);
+        },
+      },
       sentinelSnapshotPath: mainPath,
+      operatorRunExecutor: createOperatorRunToolExecutor({
+        baseDir: directory,
+        confirm(message) {
+          assertMatch(
+            message,
+            /^Approve these exact Sentinel formal goal definitions/,
+          );
+          reviewedModelGoalRequests.push(message);
+          if (revokeModelGoalOnConfirmation) denyModelGoal = true;
+          return Promise.resolve(true);
+        },
+      }),
       resolveSentinelChatCase: (id) =>
         id === "local-service" ? path : undefined,
       allowSentinelModelAccess: true,
@@ -245,7 +337,13 @@ Deno.test("authenticated Sentinel chat drafts, approves and extends independentl
       };
       await turn("/sentinel on");
       assertMatch(await turn("/sentinel case local-service"), /local-service/);
-      await run(turn, tick);
+      await run(turn, tick, async (args) => {
+        nextOperatorCall = args;
+        operatorResult = "";
+        await turn("Register the formal goal through the selected case.");
+        showOperatorResult = false;
+        return operatorResult;
+      });
     } finally {
       planner.stop();
       socket.close();
@@ -305,6 +403,8 @@ Deno.test("authenticated Sentinel chat drafts, approves and extends independentl
     let finalEvidence: unknown;
     let add = "";
     let revise = "";
+    let modelAppend: Record<string, unknown> | undefined;
+    let modelRevision = 0;
     await withGateway(async (turn, tick) => {
       const proposal = JSON.parse(
         await turn(
@@ -518,7 +618,7 @@ Deno.test("authenticated Sentinel chat drafts, approves and extends independentl
       );
     });
 
-    await withGateway(async (turn, tick) => {
+    await withGateway(async (turn, tick, operator) => {
       assertEquals(JSON.parse(await turn(add)).duplicate, true);
       assertEquals(JSON.parse(await turn(revise)).duplicate, true);
       const changed = add.replace("proof-c", "proof-b");
@@ -530,6 +630,73 @@ Deno.test("authenticated Sentinel chat drafts, approves and extends independentl
       assertEquals(
         JSON.parse(await turn(evidence(initialRevision))),
         initialEvidence,
+      );
+      assertEquals(
+        JSON.parse(await turn(evidence(finalRevision))),
+        finalEvidence,
+      );
+      await tick();
+
+      modelAppend = {
+        action: "append_goals",
+        kind: "sentinel",
+        id: "local-service",
+        revision: finalRevision,
+        runId,
+        requestId: crypto.randomUUID(),
+        goals: [{ ...additional, id: "model-followup" }],
+      };
+      assertMatch(
+        await operator({ ...modelAppend, id: "main" }),
+        /unavailable/,
+      );
+      assertEquals(reviewedModelGoalRequests.length, 0);
+      denyModelGoal = true;
+      await operator(modelAppend);
+      assertEquals(reviewedModelGoalRequests.length, 0);
+      denyModelGoal = false;
+      revokeModelGoalOnConfirmation = true;
+      assertMatch(await operator(modelAppend), /unavailable/);
+      assertEquals(readSentinelAssessment(path)?.revision, finalRevision);
+      denyModelGoal = false;
+      revokeModelGoalOnConfirmation = false;
+      const applied = JSON.parse(await operator(modelAppend));
+      assert(applied.receipt, JSON.stringify(applied));
+      assertEquals(applied.receipt.duplicate, false);
+      assertEquals(reviewedModelGoalRequests.length, 2);
+      assert(sawClassifiedModelGoalResult);
+      modelRevision = applied.receipt.appliedRevision;
+      assertEquals(modelRevision, finalRevision + 1);
+      const reopened = JSON.parse(await turn(status));
+      assertEquals(reopened.active, true);
+      assertEquals(reopened.activeFormalGoalIds, ["model-followup"]);
+      assertEquals(
+        reopened.completedFormalGoalIds,
+        restored.completedFormalGoalIds,
+      );
+      assertEquals(
+        JSON.parse(await turn(evidence(finalRevision))),
+        finalEvidence,
+      );
+      await tick();
+      const verified = JSON.parse(await turn(status));
+      assertEquals(verified.active, false);
+      assertEquals(verified.completedFormalGoalIds, [
+        ...restored.completedFormalGoalIds,
+        "model-followup",
+      ]);
+    });
+    await withGateway(async (turn, tick, operator) => {
+      assert(modelAppend);
+      const replay = JSON.parse(await operator(modelAppend));
+      assertEquals(replay.receipt.appliedRevision, modelRevision);
+      assertEquals(reviewedModelGoalRequests.length, 2);
+      assertMatch(
+        await operator({
+          ...modelAppend,
+          goals: [{ ...additional, id: "changed" }],
+        }),
+        /unavailable/,
       );
       assertEquals(
         JSON.parse(await turn(evidence(finalRevision))),
@@ -548,6 +715,11 @@ Deno.test("authenticated Sentinel chat drafts, approves and extends independentl
         revision: finalRevision,
         goalIds: ["followup"],
         criteria: ["followup/record=proof-b"],
+      },
+      {
+        revision: modelRevision,
+        goalIds: ["model-followup"],
+        criteria: ["model-followup/record=proof-c"],
       },
     ]);
   } finally {
