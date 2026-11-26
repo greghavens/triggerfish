@@ -1,3 +1,4 @@
+import { createOperatorRunCategories } from "./operator_run_categories.ts";
 /** Shared owner run controls and immutable scoped evidence links. */
 /// <reference path="./sqlite_types.d.ts" />
 
@@ -522,6 +523,10 @@ export function openOperatorRunLinkStore(path: string, now = Date.now) {
     return saved;
   }
   return {
+    categories: createOperatorRunCategories(
+      db,
+      (operation) => transaction(db, operation),
+    ),
     readBatch,
     approveBatch(
       request: OperatorRunBatchRequest,

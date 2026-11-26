@@ -4291,6 +4291,144 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
         assertEquals(observedBatch.items[0].status, "observed");
       }, restarted);
 
+      const createCategory = {
+        action: "create_run_category",
+        title: "Local investigations",
+        requestId: crypto.randomUUID(),
+      };
+      const beforeCategoryReview = confirmations.length;
+      denied = "PRE_TOOL_CALL";
+      await turn(createCategory);
+      denied = undefined;
+      assertEquals(confirmations.length, beforeCategoryReview);
+      approved = false;
+      assertStringIncludes(
+        (await turn(createCategory)).result,
+        "operator declined",
+      );
+      approved = true;
+      const emptyTaxonomy = JSON.parse(
+        (await turn({ action: "run_categories" })).result,
+      );
+      assertEquals(emptyTaxonomy.categories, []);
+      const category =
+        JSON.parse((await turn(createCategory)).result).receipt.category;
+      assertEquals(category.title, createCategory.title);
+      assertEquals(category.version, 1);
+      const catalogApproval = confirmations.length;
+      assertStringIncludes(
+        (await turn({
+          ...createCategory,
+          title: createCategory.title.toLowerCase(),
+          requestId: crypto.randomUUID(),
+        })).result,
+        "unavailable",
+      );
+      assertEquals(confirmations.length, catalogApproval);
+
+      const staleCategoryMove = {
+        action: "categorize_runs",
+        categoryId: category.id,
+        expectedVersion: 1,
+        requestId: crypto.randomUUID(),
+        runTargets: [{ ...batchCaseRef, revision: 2 }, batchWorkflow],
+      };
+      duringConfirmation = () => {
+        Deno.writeTextFileSync(batchPath, JSON.stringify(childGraph));
+        assertEquals(refreshSentinelAssessment(batchPath)?.revision, 3);
+      };
+      try {
+        assertStringIncludes(
+          (await turn(staleCategoryMove)).result,
+          "unavailable",
+        );
+      } finally {
+        duringConfirmation = undefined;
+      }
+      const workflowBeforeCategory = JSON.parse(
+        (await turn({
+          action: "list",
+          kind: "workflow",
+        })).result,
+      ).runs.find(({ ref }: { ref: { id: string } }) =>
+        ref.id === batchWorkflow.id
+      );
+      assert(workflowBeforeCategory);
+      assertEquals(workflowBeforeCategory.category, undefined);
+      const exactCategoryTarget = { ...batchCaseRef, revision: 3 };
+      const moveCategory = {
+        ...staleCategoryMove,
+        runTargets: [exactCategoryTarget, batchWorkflow],
+      };
+      const moveReceipt = JSON.parse((await turn(moveCategory)).result).receipt;
+      assertEquals(moveReceipt.affected, 2);
+      const renamed = JSON.parse(
+        (await turn({
+          action: "rename_run_category",
+          categoryId: category.id,
+          expectedVersion: 1,
+          requestId: crypto.randomUUID(),
+          title: "Verified local reviews",
+        })).result,
+      ).receipt.category;
+      assertEquals(renamed.version, 2);
+      assertEquals(renamed.id, category.id);
+      await withGateway(async (categoryTurn) => {
+        const existingApproval = confirmations.length;
+        assertEquals(
+          JSON.parse((await categoryTurn(moveCategory)).result).receipt,
+          moveReceipt,
+        );
+        assertEquals(confirmations.length, existingApproval);
+        for (const target of [exactCategoryTarget, batchWorkflow]) {
+          const listed = JSON.parse(
+            (await categoryTurn({ action: "list", kind: target.kind }))
+              .result,
+          ).runs;
+          const displayed = listed.find(({ ref }: { ref: { id: string } }) =>
+            ref.id === target.id
+          );
+          assertEquals(displayed.category, renamed);
+        }
+        const taxonomy = JSON.parse(
+          (await categoryTurn({ action: "run_categories" })).result,
+        );
+        assertEquals(taxonomy.categories, [renamed]);
+        const cleared = JSON.parse(
+          (await categoryTurn({
+            action: "clear_run_categories",
+            requestId: crypto.randomUUID(),
+            runTargets: [batchWorkflow],
+          })).result,
+        ).receipt;
+        assertEquals(cleared.affected, 1);
+        const deleted = JSON.parse(
+          (await categoryTurn({
+            action: "delete_run_category",
+            categoryId: category.id,
+            expectedVersion: 2,
+            requestId: crypto.randomUUID(),
+          })).result,
+        ).receipt;
+        assertEquals(deleted.affected, 1);
+        assertEquals(
+          JSON.parse((await categoryTurn({ action: "run_categories" })).result)
+            .categories,
+          [],
+        );
+        for (const target of [exactCategoryTarget, batchWorkflow]) {
+          const listed = JSON.parse(
+            (await categoryTurn({ action: "list", kind: target.kind }))
+              .result,
+          ).runs;
+          const displayed = listed.find(({ ref }: { ref: { id: string } }) =>
+            ref.id === target.id
+          );
+          assert(displayed);
+          assertEquals(displayed.category, undefined);
+        }
+      }, restarted);
+
       const cancelSentinel = {
         action: "cancel",
         ...linkedSentinel.run.ref,

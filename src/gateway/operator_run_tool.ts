@@ -1,3 +1,7 @@
+import type {
+  CategorizedOperatorRun,
+  OperatorRunCategoryChange,
+} from "../core/operator_run_categories.ts";
 import { executeCompletedSentinelGraphFollowup } from "../sentinel/completed_graph_followup.ts";
 import { normalizeSentinelHintAssets } from "../sentinel/adaptive_store.ts";
 import { applyOperatorRunBatch } from "./operator_run_batch_control.ts";
@@ -432,6 +436,12 @@ export const operatorRunTool: ToolDefinition = {
         "retry_graph_tasks",
         "enroll_goal_workflow",
         "completed_graph_followup",
+        "run_categories",
+        "create_run_category",
+        "rename_run_category",
+        "delete_run_category",
+        "categorize_runs",
+        "clear_run_categories",
         "set_case_membership",
         "traces",
         "finding_groups",
@@ -954,6 +964,10 @@ export const operatorRunTool: ToolDefinition = {
       type: "integer",
       description: "Exact workflow trace event sequence",
     },
+    categoryId: {
+      type: "string",
+      description: "Exact workspace run category ID.",
+    },
     runTargets: {
       type: "array",
       description:
@@ -1163,6 +1177,37 @@ function reference(
         !Number.isSafeInteger(revision) || revision < 1)
   ) return;
   return { kind: parsed, id, ...(revision !== undefined && { revision }) };
+}
+
+function exactCategoryTargets(
+  value: unknown,
+  digestPattern: RegExp,
+): CategorizedOperatorRun[] | undefined {
+  if (!Array.isArray(value) || !value.length || value.length > 8) return;
+  const seen = new Set<string>();
+  const targets: CategorizedOperatorRun[] = [];
+  for (const item of value) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return;
+    const ref = reference(item.kind, item.id, item.revision);
+    if (
+      !ref || (ref.kind !== "sentinel" && ref.kind !== "workflow") ||
+      seen.has(`${ref.kind}:${ref.id}`) ||
+      (ref.kind === "sentinel"
+        ? !isSentinelCaseId(ref.id) || ref.revision === undefined ||
+          typeof item.runId !== "string" || !digestPattern.test(item.runId)
+        : !digestPattern.test(ref.id) || item.runId !== undefined) ||
+      Object.keys(item).some((key) =>
+        !["kind", "id", "revision", "runId"].includes(key)
+      )
+    ) return;
+    seen.add(`${ref.kind}:${ref.id}`);
+    targets.push({
+      ...ref,
+      kind: ref.kind,
+      runId: ref.kind === "sentinel" ? item.runId.toLowerCase() : ref.id,
+    });
+  }
+  return targets;
 }
 
 function safeProjection(
@@ -2718,11 +2763,149 @@ ${
         }
         return safeProjection(controlled);
       }
+      const canReadRunCategories = !!context?.authenticatedOwnerSessionId &&
+        canFlowTo("INTERNAL", context.ceiling ?? "PUBLIC");
+      if (action === "run_categories") {
+        const { offset = 0, limit = 20 } = args;
+        if (
+          !canReadRunCategories ||
+          typeof offset !== "number" || !Number.isSafeInteger(offset) ||
+          offset < 0 ||
+          typeof limit !== "number" || !Number.isSafeInteger(limit) ||
+          limit < 1 || limit > 20 ||
+          Object.keys(args).some((key) =>
+            !["action", "offset", "limit"].includes(key)
+          )
+        ) return unavailable;
+        const categories = links.categories.list(offset, limit + 1);
+        return safeProjection({
+          categories: categories.slice(0, limit),
+          nextOffset: categories.length > limit ? offset + limit : null,
+        });
+      }
+      if (
+        action === "create_run_category" || action === "rename_run_category" ||
+        action === "delete_run_category" || action === "categorize_runs" ||
+        action === "clear_run_categories"
+      ) {
+        const { categoryId, title, requestId, expectedVersion, runTargets } =
+          args;
+        if (
+          !canReadRunCategories ||
+          !canFlowTo(context?.inputClassification ?? "PUBLIC", "INTERNAL") ||
+          typeof requestId !== "string" || !digestPattern.test(requestId)
+        ) return unavailable;
+        const edit = action === "create_run_category" ||
+          action === "rename_run_category";
+        const assignment = action === "categorize_runs" ||
+          action === "clear_run_categories";
+        const select = action !== "create_run_category" &&
+          action !== "clear_run_categories";
+        if (
+          (edit
+            ? typeof title !== "string" || !title.trim() ||
+              Array.from(title.trim()).length > 80 ||
+              /[\p{Cc}\p{Cf}]/u.test(title) ||
+              redactCredentialText(title) !== title
+            : title !== undefined) ||
+          (select
+            ? typeof categoryId !== "string" ||
+              !digestPattern.test(categoryId) ||
+              typeof expectedVersion !== "number" ||
+              !Number.isSafeInteger(expectedVersion) || expectedVersion < 1
+            : categoryId !== undefined || expectedVersion !== undefined) ||
+          Object.keys(args).some((key) =>
+            ![
+              "action",
+              "requestId",
+              ...(edit ? ["title"] : []),
+              ...(select ? ["categoryId", "expectedVersion"] : []),
+              ...(assignment ? ["runTargets"] : []),
+            ].includes(key)
+          )
+        ) return unavailable;
+        const runsToCategorize = assignment
+          ? exactCategoryTargets(runTargets, digestPattern)
+          : undefined;
+        if (assignment && !runsToCategorize) return unavailable;
+        const category = typeof categoryId === "string"
+          ? {
+            categoryId: categoryId.toLowerCase(),
+            version: expectedVersion as number,
+          }
+          : undefined;
+        const name = typeof title === "string" ? title.trim() : "";
+        const change: OperatorRunCategoryChange = runsToCategorize
+          ? { kind: "assign", ...category, runs: runsToCategorize }
+          : action === "create_run_category"
+          ? { kind: "create", title: name }
+          : action === "rename_run_category" && category
+          ? { kind: "rename", ...category, title: name }
+          : { kind: "delete", ...category! };
+        async function visibleTargets() {
+          for (const item of runsToCategorize ?? []) {
+            const { runId, ...ref } = item;
+            const run = await controller.inspect(ref);
+            if (
+              !run ||
+              !canFlowTo(
+                run.classification ?? "INTERNAL",
+                context?.ceiling ?? "PUBLIC",
+              ) ||
+              (ref.kind === "sentinel" &&
+                (run.status === "saved" || run.details?.runId !== runId))
+            ) return false;
+          }
+          return true;
+        }
+        if (!await visibleTargets()) return unavailable;
+        const id = requestId.toLowerCase();
+        const before = links.categories.review(id, change);
+        if (before?.receipt) return safeProjection({ receipt: before.receipt });
+        if (!before?.preview) return unavailable;
+        if (
+          !await options.confirm(
+            `Apply this exact run category change?\n${
+              JSON.stringify({ requestId: id, ...before.preview })
+            }`,
+          )
+        ) {
+          return "Error: The operator declined the run action.";
+        }
+        if (!await visibleTargets()) return unavailable;
+        const after = links.categories.review(id, change, before.preview);
+        return after?.receipt
+          ? safeProjection({ receipt: after.receipt })
+          : unavailable;
+      }
       if (action === "list") {
         const filter = kind(args.kind);
         if (args.kind !== undefined && !filter) return unavailable;
+        const listed = (await controller.list(filter)).slice(0, 20);
         return safeProjection({
-          runs: (await controller.list(filter)).slice(0, 20),
+          runs: canReadRunCategories
+            ? listed.map((run) => {
+              const { kind, id, revision } = run.ref;
+              const runId = kind === "workflow" && digestPattern.test(id)
+                ? id
+                : kind === "sentinel" && revision !== undefined
+                ? readSentinelRunIdForRevision(
+                  resolveSentinelCasePath(options.baseDir, id),
+                  revision,
+                )
+                : undefined;
+              if (
+                !runId || (kind !== "sentinel" && kind !== "workflow")
+              ) return run;
+              const category = links.categories.forRun({
+                kind,
+                id,
+                runId,
+                revision,
+              });
+              return category ? { ...run, category } : run;
+            })
+            : listed,
         });
       }
       if (action === "finding_asset_tree") {
