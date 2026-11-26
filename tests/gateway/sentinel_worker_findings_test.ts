@@ -2325,6 +2325,12 @@ async function verifyOperatorNativeRecheck(options: {
         assertEquals(input.recheckFindingId, options.findingId);
         assertEquals(input.recheckNote, recheckNote);
         assertEquals(input.target, options.evidenceId);
+        const verifiedClaim = {
+          findingId: options.findingId,
+          evidenceId: options.evidenceId,
+          requestId: crypto.randomUUID(),
+          summary: "Confirmed the approved retained workflow recheck.",
+        };
         const reviewed = await workerTurn(
           path,
           {
@@ -2345,12 +2351,7 @@ async function verifyOperatorNativeRecheck(options: {
                   requestId: rationaleRequest,
                   rationale,
                 })]
-                : [tool(recheck, {
-                  findingId: options.findingId,
-                  evidenceId: options.evidenceId,
-                  requestId: crypto.randomUUID(),
-                  summary: "Confirmed the approved retained workflow recheck.",
-                })],
+                : [tool(recheck, verifiedClaim)],
             ]),
           ],
           undefined,
@@ -2392,6 +2393,38 @@ async function verifyOperatorNativeRecheck(options: {
           assertEquals(record.outcome, undefined);
         } else {
           assertEquals(record.outcome, "pass");
+          const repeated = await workerTurn(
+            path,
+            {
+              assessmentRevision: state.revision,
+              assignedTaskId: taskId,
+              assignedTaskLeaseToken: leaseToken,
+            },
+            [
+              [tool("sentinel_assigned_execution_evidence", {
+                node: options.evidenceId,
+              })],
+              [
+                tool(recheck, verifiedClaim),
+                tool(recheck, {
+                  ...verifiedClaim,
+                  requestId: crypto.randomUUID(),
+                }),
+                tool(recheck, {
+                  ...verifiedClaim,
+                  requestId: crypto.randomUUID(),
+                  summary: "An alternate conclusion for the same assignment.",
+                }),
+              ],
+            ],
+            undefined,
+            options.baseDir,
+            reader,
+          );
+          assertEquals(repeated.reportPre, 3);
+          assertEquals(JSON.parse(repeated.results[1][0]).record, record);
+          assertEquals(JSON.parse(repeated.results[1][1]).record, record);
+          assertStringIncludes(repeated.results[1][2], "Error:");
         }
         verified = record;
         for (const event of reviewed.events) send(event);
@@ -2451,6 +2484,12 @@ async function verifyOperatorNativeRecheck(options: {
             receiptId: options.findingId,
           }),
         ).page;
+        assertEquals(
+          attempts.entries.filter(
+            ({ taskId }: { taskId: string }) => taskId === assigned.taskId,
+          ).length,
+          1,
+        );
         const settled = attempts.entries.find((
           { taskId }: { taskId: string },
         ) => taskId === assigned.taskId);

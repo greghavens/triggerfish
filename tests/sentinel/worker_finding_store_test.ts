@@ -179,6 +179,21 @@ Deno.test("worker rechecks retain fresh exact scope and original finding indepen
       undefined,
     );
     assertEquals(store.recordRecheck(recheck), result);
+    assertThrows(
+      () =>
+        store.recordRecheck({
+          ...recheck,
+          requestId: "divergent",
+          summary: "Other conclusion",
+        }),
+      Error,
+      "already recorded a verified result",
+    );
+    assertEquals(
+      store.recordRecheck({ ...recheck, requestId: "identical" }),
+      result,
+    );
+
     assertEquals(store.read(result.id), result);
     assertEquals(store.readFinding(result.id), undefined);
     assertEquals(store.readFinding(original.id), original);

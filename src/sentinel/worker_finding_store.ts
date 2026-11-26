@@ -501,6 +501,17 @@ export function openSentinelWorkerFindingStore(
               "Sentinel remediation recheck source is out of scope",
             );
           }
+          if (
+            db.prepare(`
+            SELECT 1 FROM receipts
+            WHERE findingId = ? AND revision = ? AND reportVersion IS NULL
+              AND json_extract(input, '$.taskId') = ? LIMIT 1
+          `).get(input.findingId, input.evidenceRevision, input.taskId)
+          ) {
+            throw new Error(
+              "The recheck assignment already recorded a verified result.",
+            );
+          }
         }
         const recordedAt = now();
         const record = {

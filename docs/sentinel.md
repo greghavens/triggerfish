@@ -369,6 +369,8 @@ The rationale stays available after archive restore. It does not produce
 a pass or fail, satisfy evidence requirements, or change the finding.
 A worker turn that ends without a verified result or an inconclusive
 record is saved as a failed attempt and follows the existing retry policy.
+An assignment can commit one conclusion for its finding. Repeating the
+same verified result returns the original receipt.
 
 The worker finding report shows a separate remediation status as of the selected
 evidence revision. A verified result identifies its exact recheck and evidence.
