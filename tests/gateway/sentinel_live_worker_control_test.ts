@@ -1452,7 +1452,7 @@ Deno.test("Reviewed queued cancellation wakes Sentinel planning with exact linea
   }
 });
 
-Deno.test("Committed case pause cancels only its exact interactive Sentinel turn", async () => {
+async function verifyInteractiveCaseControl(manual = false) {
   const baseDir = await Deno.makeTempDir();
   const firstPath = resolveSentinelCasePath(baseDir, "interactive-first");
   const secondPath = resolveSentinelCasePath(baseDir, "interactive-second");
@@ -1599,26 +1599,102 @@ Deno.test("Committed case pause cancels only its exact interactive Sentinel turn
       revision: state.revision,
       runId: state.plan.runId,
     };
-    await withOwnerControl(
-      baseDir,
-      async (request, approvals) => {
-        await request(pause);
+    if (manual) {
+      const status = { ...pause, action: "interactive_turns" };
+      let stop: Record<string, unknown> | undefined;
+      await withOwnerControl(baseDir, async (request, approvals) => {
+        const firstTurns = JSON.parse(await request(status)).turns;
+        assertEquals(firstTurns.length, 1);
+        assertEquals(firstTurns[0].startedRevision, state.revision);
+        const secondState = readSentinelAssessment(secondPath)!;
+        const other = {
+          ...status,
+          id: "interactive-second",
+          revision: secondState.revision,
+          runId: secondState.plan.runId,
+        };
+        const peerTurns = JSON.parse(await request(other)).turns;
+        assertEquals(peerTurns.length, 1);
+        assert(firstTurns[0].id !== peerTurns[0].id);
+        stop = {
+          ...status,
+          action: "stop_interactive_turn",
+          turnId: firstTurns[0].id,
+        };
+        assert(
+          (await request({
+            ...other,
+            ...{ action: stop.action, turnId: stop.turnId },
+          })).includes("unavailable"),
+        );
+        assert(
+          (await request({ ...stop, revision: state.revision + 1 })).includes(
+            "unavailable",
+          ),
+        );
         assertEquals(approvals.length, 0);
-        assertFalse(firstSignal.aborted);
-      },
-      undefined,
-      () => false,
-    );
-    await withOwnerControl(baseDir, async (request) => {
-      assert(
-        (await request({ ...pause, revision: state.revision + 1 })).includes(
-          "unavailable",
-        ),
+      });
+      assert(stop);
+      const requestStop = stop;
+      await withOwnerControl(
+        baseDir,
+        async (request, approvals) => {
+          await request(requestStop);
+          assertEquals(approvals.length, 0);
+          assertFalse(firstSignal.aborted);
+        },
+        undefined,
+        () => false,
       );
-      assertFalse(firstSignal.aborted);
-      const outcome = JSON.parse(await request(pause)).run;
-      assertEquals(outcome.status, "paused");
-    });
+      let revoked = false;
+      await withOwnerControl(
+        baseDir,
+        async (request, approvals) => {
+          assert((await request(requestStop)).includes("unavailable"));
+          assertEquals(approvals.length, 1);
+          assertFalse(firstSignal.aborted);
+        },
+        undefined,
+        () => !revoked,
+        {
+          onConfirm: () => {
+            revoked = true;
+          },
+        },
+      );
+      await withOwnerControl(baseDir, async (request, approvals) => {
+        assertEquals(JSON.parse(await request(requestStop)).status, "stopping");
+        assert((await request(requestStop)).includes("unavailable"));
+        assertEquals(JSON.parse(await request(status)).turns, []);
+        assertEquals(approvals.length, 1);
+      });
+      const current = readSentinelAssessment(firstPath);
+      assertEquals(current?.revision, state.revision);
+      assertEquals(current?.plan.runId, state.plan.runId);
+      assertEquals(current?.active, true);
+      assertEquals(current?.paused, false);
+    } else {
+      await withOwnerControl(
+        baseDir,
+        async (request, approvals) => {
+          await request(pause);
+          assertEquals(approvals.length, 0);
+          assertFalse(firstSignal.aborted);
+        },
+        undefined,
+        () => false,
+      );
+      await withOwnerControl(baseDir, async (request) => {
+        assert(
+          (await request({ ...pause, revision: state.revision + 1 })).includes(
+            "unavailable",
+          ),
+        );
+        assertFalse(firstSignal.aborted);
+        const outcome = JSON.parse(await request(pause)).run;
+        assertEquals(outcome.status, "paused");
+      });
+    }
     assert(firstSignal.aborted);
     assertFalse(secondSignal.aborted);
     const cancelled = await interrupted;
@@ -1631,6 +1707,7 @@ Deno.test("Committed case pause cancels only its exact interactive Sentinel turn
         "Prior context retained",
       ),
     );
+    if (manual) return;
     await withOwnerControl(baseDir, async (request) => {
       assertEquals(
         JSON.parse(await request({ ...pause, action: "resume" })).run.status,
@@ -1656,7 +1733,13 @@ Deno.test("Committed case pause cancels only its exact interactive Sentinel turn
     await gateway?.stop();
     await Deno.remove(baseDir, { recursive: true });
   }
-});
+}
+
+Deno.test("Committed case pause cancels only its exact interactive Sentinel turn", () =>
+  verifyInteractiveCaseControl());
+
+Deno.test("Gateway owner remotely stops one exact Sentinel chat turn without pausing its run", () =>
+  verifyInteractiveCaseControl(true));
 
 Deno.test("An enabled idle planner heartbeat resumes from durable case history and respects gateway pause", async () => {
   const baseDir = await Deno.makeTempDir();

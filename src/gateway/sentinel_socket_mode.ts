@@ -1,3 +1,4 @@
+import { registerSentinelInteractiveTurn } from "./sentinel_interactive_turns.ts";
 import { readSentinelAssessment } from "../sentinel/assessment_store.ts";
 import { observeSentinelAssessmentInterruption } from "../sentinel/assessment_interruptions.ts";
 /** Select the agent and conversation context for an authenticated chat socket. */
@@ -44,32 +45,40 @@ async function executeCaseChat(
   message: MessageContent,
   send: ChatEventSender,
   signal: AbortSignal,
+  main = false,
 ) {
   const initial = path && readSentinelAssessment(path);
-  if (
-    !path || !initial || !initial.active || initial.paused ||
-    !initial.plan.runId
-  ) {
+  if (!path || !initial || !initial.plan.runId) {
     return await agent.execute(message, send, signal);
   }
   const scoped = new AbortController();
   const combined = AbortSignal.any([signal, scoped.signal]);
-  const unsubscribe = observeSentinelAssessmentInterruption(path, (event) => {
-    if (
-      event.runId === initial.plan.runId && event.revision >= initial.revision
-    ) {
-      if (!combined.aborted) {
-        scoped.abort(event.action);
-        send({ type: "cancelled" });
-      }
-    }
-  });
+  const cancel = (reason: string) => {
+    if (combined.aborted) return;
+    scoped.abort(reason);
+    send({ type: "cancelled" });
+  };
+  const startedActive = initial.active && !initial.paused;
+  const unsubscribe = startedActive &&
+    observeSentinelAssessmentInterruption(path, (event) => {
+      if (
+        event.runId === initial.plan.runId && event.revision >= initial.revision
+      ) cancel(event.action);
+    });
+  const unregister = main && registerSentinelInteractiveTurn(
+    path,
+    initial.plan.runId,
+    initial.revision,
+    combined,
+    () => cancel("owner stopped the Sentinel interactive turn"),
+  );
   try {
     await agent.execute(message, (event) => {
       if (!combined.aborted) send(event);
     }, combined);
   } finally {
-    unsubscribe();
+    if (unsubscribe) unsubscribe();
+    if (unregister) unregister();
   }
 }
 
@@ -298,6 +307,7 @@ export function createSentinelSocketMode(
           content,
           sendCurrent,
           signal,
+          true,
         );
         return true;
       }

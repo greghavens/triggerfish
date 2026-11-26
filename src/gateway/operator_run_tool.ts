@@ -1,3 +1,8 @@
+import {
+  listSentinelInteractiveTurns,
+  readSentinelInteractiveTurn,
+  stopSentinelInteractiveTurn,
+} from "./sentinel_interactive_turns.ts";
 import { readSentinelWorkerEvidenceScope } from "./sentinel_worker_evidence_scope.ts";
 import {
   INCONCLUSIVE_RECHECK_ID,
@@ -434,6 +439,8 @@ export const operatorRunTool: ToolDefinition = {
         "archive",
         "restore",
         "archive_history",
+        "interactive_turns",
+        "stop_interactive_turn",
         "archive_catalog",
         "assessment_templates",
         "set_assessment_template",
@@ -1118,6 +1125,11 @@ export const operatorRunTool: ToolDefinition = {
       items: { type: "string" },
       description:
         "Exact failed graph task IDs to retry together, up to eight.",
+    },
+    turnId: {
+      type: "string",
+      description:
+        "Exact live Sentinel main-agent turn ID from interactive_turns.",
     },
     cancellationReason: {
       type: "string",
@@ -3797,6 +3809,71 @@ ${
           return "Error: The operator declined the run action.";
         }
         return safeProjection(result);
+      }
+      if (
+        action === "interactive_turns" || action === "stop_interactive_turn"
+      ) {
+        const stopping = action === "stop_interactive_turn";
+        const { runId, turnId } = args;
+        if (
+          ref?.kind !== "sentinel" || ref.revision === undefined ||
+          !context?.authenticatedOwnerSessionId ||
+          !context.authorizeOwnerRunCall ||
+          !canFlowTo("INTERNAL", context.ceiling ?? "PUBLIC") ||
+          typeof runId !== "string" || !digestPattern.test(runId) ||
+          (stopping
+            ? typeof turnId !== "string" || !digestPattern.test(turnId)
+            : turnId !== undefined) ||
+          Object.keys(args).some((key) =>
+            ![
+              "action",
+              "kind",
+              "id",
+              "revision",
+              "runId",
+              ...(stopping ? ["turnId"] : []),
+            ].includes(key)
+          ) ||
+          !await context.authorizeOwnerRunCall(args)
+        ) return unavailable;
+        const path = resolveSentinelCasePath(options.baseDir, ref.id);
+        const exactRunId = runId.toLowerCase();
+        const current = () => {
+          const state = readSentinelAssessment(path);
+          return !!state && state.revision === ref.revision &&
+            state.plan.runId === exactRunId;
+        };
+        if (!current()) return unavailable;
+        if (!stopping) {
+          return safeProjection({
+            run: ref,
+            runId: exactRunId,
+            turns: listSentinelInteractiveTurns(path, exactRunId),
+          });
+        }
+        const selected = readSentinelInteractiveTurn(
+          path,
+          exactRunId,
+          (turnId as string).toLowerCase(),
+        );
+        if (!selected) return unavailable;
+        if (
+          !await options.confirm(
+            `Stop this exact Sentinel interactive turn?
+${JSON.stringify({ run: ref, runId: exactRunId, turn: selected })}`,
+          )
+        ) return "Error: The operator declined the run action.";
+        if (!await context.authorizeOwnerRunCall(args) || !current()) {
+          return unavailable;
+        }
+        return stopSentinelInteractiveTurn(path, exactRunId, selected.id)
+          ? safeProjection({
+            run: ref,
+            runId: exactRunId,
+            turn: selected,
+            status: "stopping",
+          })
+          : unavailable;
       }
       if (action === "archive_catalog") {
         if (
