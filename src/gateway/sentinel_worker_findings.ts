@@ -66,6 +66,7 @@ import {
   readSentinelWorkerFindingWriteReceipt,
   readStagedTrafficLinks,
   type SentinelAnalystFindingInput,
+  type SentinelWorkerFindingRecord,
 } from "../sentinel/worker_finding_store.ts";
 import {
   readAssignedSentinelModelReview,
@@ -1428,11 +1429,62 @@ export async function recordOperatorSentinelFinding(
 }
 
 /** Confirm an exact owner amendment, then recheck its report and evidence under the case lock. */
+function allowsOperatorReportAmendment(
+  path: string,
+  revision: number,
+  finding: SentinelWorkerFindingRecord,
+) {
+  const scope = readSentinelFindingReceiptScope(path, revision);
+  return !!scope && scope.runId === finding.runId &&
+    scope.allowsRecord(finding) &&
+    scope.allows(finding.graphFindingId, "review_finding") &&
+    scope.allows(finding.evidenceId);
+}
+
+export function currentOperatorSentinelFindingAmendment(
+  path: string,
+  revision: number,
+  response: string,
+): boolean {
+  try {
+    const { amendment } = JSON.parse(response);
+    const caseId = locateSentinelCase(path)?.caseId;
+    if (
+      !caseId || amendment?.kind !== "report_amendment" ||
+      amendment.caseId !== caseId || amendment.evidenceRevision !== revision ||
+      amendment.taskId !== "operator" ||
+      readSentinelAssessment(path)?.revision !== revision ||
+      !hasSentinelWorkerFindingJournal(path)
+    ) return false;
+    const journal = openSentinelWorkerFindingStore(path);
+    try {
+      const finding = journal.readFindingReport(amendment.findingId, revision)
+        ?.finding;
+      return !!finding &&
+        allowsOperatorReportAmendment(path, revision, finding) &&
+        isDeepStrictEqual(
+          readSentinelWorkerFindingWriteReceipt(
+            path,
+            amendment,
+            amendment.requestId,
+          ),
+          amendment,
+        );
+    } finally {
+      journal.close();
+    }
+  } catch {
+    return false;
+  }
+}
+
 export async function amendOperatorSentinelFindingReport(
   path: string,
   revision: number,
   args: Record<string, unknown>,
   confirm: (prompt: string) => Promise<boolean>,
+  authorize: () => Promise<boolean>,
+  isCurrent: () => boolean,
 ): Promise<string> {
   const {
     receiptId,
@@ -1483,26 +1535,11 @@ export async function amendOperatorSentinelFindingReport(
       try {
         const report = journal.readFindingReport(receiptId, revision);
         const finding = report?.finding;
-        if (!finding || finding.caseId !== caseId || finding.runId !== runId) {
-          return;
-        }
         if (
-          rating !== undefined || category !== undefined ||
-          decision !== undefined
-        ) {
-          const policy = readSentinelOperatingConstraints(
-            path,
-            runId,
-            revision,
-          );
-          if (
-            policy?.constraints.allowedAssetIds?.includes(finding.targetId) ===
-              false ||
-            !state.result?.sharedGraph.snapshot?.nodes.some(({ id, kind }) =>
-              kind === "asset" && id === finding.targetId
-            )
-          ) return;
-        }
+          !isCurrent() ||
+          !finding || finding.caseId !== caseId || finding.runId !== runId ||
+          !allowsOperatorReportAmendment(path, revision, finding)
+        ) return;
         const input = {
           caseId,
           runId,
@@ -1561,6 +1598,7 @@ export async function amendOperatorSentinelFindingReport(
       }
     });
   try {
+    if (!await authorize() || !isCurrent()) return unavailable;
     const preview = inspect();
     if (!preview) return unavailable;
     if (preview.amendment) {
@@ -1594,6 +1632,7 @@ export async function amendOperatorSentinelFindingReport(
         }`,
       )
     ) return "Error: The operator declined the report amendment.";
+    if (!await authorize() || !isCurrent()) return unavailable;
     const amendment = inspect(preview.runId)?.amendment;
     return projectResult(
       amendment && { _classification: "INTERNAL", amendment },

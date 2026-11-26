@@ -1575,6 +1575,7 @@ export const sentinelOperatorCaseControlActions = [
   "set_case_membership",
   "add_case_membership",
   "record_analyst_finding",
+  "amend_finding_report",
   "review_incident",
 ] as const;
 
@@ -1590,6 +1591,7 @@ export const sentinelOperatorCaseControlParameters = [
   "expectedVersion",
   "requestId",
   "disposition",
+  "evidenceVersion",
   "deniedKinds",
   "note",
   "targetId",
@@ -11742,22 +11744,24 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
           : result;
       }
       if (action === "amend_finding_report") {
+        const selected = context?.authorizeSelectedSentinelCase;
+        const authorize = context?.authorizeOwnerRunCall;
+        const revision = ref.kind === "sentinel" ? ref.revision : undefined;
         if (
-          ref.kind !== "sentinel" || ref.revision === undefined ||
-          !canFlowTo("INTERNAL", context?.ceiling ?? "INTERNAL") ||
-          ((args.severity !== undefined || args.findingCategory !== undefined ||
-            args.disposition !== undefined) &&
-            (!context?.authenticatedOwnerSessionId ||
-              !canFlowTo(
-                context.inputClassification ?? "PUBLIC",
-                "INTERNAL",
-              ))) ||
+          ref.kind !== "sentinel" || revision === undefined || !authorize ||
+          !context?.authenticatedOwnerSessionId ||
+          !canFlowTo("INTERNAL", context.ceiling ?? "PUBLIC") ||
+          !canFlowTo(context.inputClassification ?? "PUBLIC", "INTERNAL") ||
+          (args.runId !== undefined &&
+            (typeof args.runId !== "string" ||
+              !digestPattern.test(args.runId))) ||
           Object.keys(args).some((key) =>
             ![
               "action",
               "kind",
               "id",
               "revision",
+              "runId",
               "receiptId",
               "reportVersion",
               "evidenceVersion",
@@ -11768,14 +11772,21 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
               "disposition",
               "requestId",
             ].includes(key)
-          ) ||
-          !await controller.inspect(ref)
+          ) || !await controller.inspect(ref)
         ) return unavailable;
+        const path = resolveSentinelCasePath(options.baseDir, ref.id);
+        const current = () =>
+          selected?.() !== false &&
+          context.authorizeSentinelCaseRead?.(ref.id, revision) !== false &&
+          (args.runId === undefined ||
+            readSentinelRunIdForRevision(path, revision) === args.runId);
         return await amendOperatorSentinelFindingReport(
-          resolveSentinelCasePath(options.baseDir, ref.id),
-          ref.revision,
+          path,
+          revision,
           args,
           options.confirm,
+          async () => current() && await authorize(args) && current(),
+          current,
         );
       }
       if (action === "finding_traffic_set_receipt") {

@@ -76,7 +76,10 @@ import {
   readSentinelRunIdForRevision,
 } from "../sentinel/assessment_store.ts";
 import { listSentinelFindingTrafficLinks } from "../sentinel/finding_traffic_links.ts";
-import { isSentinelCaseId } from "../sentinel/cases.ts";
+import {
+  isSentinelCaseId,
+  resolveSentinelCasePath,
+} from "../sentinel/cases.ts";
 import { loadChatHistoryEntries } from "./chat_history.ts";
 import {
   createSideQuestionService,
@@ -93,6 +96,7 @@ import {
   sentinelOperatorCaseReadParameters,
   sentinelScopedTelemetryReadActions,
 } from "./operator_run_tool.ts";
+import { currentOperatorSentinelFindingAmendment } from "./sentinel_worker_findings.ts";
 import {
   CHAT_GOAL_REPORT_TOOL,
   executeManagedChatGoal,
@@ -428,7 +432,8 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
                     action === "preview_membership" ||
                     action === "set_case_membership" ||
                     action === "add_case_membership" ||
-                    action === "record_analyst_finding") &&
+                    action === "record_analyst_finding" ||
+                    action === "amend_finding_report") &&
                   {
                     case_id: typeof call.args?.id === "string" &&
                         isSentinelCaseId(call.args.id)
@@ -449,10 +454,53 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
                     action === "set_case_membership" ||
                     action === "add_case_membership" ||
                     action === "preview_inventory_affiliation" ||
-                    action === "affiliate_inventory_asset"
+                    action === "affiliate_inventory_asset" ||
+                    action === "amend_finding_report"
                   ? meta
                   : { ...context.auditInput, ...meta },
               });
+            }
+          }
+          if (
+            config.operatorRunExecutor && hook === "POST_TOOL_RESPONSE" &&
+            context.input.tool_name === operatorRunTool.name &&
+            typeof context.input.tool_response === "string" &&
+            context.input.tool_response.includes('"kind":"report_amendment"')
+          ) {
+            const text = context.input.tool_response;
+            const receipt = JSON.parse(text).amendment;
+            if (receipt?.kind === "report_amendment") {
+              const allowed = () => {
+                if (
+                  state.activeSessionId !== state.ownerSessionId ||
+                  typeof receipt.caseId !== "string" ||
+                  !isSentinelCaseId(receipt.caseId)
+                ) return false;
+                const path = receipt.caseId === "main"
+                  ? config.sentinelSnapshotPath ??
+                    (config.sentinelSharedInventoryBaseDir &&
+                      resolveSentinelCasePath(
+                        config.sentinelSharedInventoryBaseDir,
+                      ))
+                  : config.resolveSentinelChatCase?.(receipt.caseId) ??
+                    (config.sentinelSharedInventoryBaseDir &&
+                      resolveSentinelCasePath(
+                        config.sentinelSharedInventoryBaseDir,
+                        receipt.caseId,
+                      ));
+                return !path || currentOperatorSentinelFindingAmendment(
+                  path,
+                  receipt.evidenceRevision,
+                  text,
+                );
+              };
+              const decision = await config.hookRunner.evaluateHook(
+                hook,
+                context,
+              );
+              return allowed()
+                ? decision
+                : { ...decision, allowed: false, action: "BLOCK" };
             }
           }
           return config.hookRunner.evaluateHook(hook, context);
@@ -999,7 +1047,8 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
         };
         if (!current()) return unavailable;
         const scopedDecision = action === "review_incident";
-        const scopedRead = scopedDecision ||
+        const amendReport = action === "amend_finding_report";
+        const scopedRead = scopedDecision || amendReport ||
           sentinelScopedTelemetryReadActions.some(
             (allowed) => allowed === action,
           ) ||
@@ -1015,6 +1064,7 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
           readonly digest: string;
           readonly sourceDigest: string;
         } | undefined;
+        let amendmentResult: string | undefined;
         const sourceIsCurrent = () => {
           if (
             !sourcePath || !sourceRun || !current() ||
@@ -1025,6 +1075,13 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
               sourceRun
           ) return false;
           if (previewMembership) return true;
+          if (amendReport) {
+            return !!amendmentResult && currentOperatorSentinelFindingAmendment(
+              sourcePath,
+              revision,
+              amendmentResult,
+            );
+          }
           const latest = readSentinelOperatingConstraints(
             sourcePath,
             sourceRun,
@@ -1082,6 +1139,7 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
           : await read();
         if (!current()) return unavailable;
         if (scopedRead && result.startsWith("{")) {
+          if (amendReport) amendmentResult = result;
           if (setMembership) membershipReceipt = JSON.parse(result);
           if (!sourceIsCurrent()) return unavailable;
           const source = directRead ??
@@ -1095,7 +1153,7 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
             case_id: id,
             evidence_revision: revision,
             resource_classification: "INTERNAL",
-            operation_type: setMembership ? "write" : "read",
+            operation_type: setMembership || amendReport ? "write" : "read",
           };
           const policy: typeof orchestratorConfig = {
             ...orchestratorConfig,

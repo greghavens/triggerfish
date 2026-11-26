@@ -24,6 +24,10 @@ Deno.test("Selected Sentinel owner opens exact finding reports and paged history
   const path = resolveSentinelCasePath(baseDir, id);
   const original = "Initial exact control report";
   const amendment = "Reviewed amended control report";
+  const selectedTitle = "Approved selected amendment";
+  let amendmentConfirmations = 0;
+  let revokeAmendmentAfterReview = false;
+  let denyAmendment = false;
   type Hook = "PRE_TOOL_CALL" | "POST_TOOL_RESPONSE" | "PRE_OUTPUT";
   let blocked: Hook | undefined;
   const effects = new Set<string>();
@@ -84,7 +88,13 @@ Deno.test("Selected Sentinel owner opens exact finding reports and paged history
       allowSentinelModelAccess: true,
       operatorRunExecutor: createOperatorRunToolExecutor({
         baseDir,
-        confirm: () => Promise.resolve(true),
+        confirm: (prompt) => {
+          if (prompt.startsWith("Amend Sentinel finding")) {
+            amendmentConfirmations++;
+            if (revokeAmendmentAfterReview) denyAmendment = true;
+          }
+          return Promise.resolve(true);
+        },
       }),
       hookRunner: {
         evaluateHook(hook, { input }) {
@@ -98,7 +108,9 @@ Deno.test("Selected Sentinel owner opens exact finding reports and paged history
             : hook === "PRE_OUTPUT" &&
               String(input.content).includes(amendment);
           if (matches) effects.add(hook);
-          const allowed = !matches || hook !== blocked;
+          const allowed = (!matches || hook !== blocked) &&
+            !(denyAmendment && hook === "PRE_TOOL_CALL" &&
+              call?.args?.action === "amend_finding_report");
           return Promise.resolve({
             allowed,
             action: allowed ? "ALLOW" : "BLOCK",
@@ -277,6 +289,52 @@ Deno.test("Selected Sentinel owner opens exact finding reports and paged history
     blocked = undefined;
     echo = false;
 
+    const selectedChange = {
+      ...run,
+      action: "amend_finding_report",
+      receiptId,
+      reportVersion: 2,
+      evidenceVersion:
+        sentinelFindingTrafficEvidenceVersion(path, state.revision, receiptId)
+          .digest,
+      requestId: crypto.randomUUID(),
+      title: selectedTitle,
+      summary: "The reviewed scope and evidence support the revised report.",
+    };
+    const approvalsBefore = amendmentConfirmations;
+    assertStringIncludes(
+      await turn({ ...selectedChange, id: other }),
+      "unavailable",
+    );
+    assertStringIncludes(
+      await turn({ ...selectedChange, reportVersion: 1 }),
+      "unavailable",
+    );
+    assertStringIncludes(
+      await turn({ ...selectedChange, evidenceVersion: "0".repeat(64) }),
+      "unavailable",
+    );
+    denyAmendment = true;
+    assertStringIncludes(await turn(selectedChange), "policy");
+    denyAmendment = false;
+    assertEquals(amendmentConfirmations, approvalsBefore);
+    revokeAmendmentAfterReview = true;
+    assertStringIncludes(await turn(selectedChange), "unavailable");
+    revokeAmendmentAfterReview = false;
+    denyAmendment = false;
+    assertEquals(await turn(report), currentReport);
+    const selectedReceipt = await turn(selectedChange);
+    assertEquals(JSON.parse(selectedReceipt).amendment.version, 3);
+    assertEquals(await turn(selectedChange), selectedReceipt);
+    assertEquals(amendmentConfirmations, approvalsBefore + 2);
+    const prior = JSON.parse(originalReport);
+    prior.report.latestVersion = 3;
+    assertEquals(JSON.parse(await turn(first)), prior);
+    const revisedReport = await turn(report);
+    assertEquals(JSON.parse(revisedReport).report.title, selectedTitle);
+    const revisedPage = JSON.parse(await turn(history)).page;
+    assertEquals(revisedPage.versions[0].version, 3);
+
     await turn("/sentinel off");
     const archiveId = crypto.randomUUID();
     assertEquals(
@@ -307,9 +365,9 @@ Deno.test("Selected Sentinel owner opens exact finding reports and paged history
     );
     await turn("/sentinel on");
     await turn(`/sentinel case ${id}`);
-    assertEquals(await turn(report), currentReport);
-    assertEquals(await turn(first), originalReport);
-    assertEquals(JSON.parse(await turn(history)).page, page);
+    assertEquals(await turn(report), revisedReport);
+    assertEquals(JSON.parse(await turn(first)), prior);
+    assertEquals(JSON.parse(await turn(history)).page, revisedPage);
     assert(recordSentinelOperatingConstraints(path, {
       runId: run.runId,
       evidenceRevision: ref.revision,
@@ -321,6 +379,16 @@ Deno.test("Selected Sentinel owner opens exact finding reports and paged history
     assertStringIncludes(await turn(report), "unavailable");
     assert(!olderModelText.includes(amendment));
     assertStringIncludes(await turn(history), "unavailable");
+    assertStringIncludes(await turn(selectedChange), "unavailable");
+    await turn("/sentinel off");
+    assertStringIncludes(
+      await turn({
+        ...selectedChange,
+        requestId: crypto.randomUUID(),
+        reportVersion: 3,
+      }),
+      "unavailable",
+    );
   } finally {
     socket?.close();
     await gateway.stop();

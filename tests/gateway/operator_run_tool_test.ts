@@ -1461,6 +1461,11 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
               label: "Shared failure",
               severity: "high",
             },
+            ...["rating-evidence-a", "rating-evidence-outside"].map((id) => ({
+              id,
+              kind: "evidence",
+              label: id,
+            })),
             ...["branch-finding", "branch-finding-next", "detached-finding"]
               .map((id) => ({
                 id,
@@ -1488,6 +1493,14 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
             from: "outside-finding",
             to: "private-parent",
             relation: "affects",
+          }, {
+            from: "rating-evidence-a",
+            to: "branch-finding",
+            relation: "supports",
+          }, {
+            from: "rating-evidence-outside",
+            to: "outside-finding",
+            relation: "supports",
           }, {
             from: "branch-finding",
             to: "application-a",
@@ -1654,6 +1667,12 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
           runId: treeAssessment.plan.runId!,
           evidenceRevision: treeAssessment.revision,
           targetId,
+          graphFindingId: targetId === "application-a"
+            ? "branch-finding"
+            : "outside-finding",
+          evidenceId: targetId === "application-a"
+            ? "rating-evidence-a"
+            : "rating-evidence-outside",
           snapshotDigest: digestSentinelSnapshot(savedRatingSnapshot),
           requestId: crypto.randomUUID(),
         });
