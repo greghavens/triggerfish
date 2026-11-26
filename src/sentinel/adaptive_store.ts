@@ -4292,7 +4292,10 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
     LEFT JOIN adaptive_model_reviews AS review ON review.taskId = task.id
     WHERE task.revision = ? AND (task.reason = ? OR task.kind = 'review_incident'
       OR json_type(task.plannerRound, '$.findingFollowup') = 'object'
-      OR json_type(task.plannerRound, '$.stoppedRetry') = 'object')
+      OR json_type(task.plannerRound, '$.stoppedRetry') = 'object'
+      OR (task.kind = 'review_evidence'
+        AND json_extract(task.plannerRound, '$.identity') GLOB 'operator:*'
+        AND json_type(task.plannerRound, '$.recheckFindingId') = 'text'))
       AND task.status = 'completed' AND task.factSatisfaction IS NULL AND review.noteId IS NULL
       AND (COALESCE(review.attempts, 0) < 2 + COALESCE(review.operatorRetry, 0)
         OR (task.kind = 'report_finding' AND EXISTS (

@@ -2200,6 +2200,117 @@ async function verifyOperatorNativeRecheck(options: {
   assert(resumed?.type === "response");
   assertEquals(recoveredReceipt, originalReceipt);
   assertEquals(writes, 1);
+
+  const path = resolveSentinelCasePath(options.baseDir);
+  let verified: { id: string } | undefined;
+  let workerRuns = 0;
+  const planner = createSentinelModelPlanner(
+    path,
+    (state, taskId, leaseToken) => ({
+      async execute(message, send, signal, onStep, digests, checkpoint) {
+        if (taskId !== assigned.taskId) {
+          send({
+            type: "response",
+            text:
+              '{"assignments":[],"summary":"Review complete","followUps":[]}',
+            taint: "INTERNAL",
+          });
+          return;
+        }
+        assert(taskId && leaseToken);
+        workerRuns++;
+        const input = JSON.parse(String(message).split("\n").at(-1)!);
+        assertEquals(input.assignment, assigned.taskId);
+        assertEquals(input.recheckFindingId, options.findingId);
+        assertEquals(input.target, options.evidenceId);
+        const reviewed = await workerTurn(
+          path,
+          {
+            assessmentRevision: state.revision,
+            assignedTaskId: taskId,
+            assignedTaskLeaseToken: leaseToken,
+          },
+          [
+            [tool("sentinel_assigned_execution_evidence", {
+              node: options.evidenceId,
+            })],
+            [tool(context, { findingId: options.findingId })],
+            [tool(recheck, {
+              findingId: options.findingId,
+              evidenceId: options.evidenceId,
+              requestId: crypto.randomUUID(),
+              summary: "Confirmed the approved retained workflow recheck.",
+            })],
+          ],
+          undefined,
+          options.baseDir,
+          reader,
+          {
+            prompt: message,
+            options: [signal, onStep, digests, checkpoint],
+          },
+        );
+        assertEquals(
+          JSON.parse(reviewed.results[0][0]).evidence.resultSha256,
+          options.digest,
+        );
+        assertEquals(
+          JSON.parse(reviewed.results[1][0]).current.evidenceId,
+          options.evidenceId,
+        );
+        assertEquals(reviewed.reportPre, 1);
+        assertEquals(reviewed.reportPost, 1);
+        const record = JSON.parse(reviewed.results[2][0]).record;
+        assertEquals(record.findingId, options.findingId);
+        assertEquals(record.taskId, taskId);
+        assertEquals(record.evidenceRevision, state.revision);
+        assertEquals(record.outcome, "pass");
+        verified = record;
+        for (const event of reviewed.events) send(event);
+      },
+      clear() {},
+    }),
+  );
+  try {
+    for (let i = 0; i < 200; i++) {
+      planner.advance(options.state);
+      const completion = readAdaptiveSentinel(path, options.state)
+        ?.modelReviewStates
+        .find(({ taskId }) => taskId === assigned.taskId);
+      if (completion?.status === "completed") break;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert(
+      verified,
+      JSON.stringify(
+        readAdaptiveSentinel(path, options.state)?.modelReviewStates,
+      ),
+    );
+    assertEquals(workerRuns, 1);
+    await withFindingAssignmentGateway(
+      options.baseDir,
+      () => Promise.resolve(false),
+      async (turn) => {
+        const attempts = JSON.parse(
+          await turn({
+            action: "finding_recheck_attempts",
+            kind: "sentinel",
+            id: "main",
+            revision: options.state.revision,
+            receiptId: options.findingId,
+          }),
+        ).page;
+        const settled = attempts.entries.find((
+          { taskId }: { taskId: string },
+        ) => taskId === assigned.taskId);
+        assertEquals(settled?.resultReceiptId, verified?.id);
+        assertEquals(settled?.status, "completed");
+        assertEquals(settled?.outcome, "pass");
+      },
+    );
+  } finally {
+    planner.stop();
+  }
 }
 
 async function verifyImportedFindingGrant(
