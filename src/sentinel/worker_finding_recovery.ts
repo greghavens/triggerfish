@@ -9,9 +9,11 @@ import {
   openSentinelWorkerFindingStore,
   readSentinelStagedTrafficFinding,
   readSentinelWorkerFindingWriteReceipt,
+  readStagedTrafficLinks,
+  stagedTrafficItems,
 } from "./worker_finding_store.ts";
 
-import { readSentinelFindingTrafficWriteReceipt } from "./finding_traffic_links.ts";
+import { MAX_FINDING_TRAFFIC_BATCH } from "./finding_traffic_links.ts";
 export const MAX_SENTINEL_FINDING_RESULT_CHARS = 6000;
 
 export const SENTINEL_RECHECK_CONTEXT_TOOL = "sentinel_finding_recheck_context";
@@ -63,6 +65,40 @@ export function isSentinelFindingMutation(name: string): name is FindingTool {
   return Object.hasOwn(fields, name);
 }
 
+export function parseSentinelInitialTrafficSelection(
+  args: Record<string, unknown>,
+) {
+  const { trafficEvidenceId, trafficDigest, trafficRefs } = args;
+  const valid = (evidenceId: unknown, digest: unknown) =>
+    typeof evidenceId === "string" && evidenceId.length <= 100 &&
+      !!evidenceId.trim() && !evidenceId.includes("\0") &&
+      typeof digest === "string" && /^[a-f0-9]{64}$/.test(digest)
+      ? { evidenceId, digest }
+      : undefined;
+  if (trafficRefs !== undefined) {
+    if (
+      trafficEvidenceId !== undefined || trafficDigest !== undefined ||
+      !Array.isArray(trafficRefs) || trafficRefs.length < 2 ||
+      trafficRefs.length > MAX_FINDING_TRAFFIC_BATCH
+    ) return;
+    const refs: { evidenceId: string; digest: string }[] = [];
+    for (const member of trafficRefs) {
+      if (
+        !member || typeof member !== "object" ||
+        Object.keys(member).length !== 2
+      ) return;
+      const ref = valid(member.evidenceId, member.digest);
+      if (
+        !ref || refs.some(({ evidenceId }) => evidenceId === ref.evidenceId)
+      ) return;
+      refs.push(ref);
+    }
+    return { refs, batch: true as const };
+  }
+  const ref = valid(trafficEvidenceId, trafficDigest);
+  return ref ? { refs: [ref], batch: false as const } : undefined;
+}
+
 export function sentinelFindingMutationArguments(
   name: FindingTool,
   input: Record<string, unknown>,
@@ -75,6 +111,8 @@ export function sentinelFindingMutationArguments(
         (input.trafficEvidenceId !== undefined ||
           input.trafficDigest !== undefined)
     ? [...fields[name], "trafficEvidenceId", "trafficDigest"] as const
+    : name === "sentinel_report_finding" && input.trafficRefs !== undefined
+    ? [...fields[name], "trafficRefs"] as const
     : fields[name];
   const { requestId } = input;
   if (
@@ -85,6 +123,12 @@ export function sentinelFindingMutationArguments(
   const args: Record<string, unknown> = {};
   for (const key of keys) {
     const value = input[key];
+    if (key === "trafficRefs") {
+      const selected = parseSentinelInitialTrafficSelection(input);
+      if (!selected?.batch) return;
+      args[key] = selected.refs;
+      continue;
+    }
     if (
       key === "expectedVersion"
         ? typeof value !== "number" ||
@@ -114,27 +158,35 @@ export function lookupSentinelPendingTrafficFinding(
 ) {
   const staged = readSentinelStagedTrafficFinding(path, scope, requestId);
   if (!staged || staged.finding.snapshotDigest !== snapshotDigest) return;
+  const items = stagedTrafficItems(staged);
   const args = sentinelFindingMutationArguments("sentinel_report_finding", {
     ...Object.fromEntries(
       fields.sentinel_report_finding.map((key) => [key, staged.finding[key]]),
     ),
     requestId,
-    trafficEvidenceId: staged.traffic.evidenceId,
-    trafficDigest: staged.traffic.digest,
+    ...(Array.isArray(staged.traffic)
+      ? {
+        trafficRefs: items.map(({ evidenceId, digest }) => ({
+          evidenceId,
+          digest,
+        })),
+      }
+      : {
+        trafficEvidenceId: items[0].evidenceId,
+        trafficDigest: items[0].digest,
+      }),
   });
   if (!args) return;
   return {
     args,
     staged,
-    trafficBatch: [{
-      args: {
-        revision: scope.evidenceRevision,
-        evidenceId: staged.traffic.evidenceId,
-        digest: staged.traffic.digest,
-      },
-      stepIndex: staged.traffic.stepIndex,
-      sha256: staged.traffic.resultSha256,
-    }],
+    trafficBatch: items.map((
+      { evidenceId, digest, stepIndex, resultSha256 },
+    ) => ({
+      args: { revision: scope.evidenceRevision, evidenceId, digest },
+      stepIndex,
+      sha256: resultSha256,
+    })),
   };
 }
 
@@ -200,23 +252,12 @@ export function lookupSentinelFindingMutation(
       snapshotDigest,
     );
     if (pending) {
-      const link = readSentinelFindingTrafficWriteReceipt(path, {
-        caseId: scope.caseId,
-        evidenceRevision: scope.evidenceRevision,
-        taskId: scope.taskId,
-        assetId: scope.targetId,
-      }, requestId);
-      if (
-        !link || link.findingId !== receipt.id ||
-        link.trafficId !== pending.staged.traffic.evidenceId ||
-        link.trafficDigest !== pending.staged.traffic.digest ||
-        link.sourceStep?.stepIndex !== pending.staged.traffic.stepIndex ||
-        link.sourceStep.sha256 !== pending.staged.traffic.resultSha256
-      ) return;
+      const attached = readStagedTrafficLinks(path, pending.staged);
+      if (!attached || pending.staged.findingId !== receipt.id) return;
       const result = JSON.stringify({
         _classification: "INTERNAL",
         record: receipt,
-        link,
+        ...attached,
       });
       return result.length <= MAX_SENTINEL_FINDING_RESULT_CHARS
         ? {

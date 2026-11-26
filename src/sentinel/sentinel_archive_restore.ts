@@ -1,4 +1,8 @@
-import { decodeStagedTrafficFinding } from "./worker_finding_store.ts";
+import {
+  decodeStagedTrafficFinding,
+  stagedTrafficItems,
+  stagedTrafficLinkMatches,
+} from "./worker_finding_store.ts";
 import { parseOperatorRunAdmissionCategory } from "../core/operator_run_categories.ts";
 import { retainPortablePausedGraphCheckpoints } from "./adaptive_store.ts";
 import { decodeInconclusiveRecheck } from "./recheck_inconclusive.ts";
@@ -10,6 +14,7 @@ import {
   decodeSentinelFindingTrafficLink,
   decodeSentinelTrafficLinkAnnotation,
   MAX_FINDING_TRAFFIC_BATCH,
+  sentinelTrafficBatchBinding,
 } from "./finding_traffic_links.ts";
 import {
   parseSentinelModelRoute,
@@ -906,40 +911,66 @@ function validateArchivedTrafficFindingPublications(
         LEFT JOIN traffic_links AS links ON links.id = stage.link_id LIMIT 4097`)
         .all()
       : [];
-    if (published.length > 4096 || published.length !== attachments.length) {
+    if (published.length > 4096 || attachments.length > 4096) {
       throw new Error(
-        "Incomplete archived Sentinel finding traffic publication",
+        "Invalid archived Sentinel finding traffic publication count",
       );
     }
-    const byRequest = new Map(attachments.map((row) => {
-      const link = decodeSentinelFindingTrafficLink(row, caseId);
-      return [link.requestId, link] as const;
-    }));
+    const retained = attachments.map((row) =>
+      decodeSentinelFindingTrafficLink(row, caseId)
+    );
+    const byRequest = new Map(retained.map((link) => [link.requestId, link]));
+    const byId = new Map(retained.map((link) => [link.id, link]));
+    const used = new Set<string>();
+    const batches = links && table(links, "traffic_link_batches")
+      ? links.prepare("SELECT * FROM traffic_link_batches WHERE request_id = ?")
+      : undefined;
     for (const row of published) {
       const staged = decodeStagedTrafficFinding(row, caseId);
-      if (!staged) {
+      if (!staged || row.input !== row.saved) {
         throw new Error(
           "Invalid archived Sentinel finding traffic publication",
         );
       }
-      const { finding, traffic } = staged;
-      const link = byRequest.get(String(row.requestId));
+      const items = stagedTrafficItems(staged);
+      const batch = Array.isArray(staged.traffic) &&
+        batches?.get(staged.finding.requestId);
+      const bound = Array.isArray(staged.traffic)
+        ? batch && batch.run_id === staged.finding.runId &&
+            batch.revision === staged.finding.evidenceRevision &&
+            batch.finding_id === staged.findingId
+          ? (JSON.parse(String(batch.link_ids)) as string[]).map((id) =>
+            byId.get(id)
+          )
+          : []
+        : [byRequest.get(staged.finding.requestId)];
       if (
-        row.input !== row.saved || !link ||
-        link.findingId !== row.findingId ||
-        link.evidenceRevision !== finding.evidenceRevision ||
-        link.assetId !== finding.targetId ||
-        link.authority.kind !== "assignment" ||
-        link.authority.taskId !== finding.taskId ||
-        link.trafficId !== traffic.evidenceId ||
-        link.trafficDigest !== traffic.digest ||
-        link.sourceStep?.stepIndex !== traffic.stepIndex ||
-        link.sourceStep?.sha256 !== traffic.resultSha256
+        bound.length !== items.length ||
+        bound.some((link, index) =>
+          !link || used.has(link.id) ||
+          !stagedTrafficLinkMatches(staged, link, items[index], index)
+        )
       ) {
         throw new Error(
           "Mismatched archived Sentinel finding traffic publication",
         );
       }
+      if (
+        batch && sentinelTrafficBatchBinding(
+            caseId,
+            staged.finding.runId,
+            staged.finding.requestId,
+            bound.filter((link): link is NonNullable<typeof link> => !!link),
+          ) !== batch.binding
+      ) {
+        throw new Error("Invalid archived staged traffic batch binding");
+      }
+      for (const link of bound) used.add(link!.id);
+    }
+    if (used.size !== retained.length) {
+      throw new Error(
+        "Incomplete archived Sentinel finding traffic publication",
+      );
     }
   } finally {
     if (findings) findings.close();

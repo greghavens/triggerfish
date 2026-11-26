@@ -20,6 +20,8 @@ assert(state);
 const { taskId, input, traffic } = JSON.parse(
   await Deno.readTextFile(join(baseDir, "traffic-finding-fixture.json")),
 );
+const trafficReads: { revision: number; evidenceId: string; digest: string }[] =
+  traffic;
 const resultPath = join(baseDir, "traffic-finding-result.json");
 function record(event: string) {
   Deno.writeTextFileSync(
@@ -35,38 +37,41 @@ registry.register({
   complete(messages) {
     const results = messages.filter(({ role }) => role === "tool");
     if (phase === "resume") {
-      assertEquals(results.length, 3);
+      assertEquals(results.length, trafficReads.length + 2);
       assertEquals(JSON.parse(String(results[0].content)).taskId, taskId);
-      const opened = JSON.parse(String(results[1].content));
-      assertEquals(opened.receipt.digest, traffic.digest);
-      const committed = JSON.parse(String(results[2].content));
-      assertEquals(committed.link.findingId, committed.record.id);
+      assertEquals(
+        results.slice(1, -1).map(({ content }) =>
+          JSON.parse(String(content)).receipt.digest
+        ),
+        trafficReads.map(({ digest }) => digest),
+      );
+      const committed = JSON.parse(String(results.at(-1)?.content));
+      const links = committed.link ? [committed.link] : committed.links;
+      assertEquals(
+        links.map(({ findingId }: { findingId: string }) => findingId),
+        trafficReads.map(() => committed.record.id),
+      );
       Deno.writeTextFileSync(resultPath, JSON.stringify(committed));
     } else {
       assertEquals(phase, "interrupt");
     }
-    const call = results.length === 0
-      ? ["sentinel_assigned_target", {}]
+    const calls = results.length === 0
+      ? [{ name: "sentinel_assigned_target", args: {} }]
       : results.length === 1
-      ? ["sentinel_traffic_get", traffic]
-      : results.length === 2
-      ? ["sentinel_report_finding", input]
-      : undefined;
+      ? trafficReads.map((args) => ({ name: "sentinel_traffic_get", args }))
+      : results.length === trafficReads.length + 1
+      ? [{ name: "sentinel_report_finding", args: input }]
+      : [];
     return Promise.resolve({
-      content: call
+      content: calls.length
         ? ""
         : '{"summary":"Reviewed the committed finding.","followUps":[]}',
       usage: { inputTokens: 1, outputTokens: 1 },
-      toolCalls: call
-        ? [{
-          id: `traffic-finding-${results.length}`,
-          type: "function",
-          function: {
-            name: String(call[0]),
-            arguments: JSON.stringify(call[1]),
-          },
-        }]
-        : [],
+      toolCalls: calls.map(({ name, args }, index) => ({
+        id: `traffic-finding-${results.length}-${index}`,
+        type: "function" as const,
+        function: { name, arguments: JSON.stringify(args) },
+      })),
     });
   },
 });
@@ -118,7 +123,11 @@ const planner = createSentinelModelPlanner(path, (current, id, token) => {
         if (hook === "PRE_TOOL_CALL" && name === "sentinel_traffic_get") {
           record("traffic-pre");
           if (phase === "reclaim-crash") Deno.exit(0);
-          if (phase === "revoked") {
+          if (
+            phase === "revoked" &&
+            (input.tool_call as { args?: { evidenceId?: string } } | undefined)
+                ?.args?.evidenceId === trafficReads.at(-1)?.evidenceId
+          ) {
             sawRevocation = true;
             return Promise.resolve({
               allowed: false,
@@ -210,7 +219,10 @@ try {
     assert(events.includes(`${phase}:traffic-pre`));
   }
   if (phase === "resume") assert(events.includes("resume:report-pre"));
-  if (phase === "revoked") assert(!events.includes("revoked:report-pre"));
+  if (phase === "revoked") {
+    assert(sawRevocation, "The exact selected saved source was not denied");
+    assert(!events.includes("revoked:report-pre"));
+  }
 } finally {
   planner.stop();
   await gateway.stop();

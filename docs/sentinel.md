@@ -390,8 +390,9 @@ payload's SHA-256 before saving the file. The maximum assembled size is 64 KiB.
 
 A leased worker can include `trafficEvidenceId` and `trafficDigest` in
 `sentinel_report_finding` after opening that exact retained traffic receipt
-for its assigned asset. The finding becomes visible once its traffic link
-is durable. Recovery reauthorizes the saved source and goes through the
+for its assigned asset. Use `trafficRefs` for an ordered set of two to
+four exact evidence ID and digest pairs in place of the singular fields.
+The finding becomes visible once every selected link is durable. Recovery reauthorizes the saved source and goes through the
 normal tool hooks before completing an interrupted publication. The link
 retains the source assignment and tool step. Archives preserve completed
 publications and exclude unfinished attachments.

@@ -1,4 +1,8 @@
-import { openSentinelFindingTrafficLinks } from "../sentinel/finding_traffic_links.ts";
+import {
+  openSentinelFindingTrafficLinks,
+  type SentinelFindingTrafficLinkInput,
+  sentinelTrafficBatchMemberRequestId,
+} from "../sentinel/finding_traffic_links.ts";
 import { readSentinelTrafficReceipt } from "../sentinel/traffic_receipts.ts";
 import { sentinelTrafficAttachmentKey } from "./sentinel_finding_traffic_tool.ts";
 import {
@@ -15,7 +19,10 @@ import {
   executionRecheckScope,
   receiptRecheckCandidate,
 } from "./sentinel_execution_rechecks.ts";
-import { MAX_SENTINEL_FINDING_RESULT_CHARS } from "../sentinel/worker_finding_recovery.ts";
+import {
+  MAX_SENTINEL_FINDING_RESULT_CHARS,
+  parseSentinelInitialTrafficSelection,
+} from "../sentinel/worker_finding_recovery.ts";
 /** Exact case/lease gate for worker findings and retained remediation evidence. */
 import type { ToolDefinition } from "../core/types/tool.ts";
 import {
@@ -105,6 +112,12 @@ export const sentinelFindingWriteTools: readonly ToolDefinition[] = [
       requestId: exactId,
       title: summary,
       summary,
+      trafficRefs: {
+        type: "array",
+        description:
+          "Optional ordered set of two to four already-opened exact {evidenceId,digest} traffic receipts. Omit singular traffic fields when using this set.",
+        items: { type: "object" },
+      },
       trafficEvidenceId: {
         type: "string",
         description:
@@ -658,78 +671,99 @@ export function executeSentinelWorkerFindingTool(
           if (
             initial && typeof title === "string" &&
             (args.trafficEvidenceId !== undefined ||
-              args.trafficDigest !== undefined)
+              args.trafficDigest !== undefined ||
+              args.trafficRefs !== undefined)
           ) {
-            const { trafficEvidenceId, trafficDigest } = args;
-            if (
-              typeof trafficEvidenceId !== "string" ||
-              typeof trafficDigest !== "string"
-            ) return;
-            const traffic = readSentinelTrafficReceipt(
-              scope.snapshotPath,
-              state.revision,
-              {
-                evidenceId: trafficEvidenceId,
-                digest: trafficDigest,
-              },
-              asset,
-            );
-            const step = traffic &&
-              trafficReads?.get(sentinelTrafficAttachmentKey(
-                caseId,
+            const selected = parseSentinelInitialTrafficSelection(args);
+            if (!selected) return;
+            const attachments = [];
+            for (
+              const { evidenceId: trafficEvidenceId, digest: trafficDigest }
+                of selected.refs
+            ) {
+              const traffic = readSentinelTrafficReceipt(
+                scope.snapshotPath,
                 state.revision,
+                {
+                  evidenceId: trafficEvidenceId,
+                  digest: trafficDigest,
+                },
                 asset,
-                trafficEvidenceId,
-                trafficDigest,
-                traffic.family,
-              ));
-            if (!traffic || !step) return;
-            // A recoverable compound result includes both receipts. Reserve
-            // space for their fixed fields and generated identifiers.
+              );
+              const step = traffic &&
+                trafficReads?.get(sentinelTrafficAttachmentKey(
+                  caseId,
+                  state.revision,
+                  asset,
+                  trafficEvidenceId,
+                  trafficDigest,
+                  traffic.family,
+                ));
+              if (!traffic || !step) return;
+              attachments.push({
+                traffic,
+                step,
+                staged: {
+                  evidenceId: trafficEvidenceId,
+                  digest: trafficDigest,
+                  stepIndex: step.stepIndex,
+                  resultSha256: step.sha256,
+                },
+              });
+            }
             if (
-              JSON.stringify([{ ...receipt, title }, {
-                    caseId,
-                    asset,
-                    trafficEvidenceId,
-                  }]).length +
-                  1200 > MAX_SENTINEL_FINDING_RESULT_CHARS
+              JSON.stringify([
+                    { ...receipt, title },
+                    ...attachments.map(({ staged }) => ({
+                      caseId,
+                      asset,
+                      id: staged.evidenceId,
+                    })),
+                  ]).length + 800 + 500 * attachments.length >
+                MAX_SENTINEL_FINDING_RESULT_CHARS
             ) return;
-            const staged = store.stageTrafficFinding({ ...receipt, title }, {
-              evidenceId: trafficEvidenceId,
-              digest: trafficDigest,
-              stepIndex: step.stepIndex,
-              resultSha256: step.sha256,
-            });
+            const stagedItems = attachments.map(({ staged }) => staged);
+            const staged = store.stageTrafficFinding(
+              { ...receipt, title },
+              selected.batch ? stagedItems : stagedItems[0],
+            );
             if (!staged) return;
+            const inputs: SentinelFindingTrafficLinkInput[] = attachments.map((
+              { traffic, step },
+              index,
+            ) => ({
+              caseId,
+              evidenceRevision: state.revision,
+              assetId: asset,
+              findingId: staged.findingId,
+              reportVersion: 1,
+              trafficId: traffic.evidenceId,
+              trafficDigest: traffic.digest,
+              trafficSource: traffic.family,
+              authority: { kind: "assignment", taskId: receipt.taskId },
+              sourceStep: step,
+              requestId: selected.batch
+                ? sentinelTrafficBatchMemberRequestId(receipt.requestId, index)
+                : receipt.requestId,
+            }));
+            const current = () =>
+              !signal?.aborted && assignedTask(scope)?.id === receipt.taskId;
             const links = openSentinelFindingTrafficLinks(scope.snapshotPath);
             try {
-              if (
-                !links.recordStagedPublication({
-                  caseId,
-                  evidenceRevision: state.revision,
-                  assetId: asset,
-                  findingId: staged.findingId,
-                  reportVersion: 1,
-                  trafficId: trafficEvidenceId,
-                  trafficDigest,
-                  trafficSource: traffic.family,
-                  authority: {
-                    kind: "assignment",
-                    taskId: scope.assignedTaskId,
-                  },
-                  sourceStep: step,
-                  requestId: receipt.requestId,
-                }, () =>
-                  !signal?.aborted &&
-                  assignedTask(scope)?.id === scope.assignedTaskId)
-              ) return;
+              const attached = selected.batch
+                ? links.recordBatch(
+                  receipt.requestId,
+                  receipt.runId,
+                  inputs,
+                  current,
+                  true,
+                )
+                : links.recordStagedPublication(inputs[0], current);
+              if (!attached) return;
             } finally {
               links.close();
             }
-            if (
-              signal?.aborted ||
-              assignedTask(scope)?.id !== scope.assignedTaskId
-            ) return;
+            if (!current()) return;
             const saved = store.publishTrafficFinding(
               receipt.requestId,
               notify,

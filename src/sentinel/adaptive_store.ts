@@ -368,7 +368,7 @@ function normalizeWorkerCheckpoint(
           tool.content !== saved.result ||
           ((trafficAttach ||
             (finding === "sentinel_report_finding" &&
-              "trafficDigest" in claimed)) &&
+              ("trafficDigest" in claimed || "trafficRefs" in claimed))) &&
             (saved.trafficBatch
               ? saved.trafficBatch.some(({ args, stepIndex, sha256 }) =>
                 !isDeepStrictEqual(trafficReads.get(stepIndex), args) ||

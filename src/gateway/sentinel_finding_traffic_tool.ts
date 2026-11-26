@@ -17,6 +17,7 @@ import {
   previewSentinelFindingTrafficBatch,
   sentinelFindingTrafficEvidenceVersion,
   type SentinelFindingTrafficLinkInput,
+  sentinelTrafficBatchMemberRequestId,
   sentinelTrafficEvidenceAnnotation,
   sentinelTrafficEvidenceRoles,
 } from "../sentinel/finding_traffic_links.ts";
@@ -479,12 +480,10 @@ function attachReporterBatch(
       assetId,
     );
     if (receipt?.family !== family || !receipt) return unavailable;
-    const hash = createHash("sha256").update(
-      JSON.stringify(["sentinel-traffic-link-batch", args.requestId, index]),
-    ).digest("hex");
-    const requestId = `${hash.slice(0, 8)}-${hash.slice(8, 12)}-4${
-      hash.slice(13, 16)
-    }-8${hash.slice(17, 20)}-${hash.slice(20, 32)}`;
+    const requestId = sentinelTrafficBatchMemberRequestId(
+      args.requestId,
+      index,
+    );
     inputs.push({
       caseId,
       evidenceRevision: args.revision,

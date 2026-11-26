@@ -16,7 +16,13 @@ import {
   sentinelFindingDispositions,
   sentinelFindingSeverities,
 } from "./graph.ts";
-import { readSentinelFindingTrafficWriteReceipt } from "./finding_traffic_links.ts";
+import {
+  MAX_FINDING_TRAFFIC_BATCH,
+  readSentinelFindingTrafficAssignmentBatch,
+  readSentinelFindingTrafficWriteReceipt,
+  type SentinelFindingTrafficLink,
+  sentinelTrafficBatchMemberRequestId,
+} from "./finding_traffic_links.ts";
 import { assertOperatorSourceDirectoryInfo } from "./source_snapshot_lock.ts";
 
 export interface SentinelWorkerFindingReceiptScope {
@@ -51,8 +57,89 @@ export interface SentinelFindingTrafficPublication {
 type StagedFindingPublication = {
   readonly finding: ReturnType<typeof normalizeFinding>;
   readonly findingId: string;
-  readonly traffic: SentinelFindingTrafficPublication;
+  readonly traffic: SentinelFindingTrafficPublications;
 };
+
+type SentinelFindingTrafficPublications =
+  | SentinelFindingTrafficPublication
+  | SentinelFindingTrafficPublication[];
+
+export function stagedTrafficItems(staged: StagedFindingPublication) {
+  return Array.isArray(staged.traffic) ? staged.traffic : [staged.traffic];
+}
+
+function canonicalFindingTraffic(raw: SentinelFindingTrafficPublications) {
+  if (!Array.isArray(raw)) return canonicalFindingTrafficPublication(raw);
+  if (raw.length < 2 || raw.length > MAX_FINDING_TRAFFIC_BATCH) return;
+  const items: SentinelFindingTrafficPublication[] = [];
+  for (const item of raw) {
+    const selected = canonicalFindingTrafficPublication(item);
+    if (
+      !selected ||
+      items.some(({ evidenceId }) => evidenceId === selected.evidenceId)
+    ) return;
+    items.push(selected);
+  }
+  return items;
+}
+
+export function stagedTrafficLinkMatches(
+  staged: StagedFindingPublication,
+  link: SentinelFindingTrafficLink,
+  item: SentinelFindingTrafficPublication,
+  index = 0,
+) {
+  const { finding, findingId } = staged;
+  return link.caseId === finding.caseId && link.findingId === findingId &&
+    link.evidenceRevision === finding.evidenceRevision &&
+    link.reportVersion === 1 && link.recheckId === undefined &&
+    link.requestId ===
+      (Array.isArray(staged.traffic)
+        ? sentinelTrafficBatchMemberRequestId(finding.requestId, index)
+        : finding.requestId) &&
+    link.assetId === finding.targetId &&
+    link.authority.kind === "assignment" &&
+    link.authority.taskId === finding.taskId &&
+    link.trafficId === item.evidenceId && link.trafficDigest === item.digest &&
+    link.sourceStep?.stepIndex === item.stepIndex &&
+    link.sourceStep.sha256 === item.resultSha256;
+}
+
+export function readStagedTrafficLinks(
+  path: string,
+  staged: StagedFindingPublication,
+) {
+  const { finding } = staged;
+  const scope = {
+    caseId: finding.caseId,
+    runId: finding.runId,
+    evidenceRevision: finding.evidenceRevision,
+    assetId: finding.targetId,
+    taskId: finding.taskId,
+  };
+  if (Array.isArray(staged.traffic)) {
+    const batch = readSentinelFindingTrafficAssignmentBatch(
+      path,
+      scope,
+      finding.requestId,
+    );
+    const items = staged.traffic;
+    return batch && batch.links.length === items.length &&
+        batch.links.every((link, index) =>
+          stagedTrafficLinkMatches(staged, link, items[index], index)
+        )
+      ? { links: batch.links }
+      : undefined;
+  }
+  const link = readSentinelFindingTrafficWriteReceipt(
+    path,
+    scope,
+    finding.requestId,
+  );
+  return link && stagedTrafficLinkMatches(staged, link, staged.traffic)
+    ? { link }
+    : undefined;
+}
 
 function canonicalFindingTrafficPublication(
   raw: SentinelFindingTrafficPublication,
@@ -415,7 +502,7 @@ export function decodeStagedTrafficFinding(
 ) {
   if (typeof row.input !== "string" || typeof row.traffic !== "string") return;
   const finding = normalizeFinding(JSON.parse(row.input));
-  const traffic = canonicalFindingTrafficPublication(JSON.parse(row.traffic));
+  const traffic = canonicalFindingTraffic(JSON.parse(row.traffic));
   if (
     !traffic || finding.caseId !== caseId ||
     finding.requestId !== row.requestId ||
@@ -513,10 +600,10 @@ export function openSentinelWorkerFindingStore(
 
   function stageTrafficFinding(
     raw: SentinelWorkerFindingInput,
-    traffic: SentinelFindingTrafficPublication,
+    traffic: SentinelFindingTrafficPublications,
   ) {
     const finding = normalizeFinding(raw);
-    const selected = canonicalFindingTrafficPublication(traffic);
+    const selected = canonicalFindingTraffic(traffic);
     if (
       !selected || finding.caseId !== caseBinding ||
       redactCredentialText(finding.title) !== finding.title ||
@@ -967,21 +1054,9 @@ export function openSentinelWorkerFindingStore(
     ) {
       const pending = readStagedPublication(requestId);
       if (!pending) return;
-      const { finding, findingId, traffic } = pending;
-      const link = readSentinelFindingTrafficWriteReceipt(snapshotPath, {
-        caseId: finding.caseId,
-        evidenceRevision: finding.evidenceRevision,
-        assetId: finding.targetId,
-        taskId: finding.taskId,
-      }, requestId);
-      if (
-        !link || link.findingId !== findingId ||
-        link.trafficId !== traffic.evidenceId ||
-        link.trafficDigest !== traffic.digest ||
-        link.sourceStep?.stepIndex !== traffic.stepIndex ||
-        link.sourceStep.sha256 !== traffic.resultSha256
-      ) return;
-      return { record: write(finding, onCommit, pending), link };
+      const attached = readStagedTrafficLinks(snapshotPath, pending);
+      return attached &&
+        { record: write(pending.finding, onCommit, pending), ...attached };
     },
     stageTrafficFinding,
     readStagedPublication,

@@ -372,6 +372,27 @@ function prepareTrafficBatch(
   return { canonical, binding, saved: undefined };
 }
 
+export function sentinelTrafficBatchBinding(
+  caseId: string,
+  runId: string,
+  requestId: string,
+  links: readonly SentinelFindingTrafficLink[],
+) {
+  return prepareTrafficBatch(caseId, requestId, runId, links)?.binding;
+}
+
+export function sentinelTrafficBatchMemberRequestId(
+  requestId: string,
+  index: number,
+) {
+  const hash = createHash("sha256").update(
+    JSON.stringify(["sentinel-traffic-link-batch", requestId, index]),
+  ).digest("hex");
+  return `${hash.slice(0, 8)}-${hash.slice(8, 12)}-4${hash.slice(13, 16)}-8${
+    hash.slice(17, 20)
+  }-${hash.slice(20, 32)}`;
+}
+
 function sameBatchSource(
   link: SentinelFindingTrafficLink,
   expected: SentinelFindingTrafficLinkInput,
@@ -737,11 +758,22 @@ function openLinks(snapshotPath: string, readOnly: boolean, now: () => number) {
       : undefined;
   }
 
+  function hidePublicationLinks(links: readonly SentinelFindingTrafficLink[]) {
+    db.exec(`CREATE TABLE IF NOT EXISTS staged_publication_links (
+      link_id TEXT PRIMARY KEY REFERENCES traffic_links(id)
+    ) STRICT`);
+    const insert = db.prepare(
+      "INSERT OR IGNORE INTO staged_publication_links VALUES (?)",
+    );
+    for (const link of links) insert.run(link.id);
+  }
+
   function recordBatch(
     requestId: string,
     runId: string,
     inputs: readonly SentinelFindingTrafficLinkInput[],
     verifyNew: (input: SentinelFindingTrafficLinkInput) => boolean,
+    stagedPublication = false,
   ) {
     try {
       return transaction(db, () => {
@@ -790,6 +822,7 @@ function openLinks(snapshotPath: string, readOnly: boolean, now: () => number) {
           preview.binding,
           JSON.stringify(links.map(({ id }) => id)),
         );
+        if (stagedPublication) hidePublicationLinks(links);
         return links;
       });
     } catch (error) {
@@ -984,11 +1017,7 @@ function openLinks(snapshotPath: string, readOnly: boolean, now: () => number) {
       return transaction(db, () => {
         const link = recordOne(input, verifyNew);
         if (!link) return;
-        db.exec(`CREATE TABLE IF NOT EXISTS staged_publication_links (
-          link_id TEXT PRIMARY KEY REFERENCES traffic_links(id)
-        ) STRICT`);
-        db.prepare("INSERT OR IGNORE INTO staged_publication_links VALUES (?)")
-          .run(link.id);
+        hidePublicationLinks([link]);
         return link;
       });
     },

@@ -1038,6 +1038,11 @@ export function captureStoppedSentinelCaseArtifacts(
               for (const { link_id, finding_id } of staged) {
                 if (findings.has(String(finding_id))) continue;
                 const id = String(link_id);
+                if (tableExists(db, "traffic_link_batches")) {
+                  db.prepare(`DELETE FROM traffic_link_batches WHERE EXISTS (
+                    SELECT 1 FROM json_each(link_ids) WHERE value = ?
+                  )`).run(id);
+                }
                 db.prepare(
                   "DELETE FROM staged_publication_links WHERE link_id = ?",
                 ).run(id);

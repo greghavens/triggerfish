@@ -5327,7 +5327,7 @@ async function verifyInitialTrafficPublication(
   state: State,
   source: ReturnType<typeof assignedLease>,
   input: Record<string, unknown>,
-  traffic: { revision: number; evidenceId: string; digest: string },
+  traffic: readonly { revision: number; evidenceId: string; digest: string }[],
   assetId: string,
   neighbor: { evidenceId: string; digest: string },
   mode: "resume" | "revoked" | "stale",
@@ -5338,19 +5338,32 @@ async function verifyInitialTrafficPublication(
     revision: state.revision,
     runId: state.plan.runId,
   };
+  const batch = traffic.length > 1;
+  const refs = traffic.map(({ evidenceId, digest }) => ({
+    evidenceId,
+    digest,
+  }));
+  const selectedArgs = (items: typeof refs) =>
+    batch ? { trafficRefs: items } : {
+      trafficEvidenceId: items[0].evidenceId,
+      trafficDigest: items[0].digest,
+    };
+  const different = {
+    evidenceId: neighbor.evidenceId,
+    digest: neighbor.digest,
+  };
+  const stale = { evidenceId: refs.at(-1)!.evidenceId, digest: "f".repeat(64) };
   const denied = await workerTurn(path, source, [
     [tool(assigned)],
-    [tool("sentinel_traffic_get", traffic)],
+    traffic.map((value) => tool("sentinel_traffic_get", value)),
     [
       tool(report, {
         ...input,
-        trafficEvidenceId: neighbor.evidenceId,
-        trafficDigest: neighbor.digest,
+        ...selectedArgs([...refs.slice(0, -1), different]),
       }),
       tool(report, {
         ...input,
-        trafficEvidenceId: traffic.evidenceId,
-        trafficDigest: "f".repeat(64),
+        ...selectedArgs([...refs.slice(0, -1), stale]),
       }),
     ],
   ]);
@@ -5386,11 +5399,7 @@ async function verifyInitialTrafficPublication(
     join(baseDir, "traffic-finding-fixture.json"),
     JSON.stringify({
       taskId: source.assignedTaskId,
-      input: {
-        ...input,
-        trafficEvidenceId: traffic.evidenceId,
-        trafficDigest: traffic.digest,
-      },
+      input: { ...input, ...selectedArgs(refs) },
       traffic,
     }),
     { mode: 0o600 },
@@ -5418,7 +5427,7 @@ async function verifyInitialTrafficPublication(
     assertEquals(
       linksDb.prepare("SELECT COUNT(*) AS count FROM staged_publication_links")
         .get()?.count,
-      1,
+      traffic.length,
     );
   } finally {
     linksDb.close();
@@ -5461,16 +5470,57 @@ async function verifyInitialTrafficPublication(
   const events =
     (await Deno.readTextFile(join(baseDir, "traffic-finding-events.log")))
       .trim().split("\n");
-  assertEquals(events.filter((event) => event.endsWith(":traffic-result")), [
-    "interrupt:traffic-result",
-  ]);
+  assertEquals(
+    events.filter((event) => event.endsWith(":traffic-result")),
+    traffic.map(() => "interrupt:traffic-result"),
+  );
   assert(
     events.includes("interrupt:report-pre") &&
       events.includes("interrupt:interrupted"),
   );
   assert(events.includes(`${mode}:traffic-pre`));
+  const restoreArchive = async () => {
+    assert(stopSentinelAssessment(path));
+    const archiveId = crypto.randomUUID();
+    await withFindingAssignmentGateway(
+      baseDir,
+      () => Promise.resolve(true),
+      async (turn) => {
+        assertEquals(
+          JSON.parse(
+            await turn({ ...ref, action: "archive", requestId: archiveId }),
+          ).receipt.status,
+          "succeeded",
+        );
+      },
+    );
+    await Deno.rename(
+      dirname(path),
+      join(baseDir, "before-traffic-finding-restore"),
+    );
+    await withFindingAssignmentGateway(
+      baseDir,
+      () => Promise.resolve(true),
+      async (turn) => {
+        assertEquals(
+          JSON.parse(
+            await turn({
+              ...ref,
+              action: "restore",
+              requestId: crypto.randomUUID(),
+              archiveId,
+            }),
+          ).receipt.status,
+          "succeeded",
+        );
+      },
+    );
+  };
   if (mode === "revoked") {
     assert(!events.includes("revoked:report-pre"));
+    assertEquals(readSentinelWorkerFindingHistory(path), []);
+    assertEquals(listSentinelFindingTrafficLinks(path), []);
+    await restoreArchive();
     assertEquals(readSentinelWorkerFindingHistory(path), []);
     assertEquals(listSentinelFindingTrafficLinks(path), []);
     return;
@@ -5482,59 +5532,62 @@ async function verifyInitialTrafficPublication(
   const recovered = JSON.parse(
     await Deno.readTextFile(join(baseDir, "traffic-finding-result.json")),
   );
-  assertEquals(recovered.link.findingId, recovered.record.id);
-  assertEquals(recovered.link.trafficDigest, traffic.digest);
-  assertEquals(recovered.link.authority, {
-    kind: "assignment",
-    taskId: source.assignedTaskId,
-  });
-  assertEquals(recovered.link.sourceStep?.stepIndex, 1);
+  const attached: SentinelFindingTrafficLink[] = recovered.links ??
+    [recovered.link];
+  assertEquals(
+    attached.map(({ findingId }) => findingId),
+    traffic.map(() => recovered.record.id),
+  );
+  assertEquals(
+    attached.map(({ trafficDigest }) => trafficDigest),
+    traffic.map(({ digest }) => digest),
+  );
+  assertEquals(
+    attached.map(({ authority }) => authority),
+    traffic.map(() => ({
+      kind: "assignment" as const,
+      taskId: source.assignedTaskId,
+    })),
+  );
+  assertEquals(
+    attached.map(({ sourceStep }) => sourceStep?.stepIndex),
+    traffic.map((_, index) => index + 1),
+  );
   assertEquals(recovered.record.runId, state.plan.runId);
   assertEquals(recovered.record.targetId, assetId);
   assertEquals(readSentinelWorkerFindingHistory(path), [recovered.record]);
-  assertEquals(listSentinelFindingTrafficLinks(path), [recovered.link]);
-  assert(stopSentinelAssessment(path));
-  const archiveId = crypto.randomUUID();
-  await withFindingAssignmentGateway(
-    baseDir,
-    () => Promise.resolve(true),
-    async (turn) => {
-      assertEquals(
-        JSON.parse(
-          await turn({ ...ref, action: "archive", requestId: archiveId }),
-        ).receipt.status,
-        "succeeded",
-      );
-    },
+  const byId = (
+    left: SentinelFindingTrafficLink,
+    right: SentinelFindingTrafficLink,
+  ) => left.id.localeCompare(right.id);
+  assertEquals(
+    listSentinelFindingTrafficLinks(path).sort(byId),
+    attached.toSorted(byId),
   );
-  await Deno.rename(
-    dirname(path),
-    join(baseDir, "before-traffic-finding-restore"),
-  );
-  await withFindingAssignmentGateway(
-    baseDir,
-    () => Promise.resolve(true),
-    async (turn) => {
-      assertEquals(
-        JSON.parse(
-          await turn({
-            ...ref,
-            action: "restore",
-            requestId: crypto.randomUUID(),
-            archiveId,
-          }),
-        ).receipt.status,
-        "succeeded",
-      );
-    },
-  );
+  const readTidepoolLinks = async () => {
+    let links: SentinelFindingTrafficLink[] = [];
+    await withTidepool(baseDir, async (_list, _provenance, request) => {
+      const result = await request("export", {
+        format: "provenance",
+        revision: state.revision,
+        caseId: ref.id,
+      });
+      assertEquals(result.type, "export");
+      assertEquals(result.caseId, ref.id);
+      links = JSON.parse(String(result.content)).findingTrafficLinks;
+    });
+    return links;
+  };
+  const liveTidepoolLinks = await readTidepoolLinks();
+  assertEquals(liveTidepoolLinks.toSorted(byId), attached.toSorted(byId));
+  await restoreArchive();
   const traceQuery = {
     action: "worker_trace_result",
     kind: ref.kind,
     id: ref.id,
     revision: ref.revision,
     taskId: source.assignedTaskId,
-    stepIndices: [2],
+    stepIndices: [traffic.length + 1],
   };
   await withFindingAssignmentGateway(
     baseDir,
@@ -5558,20 +5611,9 @@ async function verifyInitialTrafficPublication(
     path,
     ref.id,
     state.revision,
-    recovered.link,
+    attached[0],
   );
-  await withTidepool(baseDir, async (_list, _provenance, request) => {
-    const result = await request("export", {
-      format: "provenance",
-      revision: state.revision,
-      caseId: ref.id,
-    });
-    assertEquals(result.type, "export");
-    assertEquals(result.caseId, ref.id);
-    assertEquals(JSON.parse(String(result.content)).findingTrafficLinks, [
-      recovered!.link,
-    ]);
-  });
+  assertEquals(await readTidepoolLinks(), liveTidepoolLinks);
 }
 
 async function verifyTidepoolTrafficDownload(
@@ -5830,7 +5872,7 @@ async function testScopedReporterRestart(
         state,
         source,
         input,
-        traffic,
+        trafficRecords,
         service.assetId,
         neighborReceipt,
         initialPublication,
@@ -6460,6 +6502,12 @@ async function testScopedReporterRestart(
 
 Deno.test("Sentinel resumes a staged finding and traffic receipt through root dispatch", () =>
   testScopedReporterRestart(false, false, "resume"));
+
+Deno.test("Sentinel publishes a finding with an exact retained traffic set after restart", () =>
+  testScopedReporterRestart(true, false, "resume"));
+
+Deno.test("Revoking one source prevents publication of a staged finding traffic set", () =>
+  testScopedReporterRestart(true, false, "revoked"));
 
 Deno.test("Revoked traffic source policy blocks staged finding recovery across a gateway restart", () =>
   testScopedReporterRestart(false, false, "revoked"));

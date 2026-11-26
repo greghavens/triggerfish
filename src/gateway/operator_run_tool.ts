@@ -8682,33 +8682,38 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
                   digest,
                 );
                 if (staged) {
-                  const source = staged.trafficBatch[0];
-                  const sourceStep = savedStep(history, source.stepIndex);
-                  if (
-                    sourceStep?.tool !== SENTINEL_TRAFFIC_READ ||
-                    sourceStep.outcome !== "returned" ||
-                    sourceStep.trafficRead?.sha256 !== source.sha256 ||
-                    !await authorize(scope, SENTINEL_TRAFFIC_READ, source.args)
-                  ) return unavailable;
-                  const visible = readProjectedSentinelTrafficReceipt(
-                    path,
-                    ref.id,
-                    ref.revision,
-                    source.args,
-                    targetId,
-                  );
-                  if (!visible) return unavailable;
-                  const text = JSON.stringify(visible);
-                  if (
-                    createHash("sha256").update(text).digest("hex") !==
-                      source.sha256 ||
-                    !await authorize(
-                      scope,
-                      SENTINEL_TRAFFIC_READ,
+                  for (const source of staged.trafficBatch) {
+                    const sourceStep = savedStep(history, source.stepIndex);
+                    if (
+                      sourceStep?.tool !== SENTINEL_TRAFFIC_READ ||
+                      sourceStep.outcome !== "returned" ||
+                      sourceStep.trafficRead?.sha256 !== source.sha256 ||
+                      !await authorize(
+                        scope,
+                        SENTINEL_TRAFFIC_READ,
+                        source.args,
+                      )
+                    ) return unavailable;
+                    const visible = readProjectedSentinelTrafficReceipt(
+                      path,
+                      ref.id,
+                      ref.revision,
                       source.args,
-                      text,
-                    )
-                  ) return unavailable;
+                      targetId,
+                    );
+                    if (!visible) return unavailable;
+                    const text = JSON.stringify(visible);
+                    if (
+                      createHash("sha256").update(text).digest("hex") !==
+                        source.sha256 ||
+                      !await authorize(
+                        scope,
+                        SENTINEL_TRAFFIC_READ,
+                        source.args,
+                        text,
+                      )
+                    ) return unavailable;
+                  }
                   const compound = lookupSentinelFindingMutation(
                     path,
                     writeScope,
