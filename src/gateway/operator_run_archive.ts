@@ -347,6 +347,12 @@ export async function executeOperatorRunArchive(
     const recovering = prior?.status === "pending";
     if (prior && (!recovering || !lock)) return { receipt: prior };
     if (!lock) return unavailable;
+    using packageLock = action === "restore" && request !== id
+      ? lockRunArchiveAction(directory, id)
+      : undefined;
+    if (action === "restore" && request !== id && !packageLock) {
+      return unavailable;
+    }
     const source = action === "restore" ? journal.readArchived(id) : undefined;
     if (action === "restore") {
       if (

@@ -414,6 +414,7 @@ import { executeOperatorAssetWithdrawal } from "./operator_asset_withdrawal.ts";
 import { executeOperatorRunArchive } from "./operator_run_archive.ts";
 import { executeOperatorRunArchiveBatch } from "./operator_run_archive_batch.ts";
 import { executeOperatorArchiveCatalog } from "./operator_run_archive_catalog.ts";
+import { executeOperatorArchivePurge } from "./operator_run_archive_purge.ts";
 import {
   executeAssessmentTemplates,
   parseAssessmentTemplateSelector,
@@ -549,6 +550,8 @@ export const operatorRunTool: ToolDefinition = {
         "assessment_templates",
         "set_assessment_template",
         "withdraw_assessment_template",
+        "purge_archive",
+        "purge_archives",
         "archive_runs",
         "restore_runs",
         "approval_history",
@@ -5119,6 +5122,23 @@ ${JSON.stringify({ run: ref, runId: exactRunId, turn: selected })}`,
           context.authorizeOwnerRunCall,
         );
         return result ? safeProjection(result) : unavailable;
+      }
+      if (action === "purge_archive" || action === "purge_archives") {
+        if (
+          !context?.authenticatedOwnerSessionId ||
+          !context.authorizeOwnerRunCall ||
+          !canFlowTo("INTERNAL", context.ceiling ?? "PUBLIC")
+        ) return unavailable;
+        const result = await executeOperatorArchivePurge(
+          options.baseDir,
+          args,
+          context.authorizeOwnerRunCall,
+          options.confirm,
+        );
+        if (!result) return unavailable;
+        return "declined" in result
+          ? "Error: The operator declined the run action."
+          : safeProjection(result);
       }
       if (action === "archive_runs" || action === "restore_runs") {
         const ceiling = context?.ceiling ?? "PUBLIC";

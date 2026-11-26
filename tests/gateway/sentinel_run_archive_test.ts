@@ -1,3 +1,4 @@
+import { openRunArchiveActions } from "../../src/core/run_archive_actions.ts";
 import {
   projectRepositoryVisibility,
   SENTINEL_LIVE_REPOSITORY_VISIBILITY,
@@ -258,7 +259,9 @@ async function withGateway(
 
       const allowed = (visibility?.allowsHook(hook, input) ?? true) &&
         !(policy.denyArchive && hook === "PRE_TOOL_CALL" &&
-          call?.args?.action === "archive") &&
+          ["archive", "purge_archive", "purge_archives"].includes(
+            String(call?.args?.action),
+          )) &&
         !(policy.denyReportAmendment && hook === "PRE_TOOL_CALL" &&
           call?.args?.action === "amend_finding_report") &&
         !(policy.denyDispositionReview && hook === "PRE_TOOL_CALL" &&
@@ -6465,3 +6468,135 @@ Deno.test("gateway reopens archived planner coverage totals only with the full c
 
 Deno.test("gateway reauthorizes archived worker provenance search and exact nodes", () =>
   verifyPlannerArchive("worker-provenance"));
+
+Deno.test("Owner gateway reviews exact single and batch archive purge and resumes an admitted quarantine", async () => {
+  const baseDir = await Deno.makeTempDir();
+  const directory = join(baseDir, "data", "run-archives");
+  try {
+    const refs = ["purge-one", "purge-two", "purge-recover", "purge-current"]
+      .map(
+        (id) => ({ kind: "sentinel", id, archiveId: crypto.randomUUID() }),
+      );
+    const targets:
+      (typeof refs[number] & { revision: number; runId: string })[] = [];
+    for (const ref of refs) {
+      const path = resolveSentinelCasePath(baseDir, ref.id);
+      await Deno.mkdir(dirname(path), { recursive: true });
+      await Deno.writeTextFile(
+        path,
+        JSON.stringify({
+          version: 1,
+          nodes: [{ id: "app", kind: "asset", label: "Defensive application" }],
+          edges: [],
+        }),
+      );
+      const state = startSentinelAssessment(path);
+      assert(state.plan.runId);
+      assert(stopSentinelAssessment(path));
+      targets.push({
+        ...ref,
+        revision: state.revision,
+        runId: state.plan.runId,
+      });
+    }
+    await withGateway(baseDir, async (turn) => {
+      for (const { archiveId, ...ref } of targets) {
+        const archived = JSON.parse(
+          await turn({
+            action: "archive",
+            ...ref,
+            requestId: archiveId,
+          }),
+        );
+        assertEquals(archived.receipt.status, "succeeded");
+      }
+    });
+    const [one, two, recovering, current] = targets;
+    for (const target of [one, two, recovering]) {
+      const state = startSentinelAssessment(
+        resolveSentinelCasePath(baseDir, target.id),
+      );
+      assert(state.plan.runId !== target.runId);
+    }
+    const single = {
+      action: "purge_archive",
+      ...one,
+      requestId: crypto.randomUUID(),
+    };
+    await withGateway(baseDir, async (turn, approvals, policy) => {
+      policy.denyArchive = true;
+      assert(!(await turn(single)).includes("succeeded"));
+      assertEquals(approvals.length, 0);
+      policy.denyArchive = false;
+      policy.declineConfirmation = true;
+      assert((await turn(single)).includes("declined"));
+      assert((await Deno.lstat(join(directory, one.archiveId))).isDirectory);
+      policy.declineConfirmation = false;
+      const manifest = join(directory, one.archiveId, "manifest.json");
+      const priorManifest = await Deno.readTextFile(manifest);
+      policy.afterConfirmation = () =>
+        Deno.writeTextFileSync(
+          manifest,
+          "{}",
+        );
+      assert(!(await turn(single)).includes("succeeded"));
+      assert((await Deno.lstat(join(directory, one.archiveId))).isDirectory);
+      policy.afterConfirmation = undefined;
+      await Deno.writeTextFile(manifest, priorManifest);
+      const succeeded = JSON.parse(await turn(single));
+      assertEquals(succeeded.receipt.status, "succeeded");
+      assertEquals(JSON.parse(await turn(single)), succeeded);
+      await assertRejects(
+        () => Deno.lstat(join(directory, one.archiveId)),
+        Deno.errors.NotFound,
+      );
+      const batch = {
+        action: "purge_archives",
+        requestId: crypto.randomUUID(),
+        runTargets: [two, current],
+      };
+      const result = JSON.parse(await turn(batch));
+      assertEquals(
+        result.outcomes.map((outcome: {
+          receipt?: { status: string };
+        }) => outcome.receipt?.status),
+        ["succeeded", undefined],
+      );
+      assertEquals(JSON.parse(await turn(batch)), result);
+      assert(
+        (await Deno.lstat(join(directory, current.archiveId))).isDirectory,
+      );
+    });
+    const resume = {
+      action: "purge_archive",
+      ...recovering,
+      requestId: crypto.randomUUID(),
+    };
+    const journal = openRunArchiveActions(join(directory, "actions.db"));
+    try {
+      const original = journal.readArchived(recovering.archiveId);
+      assert(original);
+      assertEquals(
+        journal.admitPurge(resume.requestId, original)?.status,
+        "pending",
+      );
+      Deno.renameSync(
+        join(directory, recovering.archiveId),
+        join(directory, `.purge-${recovering.archiveId}`),
+      );
+    } finally {
+      journal.close();
+    }
+    await withGateway(baseDir, async (turn, approvals) => {
+      assertEquals(JSON.parse(await turn(resume)).receipt.status, "succeeded");
+      assertEquals(approvals.length, 0);
+      const result = JSON.parse(await turn({ action: "archive_catalog" }));
+      assertEquals(
+        result.archives.map((item: { archiveId: string }) => item.archiveId),
+        [current.archiveId],
+      );
+    });
+  } finally {
+    await Deno.remove(baseDir, { recursive: true });
+  }
+});

@@ -19,6 +19,14 @@ export interface RunArchiveActionRecord extends RunArchiveActionInput {
   readonly archiveDigest?: string;
 }
 
+export interface RunArchivePurgeReceipt {
+  readonly requestId: string;
+  readonly archiveId: string;
+  readonly archiveDigest: string;
+  readonly identity: RunArchiveIdentity;
+  readonly status: "pending" | "succeeded";
+}
+
 export type RunArchiveActionAdmission =
   | {
     readonly admitted: true;
@@ -192,6 +200,18 @@ function createArchiveBatches(db: DatabaseSync) {
   `);
 }
 
+function createArchivePurges(db: DatabaseSync) {
+  db.exec(`
+    CREATE TABLE run_archive_purges (
+      archiveId TEXT PRIMARY KEY,
+      requestId TEXT NOT NULL UNIQUE,
+      archiveDigest TEXT NOT NULL,
+      status TEXT NOT NULL CHECK(status IN ('pending','succeeded'))
+    ) STRICT;
+    PRAGMA user_version = 3;
+  `);
+}
+
 /** One request claims one action. An interrupted action remains pending without automatic replay. */
 export function openRunArchiveActions(path: string, now = Date.now) {
   const db = privateDatabase(path);
@@ -200,9 +220,10 @@ export function openRunArchiveActions(path: string, now = Date.now) {
     transaction(db, () => {
       const id = db.prepare("PRAGMA application_id").get()?.application_id;
       const version = db.prepare("PRAGMA user_version").get()?.user_version;
-      if (id === applicationId && version === 2) return;
-      if (id === applicationId && version === 1) {
-        createArchiveBatches(db);
+      if (id === applicationId && version === 3) return;
+      if (id === applicationId && (version === 1 || version === 2)) {
+        if (version === 1) createArchiveBatches(db);
+        createArchivePurges(db);
         return;
       }
       if (
@@ -235,6 +256,7 @@ export function openRunArchiveActions(path: string, now = Date.now) {
         PRAGMA application_id = ${applicationId};
       `);
       createArchiveBatches(db);
+      createArchivePurges(db);
     });
   } catch (error) {
     db.close();
@@ -243,7 +265,74 @@ export function openRunArchiveActions(path: string, now = Date.now) {
   const exact = db.prepare(
     "SELECT * FROM run_archive_actions WHERE requestId = ?",
   );
+  const purge = db.prepare(
+    "SELECT * FROM run_archive_purges WHERE archiveId = ?",
+  );
+  const archived = db.prepare(`
+    SELECT * FROM run_archive_actions
+    WHERE archiveId = ? AND action = 'archive' AND status = 'succeeded'
+  `);
+  function purgeReceipt(archiveId: string): RunArchivePurgeReceipt | undefined {
+    const row = purge.get(archiveId);
+    const source = row && archived.get(archiveId);
+    if (!row || !source) return;
+    return {
+      archiveId,
+      requestId: String(row.requestId),
+      archiveDigest: String(row.archiveDigest),
+      identity: project(source).identity,
+      status: row.status === "succeeded" ? "succeeded" : "pending",
+    };
+  }
   return {
+    readPurge: purgeReceipt,
+
+    /** Requires the caller to hold the package lock and current scope. */
+    admitPurge(requestId: string, archive: RunArchiveActionRecord) {
+      if (
+        !uuid.test(requestId) || !uuid.test(archive.archiveId) ||
+        !archive.archiveDigest || !digestPattern.test(archive.archiveDigest)
+      ) {
+        return;
+      }
+      return transaction(db, () => {
+        const source = archived.get(archive.archiveId);
+        if (
+          !source || JSON.stringify(project(source)) !== JSON.stringify(archive)
+        ) return;
+        const prior = purgeReceipt(archive.archiveId);
+        if (prior) {
+          return prior.requestId === requestId &&
+              prior.archiveDigest === archive.archiveDigest
+            ? prior
+            : undefined;
+        }
+        if (
+          exact.get(requestId) ||
+          db.prepare("SELECT 1 FROM run_archive_batches WHERE requestId = ?")
+            .get(requestId) ||
+          db.prepare("SELECT 1 FROM run_archive_purges WHERE requestId = ?")
+            .get(requestId) ||
+          db.prepare(
+            "SELECT 1 FROM run_archive_actions WHERE archiveId = ? AND action = 'restore' AND status = 'pending'",
+          ).get(archive.archiveId)
+        ) return;
+        db.prepare("INSERT INTO run_archive_purges VALUES (?, ?, ?, 'pending')")
+          .run(archive.archiveId, requestId, archive.archiveDigest!);
+        return purgeReceipt(archive.archiveId);
+      });
+    },
+
+    completePurge(receipt: RunArchivePurgeReceipt) {
+      const changed = db.prepare(`
+        UPDATE run_archive_purges SET status = 'succeeded'
+        WHERE archiveId = ? AND requestId = ? AND archiveDigest = ? AND status = 'pending'
+      `).run(receipt.archiveId, receipt.requestId, receipt.archiveDigest);
+      return changed.changes === 1
+        ? purgeReceipt(receipt.archiveId)
+        : undefined;
+    },
+
     readBatch(requestId: string) {
       if (!uuid.test(requestId)) return undefined;
       const row = db.prepare(
@@ -271,6 +360,10 @@ export function openRunArchiveActions(path: string, now = Date.now) {
       if (!input) return undefined;
       const binding = JSON.stringify(input);
       return transaction(db, () => {
+        if (
+          db.prepare("SELECT 1 FROM run_archive_purges WHERE requestId = ?")
+            .get(input.requestId)
+        ) return undefined;
         const existing = exact.get(input.requestId);
         if (existing) {
           return existing.binding === binding
@@ -370,15 +463,13 @@ export function openRunArchiveActions(path: string, now = Date.now) {
       return row && project(row);
     },
 
-    readArchived(archiveId: string) {
+    readArchived(archiveId: string, includePurged = false) {
       if (
         typeof archiveId !== "string" || !archiveName.test(archiveId) ||
         archiveId.endsWith(".")
       ) return undefined;
-      const row = db.prepare(`
-        SELECT * FROM run_archive_actions
-        WHERE archiveId = ? AND action = 'archive' AND status = 'succeeded'
-      `).get(archiveId);
+      if (!includePurged && purge.get(archiveId)) return;
+      const row = archived.get(archiveId);
       return row && project(row);
     },
 
@@ -389,6 +480,7 @@ export function openRunArchiveActions(path: string, now = Date.now) {
         SELECT * FROM run_archive_actions
         WHERE kind = ? AND identityId = ? AND runId = ? AND revision IS ?
           AND action = 'archive' AND status = 'succeeded'
+          AND NOT EXISTS (SELECT 1 FROM run_archive_purges AS p WHERE p.archiveId = run_archive_actions.archiveId)
         ORDER BY sequence DESC LIMIT 1
       `).get(scope.kind, scope.id, scope.runId, scope.revision ?? null);
       return row && project(row);
@@ -417,6 +509,7 @@ export function openRunArchiveActions(path: string, now = Date.now) {
       return db.prepare(`
         SELECT * FROM run_archive_actions
         WHERE kind = 'sentinel' AND action = 'archive' AND sequence < ?
+          AND NOT EXISTS (SELECT 1 FROM run_archive_purges AS p WHERE p.archiveId = run_archive_actions.archiveId)
           AND instr(lower(identityId), ?) > 0
           AND (? IS NULL OR status = ?)
           AND (? IS NULL OR archiveId = ?)
