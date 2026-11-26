@@ -98,7 +98,12 @@ import {
   type SentinelFormalGoal,
 } from "../../src/sentinel/formal_goals.ts";
 import { resolveSentinelCaseMembership } from "../../src/sentinel/case_membership.ts";
-import { digestSentinelSnapshot } from "../../src/sentinel/shared_inventory.ts";
+import {
+  digestSentinelSnapshot,
+  retainSentinelSourceSnapshot,
+} from "../../src/sentinel/shared_inventory.ts";
+import { loadSentinelGraph } from "../../src/sentinel/graph.ts";
+import { sharedSentinelTopologyEvidenceId } from "../../src/sentinel/shared_topology_work.ts";
 import { resolveSentinelCasePath } from "../../src/sentinel/cases.ts";
 import { importSentinelHar } from "../../src/sentinel/har.ts";
 import {
@@ -12930,7 +12935,7 @@ async function testScopedReporterRestart(
   denyMember = false,
   initialPublication?: "resume" | "revoked" | "stale" | "committed",
   hinted: boolean | "set" = false,
-  verifyReporterTrace = false,
+  verifyReporterTrace: boolean | "relationship" = false,
 ) {
   const baseDir = await Deno.makeTempDir();
   const path = resolveSentinelCasePath(
@@ -12975,6 +12980,42 @@ async function testScopedReporterRestart(
       true,
       !!initialPublication,
     );
+    const sourceCase = "reporter-topology-source";
+    const sourcePath = resolveSentinelCasePath(baseDir, sourceCase);
+    const sharedRelationship = verifyReporterTrace === "relationship";
+    const evidenceId = sharedRelationship
+      ? sharedSentinelTopologyEvidenceId(
+        service.assetId,
+        "depends_on",
+        neighbor.assetId,
+      )
+      : "evidence";
+    const origin = loadSentinelGraph({
+      version: 1,
+      nodes: [service, neighbor].map(({ assetId, origin }) => ({
+        id: assetId,
+        kind: "asset",
+        label: origin,
+      })),
+      edges: [{
+        from: service.assetId,
+        to: neighbor.assetId,
+        relation: "depends_on",
+      }],
+    }).snapshot();
+    const originDigest = digestSentinelSnapshot(origin);
+    let originState: State | undefined;
+    if (sharedRelationship) {
+      await Deno.mkdir(dirname(sourcePath), { recursive: true });
+      await Deno.writeTextFile(sourcePath, JSON.stringify(origin));
+      originState = startSentinelAssessment(sourcePath);
+      await retainSentinelSourceSnapshot(
+        baseDir,
+        sourceCase,
+        originDigest,
+        origin,
+      );
+    }
     await Deno.writeTextFile(
       path,
       JSON.stringify({
@@ -12990,7 +13031,15 @@ async function testScopedReporterRestart(
           },
           { id: "control", kind: "control", label: "Control" },
           {
-            id: "evidence",
+            id: evidenceId,
+            ...(sharedRelationship && {
+              relationshipSources: [{
+                caseId: sourceCase,
+                from: service.assetId,
+                to: neighbor.assetId,
+                snapshotDigest: originDigest,
+              }],
+            }),
             kind: "evidence",
             label: "Saved failed verification",
             controlVerification: {
@@ -13003,8 +13052,22 @@ async function testScopedReporterRestart(
         edges: [
           { from: "gap", to: service.assetId, relation: "affects" },
           { from: "control", to: "gap", relation: "mitigates" },
-          { from: "evidence", to: service.assetId, relation: "observed_on" },
-          { from: "evidence", to: "control", relation: "verifies" },
+          { from: evidenceId, to: service.assetId, relation: "observed_on" },
+          ...(sharedRelationship
+            ? [
+              {
+                from: evidenceId,
+                to: neighbor.assetId,
+                relation: "observed_on",
+              },
+              {
+                from: service.assetId,
+                to: neighbor.assetId,
+                relation: "depends_on",
+              },
+            ]
+            : []),
+          { from: evidenceId, to: "control", relation: "verifies" },
         ],
       }),
     );
@@ -13035,7 +13098,7 @@ async function testScopedReporterRestart(
     const input = {
       graphFindingId: "gap",
       controlId: "control",
-      evidenceId: "evidence",
+      evidenceId,
       title: "Verified control gap",
       summary: "The case records a failed verification.",
       requestId: crypto.randomUUID(),
@@ -13260,15 +13323,27 @@ async function testScopedReporterRestart(
         assert(checkpoint);
         assertEquals(offers, 1);
         const policy = (expectedVersion: number, deny: boolean) =>
-          recordSentinelOperatingConstraints(path, {
-            runId: state.plan.runId!,
-            evidenceRevision: state.revision,
-            expectedVersion,
-            requestId: crypto.randomUUID(),
-            operatorScope: "owner",
-            constraints: { deniedKinds: deny ? ["review_finding"] : [] },
-          });
+          recordSentinelOperatingConstraints(
+            sharedRelationship ? sourcePath : path,
+            {
+              runId: (originState ?? state).plan.runId!,
+              evidenceRevision: (originState ?? state).revision,
+              expectedVersion,
+              requestId: crypto.randomUUID(),
+              operatorScope: "owner",
+              constraints: sharedRelationship
+                ? {
+                  deniedKinds: [],
+                  ...(deny && { allowedAssetIds: [service.assetId] }),
+                }
+                : { deniedKinds: deny ? ["review_finding"] : [] },
+            },
+          );
         assert(policy(0, true));
+        if (sharedRelationship) {
+          const denied = await workerTurn(path, worker, [[tool(read, exact)]]);
+          assertStringIncludes(denied.results[0][0], "unavailable");
+        }
         await createWorker(true).execute(
           prompt,
           () => {},
@@ -13295,6 +13370,34 @@ async function testScopedReporterRestart(
         assertStringIncludes(resumedHistory, finding.id);
         assertEquals(replayed, []);
         assertEquals(offers, 1);
+        if (sharedRelationship) {
+          let reviewed = false;
+          let withdrew = false;
+          const duringOutput = await workerTurn(
+            path,
+            worker,
+            [[tool(read, exact)]],
+            undefined,
+            undefined,
+            undefined,
+            {
+              prompt:
+                "Read the retained publication before source policy changes.",
+              options: [],
+              beforeHook(hook, name) {
+                if (hook === "POST_TOOL_RESPONSE" && name === read) {
+                  reviewed = true;
+                }
+                if (reviewed && !withdrew && hook === "PRE_OUTPUT") {
+                  assert(policy(2, true));
+                  withdrew = true;
+                }
+              },
+            },
+          );
+          assert(withdrew);
+          assert(!JSON.stringify(duringOutput.events).includes(finding.id));
+        }
         return;
       } finally {
         adaptive.close();
@@ -14592,3 +14695,6 @@ Deno.test("Reviewed analyst publications retain exact actor provenance through g
 
 Deno.test("A leased reporter opens only its original finding publication step", () =>
   testScopedReporterRestart(false, false, undefined, false, true));
+
+Deno.test("A leased reporter reauthorizes both endpoints of its retained original topology source", () =>
+  testScopedReporterRestart(false, false, undefined, false, "relationship"));

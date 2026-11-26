@@ -907,6 +907,27 @@ export async function readArchivedSentinelSnapshot(
   }
 }
 
+function readArchivedSentinelSnapshotSync(
+  baseDir: string,
+  caseId: string,
+  digest: string,
+  restoredCasePath?: string,
+): Snapshot {
+  const archived = sentinelSourceSnapshotPath(baseDir, caseId, digest);
+  const quarantined = sentinelSourceSnapshotPath(baseDir, caseId, digest, true);
+  for (const path of [archived, quarantined, archived]) {
+    try {
+      return readSentinelSourceSnapshotFileSync(path, digest);
+    } catch (error) {
+      if (!(error instanceof Deno.errors.NotFound)) throw error;
+    }
+  }
+  if (restoredCasePath) {
+    return readRestoredSourceSnapshot(restoredCasePath, caseId, digest);
+  }
+  throw new Deno.errors.NotFound("Sentinel source snapshot is unavailable");
+}
+
 /** Read the archived snapshot bound to one exact alias proof source. */
 export async function readCitedSentinelAliasSnapshot(
   baseDir: string,
@@ -953,13 +974,28 @@ export async function readSharedSentinelTopologySource(
   );
   if (!source?.snapshotDigest) return undefined;
 
-  const { caseId, snapshotDigest, from, to } = source;
+  const { caseId, snapshotDigest } = source;
   const archived = await readArchivedSentinelSnapshot(
     baseDir,
     caseId,
     snapshotDigest,
     restoredCasePath,
   );
+  return archivedTopologySource(evidenceId, cited, source, archived);
+}
+
+function archivedTopologySource(
+  evidenceId: string,
+  cited: {
+    from: string;
+    to: string;
+    relation: "depends_on" | "resolved_to" | "uses_hostname";
+  },
+  source: { caseId: string; snapshotDigest?: string; from: string; to: string },
+  archived: Snapshot,
+) {
+  const { caseId, snapshotDigest, from, to } = source;
+  if (!snapshotDigest) return;
   const relationship = { from, to, relation: cited.relation };
   if (
     !archived.edges.some((edge) =>
@@ -986,6 +1022,33 @@ export async function readSharedSentinelTopologySource(
     },
     archivedSource: { caseId, snapshotDigest, relationship, endpoints },
   };
+}
+
+/** Validate every exact archived origin of one admitted relationship. */
+export function readPinnedSentinelTopologySources(
+  baseDir: string,
+  snapshot: Snapshot,
+  evidenceId: string,
+  restoredCasePath: string,
+  allowEndpoint: (id: string) => boolean,
+) {
+  const cited = indexSharedSentinelTopologyEvidence(snapshot).get(evidenceId);
+  const evidence = snapshot.nodes.find((node) => node.id === evidenceId);
+  if (
+    !cited || !allowEndpoint(cited.from) || !allowEndpoint(cited.to) ||
+    evidence?.kind !== "evidence" || !evidence.relationshipSources?.length ||
+    evidence.relationshipSources.length > MAX_SHARED_ASSET_MAPPING_SOURCES
+  ) return;
+  return evidence.relationshipSources.map((source) => {
+    if (!source.snapshotDigest) return;
+    const archived = readArchivedSentinelSnapshotSync(
+      baseDir,
+      source.caseId,
+      source.snapshotDigest,
+      restoredCasePath,
+    );
+    return archivedTopologySource(evidenceId, cited, source, archived);
+  });
 }
 
 export interface SharedSentinelFindingReference {
@@ -1084,30 +1147,13 @@ export function createPinnedSentinelSharedFindingVerifier(
   const archives = new Map<string, Set<string> | undefined>();
   let remaining = MAX_CARRYOVER_FINDING_ARCHIVES;
 
-  const readSource = ({ caseId, snapshotDigest }: SharedAssetMappingSource) => {
-    const archived = sentinelSourceSnapshotPath(
+  const readSource = ({ caseId, snapshotDigest }: SharedAssetMappingSource) =>
+    readArchivedSentinelSnapshotSync(
       baseDir,
       caseId,
       snapshotDigest,
+      restoredCasePath,
     );
-    const quarantined = sentinelSourceSnapshotPath(
-      baseDir,
-      caseId,
-      snapshotDigest,
-      true,
-    );
-    for (const path of [archived, quarantined, archived]) {
-      try {
-        return readSentinelSourceSnapshotFileSync(path, snapshotDigest);
-      } catch (error) {
-        if (!(error instanceof Deno.errors.NotFound)) throw error;
-      }
-    }
-    if (!restoredCasePath) {
-      throw new Deno.errors.NotFound("Sentinel finding source is unavailable");
-    }
-    return readRestoredSourceSnapshot(restoredCasePath, caseId, snapshotDigest);
-  };
 
   const verify = (
     reference: PinnedSentinelSharedFindingReference,

@@ -58,7 +58,10 @@ import {
   sentinelPlannerSteerToolName,
 } from "../core/approval_inbox.ts";
 import { readLinkedFindingProof } from "./sentinel_linked_findings.ts";
-import { digestSentinelSnapshot } from "../sentinel/shared_inventory.ts";
+import {
+  digestSentinelSnapshot,
+  readPinnedSentinelTopologySources,
+} from "../sentinel/shared_inventory.ts";
 import { readSentinelCaseFindingReceipts } from "../sentinel/worker_finding_store.ts";
 import { notifyCommittedEvidence } from "../core/evidence_task_progression.ts";
 import { guardAssignmentExecution } from "../core/durable_assignment.ts";
@@ -1617,6 +1620,7 @@ function rememberIncidentRecommendationPage(
 
 interface ActiveTurn {
   readonly reporterTraceCalls: Map<string, SentinelWorkerTraceSearchArgs>;
+  readonly approvedReporterTraces: Map<string, SentinelWorkerTraceSearchArgs>;
   readonly incidentRecommendationPages: Map<number, IncidentRecommendationPage>;
   readonly controller: AbortController;
   readonly signal: AbortSignal;
@@ -3784,9 +3788,50 @@ function reporterFindingTrace(
   const evidence = snapshot?.nodes.find(({ id }) => id === finding.evidenceId);
   if (
     !snapshot || evidence?.kind !== "evidence" || evidence.executionSource ||
-    evidence.nativeWorkflowSource || evidence.relationshipSources?.length ||
+    evidence.nativeWorkflowSource ||
     finding.snapshotDigest !== digestSentinelSnapshot(snapshot)
   ) return [];
+  if (evidence.relationshipSources?.length) {
+    const location = locateSentinelCase(path);
+    if (!location) return [];
+    try {
+      const sources = readPinnedSentinelTopologySources(
+        location.baseDir,
+        snapshot,
+        evidence.id,
+        path,
+        (id) => policy.allows(id),
+      );
+      if (
+        !sources?.every((source) => {
+          if (!source) return false;
+          const { caseId, relationship, endpoints } = source.archivedSource;
+          if (
+            caseId === location.caseId ||
+            endpoints.length !==
+              new Set([relationship.from, relationship.to]).size
+          ) return false;
+          const sourcePath = resolveSentinelCasePath(location.baseDir, caseId);
+          const current = readSentinelAssessment(sourcePath);
+          if (!current?.plan.runId) return true;
+          const allowed = readSentinelFindingReceiptScope(
+            sourcePath,
+            current.revision,
+          );
+          const currentNodes = new Set(
+            current.result?.sharedGraph.snapshot?.nodes
+              .filter(({ kind }) => kind === "asset").map(({ id }) => id),
+          );
+          return !!allowed &&
+            endpoints.every(({ id }) =>
+              currentNodes.has(id) && allowed.allows(id)
+            );
+        })
+      ) return [];
+    } catch {
+      return [];
+    }
+  }
   const source = history.tasks.find(({ id }) => id === finding.taskId);
   if (source?.nodeId !== finding.targetId) return [];
   const complete = history.modelReviews.find(({ taskId }) =>
@@ -6281,17 +6326,6 @@ function createAgent(
             }
             turn.reporterTraceCalls.set(JSON.stringify(args), args);
           }
-          const response = context.input.tool_response;
-          if (
-            name === "POST_TOOL_RESPONSE" && typeof response === "string" &&
-            response.startsWith("{") &&
-            (!live || !turn ||
-              ![...turn.reporterTraceCalls.values()].some((args) =>
-                searchSentinelWorkerTraces(options, args) === response
-              ))
-          ) {
-            return { ...result, allowed: false, action: "BLOCK" };
-          }
         }
         if (
           name === "PRE_TOOL_CALL" && reporter &&
@@ -6419,6 +6453,28 @@ function createAgent(
           ((workerApprovalContext && (!turn || !approvalIsCurrent(turn))) ||
             (await turn?.workerBoundary?.("before_tool"))?.stop)
         ) return { ...result, allowed: false, action: "BLOCK" };
+        if (reporter && turn && result.allowed) {
+          const response = context.input.tool_response;
+          if (
+            name === "POST_TOOL_RESPONSE" &&
+            toolName === SENTINEL_WORKER_TRACE_SEARCH &&
+            typeof response === "string" && response.startsWith("{")
+          ) {
+            const args = [...turn.reporterTraceCalls.values()].find((args) =>
+              searchSentinelWorkerTraces(options, args) === response
+            );
+            if (!args) return { ...result, allowed: false, action: "BLOCK" };
+            if (JSON.parse(response).steps.length) {
+              turn.approvedReporterTraces.set(response, args);
+            }
+          }
+          if (
+            name === "PRE_OUTPUT" &&
+            [...turn.approvedReporterTraces].some(([approved, args]) =>
+              searchSentinelWorkerTraces(options, args) !== approved
+            )
+          ) return { ...result, allowed: false, action: "BLOCK" };
+        }
         if (
           active && name === "PRE_OUTPUT" && result.allowed &&
           typeof context.input.content === "string"
@@ -10165,6 +10221,7 @@ function createAgent(
           plannerFindingDrafts: new Map(),
           incidentRecommendationPages: new Map(),
           reporterTraceCalls: new Map(),
+          approvedReporterTraces: new Map(),
           operatingConstraints,
           reads: 0,
           workers: 0,

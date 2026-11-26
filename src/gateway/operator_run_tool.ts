@@ -8877,7 +8877,14 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
                 !text ||
                 createHash("sha256").update(text).digest("hex") !==
                   page.sha256 ||
-                !await authorize(scope, step.tool, page.args, text)
+                !await authorize(scope, step.tool, page.args, text) ||
+                (task.kind === "report_finding" &&
+                  reopenSentinelWorkerTraceSearch(
+                      path,
+                      ref.revision,
+                      task.id,
+                      page,
+                    ) !== text)
               ) return unavailable;
               const current = readHistoricalAdaptiveSentinel(
                 path,
