@@ -1,13 +1,15 @@
-/** Select a background assessment model using the session's fixed data classification. */
+/** Select an assessment model using the session's fixed data classification. */
 import {
   listSelectableModelProfiles,
   type ModelProfileAllowlists,
   type SelectedModelProfile,
   selectedModelProvider,
 } from "../core/model_profile_selection.ts";
+import type { SentinelModelRoute } from "../sentinel/model_routes.ts";
 import type { LlmProvider, LlmProviderRegistry } from "../core/types/llm.ts";
 import {
   advanceSentinelModelFallback,
+  readSentinelAssessment,
   readSentinelModelRoute,
 } from "../sentinel/assessment_store.ts";
 
@@ -32,12 +34,12 @@ function isAvailabilityFailure(error: unknown) {
 }
 
 function runModelProvider(
-  run: SentinelModelRun,
+  run: SentinelModelRun | { readonly path: string; readonly interactive: true },
   resolve: (profile: SelectedModelProfile) => LlmProvider | undefined,
   defaultProvider: () => LlmProvider | undefined,
 ) {
   const resolveProvider = (
-    route: NonNullable<ReturnType<typeof readSentinelModelRoute>>["route"],
+    route: SentinelModelRoute,
     index: number,
   ) => {
     const profile = index === 0 ? route.primary : route.alternates?.[index - 1];
@@ -47,12 +49,40 @@ function runModelProvider(
       ? defaultProvider()
       : undefined;
   };
-  const initial = readSentinelModelRoute(run.path, run);
+  const interactive = "interactive" in run;
+  let boundRun = "runId" in run ? run.runId : undefined;
+  const readRoute = () => {
+    if (!interactive && "runId" in run) {
+      const saved = readSentinelModelRoute(run.path, run);
+      return saved && { ...saved, scope: run };
+    }
+    const assessment = readSentinelAssessment(run.path);
+    const runId = assessment?.plan.runId;
+    if (!runId || !assessment) {
+      return boundRun === undefined
+        ? {
+          route: { activeIndex: 0 } as SentinelModelRoute,
+          version: 0,
+          runnable: true,
+          scope: undefined,
+        }
+        : undefined;
+    }
+    boundRun ??= runId;
+    if (runId !== boundRun) return;
+    const scope = { runId, revision: assessment.revision, allowInactive: true };
+    const saved = readSentinelModelRoute(run.path, scope);
+    return saved && { ...saved, runnable: true, scope };
+  };
+  const initial = readRoute();
   let active = initial?.runnable
     ? resolveProvider(initial.route, initial.route.activeIndex)
     : undefined;
-  if (!active) return;
-  const approvedProvider = active;
+  // Case chat must be able to pick up a later reviewed route without using
+  // the ordinary provider to answer while the current case route is revoked.
+  const approvedProvider = active ??
+    (interactive ? defaultProvider() : undefined);
+  if (!approvedProvider) return;
   return {
     get name() {
       return active?.name ?? approvedProvider.name;
@@ -62,7 +92,7 @@ function runModelProvider(
     },
     supportsStreaming: false,
     get contextWindow() {
-      const current = readSentinelModelRoute(run.path, run);
+      const current = readRoute();
       if (!current) return approvedProvider.contextWindow;
       return Math.min(...Array.from(
         { length: (current.route.alternates?.length ?? 0) + 1 },
@@ -74,7 +104,7 @@ function runModelProvider(
       const signal = options.signal instanceof AbortSignal
         ? options.signal
         : undefined;
-      const selected = readSentinelModelRoute(run.path, run);
+      const selected = readRoute();
       let index = selected?.runnable ? selected.route.activeIndex : undefined;
       while (selected && index !== undefined) {
         signal?.throwIfAborted();
@@ -85,12 +115,12 @@ function runModelProvider(
         } catch (error) {
           signal?.throwIfAborted();
           if (
-            !isAvailabilityFailure(error) ||
+            !selected.scope || !isAvailabilityFailure(error) ||
             !resolveProvider(selected.route, index + 1)
           ) throw error;
           index = advanceSentinelModelFallback(
             run.path,
-            run,
+            selected.scope,
             index,
             selected.version,
           );
@@ -108,33 +138,37 @@ export function sentinelAssessmentModelRouting(
 ) {
   const resolve = (profile: SelectedModelProfile) =>
     selectedModelProvider(registry, profile, "INTERNAL", allowlists);
+  const defaultProvider = () =>
+    registry.getForClassification("INTERNAL") ?? registry.getDefault();
+  const optionsFor = (provider: LlmProvider | undefined) => ({
+    providerRegistry: provider
+      ? {
+        ...registry,
+        getForClassification: (classification) =>
+          classification === "INTERNAL"
+            ? provider
+            : registry.getForClassification(classification),
+      } satisfies LlmProviderRegistry
+      : registry,
+    allowModelAccess: provider !== undefined,
+  });
   return {
     list: () => listSelectableModelProfiles(registry, "INTERNAL", allowlists),
+    interactiveOptions(path: string) {
+      return optionsFor(
+        runModelProvider({ path, interactive: true }, resolve, defaultProvider),
+      );
+    },
     workerOptions(profile?: SelectedModelProfile, run?: SentinelModelRun) {
       if (profile === undefined && !run) {
         return { providerRegistry: registry, allowModelAccess: true };
       }
-      const provider = run
-        ? runModelProvider(
-          run,
-          resolve,
-          () =>
-            registry.getForClassification("INTERNAL") ?? registry.getDefault(),
-        )
-        : profile && resolve(profile);
       // Revoking or changing the active profile takes effect before the next outbound call.
-      return {
-        providerRegistry: provider
-          ? {
-            ...registry,
-            getForClassification: (classification) =>
-              classification === "INTERNAL"
-                ? provider
-                : registry.getForClassification(classification),
-          } satisfies LlmProviderRegistry
-          : registry,
-        allowModelAccess: provider !== undefined,
-      };
+      return optionsFor(
+        run
+          ? runModelProvider(run, resolve, defaultProvider)
+          : profile && resolve(profile),
+      );
     },
   };
 }

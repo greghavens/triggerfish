@@ -1973,3 +1973,194 @@ Deno.test("A reviewed model route replacement preserves the running response and
     await Deno.remove(baseDir, { recursive: true });
   }
 });
+
+Deno.test("Selected Sentinel chat and its worker use the reviewed case model route", async () => {
+  const baseDir = await Deno.makeTempDir();
+  const caseId = "route-chat";
+  const path = resolveSentinelCasePath(baseDir, caseId);
+  const mainPath = resolveSentinelCasePath(baseDir);
+  const providers = createProviderRegistry();
+  const allow = ["primary", "alternate", "replacement"];
+  const modelAllowlists = { INTERNAL: allow };
+  const calls: string[] = [];
+  let unavailable = false;
+  for (const name of ["global", ...allow]) {
+    providers.register({
+      name,
+      model: name + "-model",
+      supportsStreaming: false,
+      complete() {
+        calls.push(name);
+        if (name === "primary" && unavailable) {
+          return Promise.reject(
+            Object.assign(new Error("Provider unavailable"), { status: 503 }),
+          );
+        }
+        return Promise.resolve({
+          content: "Reviewed with " + name,
+          usage: { inputTokens: 1, outputTokens: 1 },
+          toolCalls: [],
+        });
+      },
+    });
+  }
+  providers.setDefault("global");
+  const routing = sentinelAssessmentModelRouting(providers, modelAllowlists);
+  let gateway: ReturnType<typeof createGatewayServer> | undefined;
+  let socket: WebSocket | undefined;
+  try {
+    for (const file of [mainPath, path]) {
+      await Deno.mkdir(dirname(file), { recursive: true });
+      await Deno.writeTextFile(
+        file,
+        JSON.stringify({ version: 1, nodes: [], edges: [] }),
+      );
+    }
+    const started = startSentinelAssessment(path);
+    const runId = started.plan.runId;
+    assert(runId);
+    const scope = {
+      kind: "sentinel",
+      id: caseId,
+      runId,
+      revision: started.revision,
+    };
+    async function setRoute(
+      modelProfile: string,
+      expectedVersion: number,
+      fallbackModelProfiles?: string[],
+    ) {
+      await withOwnerControl(baseDir, async (request) => {
+        const { edit } = JSON.parse(
+          await request({
+            ...scope,
+            action: "set_model_route",
+            requestId: crypto.randomUUID(),
+            modelProfile,
+            expectedVersion,
+            fallbackModelProfiles,
+          }),
+        );
+        assertEquals(edit.version, expectedVersion + 1);
+      }, routing.list);
+    }
+    await setRoute("primary", 0, ["alternate"]);
+
+    const token = crypto.randomUUID();
+    gateway = createGatewayServer({
+      port: 0,
+      token,
+      chatSession: createChatSession({
+        session: createSession({
+          userId: "owner" as UserId,
+          channelId: "case-route-chat" as ChannelId,
+          bumpersEnabled: false,
+        }),
+        providerRegistry: providers,
+        hookRunner: {
+          evaluateHook: () =>
+            Promise.resolve({
+              allowed: true,
+              action: "ALLOW",
+              ruleId: null,
+              duration: 0,
+            }),
+        },
+        sentinelSnapshotPath: mainPath,
+        allowSentinelModelAccess: true,
+        sentinelModelProfileAllowlists: modelAllowlists,
+        resolveSentinelChatCase: (id) => id === caseId ? path : undefined,
+        enableStreaming: false,
+      }),
+    });
+    const { port } = await gateway.start();
+    const connected = new WebSocket(
+      `ws://127.0.0.1:${port}/chat?token=${token}`,
+    );
+    socket = connected;
+    await new Promise<void>((resolve, reject) => {
+      connected.addEventListener("open", () => resolve(), { once: true });
+      connected.addEventListener("error", reject, { once: true });
+    });
+    async function turn(content: string) {
+      const done = Promise.withResolvers<string>();
+      const seen: string[] = [];
+      const timeout = setTimeout(
+        () => done.reject(new Error("Case chat did not end")),
+        3000,
+      );
+      function receive({ data }: MessageEvent) {
+        seen.push(String(data));
+        if (JSON.parse(data).type === "turn_end") done.resolve(seen.join("\n"));
+      }
+      connected.addEventListener("message", receive);
+      try {
+        connected.send(JSON.stringify({ type: "message", content }));
+        return await done.promise;
+      } finally {
+        clearTimeout(timeout);
+        connected.removeEventListener("message", receive);
+      }
+    }
+    assert(
+      (await turn("Review normal chat.")).includes("Reviewed with global"),
+    );
+    await turn("/sentinel on");
+    assert((await turn(`/sentinel case ${caseId}`)).includes(caseId));
+    assert(
+      (await turn("Review the selected case.")).includes(
+        "Reviewed with primary",
+      ),
+    );
+    assert(
+      (await turn("/sentinel-agent Review scoped evidence.")).includes(
+        "Reviewed with primary",
+      ),
+    );
+    assertEquals(calls, ["global", "primary", "primary"]);
+
+    await withOwnerControl(baseDir, async (request) => {
+      assertEquals(
+        JSON.parse(await request({ ...scope, action: "cancel" })).run.status,
+        "stopped",
+      );
+    }, routing.list);
+    unavailable = true;
+    assert(
+      (await turn("Review the stopped case.")).includes(
+        "Reviewed with alternate",
+      ),
+    );
+    assertEquals(calls, [
+      "global",
+      "primary",
+      "primary",
+      "primary",
+      "alternate",
+    ]);
+    const stopped = readSentinelAssessment(path);
+    assertFalse(stopped?.active);
+    assertEquals(stopped?.plan.modelFallbackIndex, 1);
+
+    allow.splice(allow.indexOf("alternate"), 1);
+    assert(
+      !(await turn("Review after grant revocation.")).includes("Reviewed with"),
+    );
+    assertEquals(calls.length, 5);
+    await setRoute("replacement", 1);
+    assert(
+      (await turn("Review using the replacement.")).includes(
+        "Reviewed with replacement",
+      ),
+    );
+    await turn("/sentinel off");
+    assert(
+      (await turn("Return to normal chat.")).includes("Reviewed with global"),
+    );
+    assertEquals(calls.slice(-2), ["replacement", "global"]);
+  } finally {
+    socket?.close();
+    await gateway?.stop();
+    await Deno.remove(baseDir, { recursive: true });
+  }
+});

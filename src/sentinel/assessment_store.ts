@@ -2888,7 +2888,11 @@ export function readSentinelLinkedStartModelRoute(
 /** Advance once, leaving the approved model choices and evidence revision intact. */
 export function advanceSentinelModelFallback(
   path: string,
-  scope: { readonly runId: string; readonly revision: number },
+  scope: {
+    readonly runId: string;
+    readonly revision: number;
+    readonly allowInactive?: boolean;
+  },
   failedIndex: number,
   expectedVersion = 0,
 ) {
@@ -2897,7 +2901,10 @@ export function advanceSentinelModelFallback(
   try {
     return transact(db, () => {
       const row = getRow(db);
-      if (row?.active !== 1 || row.revision !== scope.revision) return;
+      if (
+        !row || (row.active !== 1 && !scope.allowInactive) ||
+        row.revision !== scope.revision
+      ) return;
       const plan = JSON.parse(row.plan) as AssessmentPlan;
       const fallbacks = parseModelFallbackProfiles(
         plan.modelFallbackProfiles,
@@ -2907,7 +2914,8 @@ export function advanceSentinelModelFallback(
       if (
         plan.runId !== scope.runId || !fallbacks ||
         (plan.modelRouteHistory?.length ?? 0) !== expectedVersion ||
-        (plan.deadlineAt !== undefined && Date.now() >= plan.deadlineAt) ||
+        (!scope.allowInactive && plan.deadlineAt !== undefined &&
+          Date.now() >= plan.deadlineAt) ||
         !Number.isSafeInteger(failedIndex) || failedIndex < 0 ||
         failedIndex >= fallbacks.length || !Number.isSafeInteger(index) ||
         index < failedIndex || index > fallbacks.length

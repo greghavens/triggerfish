@@ -1,3 +1,4 @@
+import type { ModelProfileAllowlists } from "../core/model_profile_selection.ts";
 /**
  * ChatSessionConfig and channel registration config types.
  *
@@ -112,6 +113,7 @@ export interface ChatSessionConfig {
   readonly sentinelSharedInventoryBaseDir?: string;
   readonly resolveSentinelChatCase?: (caseId: string) => string | undefined;
   readonly allowSentinelModelAccess?: boolean;
+  readonly sentinelModelProfileAllowlists?: ModelProfileAllowlists;
   readonly sentinelOutputLanguage?: SentinelOutputLanguage;
   readonly sentinelWebContainmentConfigured?: boolean;
   readonly hookRunner: HookRunner;

@@ -113,6 +113,7 @@ Deno.test("Authenticated Sentinel chat reads exact approved cross-case graph fin
         assertEquals(
           definition.function?.parameters?.properties?.action?.enum,
           [
+            "model_route",
             "graph_overview",
             "graph",
             "findings",
@@ -382,6 +383,18 @@ Deno.test("Authenticated Sentinel chat reads exact approved cross-case graph fin
     );
     assert(worker.some((frame) => frame.includes("Worker bindings verified.")));
     assertEquals(dispatched, beforeMutation + 2);
+    await turn("Read the exact peer model route.", {
+      action: "model_route",
+      ...exact,
+      runId: approved.state.plan.runId,
+    });
+    assertEquals(JSON.parse(result).version, 0);
+    await turn("Reject an unrelated model route.", {
+      action: "model_route",
+      ...exact,
+      runId: main.state.plan.runId,
+    });
+    assertStringIncludes(result, "unavailable");
   } finally {
     socket.close();
     await gateway.stop();

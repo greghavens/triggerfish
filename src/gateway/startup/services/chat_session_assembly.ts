@@ -175,6 +175,8 @@ export function assembleChatSession(
     sentinelWebContainmentConfigured:
       deps.config.web?.domains?.sentinel_containment === true,
     allowSentinelModelAccess: deps.config.sentinel?.allow_model_access === true,
+    sentinelModelProfileAllowlists: deps.config.sentinel
+      ?.model_profile_allowlists,
     sentinelOutputLanguage: deps.config.sentinel?.output_language,
     hookRunner: deps.hookRunner,
     providerRegistry: deps.registry,

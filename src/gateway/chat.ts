@@ -1,3 +1,4 @@
+import { sentinelAssessmentModelRouting } from "./sentinel_model_routing.ts";
 import type { ManagedGoalTraceAccess } from "../core/goal_completion.ts";
 import type { ManagedTranscriptGrantReader } from "../core/conversation/managed_evidence.ts";
 import { authorizeManagedTranscript } from "./startup/factory/managed_transcript_authorization.ts";
@@ -988,9 +989,11 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
           snapshotPath: caseSnapshotPath,
           sharedInventoryBaseDir: config.sentinelSharedInventoryBaseDir,
           webContainmentConfigured: config.sentinelWebContainmentConfigured,
-          providerRegistry: config.providerRegistry,
+          ...sentinelAssessmentModelRouting(
+            config.providerRegistry,
+            config.sentinelModelProfileAllowlists,
+          ).interactiveOptions(caseSnapshotPath),
           hookRunner: config.hookRunner,
-          allowModelAccess: true,
           ...(!worker && { operatorRunReader }),
           outputLanguage: config.sentinelOutputLanguage,
           readOutputLanguage: () =>
