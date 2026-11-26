@@ -12,7 +12,12 @@ import {
   parseSentinelToolConfigurationUpdate,
   sentinelToolConfigurations,
 } from "../../src/gateway/sentinel_tool_configuration.ts";
-import { advanceAdaptiveSentinel } from "../../src/gateway/sentinel_adaptive_runtime.ts";
+import {
+  advanceAdaptiveSentinel,
+  createSentinelModelPlanner,
+  readAdaptiveSentinel,
+} from "../../src/gateway/sentinel_adaptive_runtime.ts";
+import { startSentinelAssessmentCoordinator } from "../../src/gateway/sentinel_assessment_service.ts";
 import { openSentinelAdaptiveStore } from "../../src/sentinel/adaptive_store.ts";
 import {
   adaptiveRevision,
@@ -147,6 +152,11 @@ Deno.test("Reviewed Sentinel built-in settings restrict roles and apply safe def
     }),
   });
   let socket: WebSocket | undefined;
+  let background: ReturnType<typeof createSentinelModelPlanner> | undefined;
+  let coordinator:
+    | ReturnType<typeof startSentinelAssessmentCoordinator>
+    | undefined;
+  const releaseSettingsChange = Promise.withResolvers<void>();
   try {
     await Deno.mkdir(dirname(path), { recursive: true });
     await Deno.writeTextFile(
@@ -347,7 +357,151 @@ Deno.test("Reviewed Sentinel built-in settings restrict roles and apply safe def
     });
     assertEquals(JSON.parse(reset).settingsReceipt.version, 3);
     assertEquals(JSON.parse(await version()).settings.description, undefined);
+
+    const ownerRequest = async (args: Record<string, unknown>) => {
+      requested = { name: "operator_runs", args };
+      return await turn("Review this background assignment.");
+    };
+    assertEquals(
+      JSON.parse(
+        await manage({
+          ...mutation,
+          expectedVersion: 3,
+          requestId: crypto.randomUUID(),
+          builtinSettings: {
+            ...mutation.builtinSettings,
+            roles: ["chat", "worker"],
+          },
+        }),
+      ).settingsReceipt.version,
+      4,
+    );
+    const admitted = JSON.parse(
+      await ownerRequest({
+        action: "assign_batch",
+        kind: "sentinel",
+        id: "main",
+        revision: state.revision,
+        runId: state.plan.runId,
+        adaptiveRevision: adaptiveRevision(state),
+        requestId: crypto.randomUUID(),
+        assignments: [{
+          taskKind: "trace",
+          node: "reviewed",
+          question: "Review the policy-approved background graph.",
+          prioritizeNext: true,
+        }],
+      }),
+    ).receipt;
+    const taskId: string = admitted.receipts[0].taskId;
+    const delivered = Promise.withResolvers<string>();
+    const denied = Promise.withResolvers<string>();
+    let laterToolSnapshot = "";
+    let matchingWorkerBuilds = 0;
+    const awaitResult = async (promise: Promise<string>) => {
+      const timeout = Promise.withResolvers<string>();
+      const timer = setTimeout(
+        () => timeout.reject(new Error("Background dispatch did not finish")),
+        5_000,
+      );
+      try {
+        return await Promise.race([promise, timeout.promise]);
+      } finally {
+        clearTimeout(timer);
+      }
+    };
+    background = createSentinelModelPlanner(
+      path,
+      (current, selected, token) => {
+        if (selected !== taskId || !token) {
+          return {
+            execute(_question, send) {
+              send({ type: "response", text: "[]", taint: "INTERNAL" });
+              return Promise.resolve();
+            },
+            clear() {},
+          };
+        }
+        matchingWorkerBuilds++;
+        const workerProviders = createProviderRegistry();
+        workerProviders.register({
+          name: "background-settings-fixture",
+          supportsStreaming: false,
+          async complete(messages, definitions) {
+            const results = messages.filter(({ role }) => role === "tool");
+            const usage = { inputTokens: 1, outputTokens: 1 };
+            if (results.length === 1) {
+              delivered.resolve(String(results[0].content));
+              await releaseSettingsChange.promise;
+            }
+            if (results.length >= 2) {
+              laterToolSnapshot = JSON.stringify(definitions);
+              denied.resolve(String(results[1].content));
+              return {
+                content: JSON.stringify({
+                  summary: "Finished the reviewed background check.",
+                  followUps: [],
+                }),
+                usage,
+                toolCalls: [],
+              };
+            }
+            return {
+              content: "",
+              usage,
+              toolCalls: [{
+                id: crypto.randomUUID(),
+                type: "function",
+                function: { name, arguments: "{}" },
+              }],
+            };
+          },
+        });
+        workerProviders.setDefault("background-settings-fixture");
+        return createSentinelSubagent({
+          snapshotPath: path,
+          sharedInventoryBaseDir: baseDir,
+          assessmentRevision: current.revision,
+          assignedTaskId: selected,
+          assignedTaskLeaseToken: token,
+          providerRegistry: workerProviders,
+          allowModelAccess: true,
+          hookRunner,
+        });
+      },
+    );
+    coordinator = startSentinelAssessmentCoordinator({
+      snapshotPath: path,
+      advanceAdaptive: (current) => background?.advance(current),
+    });
+    assertStringIncludes(
+      await awaitResult(delivered.promise),
+      "Review fixture",
+    );
+    const firstCount = calls.length;
+    assertEquals(
+      JSON.parse(
+        await manage({
+          ...mutation,
+          expectedVersion: 4,
+          requestId: crypto.randomUUID(),
+        }),
+      ).settingsReceipt.version,
+      5,
+    );
+    const review = readAdaptiveSentinel(path, state)?.modelReviewStates.find((
+      entry,
+    ) => entry.taskId === taskId);
+    assertEquals(review?.status, "running");
+    releaseSettingsChange.resolve();
+    assertStringIncludes(await awaitResult(denied.promise), "unavailable");
+    assert(!laterToolSnapshot.includes(name));
+    assertEquals(calls.length, firstCount);
+    assertEquals(matchingWorkerBuilds, 1);
   } finally {
+    releaseSettingsChange.resolve();
+    coordinator?.stop();
+    background?.stop();
     socket?.close();
     await gateway.stop();
     await Deno.remove(baseDir, { recursive: true });
