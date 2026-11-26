@@ -1404,6 +1404,50 @@ Deno.test("Leased Sentinel workers report, recheck, and amend findings visible i
         ),
         ["review-gap"],
       );
+      const ratedRequest = {
+        ...filterExport,
+        caseId: "other",
+        revision: other.revision,
+      };
+      const selectRated = async (disposition: string) => {
+        const reply = await request("export", {
+          ...ratedRequest,
+          findingFilter: { severity: "high", disposition },
+        });
+        assertEquals(reply.type, "export");
+        return JSON.parse(String(reply.content)).findings;
+      };
+      assertEquals(await selectRated("confirmed"), []);
+      assertEquals((await selectRated("open"))[0].id, "review-gap");
+      const savedReview = await request("review_finding", {
+        caseId: ratedRequest.caseId,
+        revision: ratedRequest.revision,
+        findingId: "review-gap",
+        disposition: "confirmed",
+        note: "Verified against the recorded control failure.",
+      });
+      assertEquals(savedReview.type, "sentinel_state");
+      assertEquals(await selectRated("open"), []);
+      const confirmed = await selectRated("confirmed");
+      assertEquals(confirmed.length, 1);
+      assertEquals(confirmed[0].id, "review-gap");
+      assertEquals(confirmed[0].severity, "high");
+      assertEquals(confirmed[0].disposition, "confirmed");
+      const localRatings = await request("export", {
+        ...filterExport,
+        findingFilter: { severity: "high", disposition: "confirmed" },
+      });
+      assertEquals(JSON.parse(String(localRatings.content)).findings, []);
+      const unrated = await request("export", {
+        ...filterExport,
+        findingFilter: { kind: "worker", severity: "high" },
+      });
+      assertEquals(JSON.parse(String(unrated.content)).findings, []);
+      const invalidRating = await request("export", {
+        ...ratedRequest,
+        findingFilter: { severity: "unknown" },
+      });
+      assertEquals(invalidRating.type, "error");
       const zipped = await request("export", {
         ...selected,
         format: "md-zip",

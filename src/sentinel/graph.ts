@@ -181,9 +181,15 @@ interface LinkedControlCoverage {
 }
 
 const kinds = ["asset", "finding", "control", "evidence"] as const;
-const severities = ["critical", "high", "medium", "low", "info"] as const;
+export const sentinelFindingSeverities = [
+  "critical",
+  "high",
+  "medium",
+  "low",
+  "info",
+] as const;
 type Kind = typeof kinds[number];
-type Severity = typeof severities[number];
+type Severity = typeof sentinelFindingSeverities[number];
 
 interface NodeFields {
   readonly id: string;
@@ -329,7 +335,7 @@ function parseNode(value: unknown): GraphNode {
       id,
       kind,
       label,
-      severity: member(severities, raw.severity, "severity"),
+      severity: member(sentinelFindingSeverities, raw.severity, "severity"),
       ...(workerFindingSource && { workerFindingSource }),
     };
   }
@@ -661,7 +667,8 @@ export function loadSentinelGraph(value: unknown) {
         return [{ ...node, assets, controls, evidence }];
       })
       .sort((a, b) =>
-        severities.indexOf(a.severity) - severities.indexOf(b.severity) ||
+        sentinelFindingSeverities.indexOf(a.severity) -
+          sentinelFindingSeverities.indexOf(b.severity) ||
         b.assets.length - a.assets.length || a.id.localeCompare(b.id)
       );
   }

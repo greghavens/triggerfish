@@ -17,11 +17,12 @@ import {
   readSentinelIncidentReviews,
   readSentinelOperatingConstraintsForRevision,
   readSentinelRunIdForRevision,
+  sentinelFindingDispositions,
 } from "./assessment_store.ts";
 import { locateSentinelCase } from "./cases.ts";
 import { encodeSentinelFindingZip } from "./finding_export_zip.ts";
 import { exportSentinelFindingTrafficLinks } from "./finding_traffic_links.ts";
-import { loadSentinelGraph } from "./graph.ts";
+import { loadSentinelGraph, sentinelFindingSeverities } from "./graph.ts";
 import {
   hasSentinelWorkerFindingJournal,
   openSentinelWorkerFindingStore,
@@ -291,18 +292,31 @@ interface FindingExportFilter {
   readonly kind?: "imported" | "worker";
   readonly assetId?: string;
   readonly query?: string;
+  readonly severity?: typeof sentinelFindingSeverities[number];
+  readonly disposition?: SentinelFindingReview["disposition"];
 }
 
 export function parseFindingExportFilter(
   raw: unknown,
 ): FindingExportFilter | undefined {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return;
-  const { kind, assetId, query } = raw as Record<string, unknown>;
+  const { kind, assetId, query, severity, disposition } = raw as Record<
+    string,
+    unknown
+  >;
+  const severityFilter = sentinelFindingSeverities.find((value) =>
+    value === severity
+  );
+  const dispositionFilter = sentinelFindingDispositions.find((value) =>
+    value === disposition
+  );
   if (
     Object.keys(raw).some((key) =>
-      !["kind", "assetId", "query"].includes(key)
+      !["kind", "assetId", "query", "severity", "disposition"].includes(key)
     ) ||
     (kind !== undefined && kind !== "imported" && kind !== "worker") ||
+    (severity !== undefined && !severityFilter) ||
+    (disposition !== undefined && !dispositionFilter) ||
     (assetId !== undefined &&
       (typeof assetId !== "string" || !assetId || assetId.length > 4096 ||
         /[\p{Cc}\p{Cf}]/u.test(assetId))) ||
@@ -312,6 +326,8 @@ export function parseFindingExportFilter(
   ) return;
   return {
     ...(kind && { kind }),
+    ...(severityFilter && { severity: severityFilter }),
+    ...(dispositionFilter && { disposition: dispositionFilter }),
     ...(typeof assetId === "string" && { assetId }),
     ...(typeof query === "string" && { query: query.trim().toLowerCase() }),
   };
@@ -359,7 +375,8 @@ export function renderScopedSentinelFindings(
   const records = [];
   try {
     const maxScannedWorkerFindings = 256;
-    const workerIds = !explicit && selection.kind !== "imported" && runId
+    const workerIds = !explicit && selection.kind !== "imported" &&
+        !selection.severity && !selection.disposition && runId
       ? journal?.listFindingIds(
         caseId,
         runId,
@@ -378,13 +395,16 @@ export function renderScopedSentinelFindings(
       const report = journal?.readFindingReport(id, assessment.revision);
       if (imported && report) return;
       if (!explicit) {
-        const { assetId, query } = selection;
+        const { assetId, query, severity, disposition } = selection;
         const scope = imported ? imported.assets : [report?.finding.targetId];
         const title = redactCredentialText(
           imported?.label ?? report?.title ?? "",
         );
         const summary = redactCredentialText(report?.summary ?? "");
         if (
+          (severity && imported?.severity !== severity) ||
+          (disposition &&
+            (!imported || (dispositions.get(id) ?? "open") !== disposition)) ||
           (assetId && !scope.includes(assetId)) ||
           (query &&
             ![title, summary].some((value) =>
