@@ -3982,7 +3982,7 @@ async function verifyConnectorFindingPublication(
       },
     );
     assert(membership);
-    assert(recordSentinelOperatingConstraints(consumerPath, {
+    const policy = recordSentinelOperatingConstraints(consumerPath, {
       runId: consumerState.plan.runId,
       evidenceRevision: consumerState.revision,
       expectedVersion: 0,
@@ -3990,11 +3990,17 @@ async function verifyConnectorFindingPublication(
       operatorScope: "fixture-connector-owner",
       constraints: { allowedAssetIds: membership.assetIds, deniedKinds: [] },
       membership,
-    }));
+    });
+    assert(policy);
     const consumer = assignedLease(consumerPath, consumerState, "impact");
     const selectedExecution: NonNullable<Parameters<typeof workerTurn>[6]> = {
       prompt: "Review the exact selected source.",
-      options: [],
+      options: [undefined, undefined, undefined, {
+        operatingConstraints: {
+          version: policy.version,
+          digest: policy.digest,
+        },
+      }],
       authorizeExecutionTracePayload: authorize,
     };
     const listSelected = tool("sentinel_shared_asset_links", {
@@ -4083,6 +4089,27 @@ async function verifyConnectorFindingPublication(
     blockSource = undefined;
 
     if (attempt) {
+      const stalePolicy = await workerTurn(
+        consumerPath,
+        consumer,
+        [[listSelected]],
+        undefined,
+        baseDir,
+        readLiveWorkflow,
+        {
+          ...selectedExecution,
+          options: [undefined, undefined, undefined, {
+            operatingConstraints: {
+              version: policy.version,
+              digest: "0".repeat(64),
+            },
+          }],
+        },
+      );
+      assertEquals(
+        stalePolicy.results[0][0],
+        "Tool response withheld by policy.",
+      );
       for (const hook of ["PRE_TOOL_CALL", "POST_TOOL_RESPONSE"] as const) {
         const before = checks;
         const denied = await workerTurn(
