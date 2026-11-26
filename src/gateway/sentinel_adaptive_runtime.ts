@@ -6888,10 +6888,12 @@ export function createSentinelModelPlanner(
                       .map((call) => [call.id!, call] as const)
                   ),
                 );
+                let resumedStepIndex = -1;
                 for (const entry of resume.history) {
                   if (
                     entry.role !== "tool" || typeof entry.content !== "string"
                   ) continue;
+                  const position = ++resumedStepIndex;
                   const digest = createHash("sha256").update(entry.content)
                     .digest("hex");
                   const provenanceRead = previousProgress.find((step) =>
@@ -6907,12 +6909,16 @@ export function createSentinelModelPlanner(
                     steps.push(provenanceRead);
                     continue;
                   }
-                  const assigned = previousProgress.find((step) =>
+                  const matchesAssigned = (step?: SentinelReviewStep) =>
+                    !!step && !resumedProgress.has(step) &&
                     step.tool === "sentinel_assigned_target" &&
                     step.outcome === "returned" &&
                     step.assignedTarget?.targetId === task.nodeId &&
-                    step.resultSnapshot?.sha256 === digest
-                  );
+                    step.resultSnapshot?.sha256 === digest;
+                  const matchingPosition = previousProgress[position];
+                  const assigned = matchesAssigned(matchingPosition)
+                    ? matchingPosition
+                    : previousProgress.find(matchesAssigned);
                   if (assigned?.assignedTarget) {
                     resumedProgress.add(assigned);
                     steps.push(assigned);

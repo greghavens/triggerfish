@@ -20,7 +20,7 @@ import { startSentinelAssessment } from "../../src/sentinel/assessment_store.ts"
 import { resolveSentinelCasePath } from "../../src/sentinel/cases.ts";
 import { SENTINEL_WORKER_NARRATIVE_COMMIT } from "../../src/sentinel/worker_narratives.ts";
 
-Deno.test("Sentinel reconciles a committed worker observation when the process exits before progress", async () => {
+async function verifyPublicationCrash(publications: number) {
   const baseDir = await Deno.makeTempDir();
   const path = resolveSentinelCasePath(baseDir);
   const database = join(dirname(path), "sentinel-adaptive.db");
@@ -73,6 +73,7 @@ Deno.test("Sentinel reconciles a committed worker observation when the process e
           taskId,
           phase,
           clock === undefined ? "" : String(clock),
+          String(publications),
         ],
         signal: AbortSignal.timeout(20_000),
         stdout: "piped",
@@ -97,14 +98,14 @@ Deno.test("Sentinel reconciles a committed worker observation when the process e
             "SELECT availableAt FROM adaptive_model_reviews WHERE taskId = ?",
           ).get(taskId)?.availableAt,
         );
-        const receipt = db.prepare(
-          "SELECT id, receipt FROM adaptive_worker_narratives WHERE taskId = ?",
-        ).get(taskId);
+        const receipts = db.prepare(
+          "SELECT id, receipt, stepIndex FROM adaptive_worker_narratives WHERE taskId = ? ORDER BY stepIndex",
+        ).all(taskId);
         const count = db.prepare(`SELECT count(*) AS count FROM adaptive_events
           WHERE taskId = ? AND event = 'worker_narrative_committed'`).get(
           taskId,
         )?.count;
-        return { event, checkpoint, progress, available, receipt, count };
+        return { event, checkpoint, progress, available, receipts, count };
       } finally {
         db.close();
       }
@@ -114,13 +115,33 @@ Deno.test("Sentinel reconciles a committed worker observation when the process e
     assertEquals(interrupted.code, 73, audit.decode(interrupted.stderr));
     const pending = reviewState();
     assertEquals(pending.event, "model_mutation_pending");
-    assertEquals(pending.count, 1);
-    assertEquals(typeof pending.receipt?.id, "string");
-    assertStringIncludes(String(pending.progress), "sentinel_assigned_target");
-    assert(
-      !String(pending.progress).includes(SENTINEL_WORKER_NARRATIVE_COMMIT),
+    const sequence = Array.from({ length: publications }).flatMap(() => [
+      "sentinel_assigned_target",
+      SENTINEL_WORKER_NARRATIVE_COMMIT,
+    ]);
+    assertEquals(pending.count, publications);
+    assertEquals(pending.receipts.length, publications);
+    assertEquals(
+      pending.receipts.map(({ stepIndex }) => stepIndex),
+      publications === 1 ? [0] : [0, 2],
     );
-    assertEquals(JSON.parse(String(pending.checkpoint)).completedIterations, 1);
+    assertEquals(
+      JSON.parse(String(pending.progress)).map(({ tool }: { tool: string }) =>
+        tool
+      ),
+      sequence.slice(0, -1),
+    );
+    const checkpoint = JSON.parse(String(pending.checkpoint));
+    assertEquals(checkpoint.completedIterations, sequence.length - 1);
+    assertEquals(checkpoint.toolCallCounts[0], [
+      "sentinel_assigned_target:{}",
+      publications,
+    ]);
+    assert(
+      !String(pending.checkpoint).includes(
+        "[SYSTEM] You have used many tool calls",
+      ),
+    );
     const denied = await run("deny", pending.available + 1);
     assertEquals(denied.code, 0, audit.decode(denied.stderr));
     await assertRejects(
@@ -129,8 +150,8 @@ Deno.test("Sentinel reconciles a committed worker observation when the process e
     );
     const recovered = reviewState();
     assertEquals(recovered.event, "model_mutation_settled");
-    assertEquals(recovered.count, 1);
-    assertEquals(recovered.receipt, pending.receipt);
+    assertEquals(recovered.count, publications);
+    assertEquals(recovered.receipts, pending.receipts);
     assertStringIncludes(
       String(recovered.checkpoint),
       "sentinel-worker-narrative:",
@@ -146,16 +167,32 @@ Deno.test("Sentinel reconciles a committed worker observation when the process e
     const result = JSON.parse(
       await Deno.readTextFile(join(baseDir, "resumed-narrative")),
     );
-    assertEquals(result.id, pending.receipt?.id);
-    assertEquals(result.receipt, JSON.parse(String(pending.receipt?.receipt)));
-    assertEquals(reviewState().count, 1);
+    assertEquals(result.length, publications * 2);
+    assertEquals(
+      result.filter((_: unknown, index: number) => index % 2 === 1).map(
+        (
+          { id, receipt, stepIndex }: {
+            id: string;
+            receipt: object;
+            stepIndex: number;
+          },
+        ) => ({ id, receipt, stepIndex }),
+      ),
+      pending.receipts.map(({ id, receipt, stepIndex }) => ({
+        id,
+        receipt: JSON.parse(String(receipt)),
+        stepIndex,
+      })),
+    );
+    assertEquals(reviewState().count, publications);
     const final = readAdaptiveSentinel(path, state, "revision")?.modelReviews
       .find((item) => item.taskId === taskId);
-    assertEquals(final?.steps.map(({ tool }) => tool), [
-      "sentinel_assigned_target",
-      SENTINEL_WORKER_NARRATIVE_COMMIT,
-    ]);
+    assertEquals(final?.steps.map(({ tool }) => tool), sequence);
   } finally {
     await Deno.remove(baseDir, { recursive: true });
   }
-});
+}
+Deno.test("Sentinel reconciles a committed worker observation when the process exits before progress", () =>
+  verifyPublicationCrash(1));
+Deno.test("Sentinel resumes both distinct ordered source reads after a second publication crash", () =>
+  verifyPublicationCrash(2));

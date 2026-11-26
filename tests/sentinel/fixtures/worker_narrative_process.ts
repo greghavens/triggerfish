@@ -9,7 +9,12 @@ import { readSentinelAssessment } from "../../../src/sentinel/assessment_store.t
 import { resolveSentinelCasePath } from "../../../src/sentinel/cases.ts";
 import { SENTINEL_WORKER_NARRATIVE_COMMIT } from "../../../src/sentinel/worker_narratives.ts";
 
-const [baseDir, taskId, phase, clock] = Deno.args;
+const [baseDir, taskId, phase, clock, count] = Deno.args;
+const publications = Number(count);
+const summaries = [
+  "The retained inventory check needs review.",
+  "The retained inventory check has an unresolved owner.",
+];
 const wallTime = Date.now;
 if (clock) Date.now = () => Math.max(wallTime(), Number(clock));
 const path = resolveSentinelCasePath(baseDir);
@@ -17,9 +22,9 @@ const state = readSentinelAssessment(path);
 if (!state) throw new Error("Missing assessment fixture");
 
 const registry = createProviderRegistry();
-const tool = (name: string, args: object) => ({
+const tool = (name: string, args: object, step: number) => ({
   type: "function" as const,
-  id: name,
+  id: `${name}-${step}`,
   function: { name, arguments: JSON.stringify(args) },
 });
 const usage = { inputTokens: 1, outputTokens: 1 };
@@ -30,25 +35,28 @@ registry.register({
   async complete(messages) {
     const results = messages.filter(({ role }) => role === "tool");
     if (phase === "interrupt") {
-      if (results.length > 1) {
+      const step = results.length;
+      if (step >= publications * 2) {
         throw new Error("Expected publication interruption");
       }
       return {
         content: "",
         usage,
-        toolCalls: results.length === 0
-          ? [tool("sentinel_assigned_target", {})]
+        toolCalls: step % 2 === 0
+          ? [tool("sentinel_assigned_target", {}, step)]
           : [tool(SENTINEL_WORKER_NARRATIVE_COMMIT, {
-            summary: "The retained inventory check needs review.",
+            summary: summaries[(step - 1) / 2],
             confidence: "inferred",
             evidenceId: "retained-check",
-          })],
+          }, step)],
       };
     }
-    if (phase !== "resume" || results.length !== 2) Deno.exit(74);
+    if (phase !== "resume" || results.length !== publications * 2) {
+      Deno.exit(74);
+    }
     await Deno.writeTextFile(
       join(baseDir, "resumed-narrative"),
-      String(results[1].content),
+      JSON.stringify(results.map(({ content }) => JSON.parse(String(content)))),
     );
     return {
       content:
@@ -77,9 +85,8 @@ const planner = createSentinelModelPlanner(
               phase === "interrupt" && hook === "POST_TOOL_RESPONSE" &&
               input.tool_name === SENTINEL_WORKER_NARRATIVE_COMMIT &&
               typeof input.tool_response === "string" &&
-              JSON.parse(input.tool_response).id?.startsWith(
-                "worker-narrative:",
-              )
+              JSON.parse(input.tool_response).receipt?.summary ===
+                summaries[publications - 1]
             ) Deno.exit(73);
             if (
               phase === "deny" && hook === "PRE_TOOL_CALL" &&

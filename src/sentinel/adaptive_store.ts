@@ -1,4 +1,8 @@
 import {
+  computeSoftLimit,
+  injectSoftLimitWarning,
+} from "../agent/loop/loop_types.ts";
+import {
   parseSentinelPeerWorkerReview,
   type SentinelPeerWorkerReviewReference,
 } from "./linked_case_sources.ts";
@@ -266,10 +270,16 @@ function normalizeWorkerCheckpoint(
     !Number.isSafeInteger(value.completedIterations) ||
     value.completedIterations < 1 || value.completedIterations > 4 ||
     value.nudgeCount !== 0 || value.eosRetries !== 0 ||
-    !Array.isArray(value.toolCallCounts) ||
-    !workerSteeringCheckpointIds(value.history, steering)
+    !Array.isArray(value.toolCallCounts)
   ) return;
-  const [user, ...exchanges] = value.history;
+  const softLimit: AgentTurnCheckpoint["history"][number][] = [];
+  injectSoftLimitWarning(softLimit, computeSoftLimit(4), 4);
+  // The shared loop's generated warning is transient model guidance.
+  const exchangesWithoutWarning = value.history.filter((entry, index) =>
+    index === 0 || !isDeepStrictEqual(entry, softLimit[0])
+  );
+  if (!workerSteeringCheckpointIds(exchangesWithoutWarning, steering)) return;
+  const [user, ...exchanges] = exchangesWithoutWarning;
   const inputTokens = value.tokenUsage?.inputTokens;
   const outputTokens = value.tokenUsage?.outputTokens;
   if (
@@ -283,6 +293,11 @@ function normalizeWorkerCheckpoint(
     { role: "user", content: user.content },
   ];
   const seen = new Map<string, readonly [string, number]>();
+  const orderedAssignedTargets = value.toolCallCounts.some((entry) =>
+    Array.isArray(entry) &&
+    entry[0] === `${ASSIGNED_TARGET_CHECKPOINT_TOOL}:{}` &&
+    typeof entry[1] === "number" && entry[1] > 1
+  );
   const sourceResults: string[] = [];
   const trafficReads = new Map<
     number,
@@ -337,8 +352,8 @@ function normalizeWorkerCheckpoint(
         (!workflow && !published && !journalWrite && !recheckContext &&
           !trafficRead && !trafficSearch && !trafficLinks && !goalReceiptRead &&
           name !== ASSIGNED_TARGET_CHECKPOINT_TOOL) ||
-        (!trafficRead && !isRepeatableSentinelReceiptRead(name) &&
-          seen.has(name)) ||
+        (!trafficRead && name !== ASSIGNED_TARGET_CHECKPOINT_TOOL &&
+          !isRepeatableSentinelReceiptRead(name) && seen.has(name)) ||
         typeof call?.id !== "string" ||
         !/^[A-Za-z0-9._:-]{1,128}$/.test(call.id) || providerIds.has(call.id) ||
         (call.type !== undefined && call.type !== "function") ||
@@ -574,12 +589,14 @@ function normalizeWorkerCheckpoint(
         ) return;
       } else {
         const digest = createHash("sha256").update(tool.content).digest("hex");
+        const matches = (step?: SentinelReviewStep) =>
+          step?.tool === name && step.outcome === "returned" &&
+          step.assignedTarget?.targetId === targetId &&
+          step.resultSnapshot?.sha256 === digest;
         if (
-          !progress.some((step) =>
-            step.tool === name && step.outcome === "returned" &&
-            step.assignedTarget?.targetId === targetId &&
-            step.resultSnapshot?.sha256 === digest
-          )
+          orderedAssignedTargets
+            ? !matches(progress[sourceResults.length])
+            : !progress.some(matches)
         ) return;
       }
       const signature = `${name}:${
@@ -588,7 +605,8 @@ function normalizeWorkerCheckpoint(
       const repeatable = trafficRead || linkedPayloadRead ||
         isRepeatableSentinelReceiptRead(name);
       const key = repeatable ? signature : name;
-      if (seen.has(key)) return;
+      const prior = seen.get(key);
+      if (prior && name !== ASSIGNED_TARGET_CHECKPOINT_TOOL) return;
       const id = repeatable
         ? `recovery-${name}-${sourceResults.length}`
         : workflow
@@ -604,8 +622,10 @@ function normalizeWorkerCheckpoint(
         : trafficRead || trafficAttach || trafficSearch || trafficLinks ||
             goalReceiptRead
         ? `recovery-${name}`
+        : prior
+        ? `${ASSIGNED_TARGET_CHECKPOINT_CALL}-${sourceResults.length}`
         : ASSIGNED_TARGET_CHECKPOINT_CALL;
-      seen.set(key, [signature, 1]);
+      seen.set(key, [signature, (prior?.[1] ?? 0) + 1]);
       sourceResults.push(tool.content);
       providerIds.add(call.id);
       calls.push({
@@ -11011,19 +11031,21 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
               batch.map(savedResult),
             )
           ) continue;
+          const toolCallCounts = new Map(saved.toolCallCounts);
+          for (const { tool, args } of batch) {
+            const signature = `${tool}:${
+              JSON.stringify(args, Object.keys(args).sort())
+            }`;
+            toolCallCounts.set(
+              signature,
+              (toolCallCounts.get(signature) ?? 0) + 1,
+            );
+          }
           const normalized = normalizeWorkerCheckpoint(
             alreadySaved ? saved : {
               ...saved,
               completedIterations: marker.publicationIteration,
-              toolCallCounts: [
-                ...saved.toolCallCounts,
-                ...batch.map(({ tool, args }) =>
-                  [
-                    `${tool}:${JSON.stringify(args, Object.keys(args).sort())}`,
-                    1,
-                  ] as const
-                ),
-              ],
+              toolCallCounts: [...toolCallCounts],
               history: [
                 ...saved.history,
                 {
