@@ -7381,14 +7381,33 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
         "unavailable",
       );
       assertEquals(confirmations.length, beforeBackgroundLink);
+      duringConfirmation = () => {
+        denied = "PRE_TOOL_CALL";
+      };
+      try {
+        assertStringIncludes(
+          (await turn(backgroundLink)).result,
+          "unavailable",
+        );
+      } finally {
+        duringConfirmation = undefined;
+        denied = undefined;
+      }
+      assertEquals(confirmations.length, beforeBackgroundLink + 1);
+      for (const ref of [delegatedRef, scheduledRef]) {
+        const detail = JSON.parse(
+          (await turn({ action: "inspect", ...ref })).result,
+        );
+        assertEquals(detail.links, []);
+      }
       const linkedBackground =
         JSON.parse((await turn(backgroundLink)).result).link;
-      assertEquals(confirmations.length, beforeBackgroundLink + 1);
+      assertEquals(confirmations.length, beforeBackgroundLink + 2);
       assertEquals(
         JSON.parse((await turn(backgroundLink)).result).link,
         linkedBackground,
       );
-      assertEquals(confirmations.length, beforeBackgroundLink + 1);
+      assertEquals(confirmations.length, beforeBackgroundLink + 2);
       await withGateway(async (reopen) => {
         for (const ref of [delegatedRef, scheduledRef]) {
           const detail = JSON.parse(
@@ -7404,7 +7423,7 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
           JSON.parse((await reopen(backgroundLink)).result).link,
           linkedBackground,
         );
-        assertEquals(confirmations.length, beforeBackgroundLink + 1);
+        assertEquals(confirmations.length, beforeBackgroundLink + 2);
       }, restarted);
       const hostedTraceSearch = {
         action: "search_case_traces",

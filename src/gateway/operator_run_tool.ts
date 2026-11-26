@@ -3385,12 +3385,12 @@ ${
         authorize: (_action, ref) => Object.hasOwn(runProviders, ref.kind),
         providers: runProviders,
         links,
-        approveLink: ({ left, right }) =>
-          options.confirm(
+        approveLink: async ({ left, right }) =>
+          await options.confirm(
             `Link these exact operator runs?\n${
               JSON.stringify({ left, right })
             }`,
-          ),
+          ) && await context?.authorizeOwnerRunCall?.(args) === true,
       });
       if (action === "pause_runs" || action === "resume_runs") {
         const { requestId, runTargets } = args;
@@ -12372,6 +12372,9 @@ ${JSON.stringify({ run: ref, adaptiveRevision, ...scope })}`,
           );
         const requestId = args.requestId;
         if (
+          !context?.authenticatedOwnerSessionId ||
+          !context.authorizeOwnerRunCall ||
+          !canFlowTo("INTERNAL", context.ceiling ?? "PUBLIC") ||
           !other || typeof requestId !== "string" ||
           !digestPattern.test(requestId) ||
           ref.kind === "sentinel" && ref.revision === undefined ||
