@@ -584,6 +584,7 @@ export function isSentinelRetainedReadReceipt(tool: unknown, args: unknown) {
 export const SENTINEL_GOAL_RECHECK_READ = "sentinel_worker_findings";
 
 export type SentinelWorkerTraceSearchArgs = {
+  readonly liveProgress?: true;
   readonly task?: string;
   readonly query?: string;
   readonly stepIndices?: readonly number[];
@@ -595,13 +596,23 @@ export type SentinelWorkerTraceSearchArgs = {
 export function sentinelWorkerTraceSearchArgs(
   args: Record<string, unknown>,
 ): SentinelWorkerTraceSearchArgs | undefined {
-  const { query, task, stepIndices, revision, offset, limit } = args;
+  const { query, task, stepIndices, revision, offset, limit, liveProgress } =
+    args;
   if (
     Object.keys(args).some((key) =>
-      !["query", "task", "stepIndices", "revision", "offset", "limit"].includes(
+      ![
+        "query",
+        "task",
+        "stepIndices",
+        "revision",
+        "offset",
+        "limit",
+        "liveProgress",
+      ].includes(
         key,
       )
     ) ||
+    (liveProgress !== undefined && liveProgress !== true) ||
     (query !== undefined && (typeof query !== "string" ||
       !/^[a-zA-Z0-9 ._:-]{0,128}$/.test(query) ||
       redactCredentialText(query) !== query)) ||
@@ -624,6 +635,7 @@ export function sentinelWorkerTraceSearchArgs(
         limit > 30))
   ) return;
   return {
+    ...(liveProgress === true && { liveProgress: true }),
     ...(query !== undefined && { query }),
     ...(task !== undefined && { task }),
     ...(stepIndices !== undefined && { stepIndices }),
@@ -642,6 +654,7 @@ type GoalReceiptReadArguments =
     cursor?: string;
     before?: number;
     assignedTraffic?: true;
+    liveProgress?: true;
     after?: string;
     incidentId?: string;
     behavior?: string;

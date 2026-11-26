@@ -213,11 +213,13 @@ import {
 import { loadSentinelGraph } from "../sentinel/graph.ts";
 import {
   readAssignedSentinelModelReview,
+  readHistoricalAdaptiveSentinel,
   readSentinelAssetTrafficHints,
   readSentinelCaseHints,
   readSentinelProvenance,
   readSentinelWorkerObservation,
   SENTINEL_MAX_INPUT_CHARS,
+  sentinelHintAssetsInScope,
 } from "./sentinel_adaptive_runtime.ts";
 import {
   archivedSentinelInventoryAliases,
@@ -597,6 +599,11 @@ const graphTools: readonly ToolDefinition[] = [
     description:
       "Search saved read-only graph queries from completed case workers. Results identify the review, assignment, and exact step. Supply task and stepIndices to retrieve specific recorded steps.",
     parameters: {
+      liveProgress: {
+        type: "boolean",
+        description:
+          "Return committed progress metadata from peer workers on the exact leased asset.",
+      },
       query: {
         type: "string",
         description:
@@ -2797,6 +2804,80 @@ function workerTraceMatches(
   );
 }
 
+const approvedPeerProgress = new Map([
+  [
+    "sentinel_publish_workflow_observation",
+    /^workflow-observation:[a-f0-9]{64}$/,
+  ],
+  ["sentinel_publish_graph_fact", /^worker-graph-fact:[a-f0-9]{64}$/],
+  ["sentinel_report_finding", /^worker-finding:[a-f0-9]{64}$/],
+  ["sentinel_record_finding_recheck", /^worker-recheck:[a-f0-9]{64}$/],
+  ["sentinel_attach_finding_traffic", /^finding-traffic-link:[a-f0-9]{64}$/],
+]);
+
+function peerProgressMatches(
+  path: string,
+  revision: number,
+  consumerId: string,
+  args: SentinelWorkerTraceSearchArgs,
+) {
+  const current = readSentinelAssessment(path);
+  const history = readHistoricalAdaptiveSentinel(path, revision);
+  const consumer = history?.tasks.find(({ id }) => id === consumerId);
+  const assetId = consumer?.nodeId;
+  if (
+    !history || !assetId || !current?.plan.runId ||
+    current.plan.runId !== history.goal.id ||
+    !sentinelHintAssetsInScope(path, current, [assetId])
+  ) return;
+  const term = args.query?.trim().toLowerCase() ?? "";
+  return history.tasks.flatMap((task) => {
+    if (
+      task.id === consumerId || task.nodeId !== assetId ||
+      (args.task !== undefined && task.id !== args.task)
+    ) return [];
+    const review = history.modelReviewStates.find(({ taskId }) =>
+      taskId === task.id
+    );
+    const steps = review?.progressSteps ??
+      history.modelReviews.find(({ taskId }) => taskId === task.id)?.steps ??
+      [];
+    return steps.flatMap((step, index) => {
+      const target = step.target;
+      if (
+        step.outcome !== "returned" || !target ||
+        !approvedPeerProgress.get(step.tool)?.test(target) ||
+        (args.stepIndices && !args.stepIndices.includes(index)) ||
+        (term &&
+          ![step.tool, target].some((part) =>
+            part.toLowerCase().includes(term)
+          ))
+      ) return [];
+      return [{
+        reviewId: `progress:${task.id}`,
+        taskId: task.id,
+        index,
+        tool: step.tool,
+        target,
+        outcome: step.outcome,
+      }];
+    });
+  });
+}
+
+function liveProgressConsumer(options: ProvenanceScope, revision: number) {
+  const { assignedTaskId, assignedTaskLeaseToken } = options;
+  return assignedTaskId && assignedTaskLeaseToken &&
+      readAssignedSentinelModelReview(
+        options.snapshotPath,
+        revision,
+        assignedTaskId,
+        assignedTaskLeaseToken,
+      )
+    ? assignedTaskId
+    : undefined;
+}
+
 function parseSavedWorkerTracePage(
   result: string,
   revision: number,
@@ -2843,8 +2924,16 @@ function validateSavedWorkerTracePage(
   const retained = readAgentProvenance(options, revision);
   const saved = parseSavedWorkerTracePage(result, revision, args);
   if ("error" in retained || !saved) return false;
+  const consumer = args.liveProgress
+    ? liveProgressConsumer(options, revision)
+    : undefined;
+  const steps = args.liveProgress
+    ? consumer &&
+      peerProgressMatches(options.snapshotPath, revision, consumer, args)
+    : workerTraceMatches(options, retained.graph, args);
+  if (!steps) return false;
   const allowed = new Map(
-    workerTraceMatches(options, retained.graph, args).map((
+    steps.map((
       step,
     ) => [JSON.stringify([step.reviewId, step.index]), JSON.stringify(step)]),
   );
@@ -2867,7 +2956,10 @@ export function reopenSentinelWorkerTraceSearch(
   };
   const retained = readAgentProvenance(options, saved.args.revision);
   if ("error" in retained) return;
-  const steps = workerTraceMatches(options, retained.graph, saved.args, true);
+  const steps = saved.args.liveProgress
+    ? taskId && peerProgressMatches(path, revision, taskId, saved.args)
+    : workerTraceMatches(options, retained.graph, saved.args, true);
+  if (!steps) return;
   const page = saved.rows.map((row) =>
     steps.find(({ taskId, index }) =>
       taskId === row.taskId && index === row.index
@@ -2888,9 +2980,17 @@ export function searchSentinelWorkerTraces(
   args: Record<string, unknown>,
   workerRead = options.assignedTaskLeaseToken !== undefined,
 ): string {
-  const { query = "", task, stepIndices, revision, offset = 0, limit = 10 } =
-    args;
+  const {
+    query = "",
+    task,
+    stepIndices,
+    revision,
+    offset = 0,
+    limit = 10,
+    liveProgress,
+  } = args;
   if (
+    (liveProgress !== undefined && liveProgress !== true) ||
     (stepIndices !== undefined &&
       (typeof task !== "string" || args.query !== undefined ||
         !Array.isArray(stepIndices) || !stepIndices.length ||
@@ -2908,7 +3008,15 @@ export function searchSentinelWorkerTraces(
     typeof limit !== "number" || !Number.isSafeInteger(limit) || limit < 1 ||
     limit > MAX_FINDING_PAGE ||
     Object.keys(args).some((key) =>
-      !["query", "task", "stepIndices", "revision", "offset", "limit"].includes(
+      ![
+        "query",
+        "task",
+        "stepIndices",
+        "revision",
+        "offset",
+        "limit",
+        "liveProgress",
+      ].includes(
         key,
       )
     )
@@ -2921,15 +3029,30 @@ export function searchSentinelWorkerTraces(
     const requested = Array.isArray(stepIndices)
       ? new Set(stepIndices)
       : undefined;
-    const steps = workerTraceMatches(options, provenance.graph, {
+    const filters = {
       query,
       task,
       stepIndices: Array.isArray(stepIndices) ? stepIndices : undefined,
-    }, workerRead);
+    };
+    const consumer = liveProgress
+      ? liveProgressConsumer(options, provenance.revision)
+      : undefined;
+    const steps = liveProgress
+      ? consumer &&
+        peerProgressMatches(
+          options.snapshotPath,
+          provenance.revision,
+          consumer,
+          filters,
+        )
+      : workerTraceMatches(options, provenance.graph, filters, workerRead);
+    if (!steps) {
+      return "Error: Peer progress requires a current assignment lease and exact asset.";
+    }
     if (requested && requested.size !== steps.length) {
       return "Error: A requested worker trace step is unavailable in this case and revision.";
     }
-    return pageProvenance(
+    return pageProvenance<(typeof steps)[number], (typeof steps)[number]>(
       steps,
       offset,
       limit,

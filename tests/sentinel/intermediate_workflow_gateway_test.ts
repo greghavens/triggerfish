@@ -180,8 +180,9 @@ async function withOperator(
       }),
       hookRunner: {
         evaluateHook: (hook, { input }) => {
-          const retainedSource = input.tool_name ===
-            "sentinel_intermediate_workflow_observation";
+          const retainedSource =
+            input.tool_name === "sentinel_intermediate_workflow_observation" ||
+            input.tool_name === "sentinel_worker_trace_search";
           const allowed = !(hook === "POST_TOOL_RESPONSE" &&
             (withhold === true || withhold === "source" && retainedSource)) &&
             !(hook === "PRE_TOOL_CALL" && withhold === "source-pre" &&
@@ -267,6 +268,7 @@ Deno.test("Gateway workers cite an intermediate observation while its source rev
   let metadataAllowed = true;
   let metadataChecks = 0;
   let received = "";
+  let peerProgress: unknown;
   let expectedGateOutcome: "success" | "failure" = "success";
   let rewrite: { id: string; prerequisites: string[] } | undefined;
   const allowPublication = Promise.withResolvers<void>();
@@ -387,17 +389,45 @@ Deno.test("Gateway workers cite an intermediate observation while its source rev
       await published.promise;
       await allowPeerRead.promise;
       if (!results.length) {
-        return call("sentinel_intermediate_workflow_observation");
+        return call("sentinel_worker_trace_search", {
+          liveProgress: true,
+          query: "sentinel_publish_workflow_observation",
+        });
       }
       if (results.length === 1) {
-        const id = String(results[0].content).match(
+        const page = JSON.parse(String(results[0].content));
+        peerProgress = page;
+        assertEquals(page.steps.length, 1);
+        const [step] = page.steps;
+        assertEquals(step.tool, "sentinel_publish_workflow_observation");
+        assertEquals(Object.keys(step).toSorted(), [
+          "index",
+          "outcome",
+          "reviewId",
+          "target",
+          "taskId",
+          "tool",
+        ]);
+        return call("sentinel_worker_trace_search", {
+          liveProgress: true,
+          task: step.taskId,
+          stepIndices: [step.index],
+        });
+      }
+      if (results.length === 2) {
+        const earlier = JSON.parse(String(results[0].content)).steps;
+        assertEquals(JSON.parse(String(results[1].content)).steps, earlier);
+        return call("sentinel_intermediate_workflow_observation");
+      }
+      if (results.length === 3) {
+        const id = String(results[2].content).match(
           /workflow-observation:[a-f0-9]{64}/,
         )?.[0];
         assert(id);
         received = id;
         return call("sentinel_intermediate_workflow_observation", { id });
       }
-      const receipt = String(results[1].content);
+      const receipt = String(results[3].content);
       assert(
         receipt.includes(received) && receipt.includes('"id":51') &&
           receipt.includes('"failure"'),
@@ -1355,7 +1385,8 @@ Deno.test("Gateway workers cite an intermediate observation while its source rev
       );
     assert(peerStep !== undefined && peerStep > 0);
     const peerTrace = { ...trace, taskId: peer.id, stepIndices: [peerStep] };
-    const peerPage = { ...peerTrace, stepIndices: [0] };
+    const peerPage = { ...peerTrace, stepIndices: [peerStep - 1] };
+    const exactPeerProgress = { ...peerTrace, stepIndices: [0] };
     const expectedPeerPage = {
       evidenceRevision: state.revision,
       targetId: observation.targetId,
@@ -1381,6 +1412,18 @@ Deno.test("Gateway workers cite an intermediate observation while its source rev
           revision: state.revision,
         };
         const publication = JSON.parse(await turn(trace));
+        assertEquals(
+          JSON.parse(await turn(exactPeerProgress)).result,
+          peerProgress,
+        );
+        assertStringIncludes(
+          await turn(exactPeerProgress, "source-pre"),
+          "unavailable",
+        );
+        assertStringIncludes(
+          await turn(exactPeerProgress, "source"),
+          "unavailable",
+        );
         assertEquals(JSON.parse(await turn(peerTrace)).result, observation);
         assert((await turn(peerTrace, "source")).includes("unavailable"));
         assertEquals(
