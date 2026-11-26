@@ -21,7 +21,12 @@ import {
   canFlowTo,
   type ClassificationLevel,
 } from "../../core/types/classification.ts";
-import type { SkillLoader, SkillSource } from "./loader.ts";
+import {
+  type SkillLoader,
+  type SkillSource,
+  splitSkillDocuments,
+} from "./loader.ts";
+import { validSkillReferencePath } from "./reference_documents.ts";
 import { enforceSkillName } from "./registry_types.ts";
 import type { SkillContextTracker } from "./context.ts";
 import type { SkillScanner } from "./scanner.ts";
@@ -32,6 +37,20 @@ import { fenceExternalMetadata } from "../../core/security/prompt_fencing.ts";
 import type { ConversationRecord } from "../../core/conversation/conversation_types.ts";
 
 const log = createLogger("skill-tools");
+
+async function scanSkillPackage(scanner: SkillScanner, markdown: string) {
+  const main = await scanner.scan(markdown);
+  if (!main.ok) return main;
+  const { files } = splitSkillDocuments(markdown);
+  if (!files) {
+    return { ok: false, warnings: ["Invalid skill reference manifest."] };
+  }
+  for (const file of files) {
+    const result = await scanner.scan(file.content);
+    if (!result.ok) return result;
+  }
+  return main;
+}
 
 /** Skill type argument accepted by read_skill. */
 export type SkillType = "BUNDLED" | "USER_PROVIDED";
@@ -115,8 +134,14 @@ export function buildSkillAdministrationToolDefinitions(): readonly ToolDefiniti
   }, {
     name: "inspect_skill_document",
     description:
-      "Inspect the current SKILL.md and its exact digest without activating the skill. Requires the active owner session.",
-    parameters: buildReadSkillDef().parameters,
+      "Inspect the current skill instructions and list its approved reference documents. Select one exact file to open it without activating the skill. Requires the active owner session.",
+    parameters: {
+      ...buildReadSkillDef().parameters,
+      file: {
+        type: "string",
+        description: "Optional path of one approved reference document",
+      },
+    },
   }, {
     name: "inspect_skill_draft",
     description:
@@ -409,7 +434,7 @@ async function executeDraftAction(
   if (!inspection && approval?.withdrawal) {
     return "Error: This exact skill draft approval was withdrawn.";
   }
-  const scan = await ctx.skillScanner.scan(draft.content);
+  const scan = await scanSkillPackage(ctx.skillScanner, draft.content);
   if (!applicable()) {
     return "Error: Draft administration is outside the active owner scope.";
   }
@@ -517,7 +542,7 @@ async function executeRevisionAction(
   if (!applicable()) {
     return "Error: Skill revision is outside the active owner scope.";
   }
-  const scan = await ctx.skillScanner.scan(revision.content);
+  const scan = await scanSkillPackage(ctx.skillScanner, revision.content);
   if (!applicable()) {
     return "Error: Skill revision is outside the active owner scope.";
   }
@@ -623,7 +648,7 @@ async function executeCreationAction(
   if (!applicable()) {
     return "Error: The proposed skill is outside the active owner scope.";
   }
-  const scan = await ctx.skillScanner.scan(proposal.markdown);
+  const scan = await scanSkillPackage(ctx.skillScanner, proposal.markdown);
   if (!applicable()) {
     return "Error: The proposed skill is outside the active owner scope.";
   }
@@ -726,6 +751,12 @@ export function createSkillToolExecutor(
 
     const type = input.type;
     const skillName = input.skill_name;
+    const requestedFile = inspecting ? input.file : undefined;
+    if (
+      requestedFile !== undefined && !validSkillReferencePath(requestedFile)
+    ) {
+      return "Error: Invalid skill reference path.";
+    }
 
     if (
       typeof type !== "string" ||
@@ -820,7 +851,7 @@ export function createSkillToolExecutor(
 
     // 3. Scanner check at activation time
     if (ctx.skillScanner) {
-      const scanResult = await ctx.skillScanner.scan(content);
+      const scanResult = await scanSkillPackage(ctx.skillScanner, content);
       if (!scanResult.ok) {
         log.warn("Skill activation blocked by scanner", {
           operation: "readSkillScannerCheck",
@@ -833,6 +864,17 @@ export function createSkillToolExecutor(
       }
     }
 
+    const documents = splitSkillDocuments(content);
+    const approvedFiles = skill.draftApproval && ctx.skillScanner
+      ? documents.files ?? []
+      : [];
+    const reference = approvedFiles.find(({ path }) => path === requestedFile);
+    if (requestedFile !== undefined && !reference) {
+      return "Error: The approved skill reference is unavailable.";
+    }
+    const referenceDigest = reference
+      ? await computeSkillHash(reference.content)
+      : undefined;
     if (skill.draftApproval) {
       const current = await ctx.skillLoader.inspectDraft?.(skill.name);
       if (
@@ -852,9 +894,17 @@ export function createSkillToolExecutor(
         found: true,
         skill_name: skill.name,
         source: skill.source,
-        file: "SKILL.md",
+        file: reference?.path ?? "SKILL.md",
         digest: currentHash,
-        content: fenceExternalMetadata(content, "skill-document"),
+        ...(referenceDigest && { file_digest: referenceDigest }),
+        ...(approvedFiles.length && {
+          files: approvedFiles.map(({ path }) => path),
+          approval_receipt_id: skill.draftApproval?.receiptId,
+        }),
+        content: fenceExternalMetadata(
+          reference?.content ?? documents.instructions,
+          "skill-document",
+        ),
         _classification: taint,
       });
     }
@@ -872,7 +922,7 @@ export function createSkillToolExecutor(
         { approval_receipt_id: skill.draftApproval.receiptId }),
       requires_tools: skill.requiresTools,
       network_domains: skill.networkDomains,
-      content,
+      content: documents.instructions,
     });
   };
 }

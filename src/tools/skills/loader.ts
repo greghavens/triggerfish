@@ -33,6 +33,7 @@ import {
   createSkillAuthor,
   type SkillCreateOptions,
 } from "./author.ts";
+import { parseSkillReferences } from "./reference_documents.ts";
 
 const log = createLogger("skills");
 const frontmatterPattern = /^---\n([\s\S]*?)(?:\n---|\n\.\.\.)(?=\n|$)/;
@@ -159,6 +160,23 @@ interface SkillFrontmatter {
   readonly requires_tools?: readonly string[];
   readonly network_domains?: readonly string[];
   readonly status?: string;
+  readonly files?: unknown;
+}
+
+/** Read package documents separately from the instructions passed to an agent. */
+export function splitSkillDocuments(content: string) {
+  const header = frontmatterPattern.exec(content)?.[0];
+  const meta = parseFrontmatter(content);
+  if (!header || !meta || !Object.hasOwn(meta, "files")) {
+    return { instructions: content, files: [] };
+  }
+  const { files, ...instructions } = meta;
+  return {
+    instructions: `---\n${stringifyYaml(instructions).trimEnd()}\n---${
+      content.slice(header.length)
+    }`,
+    files: parseSkillReferences(files),
+  };
 }
 
 /**
@@ -299,6 +317,7 @@ function parseCreationOptions(
         "classification_ceiling",
         "requires_tools",
         "network_domains",
+        "files",
       ].includes(key)
     ) ||
     meta.name !== name || typeof meta.description !== "string" ||
@@ -319,7 +338,12 @@ function parseCreationOptions(
   ) return;
   const ceiling = parseClassification(meta.classification_ceiling);
   const content = source.slice(header.length + 1);
-  if (!ceiling.ok || !content.trim()) return;
+  const files = meta.files === undefined
+    ? undefined
+    : parseSkillReferences(meta.files);
+  if (!ceiling.ok || !content.trim() || (meta.files !== undefined && !files)) {
+    return;
+  }
   return {
     name,
     description: meta.description,
@@ -327,6 +351,7 @@ function parseCreationOptions(
     requiresTools: meta.requires_tools,
     networkDomains: meta.network_domains,
     content,
+    files,
   };
 }
 

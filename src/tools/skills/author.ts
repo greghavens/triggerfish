@@ -16,6 +16,7 @@ import type {
 import { CLASSIFICATION_ORDER } from "../../core/types/classification.ts";
 import { createLogger } from "../../core/logger/logger.ts";
 import { enforceSkillName } from "./registry_types.ts";
+import type { SkillReferenceDocument } from "./reference_documents.ts";
 
 const log = createLogger("skills-author");
 
@@ -55,6 +56,7 @@ export interface SkillCreateOptions {
   readonly requiresTools?: readonly string[];
   readonly networkDomains?: readonly string[];
   readonly content: string;
+  readonly files?: readonly SkillReferenceDocument[];
 }
 
 /** Skill author interface. */
@@ -89,6 +91,7 @@ export function buildPendingSkillMarkdown(options: SkillCreateOptions): string {
     classification_ceiling: options.classificationCeiling,
     requires_tools: options.requiresTools ?? [],
     network_domains: options.networkDomains ?? [],
+    ...(options.files?.length && { files: options.files }),
     status: "PENDING_APPROVAL",
   }).trimEnd();
   return `---\n${frontmatter}\n---\n${options.content}`;
@@ -182,6 +185,7 @@ function normalizeSkillCreateOptions(
   readonly requiresTools: readonly string[];
   readonly networkDomains: readonly string[];
   readonly content: string;
+  readonly files?: readonly SkillReferenceDocument[];
 } {
   return {
     name: createOptions.name,
@@ -190,6 +194,7 @@ function normalizeSkillCreateOptions(
     requiresTools: createOptions.requiresTools ?? [],
     networkDomains: createOptions.networkDomains ?? [],
     content: createOptions.content,
+    files: createOptions.files,
   };
 }
 
