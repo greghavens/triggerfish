@@ -1,3 +1,5 @@
+import { readAgentProfile } from "../core/agent_profiles.ts";
+import { locateSentinelCase } from "../sentinel/cases.ts";
 import { sentinelModelRoleProfile } from "../sentinel/model_routes.ts";
 import type { ClassificationLevel } from "../core/types/classification.ts";
 /** Select an assessment model using the session's fixed data classification. */
@@ -17,6 +19,31 @@ import {
   readSentinelAssessment,
   readSentinelModelRoute,
 } from "../sentinel/assessment_store.ts";
+
+/** Resolve a reviewed per-run override before the specialized profile default. */
+export function sentinelRoleModelSelection(
+  path: string,
+  route: SentinelModelRoute,
+  role: SentinelModelRole,
+) {
+  const direct = route.roles?.[role];
+  if (direct) return { source: "role", profile: direct } as const;
+  if (role === "goals" || role === "reporter" || role === "recheck") {
+    const location = locateSentinelCase(path);
+    const settings = location && readAgentProfile(
+      location.baseDir,
+      `sentinel-${role}`,
+    )?.definition;
+    if (settings?.role === role && settings.modelProfile) {
+      return {
+        source: "profile_default",
+        profile: settings.modelProfile,
+      } as const;
+    }
+  }
+  const profile = sentinelModelRoleProfile(route, role);
+  return profile ? { source: "role_default", profile } as const : undefined;
+}
 
 interface SentinelModelRun {
   readonly path: string;
@@ -52,8 +79,9 @@ function runModelProvider(
   const resolveProvider = (
     route: SentinelModelRoute,
     index: number,
+    roleProfile: SelectedModelProfile | undefined,
   ) => {
-    const profile = sentinelModelRoleProfile(route, role) ??
+    const profile = roleProfile ??
       (index === 0 ? route.primary : route.alternates?.[index - 1]);
     return profile
       ? resolve(profile)
@@ -88,7 +116,11 @@ function runModelProvider(
   };
   const initial = readRoute();
   let active = initial?.runnable
-    ? resolveProvider(initial.route, initial.route.activeIndex)
+    ? resolveProvider(
+      initial.route,
+      initial.route.activeIndex,
+      sentinelRoleModelSelection(run.path, initial.route, role)?.profile,
+    )
     : undefined;
   // Case chat must be able to pick up a later reviewed route without using
   // the ordinary provider to answer while the current case route is revoked.
@@ -106,10 +138,16 @@ function runModelProvider(
     get contextWindow() {
       const current = readRoute();
       if (!current) return approvedProvider.contextWindow;
+      const roleProfile = sentinelRoleModelSelection(
+        run.path,
+        current.route,
+        role,
+      )?.profile;
       return Math.min(...Array.from(
         { length: (current.route.alternates?.length ?? 0) + 1 },
         (_, index) =>
-          resolveProvider(current.route, index)?.contextWindow ?? 100_000,
+          resolveProvider(current.route, index, roleProfile)?.contextWindow ??
+            100_000,
       ));
     },
     async complete(messages, tools, options) {
@@ -117,19 +155,22 @@ function runModelProvider(
         ? options.signal
         : undefined;
       const selected = readRoute();
+      const roleProfile = selected &&
+        sentinelRoleModelSelection(run.path, selected.route, role)?.profile;
       let index = selected?.runnable ? selected.route.activeIndex : undefined;
       while (selected && index !== undefined) {
         signal?.throwIfAborted();
-        active = resolveProvider(selected.route, index);
+        active = resolveProvider(selected.route, index, roleProfile);
         if (!active) break;
         try {
           return await active.complete(messages, tools, options);
         } catch (error) {
           signal?.throwIfAborted();
           if (
-            sentinelModelRoleProfile(selected.route, role) || !selected.scope ||
+            roleProfile ||
+            !selected.scope ||
             !isAvailabilityFailure(error) ||
-            !resolveProvider(selected.route, index + 1)
+            !resolveProvider(selected.route, index + 1, roleProfile)
           ) throw error;
           index = advanceSentinelModelFallback(
             run.path,

@@ -4,6 +4,10 @@
 import { DatabaseSync } from "node:sqlite";
 import { join } from "@std/path";
 import { redactCredentialText } from "./logger/redactor.ts";
+import {
+  isSelectedModelProfile,
+  type SelectedModelProfile,
+} from "./model_profile_selection.ts";
 
 const profileId = /^[a-z][a-z0-9_-]{0,63}$/;
 const requestId = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/;
@@ -27,6 +31,7 @@ export interface AgentProfileDefinition {
   readonly tools?: readonly string[];
   readonly skills?: readonly string[];
   readonly automaticAdmission?: AgentAutomaticAdmission;
+  readonly modelProfile?: SelectedModelProfile;
 }
 
 export interface AgentProfileRevision {
@@ -91,6 +96,7 @@ export function parseAgentProfileDefinition(
     tools,
     skills,
     automaticAdmission: admission,
+    modelProfile,
   } = fields;
   if (
     Object.keys(fields).some((key) =>
@@ -107,6 +113,7 @@ export function parseAgentProfileDefinition(
         "tools",
         "skills",
         "automaticAdmission",
+        "modelProfile",
       ].includes(key)
     )
   ) return;
@@ -118,6 +125,10 @@ export function parseAgentProfileDefinition(
   const visibleTools = settingList(tools);
   const visibleSkills = settingList(skills);
   const reviewedAdmission = automaticAdmission(admission);
+  const reviewedModel = isSelectedModelProfile(modelProfile) &&
+      (modelProfile.model === undefined || safeText(modelProfile.model, 256))
+    ? modelProfile
+    : undefined;
   if (
     !parsedName || parsedDescription === undefined || !parsedPrompt ||
     !isAgentProfileId(role) ||
@@ -126,6 +137,9 @@ export function parseAgentProfileDefinition(
     (tools !== undefined && !visibleTools) ||
     (skills !== undefined && !visibleSkills) ||
     (admission !== undefined && (role !== "reporter" || !reviewedAdmission)) ||
+    (modelProfile !== undefined &&
+      (!reviewedModel ||
+        !["goals", "reporter", "recheck"].includes(String(role)))) ||
     (maxTurns !== undefined &&
       (typeof maxTurns !== "number" || !Number.isInteger(maxTurns) ||
         maxTurns < 1 || maxTurns > 32)) ||
@@ -151,6 +165,7 @@ export function parseAgentProfileDefinition(
     ...(visibleTools && { tools: visibleTools }),
     ...(visibleSkills && { skills: visibleSkills }),
     ...(reviewedAdmission && { automaticAdmission: reviewedAdmission }),
+    ...(reviewedModel && { modelProfile: reviewedModel }),
   };
 }
 

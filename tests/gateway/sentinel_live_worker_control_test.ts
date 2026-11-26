@@ -3664,6 +3664,7 @@ Deno.test("Reviewed Sentinel role routes resolve and dispatch independently of t
     "worker-model",
     "chat-model",
     "goals-model",
+    "goals-default-model",
     "reporter-model",
     "recheck-model",
   ];
@@ -3678,7 +3679,7 @@ Deno.test("Reviewed Sentinel role routes resolve and dispatch independently of t
       supportsStreaming: false,
       complete(_messages, tools) {
         calls.push(provider);
-        if (provider === "goals-model") assertEquals(tools?.length ?? 0, 0);
+        if (provider.startsWith("goals-")) assertEquals(tools?.length ?? 0, 0);
         if (provider === "planner-model") {
           const definitions = tools as {
             function?: {
@@ -3711,7 +3712,7 @@ Deno.test("Reviewed Sentinel role routes resolve and dispatch independently of t
           : provider === "worker-model" &&
               calls.filter((item) => item === "worker-model").length === 1
           ? '{"summary":"Reviewed using worker-model","followUps":[]}'
-          : provider === "goals-model"
+          : provider.startsWith("goals-")
           ? JSON.stringify({
             goals: [{
               id: "verify-app",
@@ -3866,6 +3867,40 @@ Deno.test("Reviewed Sentinel role routes resolve and dispatch independently of t
         ],
       );
     }, routing.list);
+    await withOwnerControl(baseDir, async (request, confirmations) => {
+      const roleDefault = {
+        action: "set_agent_profile",
+        id: "sentinel-goals",
+        expectedVersion: 0,
+        requestId: crypto.randomUUID(),
+        profileSettings: {
+          name: "Assessment goals",
+          description: "Draft goals for operator review",
+          role: "goals",
+          prompt: "Use only the evidence the operator supplied.",
+          modelProfile: {
+            provider: "public-model",
+            model: "public-model-version",
+          },
+        },
+      };
+      assert((await request(roleDefault)).startsWith("Error:"));
+      assertEquals(confirmations.length, 0);
+      const accepted = JSON.parse(
+        await request({
+          ...roleDefault,
+          profileSettings: {
+            ...roleDefault.profileSettings,
+            modelProfile: {
+              provider: "goals-default-model",
+              model: "goals-default-model-version",
+            },
+          },
+        }),
+      );
+      assertEquals(accepted.profile.version, 1);
+      assertEquals(confirmations.length, 1);
+    }, routing.list);
 
     const state = readSentinelAssessment(path);
     assert(state);
@@ -3948,6 +3983,13 @@ Deno.test("Reviewed Sentinel role routes resolve and dispatch independently of t
       }
     }
     await turn("/sentinel on");
+    const beforeDraft = calls.length;
+    const draftBeforeRun = await turn(
+      'assessment goals propose {"objective":"Verify the deployment"}',
+    );
+    assert(draftBeforeRun.includes("verify-app"), draftBeforeRun);
+    assertEquals(calls.slice(beforeDraft), ["goals-default-model"]);
+    assertEquals(readSentinelAssessment(mainPath), undefined);
     await turn(`/sentinel case ${caseId}`);
     assert(
       (await turn("Review this assessment.")).includes(

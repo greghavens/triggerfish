@@ -1,3 +1,4 @@
+import { sentinelRoleModelSelection } from "./sentinel_model_routing.ts";
 import { executeAgentEventAction } from "./operator_agent_events.ts";
 import {
   executeAgentProfileAction,
@@ -74,7 +75,6 @@ import {
 import { applyOperatorRunBatch } from "./operator_run_batch_control.ts";
 import {
   isSentinelModelRole,
-  sentinelModelRoleProfile,
   sentinelModelRoles,
   type SentinelModelRoute,
   sentinelModelRouteEditLimit,
@@ -3223,6 +3223,10 @@ export function createOperatorRunToolExecutor(options: {
         args,
         context,
         options.confirm,
+        (profile) =>
+          options.sentinelProfiles?.().some((allowed) =>
+            isDeepStrictEqual(allowed, profile)
+          ) ?? false,
       );
     }
     if (
@@ -5703,17 +5707,13 @@ ${JSON.stringify({ run: ref, runId: exactRunId, turn: selected })}`,
             ? route.alternates?.[route.activeIndex - 1]
             : route.primary;
           const roles = Object.fromEntries(sentinelModelRoles.map((role) => {
-            const roleProfile = sentinelModelRoleProfile(route, role);
-            const profile = roleProfile ?? activeRun;
+            const selection = sentinelRoleModelSelection(path, route, role);
+            const profile = selection?.profile ?? activeRun;
             return [
               role,
               profile
                 ? {
-                  source: route.roles?.[role]
-                    ? "role"
-                    : roleProfile
-                    ? "role_default"
-                    : "run",
+                  source: selection?.source ?? "run",
                   profile,
                   available: allowed.some((record) =>
                     isDeepStrictEqual(record, profile)

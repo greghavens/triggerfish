@@ -1,3 +1,4 @@
+import type { SelectedModelProfile } from "../core/model_profile_selection.ts";
 /** Owner gateway operations for the durable agent registry. */
 import {
   isAgentProfileId,
@@ -32,6 +33,7 @@ export async function executeAgentProfileAction(
   args: Record<string, unknown>,
   context: OperatorRunToolContext | undefined,
   confirm: (message: string) => Promise<boolean>,
+  permitsModel?: (profile: SelectedModelProfile) => boolean,
 ): Promise<string> {
   const operator = context?.authenticatedOwnerSessionId;
   const authorize = context?.authorizeOwnerRunCall;
@@ -136,8 +138,12 @@ export async function executeAgentProfileAction(
     if (!mutation || (!deletion && mutation.definition === null)) {
       return unavailable;
     }
+    const model = mutation.definition?.modelProfile;
+    const modelAllowed = () => !model || permitsModel?.(model) === true;
     const saved = registry.receipt(mutation);
-    if (!await authorize(args)) return unavailable;
+    if (!modelAllowed() || !await authorize(args) || !modelAllowed()) {
+      return unavailable;
+    }
     if (saved !== undefined) {
       return saved ? output({ profile: saved }) : unavailable;
     }
@@ -148,7 +154,7 @@ export async function executeAgentProfileAction(
           JSON.stringify(mutation)
         }`,
       ) ||
-      !await authorize(args)
+      !await authorize(args) || !modelAllowed()
     ) return unavailable;
     const profile = registry.commit(mutation, operator);
     return profile ? output({ profile }) : unavailable;
