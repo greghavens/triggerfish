@@ -66,6 +66,7 @@ export interface SentinelFindingTrafficLinkInput {
   readonly trafficDigest: string;
   readonly evidenceRole?: TrafficEvidenceRole;
   readonly evidenceNote?: string;
+  readonly sourceHint?: { readonly id: number; readonly runId: string };
   readonly authority: SentinelFindingTrafficAuthority;
   readonly requestId: string;
 }
@@ -174,6 +175,7 @@ function normalize(
     trafficId,
     trafficSource,
     trafficDigest,
+    sourceHint,
     authority,
     requestId,
   } = input;
@@ -187,7 +189,11 @@ function normalize(
     !sentinelTrafficSources.includes(trafficSource) ||
     typeof trafficDigest !== "string" || !digest.test(trafficDigest) ||
     typeof requestId !== "string" || !uuid.test(requestId) ||
-    !authority ||
+    !authority || (sourceHint !== undefined &&
+      (authority.kind !== "assignment" || !sourceHint ||
+        Object.keys(sourceHint).length !== 2 || !positive(sourceHint.id) ||
+        typeof sourceHint.runId !== "string" ||
+        !uuid.test(sourceHint.runId))) ||
     (authority.kind !== "operator" &&
       (authority.kind !== "assignment" ||
         typeof authority.taskId !== "string" ||
@@ -204,6 +210,8 @@ function normalize(
     trafficSource,
     trafficDigest,
     ...annotation,
+    ...(sourceHint !== undefined &&
+      { sourceHint: { id: sourceHint.id, runId: sourceHint.runId } }),
     authority: authority.kind === "assignment"
       ? { kind: "assignment", taskId: authority.taskId }
       : { kind: "operator" },

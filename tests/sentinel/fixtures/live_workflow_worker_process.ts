@@ -512,7 +512,9 @@ const hookRunner: HookRunner = {
       const { link } = JSON.parse(String(input.tool_response));
       if (
         link?.trafficDigest !== traffic.digest ||
-        link.findingId !== traffic.findingId
+        link.findingId !== traffic.findingId ||
+        (traffic.sourceHintId !== undefined &&
+          link.sourceHint?.id !== traffic.sourceHintId)
       ) {
         throw new Error("The exact attachment was missing");
       }
@@ -1338,6 +1340,8 @@ registry.register({
                   digest,
                   findingId,
                   reportVersion: 1,
+                  ...(traffic.sourceHintId !== undefined &&
+                    { sourceHintId: traffic.sourceHintId }),
                   requestId: "15673bf0-5479-4f75-93c9-1f144e97eee9",
                 }),
               },
@@ -1358,7 +1362,10 @@ registry.register({
             "retained-payload-tail") ||
         (trafficSearch && !JSON.parse(String(results[0].content)).nextCursor) ||
         !String(results.at(-2)?.content).includes(traffic.digest) ||
-        !String(results.at(-1)?.content).includes("finding-traffic-link:")
+        !String(results.at(-1)?.content).includes("finding-traffic-link:") ||
+        (traffic.sourceHintId !== undefined &&
+          JSON.parse(String(results.at(-1)?.content)).link?.sourceHint?.id !==
+            traffic.sourceHintId)
       ) throw new Error("Traffic results did not survive");
       return Promise.resolve({
         content:

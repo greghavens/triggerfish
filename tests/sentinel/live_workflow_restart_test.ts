@@ -32,6 +32,7 @@ import {
   readHistoricalAdaptiveSentinel,
   readSentinelProvenance,
   readSentinelWorkerObservation,
+  recordOperatorSentinelRunHint,
 } from "../../src/gateway/sentinel_adaptive_runtime.ts";
 import {
   openSentinelAdaptiveStore,
@@ -1917,6 +1918,21 @@ for (
                 },
               )?.receipts[0];
               assert(traffic);
+              const trafficHint = phase === "resume_traffic_batch"
+                ? recordOperatorSentinelRunHint(
+                  path,
+                  assessment.revision,
+                  crypto.randomUUID(),
+                  "Review this retained response.",
+                  "owner",
+                  [assetId],
+                  {
+                    evidenceId: traffic.evidenceId,
+                    digest: traffic.digest,
+                  },
+                )
+                : undefined;
+              if (phase === "resume_traffic_batch") assert(trafficHint);
               let historicalLinkId: string | undefined;
               let historicalDigest: string | undefined;
               if (
@@ -1963,6 +1979,7 @@ for (
                   evidenceId: trafficId,
                   digest: traffic.digest,
                   findingId: finding.id,
+                  sourceHintId: trafficHint?.id,
                   historicalLinkId,
                   historicalEvidenceId: historicalTrafficId,
                   historicalDigest,

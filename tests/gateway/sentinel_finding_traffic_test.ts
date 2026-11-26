@@ -1,3 +1,4 @@
+import { recordOperatorSentinelRunHint } from "../../src/gateway/sentinel_adaptive_runtime.ts";
 import { createChatSession } from "../../src/gateway/chat.ts";
 import { createOperatorRunToolExecutor } from "../../src/gateway/operator_run_tool.ts";
 import { createGatewayServer } from "../../src/gateway/server/server.ts";
@@ -427,6 +428,25 @@ Deno.test("Leased workers attach only exact saved traffic and authenticated Tide
     };
     const exact = receipt("https://service.example");
     const neighbor = receipt("https://neighbor.example");
+    const hint = recordOperatorSentinelRunHint(
+      path,
+      revision,
+      crypto.randomUUID(),
+      "Review the recorded response.",
+      "owner",
+      [assetId],
+      { evidenceId: exact.evidenceId, digest: exact.digest },
+    );
+    const otherHint = recordOperatorSentinelRunHint(
+      path,
+      revision,
+      crypto.randomUUID(),
+      "Review evidence on the neighboring asset.",
+      "owner",
+      [observations[1].assetId],
+      { evidenceId: neighbor.evidenceId, digest: neighbor.digest },
+    );
+    assert(hint && otherHint);
     const bodySearch = {
       action: "traffic_search",
       kind: "sentinel",
@@ -480,6 +500,7 @@ Deno.test("Leased workers attach only exact saved traffic and authenticated Tide
       ...exact,
       findingId,
       reportVersion: 1,
+      sourceHintId: hint.id,
       evidenceRole: "proof",
       evidenceNote:
         "Shows the retained response at the time of the failed control check.",
@@ -523,6 +544,16 @@ Deno.test("Leased workers attach only exact saved traffic and authenticated Tide
         call(attach, mutation),
         call(links, { revision, findingId }),
         call(attach, { ...mutation, evidenceRole: "baseline" }),
+        call(attach, {
+          ...mutation,
+          sourceHintId: otherHint.id,
+          requestId: crypto.randomUUID(),
+        }),
+        call(attach, {
+          ...mutation,
+          sourceHintId: otherHint.id + 10,
+          requestId: crypto.randomUUID(),
+        }),
       ],
     ], "output");
     assert(
@@ -547,8 +578,11 @@ Deno.test("Leased workers attach only exact saved traffic and authenticated Tide
     assertEquals(record.reportVersion, 1);
     assertEquals(record.trafficDigest, exact.digest);
     assertEquals(record.evidenceRole, mutation.evidenceRole);
+    assertEquals(record.sourceHint, { id: hint.id, runId: state.plan.runId });
     assertEquals(record.evidenceNote, mutation.evidenceNote);
-    assertStringIncludes(attached.responses[2][3], "unavailable");
+    for (const deniedHint of attached.responses[2].slice(3)) {
+      assertStringIncludes(deniedHint, "unavailable");
+    }
     assertEquals(record.authority, {
       kind: "assignment",
       taskId: lease.assignedTaskId,
@@ -724,6 +758,11 @@ Deno.test("Leased workers attach only exact saved traffic and authenticated Tide
       requestId: crypto.randomUUID(),
     };
     const unrelated = "worker-recheck:" + "0".repeat(64);
+    const staleHint = await runWorker(path, nextLease, [
+      [call(get, current)],
+      [call(attach, { ...attachRecheck, sourceHintId: hint.id })],
+    ]);
+    assertStringIncludes(staleHint.responses[1][0], "unavailable");
     const bound = await runWorker(path, nextLease, [
       [call(get, current)],
       [

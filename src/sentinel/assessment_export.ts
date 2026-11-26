@@ -601,6 +601,13 @@ export function renderScopedSentinelFindings(
             `- ${markdownText(link.id)} · ${markdownText(link.trafficId)} · ${
               markdownText(link.trafficDigest)
             }`,
+            ...(link.sourceHint
+              ? [
+                `  - operator-hint:${link.sourceHint.id} · ${
+                  markdownText(link.sourceHint.runId)
+                }`,
+              ]
+              : []),
             ...(link.annotations ?? []).map((item) =>
               `  - ${markdownText(item.id)} · ${
                 markdownText(item.evidenceRole ?? "")

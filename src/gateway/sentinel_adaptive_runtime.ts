@@ -97,6 +97,7 @@ import {
   openSentinelAdaptiveStore,
   querySentinelWorkerObservations,
   readAdaptiveAssetSnapshotCitations,
+  readAdaptiveOperatorTrafficHint,
   roundWithUpstreamCitations,
   selectAdaptiveGraphRetries,
   SentinelAdaptiveQueueChanged,
@@ -1327,6 +1328,27 @@ export function readSentinelOperatorAssetHint(
   } finally {
     store.close();
   }
+}
+
+/** Reopen only the source reference from one exact reviewed asset hint. */
+export function readSentinelOperatorTrafficHint(
+  path: string,
+  state: State,
+  sourceHintId: number,
+  assetId: string,
+) {
+  const runId = state.plan.runId;
+  if (
+    !runId || !state.active || state.paused ||
+    !sentinelHintAssetsInScope(path, state, [assetId])
+  ) return;
+  return readAdaptiveOperatorTrafficHint(
+    storePath(path),
+    sourceHintId,
+    state.revision,
+    runId,
+    assetId,
+  );
 }
 
 export function readSentinelCaseHints(
@@ -4200,6 +4222,18 @@ export function createSentinelModelPlanner(
           assetId: targetId,
         }, requestId);
         if (!link) return;
+        const sourceHint = link.sourceHint && readSentinelOperatorTrafficHint(
+          snapshotPath,
+          current,
+          link.sourceHint.id,
+          targetId,
+        );
+        if (
+          link.sourceHint &&
+          (link.sourceHint.runId !== current.plan.runId ||
+            sourceHint?.evidenceId !== link.trafficId ||
+            sourceHint.digest !== link.trafficDigest)
+        ) return;
         const args = sentinelTrafficAttachArgs({
           revision: current.revision,
           findingId: link.findingId,
@@ -4211,6 +4245,7 @@ export function createSentinelModelPlanner(
             { evidenceRole: link.evidenceRole }),
           ...(link.evidenceNote !== undefined &&
             { evidenceNote: link.evidenceNote }),
+          ...(link.sourceHint && { sourceHintId: link.sourceHint.id }),
           requestId,
         });
         const traffic = {

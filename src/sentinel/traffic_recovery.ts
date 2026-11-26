@@ -273,12 +273,15 @@ export function sentinelTrafficAttachArgs(value: unknown) {
     evidenceId,
     digest,
     requestId,
+    sourceHintId,
   } = args;
   const annotation = sentinelTrafficEvidenceAnnotation(args);
   if (
     !annotation ||
+    (sourceHintId !== undefined && (typeof sourceHintId !== "number" ||
+      !Number.isSafeInteger(sourceHintId) || sourceHintId < 1)) ||
     Object.keys(args).length !== (recheckId === undefined ? 6 : 7) +
-        Object.keys(annotation).length ||
+        Object.keys(annotation).length + Number(sourceHintId !== undefined) ||
     typeof revision !== "number" || !Number.isSafeInteger(revision) ||
     revision < 1 ||
     typeof findingId !== "string" ||
@@ -299,6 +302,7 @@ export function sentinelTrafficAttachArgs(value: unknown) {
     evidenceId,
     digest,
     ...annotation,
+    ...(sourceHintId !== undefined && { sourceHintId }),
     requestId: requestId.toLowerCase(),
   };
 }

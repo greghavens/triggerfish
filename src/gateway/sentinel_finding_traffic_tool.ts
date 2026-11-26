@@ -1,6 +1,7 @@
 /** Exact leased-worker links from immutable findings to sanitized retained traffic. */
 import type { ToolDefinition } from "../core/types/tool.ts";
 import {
+  type readSentinelAssessment,
   readSentinelAssessmentRevision,
   readSentinelOperatingConstraints,
   withSentinelAssessmentWriteLock,
@@ -30,7 +31,10 @@ import {
   sentinelTrafficPayloadOffsetParameter,
   sentinelTrafficPayloadPartParameter,
 } from "../sentinel/traffic_recovery.ts";
-import { readAssignedSentinelModelReview } from "./sentinel_adaptive_runtime.ts";
+import {
+  readAssignedSentinelModelReview,
+  readSentinelOperatorTrafficHint,
+} from "./sentinel_adaptive_runtime.ts";
 import { projectSentinelTrafficBlob } from "./sentinel_traffic_tool.ts";
 import type { SentinelAgentOptions } from "./sentinel_agent.ts";
 
@@ -92,6 +96,11 @@ export const sentinelFindingTrafficAttachTool: ToolDefinition = {
       type: "string",
       description: "Unique request UUID for idempotent retry",
       required: true,
+    },
+    sourceHintId: {
+      type: "integer",
+      description:
+        "Optional exact reviewed planner hint that linked this same traffic receipt to this assigned asset.",
     },
     evidenceRole: {
       type: "string",
@@ -310,6 +319,7 @@ function attachForScope(
   scope: Scope,
   caseId: string,
   revision: number,
+  state: NonNullable<ReturnType<typeof readSentinelAssessment>>,
   runId: string,
   assetId: string,
   taskId: string,
@@ -317,8 +327,15 @@ function attachForScope(
   approvedTraffic: ReadonlySet<string>,
   signal?: AbortSignal,
 ): string {
-  const { findingId, recheckId, reportVersion, evidenceId, digest, requestId } =
-    args;
+  const {
+    findingId,
+    recheckId,
+    reportVersion,
+    evidenceId,
+    digest,
+    requestId,
+    sourceHintId,
+  } = args;
   const annotation = sentinelTrafficEvidenceAnnotation(args);
   if (
     !annotation || typeof findingId !== "string" ||
@@ -326,6 +343,7 @@ function attachForScope(
     recheckId !== undefined &&
       (typeof recheckId !== "string" || !recheckPattern.test(recheckId)) ||
     !positiveInteger(reportVersion) ||
+    (sourceHintId !== undefined && !positiveInteger(sourceHintId)) ||
     !exactId(evidenceId, 100) || typeof digest !== "string" ||
     !digestPattern.test(digest) ||
     typeof requestId !== "string" || !uuidPattern.test(requestId)
@@ -346,6 +364,17 @@ function attachForScope(
     !traffic || traffic.family !== family ||
     !hasSentinelWorkerFindingJournal(snapshotPath)
   ) return unavailable;
+  if (sourceHintId !== undefined) {
+    const source = readSentinelOperatorTrafficHint(
+      snapshotPath,
+      state,
+      sourceHintId,
+      assetId,
+    );
+    if (source?.evidenceId !== evidenceId || source.digest !== digest) {
+      return unavailable;
+    }
+  }
   const findings = openSentinelWorkerFindingStore(snapshotPath);
   try {
     const original = findings.readFinding(findingId);
@@ -376,6 +405,8 @@ function attachForScope(
         trafficSource: traffic.family,
         trafficDigest: traffic.digest,
         ...annotation,
+        ...(sourceHintId !== undefined &&
+          { sourceHint: { id: sourceHintId, runId } }),
         authority: { kind: "assignment", taskId },
         requestId,
       }, () =>
@@ -446,6 +477,7 @@ export function executeSentinelFindingTrafficTool(
             scope,
             caseId,
             revision,
+            state,
             state.plan.runId,
             subject,
             assignedTaskId,

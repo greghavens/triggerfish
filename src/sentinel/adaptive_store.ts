@@ -2390,6 +2390,44 @@ function openPrivateDatabase(path: string, readOnly = false): DatabaseSync {
   return new DatabaseSync(resolved, { readOnly });
 }
 
+/** Read through a separate read-only connection during checkpoint reconciliation. */
+export function readAdaptiveOperatorTrafficHint(
+  path: string,
+  id: number,
+  revision: number,
+  runId: string,
+  assetId: string,
+) {
+  const db = openPrivateDatabase(path, true);
+  try {
+    if (
+      !db.prepare("PRAGMA table_info(adaptive_case_hints)").all().some((
+        { name },
+      ) => name === "trafficReference")
+    ) return;
+    const row = db.prepare(`
+      SELECT hint.assetIds, hint.trafficReference
+      FROM adaptive_case_hints AS hint
+      JOIN adaptive_operator_case_hint_requests AS request ON request.hintId = hint.id
+      WHERE hint.id = ? AND hint.evidenceRevision = ? AND request.runId = ?
+        AND request.operatorScope = 'owner'
+    `).get(id, revision, runId);
+    if (
+      !row || typeof row.assetIds !== "string" ||
+      typeof row.trafficReference !== "string"
+    ) return;
+    const assets = normalizeSentinelHintAssets(JSON.parse(row.assetIds));
+    const ref: unknown = JSON.parse(row.trafficReference);
+    if (
+      !isDeepStrictEqual(assets, [assetId]) ||
+      !isSentinelHintTrafficReference(ref)
+    ) return;
+    return ref;
+  } finally {
+    db.close();
+  }
+}
+
 export function readAdaptiveSourceSnapshotReferences(path: string) {
   let db: DatabaseSync;
   try {
