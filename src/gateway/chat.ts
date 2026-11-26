@@ -357,6 +357,8 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
                     "live_model_route",
                     "set_live_model_route",
                     "reset_live_model_route",
+                    "model_usage_totals",
+                    "tool_usage_totals",
                   ].includes(action)) &&
                   typeof call.args?.modelRouteClassification === "string"
                 ? parseClassification(call.args.modelRouteClassification)
@@ -393,6 +395,8 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
                       "live_model_route",
                       "model_profiles",
                       "model_profile",
+                      "model_usage_totals",
+                      "tool_usage_totals",
                       "finding_groups",
                       "finding_asset_tree",
                       "search_case_traces",

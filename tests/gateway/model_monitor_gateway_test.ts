@@ -4,9 +4,15 @@ import {
   assertRejects,
   assertStringIncludes,
 } from "@std/assert";
+import { join } from "@std/path";
 import { createProviderRegistry } from "../../src/agent/llm.ts";
 import { monitorProviderRegistry } from "../../src/agent/providers/monitoring.ts";
 import { withRetry } from "../../src/agent/providers/retry.ts";
+import { assignmentRecoveryKey } from "../../src/core/durable_assignment.ts";
+import {
+  type ExecutionTraceScope,
+  openExecutionTraces,
+} from "../../src/core/execution_traces.ts";
 import { createPolicyEngine } from "../../src/core/policy/engine.ts";
 import { createHookRunner } from "../../src/core/policy/hooks/hooks.ts";
 import {
@@ -35,6 +41,7 @@ Deno.test("gateway reviews model retry edits and keeps monitoring metadata class
   let classified = 0;
   let holdOutput = false;
   let blockedOutput = 0;
+  let denyRollup = false;
   let exerciseFailure = () => Promise.resolve();
   const inputClassification = "INTERNAL";
   let attempts = 0;
@@ -101,6 +108,18 @@ Deno.test("gateway reviews model retry edits and keeps monitoring metadata class
           ...policy,
           evaluateHook(hook, context) {
             if (
+              hook === "PRE_TOOL_CALL" && denyRollup &&
+              (context.input.tool_call as { args?: { action?: string } })
+                  ?.args?.action === "tool_usage_totals"
+            ) {
+              return Promise.resolve({
+                allowed: false,
+                action: "BLOCK",
+                ruleId: null,
+                duration: 0,
+              });
+            }
+            if (
               hook === "PRE_TOOL_CALL" && holds &&
               (context.input.tool_call as
                   | { args?: { action?: string } }
@@ -120,7 +139,8 @@ Deno.test("gateway reviews model retry edits and keeps monitoring metadata class
             if (
               hook === "PRE_OUTPUT" && holdOutput &&
               typeof context.input.content === "string" &&
-              context.input.content.includes('"retryPolicy"')
+              (context.input.content.includes('"retryPolicy"') ||
+                context.input.content.includes('"totals"'))
             ) {
               blockedOutput++;
               return Promise.resolve({
@@ -228,6 +248,144 @@ Deno.test("gateway reviews model retry edits and keeps monitoring metadata class
       await turn({ action: "model_usage", ...profile }),
     );
     assert(days[0].inputTokens >= 4);
+    const usageRollup = { action: "model_usage_totals" };
+    const globalUsage = JSON.parse(await turn(usageRollup));
+    const model = globalUsage.profiles.find(
+      (entry: { provider: string }) => entry.provider === profile.modelProfile,
+    );
+    assert(model.inputTokens >= days[0].inputTokens);
+    assert(
+      !globalUsage.profiles.some((entry: { provider: string }) =>
+        entry.provider === failing.modelProfile
+      ),
+    );
+    const restrictedUsage = JSON.parse(
+      await turn({
+        ...usageRollup,
+        modelRouteClassification: "RESTRICTED",
+      }),
+    );
+    assertEquals(restrictedUsage.profiles[0].failures, 1);
+    assertEquals(restrictedUsage.daily[0].calls, 1);
+
+    const fixtureTraces = openExecutionTraces(
+      join(baseDir, "execution-traces.db"),
+    );
+    try {
+      const scoped = crypto.randomUUID();
+      const ownerScope: ExecutionTraceScope = {
+        role: "owner_chat",
+        sessionId: session.id,
+        sourceId: scoped,
+        runId: assignmentRecoveryKey(session.id, scoped),
+      };
+      const add = (
+        scope: ExecutionTraceScope,
+        tool: string,
+        classification: "INTERNAL" | "RESTRICTED",
+        outcome: "returned" | "failed" | "blocked" = "returned",
+      ) => {
+        assert(fixtureTraces.admit(scope));
+        assert(
+          fixtureTraces.appendNext(scope, { tool, outcome, classification }),
+        );
+      };
+      add(ownerScope, "fixture_controls", "INTERNAL");
+      add(ownerScope, "fixture_controls", "INTERNAL", "blocked");
+      add(
+        {
+          role: "delegated",
+          runId: "authorized-delegated",
+          sessionId: "worker-session",
+          sourceId: session.id,
+        },
+        "fixture_controls",
+        "INTERNAL",
+        "failed",
+      );
+      add(
+        {
+          role: "delegated",
+          runId: "other-delegated",
+          sessionId: "other-session",
+          sourceId: crypto.randomUUID(),
+        },
+        "foreign_tool",
+        "INTERNAL",
+      );
+      add(
+        {
+          role: "delegated",
+          runId: "unbound-delegated",
+          sessionId: "other-session",
+        },
+        "unbound_tool",
+        "INTERNAL",
+      );
+      add(
+        {
+          role: "scheduled",
+          runId: "scheduled-test",
+          sessionId: "scheduled-session",
+        },
+        "fixture_controls",
+        "INTERNAL",
+      );
+      add(
+        {
+          role: "scheduled",
+          runId: "restricted-run",
+          sessionId: "restricted-session",
+        },
+        "restricted_tool",
+        "RESTRICTED",
+      );
+    } finally {
+      fixtureTraces.close();
+    }
+    const toolRollup = { action: "tool_usage_totals" };
+    denyRollup = true;
+    assertStringIncludes(await turn(toolRollup), "blocked");
+    denyRollup = false;
+    holdOutput = true;
+    assert(!(await turn(toolRollup)).includes("fixture_controls"));
+    holdOutput = false;
+    const toolTotals = JSON.parse(await turn(toolRollup)).totals;
+    assertEquals(toolTotals, [
+      {
+        tool: "fixture_controls",
+        role: "delegated",
+        calls: 1,
+        failed: 1,
+        blocked: 0,
+      },
+      {
+        tool: "fixture_controls",
+        role: "owner_chat",
+        calls: 1,
+        failed: 0,
+        blocked: 1,
+      },
+      {
+        tool: "fixture_controls",
+        role: "scheduled",
+        calls: 1,
+        failed: 0,
+        blocked: 0,
+      },
+    ]);
+    const classifiedTools = JSON.parse(
+      await turn({
+        ...toolRollup,
+        modelRouteClassification: "RESTRICTED",
+      }),
+    );
+    assertEquals(
+      classifiedTools.totals.map(({ tool }: { tool: string }) => tool),
+      [
+        "restricted_tool",
+      ],
+    );
     const { records } = JSON.parse(
       await turn({ action: "model_call_records", ...profile }),
     );
@@ -250,6 +408,13 @@ Deno.test("gateway reviews model retry edits and keeps monitoring metadata class
     await gateway.stop();
     gateway = makeGateway("INTERNAL");
     await connect();
+    assertEquals(JSON.parse(await turn(toolRollup)).totals, toolTotals);
+    for (const args of [usageRollup, toolRollup]) {
+      assertStringIncludes(
+        await turn({ ...args, modelRouteClassification: "RESTRICTED" }),
+        "unavailable",
+      );
+    }
     assertStringIncludes(
       await turn({ ...read, modelRouteClassification: "RESTRICTED" }),
       "unavailable",

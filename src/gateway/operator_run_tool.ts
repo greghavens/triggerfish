@@ -1196,6 +1196,10 @@ export const operatorRunTool: ToolDefinition = {
       type: "integer",
       description: "Number of UTC days to report.",
     },
+    toolUsageAfter: {
+      type: "string",
+      description: "Cursor from the prior retained tool usage totals page.",
+    },
     modelProfileVersion: {
       type: "integer",
       description: "Exact reviewed named model profile revision to activate.",

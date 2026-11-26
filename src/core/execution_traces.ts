@@ -24,6 +24,7 @@ import {
 } from "./operator_runs.ts";
 import {
   executionTraceSourceVisible,
+  isOwnerBoundExecutionTraceSource,
   parseTeamDeliveryTraceSource,
 } from "./team_delivery_trace_source.ts";
 import { redactCredentialText } from "./logger/redactor.ts";
@@ -855,6 +856,11 @@ export function openExecutionTraces(path: string, now = Date.now) {
     { deterministic: true },
     (source) => parseTeamDeliveryTraceSource(source)?.sender ?? null,
   );
+  db.function(
+    "execution_trace_owner_bound",
+    { deterministic: true },
+    (role, source) => isOwnerBoundExecutionTraceSource(role, source) ? 1 : 0,
+  );
   const controls = createAssignmentControlJournal(
     db,
     "execution_trace_controls",
@@ -1598,6 +1604,60 @@ export function openExecutionTraces(path: string, now = Date.now) {
       }
       const row = checkedRun(scope, ceiling);
       return row && (savedToolDecisions(row.sequence, scope.runId) ?? []);
+    },
+
+    toolUsage({
+      ownerSessionId,
+      classification,
+      after,
+      since,
+    }: {
+      readonly ownerSessionId: string;
+      readonly classification: ClassificationLevel;
+      readonly after: string;
+      readonly since: number;
+    }) {
+      if (
+        !reference(ownerSessionId) || !levelOf(classification) ||
+        !Number.isSafeInteger(since) || since < 0
+      ) return;
+      return db.prepare(`
+        WITH authorized AS (
+          SELECT step.tool, step.outcome, run.role
+          FROM execution_trace_steps step
+          JOIN execution_trace_runs run ON run.sequence = step.runSequence
+          WHERE run.maxLevel <= ? AND step.classification = ?
+            AND step.recordedAt >= ? AND step.tool > ?
+            AND (
+              (run.role = 'owner_chat' AND json_extract(run.scope, '$.sessionId') = ?)
+              OR (
+                (run.role = 'scheduled' OR (
+                  run.role = 'delegated' AND execution_trace_owner_bound(
+                    run.role, json_extract(run.scope, '$.sourceId')
+                  )
+                ))
+                AND execution_trace_source_visible(
+                  run.role, json_extract(run.scope, '$.sourceId'), ?
+                )
+              )
+            )
+        ), next_tools AS (
+          SELECT DISTINCT tool FROM authorized ORDER BY tool LIMIT 9
+        )
+        SELECT authorized.tool, role,
+          SUM(outcome = 'returned' OR outcome = 'failed') AS calls,
+          SUM(outcome = 'failed') AS failed,
+          SUM(outcome = 'blocked') AS blocked
+        FROM authorized JOIN next_tools ON next_tools.tool = authorized.tool
+        GROUP BY authorized.tool, role ORDER BY authorized.tool, role
+      `).all(
+        CLASSIFICATION_ORDER[classification],
+        classification,
+        since,
+        after,
+        ownerSessionId,
+        ownerSessionId,
+      );
     },
 
     listRuns({

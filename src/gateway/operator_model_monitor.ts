@@ -1,3 +1,5 @@
+import { join } from "@std/path";
+import { openExecutionTraces } from "../core/execution_traces.ts";
 import {
   canFlowTo,
   maxClassification,
@@ -12,6 +14,8 @@ export const modelMonitoringActions = [
   "model_health",
   "reset_model_health",
   "model_usage",
+  "model_usage_totals",
+  "tool_usage_totals",
   "model_call_records",
   "model_call_record",
   "delete_model_call_record",
@@ -52,6 +56,8 @@ export async function executeOperatorModelMonitor(
     modelRetryDelayMs,
     modelRecordId,
     modelUsageDays,
+    modelProfileAfter,
+    toolUsageAfter,
   } = args;
   const fields: Record<ModelMonitoringAction, readonly string[]> = {
     model_retry_policy: [],
@@ -64,6 +70,12 @@ export async function executeOperatorModelMonitor(
     model_health: [],
     reset_model_health: ["expectedVersion"],
     model_usage: ["modelUsageDays"],
+    model_usage_totals: [
+      "modelUsageDays",
+      "modelProfileAfter",
+      "modelRouteModel",
+    ],
+    tool_usage_totals: ["modelUsageDays", "toolUsageAfter"],
     model_call_records: ["modelRecordId"],
     model_call_record: ["modelRecordId"],
     delete_model_call_record: ["modelRecordId"],
@@ -75,6 +87,8 @@ export async function executeOperatorModelMonitor(
     ...fields[action],
     ...(retry
       ? []
+      : action === "model_usage_totals" || action === "tool_usage_totals"
+      ? ["modelRouteClassification"]
       : ["modelProfile", "modelRouteModel", "modelRouteClassification"]),
   ]);
   if (Object.keys(args).some((key) => !allowed.has(key))) return;
@@ -124,6 +138,63 @@ export async function executeOperatorModelMonitor(
   ) return;
   const level = parsed.value;
   const _classification = maxClassification("INTERNAL", level);
+  if (action === "model_usage_totals" || action === "tool_usage_totals") {
+    const days = modelUsageDays ?? 7;
+    if (
+      !exactInteger(days, 1, 30) ||
+      !canFlowTo(_classification, context.ceiling ?? "PUBLIC")
+    ) return;
+    const date = new Date();
+    date.setUTCHours(0, 0, 0, 0);
+    date.setUTCDate(date.getUTCDate() - days + 1);
+    if (action === "tool_usage_totals") {
+      if (
+        toolUsageAfter !== undefined &&
+        (typeof toolUsageAfter !== "string" ||
+          !/^[\da-z_.:@/-]{1,128}$/i.test(toolUsageAfter))
+      ) return;
+      const trace = openExecutionTraces(join(baseDir, "execution-traces.db"));
+      try {
+        const rows = trace.toolUsage({
+          ownerSessionId: context.authenticatedOwnerSessionId,
+          classification: level,
+          after: toolUsageAfter ?? "",
+          since: date.getTime(),
+        });
+        if (!rows) return;
+        const tools = [...new Set(rows.map((row) => row.tool))];
+        return {
+          _classification,
+          since: date.toISOString(),
+          totals: rows.filter(({ tool }) => tool !== tools[8]),
+          nextAfter: tools.length > 8 ? tools[7] : null,
+        };
+      } finally {
+        trace.close();
+      }
+    }
+    const after = modelProfileAfter ?? "";
+    const afterModel = modelRouteModel ?? "";
+    if (
+      typeof after !== "string" || !/^[\da-z_.-]{0,80}$/i.test(after) ||
+      typeof afterModel !== "string" ||
+      !/^[\da-z/_.:@-]{0,160}$/i.test(afterModel) || (!after && afterModel)
+    ) return;
+    const { profiles, daily } = monitor.usageTotals(
+      level,
+      date.toISOString().slice(0, 10),
+      after,
+      afterModel,
+    );
+    return {
+      _classification,
+      profiles: profiles.slice(0, 8),
+      daily,
+      nextAfter: profiles.length > 8
+        ? { provider: profiles[7].provider, model: profiles[7].model }
+        : null,
+    };
+  }
   if (
     typeof modelProfile !== "string" ||
     !/^[\da-z_.-]{1,80}$/i.test(modelProfile) ||

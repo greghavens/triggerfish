@@ -282,6 +282,29 @@ export function modelMonitor(baseDir: string) {
       `).all(classification, provider, model, since)
       );
     },
+    usageTotals(
+      classification: ClassificationLevel,
+      since: string,
+      afterProvider: string,
+      afterModel: string,
+    ) {
+      return access((db) => {
+        const profiles = db.prepare(`
+          SELECT provider, model, SUM(calls) AS calls, SUM(failures) AS failures,
+            SUM(inputTokens) AS inputTokens, SUM(outputTokens) AS outputTokens
+          FROM model_daily_usage WHERE classification = ?
+            AND (provider, model) > (?, ?)
+          GROUP BY provider, model ORDER BY provider, model LIMIT 9
+        `).all(classification, afterProvider, afterModel);
+        const daily = db.prepare(`
+          SELECT day, SUM(calls) AS calls, SUM(failures) AS failures,
+            SUM(inputTokens) AS inputTokens, SUM(outputTokens) AS outputTokens
+          FROM model_daily_usage WHERE classification = ? AND day >= ?
+          GROUP BY day ORDER BY day DESC
+        `).all(classification, since);
+        return { profiles, daily };
+      });
+    },
     get(
       classification: ClassificationLevel,
       provider: string,
