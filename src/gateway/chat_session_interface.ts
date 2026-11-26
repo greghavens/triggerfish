@@ -73,6 +73,7 @@ export interface ChatSession {
   readonly createSentinelAgent?: (
     worker?: boolean,
     caseSnapshotPath?: string,
+    role?: "goals",
   ) => ReturnType<typeof import("./sentinel_agent.ts").createSentinelAgent>;
   readonly clearForSentinelMode?: () => Promise<void>;
   /** Process an owner message through the orchestrator. */

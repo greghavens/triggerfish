@@ -1652,9 +1652,10 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
       }
     },
     createSentinelAgent: snapshotPath && config.allowSentinelModelAccess
-      ? (worker = false, caseSnapshotPath = snapshotPath) =>
+      ? (worker = false, caseSnapshotPath = snapshotPath, role) =>
         (worker ? createSentinelSubagent : createSentinelAgent)({
           snapshotPath: caseSnapshotPath,
+          goalsOnly: role === "goals",
           sharedInventoryBaseDir: config.sentinelSharedInventoryBaseDir,
           webContainmentConfigured: config.sentinelWebContainmentConfigured,
           ...sentinelAssessmentModelRouting(
@@ -1662,7 +1663,7 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
             config.sentinelModelProfileAllowlists,
           ).interactiveOptions(
             caseSnapshotPath,
-            worker ? "worker" : "interactive",
+            role ?? (worker ? "worker" : "interactive"),
           ),
           hookRunner: config.hookRunner,
           operatorRunReader: operatorRunReaderForCase(caseSnapshotPath),

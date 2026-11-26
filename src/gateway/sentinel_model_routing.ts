@@ -1,3 +1,4 @@
+import { sentinelModelRoleProfile } from "../sentinel/model_routes.ts";
 import type { ClassificationLevel } from "../core/types/classification.ts";
 /** Select an assessment model using the session's fixed data classification. */
 import {
@@ -52,7 +53,7 @@ function runModelProvider(
     route: SentinelModelRoute,
     index: number,
   ) => {
-    const profile = route.roles?.[role] ??
+    const profile = sentinelModelRoleProfile(route, role) ??
       (index === 0 ? route.primary : route.alternates?.[index - 1]);
     return profile
       ? resolve(profile)
@@ -126,7 +127,7 @@ function runModelProvider(
         } catch (error) {
           signal?.throwIfAborted();
           if (
-            selected.route.roles?.[role] || !selected.scope ||
+            sentinelModelRoleProfile(selected.route, role) || !selected.scope ||
             !isAvailabilityFailure(error) ||
             !resolveProvider(selected.route, index + 1)
           ) throw error;

@@ -1,3 +1,5 @@
+import { withAgentProfileRuntime } from "../agent/orchestrator/agent_profile_runtime.ts";
+import { readAgentProfile } from "../core/agent_profiles.ts";
 import {
   configureSentinelToolDefinition,
   type SentinelToolConfigurationRole,
@@ -428,6 +430,7 @@ interface SentinelDirectCaseRead {
 }
 
 export interface SentinelAgentOptions {
+  readonly goalsOnly?: boolean;
   readonly operatorRunReader?: {
     readonly definition: ToolDefinition;
     readonly execute: (
@@ -5813,7 +5816,9 @@ function createAgent(
   const findingFollowup = assignedReview?.plannerRound?.findingFollowup;
   const nativeRepositoryRecheck = findingFollowup?.nativeRepositoryVisibility;
   const graphOnlyRetry = !!assignedReview?.plannerRound?.stoppedRetry;
-  const toolDefs = graphOnlyRetry
+  const toolDefs = options.goalsOnly
+    ? []
+    : graphOnlyRetry
     ? [assignedTargetTool]
     : reporter
     ? availableTools.filter(({ name }) =>
@@ -5931,6 +5936,21 @@ function createAgent(
     locateSentinelCase(options.snapshotPath)?.baseDir;
   const toolConfiguration = configurationBaseDir &&
     sentinelToolConfigurations(configurationBaseDir);
+  const profileRole = options.goalsOnly
+    ? "goals"
+    : reporter
+    ? "reporter"
+    : assignedReview?.plannerRound?.recheckFindingId || nativeRepositoryRecheck
+    ? "recheck"
+    : undefined;
+  const readRoleProfile = () => {
+    if (!profileRole || !configurationBaseDir) return;
+    const record = readAgentProfile(
+      configurationBaseDir,
+      `sentinel-${profileRole}`,
+    );
+    return record?.definition?.role === profileRole ? record : undefined;
+  };
   const toolRole: SentinelToolConfigurationRole = canDelegate
     ? "chat"
     : canReadPlannerCase
@@ -6349,7 +6369,7 @@ function createAgent(
     : undefined;
   const toolApprovalContext = workerApprovalContext ?? plannerApprovalContext;
 
-  const config: OrchestratorConfig = {
+  const baseConfig: OrchestratorConfig = {
     ...(toolApprovalContext && { toolApprovalContext }),
     allowJsonResponse: options.assessmentRevision !== undefined,
     providerRegistry: registry,
@@ -7056,7 +7076,12 @@ function createAgent(
       : 4,
     maxToolResponseChars: MAX_TOOL_CHARS,
     enableStreaming: false,
-    systemPromptSections: instructions,
+    systemPromptSections: options.goalsOnly
+      ? [
+        "You are Sentinel's defensive assessment goal designer. Draft goals using only the evidence and scope supplied by the operator.",
+        ...instructions.slice(2),
+      ]
+      : instructions,
     getExtraSystemPromptSections: () => [
       `Write user-facing replies and review summaries in ${
         outputLanguageNames[active?.outputLanguage ?? "en"]
@@ -8817,6 +8842,7 @@ function createAgent(
       return queryGraph(graph, name, args, evaluatedAt);
     },
   };
+  const config = withAgentProfileRuntime(baseConfig, readRoleProfile);
   const orchestrator = createOrchestrator({
     ...config,
     async toolExecutor(name, args, dispatch) {

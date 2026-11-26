@@ -6032,7 +6032,7 @@ export function createSentinelModelPlanner(
     state: State,
     taskId?: string,
     taskLeaseToken?: string,
-    role?: "planner",
+    role?: "planner" | "reporter" | "recheck",
   ) => import("./sentinel_agent.ts").SentinelAgent,
   reserve?: () => (() => void) | undefined,
   now: () => number = Date.now,
@@ -7059,7 +7059,13 @@ export function createSentinelModelPlanner(
           journal.close();
         }
       }
-      const worker = createWorker(state, task.id, token);
+      const role = task.kind === "report_finding"
+        ? "reporter"
+        : task.plannerRound?.recheckFindingId ||
+            task.plannerRound?.findingFollowup?.nativeRepositoryVisibility
+        ? "recheck"
+        : undefined;
+      const worker = createWorker(state, task.id, token, role);
       try {
         const protectedSources =
           task.plannerRound?.sourceEvidence?.filter(({ executionEvidenceId }) =>

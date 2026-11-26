@@ -528,7 +528,7 @@ export async function startServicesAndChannels(
       state: AssessmentState,
       assignedTaskId?: string,
       assignedTaskLeaseToken?: string,
-      role?: "planner",
+      role?: "planner" | "reporter" | "recheck",
     ) =>
       createSentinelSubagent({
         ...modelRouting.workerOptions(

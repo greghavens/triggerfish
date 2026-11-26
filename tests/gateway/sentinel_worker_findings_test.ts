@@ -4286,7 +4286,7 @@ async function verifyOperatorNativeRecheck(options: {
   const wakes: string[] = [];
   const planner = createSentinelModelPlanner(
     path,
-    (state, taskId, leaseToken) => ({
+    (state, taskId, leaseToken, role) => ({
       async execute(message, send, signal, onStep, digests, checkpoint) {
         if (taskId !== assigned.taskId) {
           if (options.goalSettlement && taskId === undefined) {
@@ -4304,6 +4304,7 @@ async function verifyOperatorNativeRecheck(options: {
           return;
         }
         assert(taskId && leaseToken);
+        assertEquals(role, "recheck");
         workerRuns++;
         if (options.goalSettlement) await assertActiveCatalog("running");
         const activeLifecycle = await readLifecycle();
@@ -14082,8 +14083,10 @@ async function testScopedReporterRestart(
       _state: State,
       assignedTaskId?: string,
       assignedTaskLeaseToken?: string,
-    ) =>
-      createSentinelSubagent({
+      role?: "planner" | "reporter" | "recheck",
+    ) => {
+      if (assignedTaskId === reporter.id) assertEquals(role, "reporter");
+      return createSentinelSubagent({
         snapshotPath: path,
         assessmentRevision: state.revision,
         plannerExecutionEvidenceRunId: assignedTaskId
@@ -14134,6 +14137,7 @@ async function testScopedReporterRestart(
           },
         },
       });
+    };
     const waitFor = async (condition: () => boolean) => {
       const end = Date.now() + 3_000;
       while (!condition() && Date.now() < end) {

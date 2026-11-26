@@ -30,6 +30,7 @@ interface SentinelModeOptions {
   readonly createAgent?: (
     worker?: boolean,
     caseSnapshotPath?: string,
+    role?: "goals",
   ) => SentinelWorker;
   readonly resolveCase?: (caseId: string) => string | undefined;
   readonly clearContext?: () => Promise<void>;
@@ -256,7 +257,7 @@ export function createSentinelSocketMode(
             snapshotPath,
             text,
             options.createAgent
-              ? () => options.createAgent!(false, snapshotPath)
+              ? () => options.createAgent!(false, snapshotPath, "goals")
               : undefined,
             signal,
             options.webContainmentConfigured,

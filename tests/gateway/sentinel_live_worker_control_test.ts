@@ -3658,7 +3658,15 @@ Deno.test("Reviewed Sentinel role routes resolve and dispatch independently of t
   const path = resolveSentinelCasePath(baseDir, caseId);
   const mainPath = resolveSentinelCasePath(baseDir);
   const registry = createProviderRegistry();
-  const approved = ["run-model", "planner-model", "worker-model", "chat-model"];
+  const approved = [
+    "run-model",
+    "planner-model",
+    "worker-model",
+    "chat-model",
+    "goals-model",
+    "reporter-model",
+    "recheck-model",
+  ];
   const allowlists = { INTERNAL: approved, PUBLIC: ["public-model"] };
   const calls: string[] = [];
   let plannerCalls = 0;
@@ -3670,6 +3678,7 @@ Deno.test("Reviewed Sentinel role routes resolve and dispatch independently of t
       supportsStreaming: false,
       complete(_messages, tools) {
         calls.push(provider);
+        if (provider === "goals-model") assertEquals(tools?.length ?? 0, 0);
         if (provider === "planner-model") {
           const definitions = tools as {
             function?: {
@@ -3702,6 +3711,20 @@ Deno.test("Reviewed Sentinel role routes resolve and dispatch independently of t
           : provider === "worker-model" &&
               calls.filter((item) => item === "worker-model").length === 1
           ? '{"summary":"Reviewed using worker-model","followUps":[]}'
+          : provider === "goals-model"
+          ? JSON.stringify({
+            goals: [{
+              id: "verify-app",
+              title: "Verify the deployment",
+              policy: "operator",
+              criteria: [{
+                id: "control",
+                description: "Review the saved control",
+                source: "graph_evidence",
+                reference: "control-proof",
+              }],
+            }],
+          })
           : "Reviewed using " + provider;
         return Promise.resolve({
           content,
@@ -3795,6 +3818,22 @@ Deno.test("Reviewed Sentinel role routes resolve and dispatch independently of t
       );
       assertEquals(JSON.parse(await request(plannerEdit)), first);
       assertEquals(confirmations.length, 4);
+      const defaults = JSON.parse(
+        await request({ ...ref, action: "model_route" }),
+      );
+      assertEquals(defaults.roles.goals.profile.provider, "chat-model");
+      assertEquals(defaults.roles.reporter.profile.provider, "worker-model");
+      assertEquals(defaults.roles.recheck.source, "role_default");
+      for (
+        const [offset, role] of (["goals", "reporter", "recheck"] as const)
+          .entries()
+      ) {
+        assertEquals(
+          JSON.parse(await request(edit(role, 4 + offset, role + "-model")))
+            .edit.version,
+          5 + offset,
+        );
+      }
       const selection = JSON.parse(
         await request({ ...ref, action: "model_route" }),
       );
@@ -3809,11 +3848,22 @@ Deno.test("Reviewed Sentinel role routes resolve and dispatch independently of t
           };
           return [role.source, role.available, role.profile.provider];
         }),
-        [["role", true, "chat-model"], ["role", true, "planner-model"], [
-          "role",
-          true,
-          "worker-model",
-        ]],
+        [
+          ["role", true, "chat-model"],
+          ["role", true, "planner-model"],
+          [
+            "role",
+            true,
+            "worker-model",
+          ],
+          ["role", true, "goals-model"],
+          ["role", true, "reporter-model"],
+          [
+            "role",
+            true,
+            "recheck-model",
+          ],
+        ],
       );
     }, routing.list);
 
@@ -3909,6 +3959,12 @@ Deno.test("Reviewed Sentinel role routes resolve and dispatch independently of t
         "worker-model",
       ),
     );
+    const callsBeforeGoal = calls.length;
+    const draft = await turn(
+      'assessment goals propose {"objective":"Verify the deployment"}',
+    );
+    assert(draft.includes("verify-app"), draft);
+    assertEquals(calls.slice(callsBeforeGoal), ["goals-model"]);
     const callsBeforeFailure = calls.length;
     workerUnavailable = true;
     await turn("/sentinel-agent Check the unavailable scoped model.");
@@ -3919,7 +3975,7 @@ Deno.test("Reviewed Sentinel role routes resolve and dispatch independently of t
     );
 
     await withOwnerControl(baseDir, async (request) => {
-      const receipt = JSON.parse(await request(edit("interactive", 4)));
+      const receipt = JSON.parse(await request(edit("interactive", 7)));
       assertEquals(receipt.edit.after.roles.interactive, undefined);
       assertEquals(receipt.edit.after.roles.planner.provider, "planner-model");
       assertEquals(receipt.edit.after.roles.worker.provider, "worker-model");
@@ -3962,7 +4018,9 @@ Deno.test("Reviewed Sentinel role routes resolve and dispatch independently of t
       const restored = JSON.parse(
         await request({ ...ref, action: "model_route" }),
       );
-      assertEquals(restored.version, 5);
+      assertEquals(restored.version, 8);
+      assertEquals(restored.roles.reporter.profile.provider, "reporter-model");
+      assertEquals(restored.roles.recheck.profile.provider, "recheck-model");
       const coverage = JSON.parse(
         await request({
           action: "inventory",

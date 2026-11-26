@@ -6,7 +6,14 @@ import {
   type SelectedModelProfile,
 } from "../core/model_profile_selection.ts";
 
-export const sentinelModelRoles = ["interactive", "planner", "worker"] as const;
+export const sentinelModelRoles = [
+  "interactive",
+  "planner",
+  "worker",
+  "goals",
+  "reporter",
+  "recheck",
+] as const;
 export type SentinelModelRole = typeof sentinelModelRoles[number];
 export type SentinelRoleModels = Readonly<
   Partial<Record<SentinelModelRole, SelectedModelProfile>>
@@ -23,6 +30,19 @@ export interface SentinelModelRoute {
   readonly alternates?: readonly SelectedModelProfile[];
   readonly activeIndex: number;
   readonly roles?: SentinelRoleModels;
+}
+
+/** Specialized routes inherit the existing role defaults until explicitly reviewed. */
+export function sentinelModelRoleProfile(
+  route: SentinelModelRoute,
+  role: SentinelModelRole,
+): SelectedModelProfile | undefined {
+  const inheritedRole = role === "goals"
+    ? "interactive"
+    : role === "reporter" || role === "recheck"
+    ? "worker"
+    : role;
+  return route.roles?.[role] ?? route.roles?.[inheritedRole];
 }
 
 export interface SentinelModelRouteEdit {
