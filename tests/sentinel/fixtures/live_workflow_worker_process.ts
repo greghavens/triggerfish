@@ -1736,7 +1736,9 @@ registry.register({
                 name: "sentinel_case_inventory",
                 arguments: JSON.stringify({
                   view,
-                  assetId: "delivery",
+                  ...(view === "assets"
+                    ? { assetIds: ["delivery"] }
+                    : { assetId: "delivery" }),
                   limit: 1,
                 }),
               },

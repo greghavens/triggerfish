@@ -25,6 +25,7 @@ interface PageOptions {
 export interface SentinelAssetInventoryOptions extends PageOptions {
   /** Trusted exact member IDs supplied by an authorized caller. */
   readonly allowedAssetIds?: readonly string[];
+  readonly exactAssetIds?: readonly string[];
   readonly organizationId?: string;
   readonly assetType?: SentinelAssetType;
   readonly parentId?: string;
@@ -71,6 +72,21 @@ function hash(value: string): string {
 function validIdentifier(value: unknown, maxLength = 4096): boolean {
   return typeof value === "string" && value.trim().length > 0 &&
     value.length <= maxLength && !value.includes("\0");
+}
+
+/** Canonical bounded selector. Duplicate and credential-shaped IDs are invalid. */
+export function parseSentinelInventoryAssetIds(
+  value: unknown,
+): string[] | undefined {
+  if (
+    !Array.isArray(value) || value.length < 1 || value.length > 20 ||
+    value.some((id) =>
+      typeof id !== "string" || !validIdentifier(id, 800) ||
+      id.trim() !== id || redactCredentialText(id) !== id
+    ) ||
+    new Set(value).size !== value.length
+  ) return;
+  return [...value].sort();
 }
 
 function compareIds(a: string, b: string): number {
@@ -122,6 +138,7 @@ function filterAssets(
 ) {
   const {
     onlyAsset,
+    exactAssetIds,
     organizationId,
     assetType,
     parentId,
@@ -145,9 +162,19 @@ function filterAssets(
   const allowed = allowedAssetIds === undefined
     ? undefined
     : new Set(allowedAssetIds);
+  const batch = exactAssetIds === undefined
+    ? undefined
+    : parseSentinelInventoryAssetIds(exactAssetIds);
+  if (
+    exactAssetIds !== undefined &&
+    (!batch || onlyAsset !== undefined || organizationId !== undefined ||
+      assetType !== undefined || parentId !== undefined || alias !== undefined)
+  ) throw new Error("Invalid Sentinel inventory selector");
+  const requested = batch && new Set(batch);
   const assets = snapshot.nodes.filter((node): node is Asset =>
     node.kind === "asset" &&
     (allowed === undefined || allowed.has(node.id)) &&
+    (requested === undefined || requested.has(node.id)) &&
     (onlyAsset === undefined || node.id === onlyAsset) &&
     (organizationId === undefined ||
       node.organization?.id === organizationId) &&
@@ -155,6 +182,9 @@ function filterAssets(
     (parentId === undefined || node.parentId === parentId) &&
     (alias === undefined || node.aliases?.includes(alias) === true)
   );
+  if (batch && assets.length !== batch.length) {
+    throw new Error("Requested Sentinel inventory is unavailable");
+  }
   return {
     assets,
     filters: [
@@ -164,6 +194,7 @@ function filterAssets(
       parentId,
       alias,
       ...(allowed ? [[...allowed].sort()] : []),
+      ...(batch ? [{ exactAssetIds: batch }] : []),
     ],
   };
 }

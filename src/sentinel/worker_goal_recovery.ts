@@ -3,6 +3,7 @@ import {
   sentinelTrafficBlobArgs,
 } from "./traffic_recovery.ts";
 import {
+  parseSentinelInventoryAssetIds,
   sentinelAssetCoverageGaps,
   validSentinelCoverageTime,
 } from "./inventory_queries.ts";
@@ -286,6 +287,9 @@ export const SENTINEL_CASE_INVENTORY_READ = "sentinel_case_inventory";
 
 export function sentinelCheckpointInventoryArgs(args: Record<string, unknown>) {
   const { view, limit, coverageGap, asOf } = args;
+  const batch = args.assetIds !== undefined
+    ? parseSentinelInventoryAssetIds(args.assetIds)
+    : undefined;
   const gap = sentinelAssetCoverageGaps.find((entry) => entry === coverageGap);
   const selectors = [
     "assetId",
@@ -297,6 +301,11 @@ export function sentinelCheckpointInventoryArgs(args: Record<string, unknown>) {
   ] as const;
   if (
     (view !== "assets" && view !== "organizations" && view !== "coverage") ||
+    (args.assetIds !== undefined &&
+      (!batch || view !== "assets" ||
+        selectors.some((key) =>
+          key !== "cursor" && args[key] !== undefined
+        ))) ||
     (view === "coverage" && (args.cursor !== undefined ||
       (coverageGap !== undefined && !gap) ||
       !validSentinelCoverageTime(gap, asOf))) ||
@@ -306,7 +315,7 @@ export function sentinelCheckpointInventoryArgs(args: Record<string, unknown>) {
       !Number.isSafeInteger(limit) || limit < 1 || limit > 10)) ||
     Object.keys(args).some((key) =>
       key !== "view" && key !== "limit" && key !== "coverageGap" &&
-      key !== "asOf" &&
+      key !== "asOf" && key !== "assetIds" &&
       !selectors.some((selector) => selector === key)
     )
   ) return;
@@ -324,6 +333,7 @@ export function sentinelCheckpointInventoryArgs(args: Record<string, unknown>) {
   return {
     view,
     ...retained,
+    ...(batch && { assetIds: batch }),
     ...(limit !== undefined && { limit }),
     ...(gap && { coverageGap: gap }),
     ...(typeof asOf === "string" && { asOf }),
@@ -681,6 +691,7 @@ type GoalReceiptReadArguments =
     coverageGap?: string;
     asOf?: string;
     assetId?: string;
+    assetIds?: readonly string[];
     organizationId?: string;
     assetType?: string;
     parentId?: string;

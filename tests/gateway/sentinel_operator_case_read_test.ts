@@ -385,6 +385,36 @@ Deno.test("Authenticated Sentinel chat reads exact approved cross-case graph fin
     ]);
     assertEquals(assetPage.membership.version, approvedScope.version);
 
+    const batch = { ...inventory, assetIds: ["asset-b", "asset-a"], limit: 1 };
+    await turn("Read exact asset IDs in current membership", batch);
+    const batchPage = JSON.parse(result).page;
+    assertEquals(batchPage.assets.map(({ id }: { id: string }) => id), [
+      "asset-a",
+    ]);
+    assert(batchPage.nextCursor);
+    await turn("Continue the same canonical exact set", {
+      ...batch,
+      assetIds: ["asset-a", "asset-b"],
+      cursor: batchPage.nextCursor,
+    });
+    assertEquals(JSON.parse(result).page.assets[0].id, "asset-b");
+    for (
+      const invalid of [
+        { ...batch, assetIds: ["asset-a"], cursor: batchPage.nextCursor },
+        { ...batch, assetIds: ["asset-a", "asset-c"] },
+        { ...batch, assetIds: ["asset-a", "foreign"] },
+        { ...batch, assetId: "asset-a" },
+        { ...batch, view: "organizations" },
+        { ...batch, id: "unregistered" },
+      ]
+    ) {
+      await turn(
+        "Reject an invalid, unauthorized, or stale exact set",
+        invalid,
+      );
+      assertStringIncludes(result, "unavailable");
+    }
+
     await turn("List member organizations", {
       ...inventory,
       view: "organizations",
@@ -785,6 +815,14 @@ Deno.test("Authenticated Sentinel chat reads exact approved cross-case graph fin
     });
     assertStringIncludes(result, "unavailable");
     assertEquals(membershipConfirmations.length, 3);
+    await turn(
+      "Reject an inventory cursor from before the membership addition",
+      {
+        ...batch,
+        cursor: batchPage.nextCursor,
+      },
+    );
+    assertStringIncludes(result, "unavailable");
     await turn(
       "Read the newly enrolled asset through the same scoped inventory",
       {

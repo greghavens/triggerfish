@@ -110,6 +110,10 @@ Deno.test("operator inventory binds exact historical graph, organization and rev
       label: "Operations",
       assetCount: 1,
     }]);
+    const exactBatch = { assetIds: ["asset-b", "asset-a"], limit: 1 };
+    const before = view(exactBatch);
+    assert(before?.view === "assets" && before.nextCursor);
+    assertEquals(before.assets[0].label, "Original asset");
     await Deno.writeTextFile(
       path,
       JSON.stringify({
@@ -123,6 +127,21 @@ Deno.test("operator inventory binds exact historical graph, organization and rev
     );
     const current = refreshSentinelAssessment(path);
     assert(current && current.revision > old.revision);
+    assertEquals(
+      view({ ...exactBatch, assetIds: ["asset-a", "asset-b"] }),
+      before,
+    );
+    const continuation = view({ ...exactBatch, cursor: before.nextCursor });
+    assert(continuation?.view === "assets");
+    assertEquals(continuation.assets[0].id, "asset-b");
+    assertEquals(
+      readOperatorSentinelInventory(base, {
+        ...scoped,
+        revision: current.revision,
+      }, { ...exactBatch, cursor: before.nextCursor }),
+      undefined,
+    );
+
     assert(
       recordSentinelFindingReview(
         path,

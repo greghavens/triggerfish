@@ -18,6 +18,7 @@ import {
   resolveSentinelCasePath,
 } from "../sentinel/cases.ts";
 import {
+  parseSentinelInventoryAssetIds,
   querySentinelAssetInventory,
   querySentinelAssetReviewCoverage,
   querySentinelOrganizations,
@@ -37,6 +38,7 @@ const textFilters = [
 ] as const;
 const queryFields = new Set([
   "view",
+  "assetIds",
   "scope",
   "limit",
   "coverageGap",
@@ -50,6 +52,9 @@ function optionsFor(
   revision: number,
 ): SentinelAssetInventoryOptions | undefined {
   const { assetType, limit = 10 } = args;
+  const batch = args.assetIds !== undefined
+    ? parseSentinelInventoryAssetIds(args.assetIds)
+    : undefined;
   const exactType = sentinelAssetTypes.find((value) => value === assetType);
   if (
     Object.keys(args).some((key) => !queryFields.has(key)) ||
@@ -58,10 +63,14 @@ function optionsFor(
     ) ||
     typeof limit !== "number" || !Number.isSafeInteger(limit) || limit < 1 ||
     limit > 30 ||
-    (assetType !== undefined && !exactType)
+    (assetType !== undefined && !exactType) ||
+    (args.assetIds !== undefined &&
+      (!batch || (args.view !== undefined && args.view !== "assets") ||
+        textFilters.some((key) => key !== "cursor" && args[key] !== undefined)))
   ) return undefined;
   return {
     onlyAsset: args.assetId as string | undefined,
+    ...(batch && { exactAssetIds: batch }),
     organizationId: args.organizationId as string | undefined,
     assetType: exactType,
     parentId: args.parentId as string | undefined,

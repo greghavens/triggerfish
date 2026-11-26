@@ -11,6 +11,7 @@ import {
 import { readSentinelChatSnapshot } from "../sentinel/chat_mode.ts";
 import { loadSentinelGraph } from "../sentinel/graph.ts";
 import {
+  parseSentinelInventoryAssetIds,
   querySentinelAssetInventory,
   querySentinelAssetReviewCoverage,
   querySentinelOrganizations,
@@ -53,6 +54,12 @@ export const sentinelInventoryTool: ToolDefinition = {
       required: true,
     },
     assetId: { type: "string", description: "Exact asset ID" },
+    assetIds: {
+      type: "array",
+      items: { type: "string" },
+      description:
+        "Up to twenty exact asset IDs for the asset view. Omit other asset filters. A leased worker may name only its assigned asset.",
+    },
     organizationId: { type: "string", description: "Exact organization ID" },
     assetType: { type: "string", description: "Exact typed asset property" },
     parentId: { type: "string", description: "Exact parent asset ID" },
@@ -115,9 +122,20 @@ function queryOptions(
 ) {
   const limit = args.limit ?? 5;
   const cursor = args.cursor;
+  const batch = args.assetIds !== undefined
+    ? parseSentinelInventoryAssetIds(args.assetIds)
+    : undefined;
   if (
     Object.keys(args).some((key) =>
-      !["view", "cursor", "limit", "coverageGap", "asOf", ...filters].includes(
+      ![
+        "view",
+        "cursor",
+        "limit",
+        "coverageGap",
+        "asOf",
+        "assetIds",
+        ...filters,
+      ].includes(
         key,
       )
     ) ||
@@ -128,11 +146,17 @@ function queryOptions(
       args[key] !== undefined && (typeof args[key] !== "string" ||
         args[key].length === 0 || args[key].length > 800)
     ) ||
+    (args.assetIds !== undefined &&
+      (!batch || args.view !== "assets" ||
+        filters.some((key) => args[key] !== undefined) ||
+        (assignedAsset !== undefined &&
+          (batch.length !== 1 || batch[0] !== assignedAsset)))) ||
     assignedAsset && args.assetId !== undefined &&
       args.assetId !== assignedAsset
   ) throw new Error("Invalid or out-of-scope inventory query.");
   return {
-    onlyAsset: assignedAsset ?? args.assetId,
+    onlyAsset: batch ? undefined : assignedAsset ?? args.assetId,
+    ...(batch && { exactAssetIds: batch }),
     organizationId: args.organizationId,
     assetType: args.assetType,
     parentId: args.parentId,
@@ -195,8 +219,14 @@ export function reopenSentinelAssignedInventory(
     !snapshot || !caseId ||
     !snapshot.nodes.some(({ id, kind }) => id === assetId && kind === "asset")
   ) return;
+  let query: SentinelAssetInventoryOptions;
+  try {
+    query = queryOptions(selector, assetId);
+  } catch {
+    return;
+  }
   const page = {
-    ...queryOptions(selector, assetId),
+    ...query,
     scopeBinding: JSON.stringify([path, revision, assignmentId]),
   };
   const result = selector.view === "organizations"

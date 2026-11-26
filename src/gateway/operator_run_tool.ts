@@ -1016,7 +1016,7 @@ export const operatorRunTool: ToolDefinition = {
       type: "array",
       items: { type: "string" },
       description:
-        "Up to four exact local asset IDs to anchor a Sentinel planner hint.",
+        "Exact local asset IDs: up to four for a planner hint or up to twenty for an asset inventory lookup.",
     },
     taskIds: {
       type: "array",
@@ -1188,6 +1188,7 @@ export const sentinelOperatorCaseReadParameters = [
   "view",
   "scope",
   "assetId",
+  "assetIds",
   "organizationId",
   "assetType",
   "parentId",
@@ -2332,6 +2333,11 @@ export function createOperatorRunToolExecutor(options: {
           canFlowTo(classification, context?.ceiling ?? "PUBLIC"));
     }
     const action = args.action;
+    if (
+      args.assetIds !== undefined && action !== "inventory" && action !== "hint"
+    ) {
+      return unavailable;
+    }
     if (
       (args.includeFindingTraffic !== undefined ||
         args.trafficOffset !== undefined) && action !== "node"
