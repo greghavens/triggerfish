@@ -489,7 +489,17 @@ export async function startServicesAndChannels(
       role?: "planner",
     ) =>
       createSentinelSubagent({
-        ...modelRouting.workerOptions(state.plan.modelProfile),
+        ...modelRouting.workerOptions(
+          state.plan.modelProfile,
+          state.plan.modelFallbackProfiles && state.plan.runId
+            ? {
+              path: casePath,
+              runId: state.plan.runId,
+              revision: state.revision,
+              alternates: state.plan.modelFallbackProfiles,
+            }
+            : undefined,
+        ),
         hookRunner: toolInfra.hookRunner,
         snapshotPath: casePath,
         sharedInventoryBaseDir: bootstrap.baseDir,

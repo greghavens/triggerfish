@@ -1531,3 +1531,244 @@ Deno.test("A linked child reuses only approved discoveries from its reviewed sou
     await Deno.remove(baseDir, { recursive: true });
   }
 });
+
+Deno.test("An approved linked run fails over only the unfinished model call and retains the selected route", async () => {
+  const baseDir = await Deno.makeTempDir();
+  const pathFor = (id: string) => resolveSentinelCasePath(baseDir, id);
+  const registry = createProviderRegistry();
+  let scenario: "availability" | "restart" | "authentication" = "availability";
+  const calls: string[] = [];
+  const usage = { inputTokens: 1, outputTokens: 1 };
+  let preservedResult = "";
+  registry.register({
+    name: "primary",
+    model: "primary-model",
+    supportsStreaming: false,
+    complete(messages) {
+      calls.push("primary");
+      if (scenario === "authentication") {
+        return Promise.reject(
+          new Error("Provider request failed (401): body (429)"),
+        );
+      }
+      if (messages.some(({ role }) => role === "tool")) {
+        return Promise.reject(
+          new Error("Provider request failed (503): unavailable"),
+        );
+      }
+      return Promise.resolve({
+        content: "",
+        usage,
+        toolCalls: [{
+          id: "read-once",
+          type: "function",
+          function: { name: "sentinel_graph_overview", arguments: "{}" },
+        }],
+      });
+    },
+  });
+  registry.register({
+    name: "alternate",
+    model: "alternate-model",
+    supportsStreaming: false,
+    complete(messages) {
+      calls.push("alternate");
+      if (scenario === "availability") {
+        preservedResult = String(
+          messages.findLast(({ role }) => role === "tool")?.content,
+        );
+      }
+      return Promise.resolve({ content: "[]", usage, toolCalls: [] });
+    },
+  });
+  registry.register({
+    name: "public-only",
+    supportsStreaming: false,
+    complete() {
+      throw new Error("An unapproved model must never receive a prompt.");
+    },
+  });
+  registry.setDefault("primary");
+  const allowedModels = ["primary", "alternate"];
+  const routing = sentinelAssessmentModelRouting(registry, {
+    INTERNAL: allowedModels,
+    PUBLIC: ["public-only"],
+  });
+  let rootReads = 0;
+  const hookRunner: HookRunner = {
+    evaluateHook(hook, { input }) {
+      if (
+        hook === "PRE_TOOL_CALL" &&
+        (input.tool_call as { name?: string } | undefined)?.name ===
+          "sentinel_graph_overview"
+      ) rootReads++;
+      return Promise.resolve({
+        allowed: true,
+        action: "ALLOW",
+        ruleId: null,
+        duration: 0,
+      });
+    },
+  };
+  const createPlannerAgent = (id: string) => {
+    const path = pathFor(id);
+    const state = readSentinelAssessment(path);
+    assert(state?.plan.runId && state.plan.modelFallbackProfiles);
+    return createSentinelSubagent({
+      ...routing.workerOptions(state.plan.modelProfile, {
+        path,
+        runId: state.plan.runId,
+        revision: state.revision,
+        alternates: state.plan.modelFallbackProfiles,
+      }),
+      snapshotPath: path,
+      assessmentRevision: state.revision,
+      plannerExecutionEvidenceRunId: state.plan.runId,
+      hookRunner,
+    });
+  };
+  const runPlanner = async (id: string) => {
+    const agent = createPlannerAgent(id);
+    try {
+      await agent.execute("Review the approved case overview.", () => {});
+    } finally {
+      agent.clear();
+    }
+  };
+  try {
+    for (const id of ["main", "failover", "unauthorized", "auth-failure"]) {
+      const path = pathFor(id);
+      await Deno.mkdir(dirname(path), { recursive: true });
+      await Deno.writeTextFile(
+        path,
+        JSON.stringify({ version: 1, nodes: [], edges: [] }),
+      );
+    }
+    const root = startSentinelAssessment(pathFor("main"));
+    const start = {
+      action: "spawn",
+      kind: "sentinel",
+      id: "main",
+      revision: root.revision,
+      targetKind: "sentinel",
+      modelProfile: "primary",
+    };
+    const spawn = {
+      ...start,
+      targetId: "failover",
+      requestId: crypto.randomUUID(),
+      fallbackModelProfiles: ["alternate"],
+    };
+    await withOwnerControl(baseDir, async (request, approvals) => {
+      assert((await request({
+        ...start,
+        targetId: "unauthorized",
+        requestId: crypto.randomUUID(),
+        fallbackModelProfiles: ["public-only"],
+      })).startsWith("Error:"));
+      assertEquals(approvals.length, 0);
+      assertEquals(readSentinelAssessment(pathFor("unauthorized")), undefined);
+      const { run } = JSON.parse(await request(spawn));
+      assertEquals(run.details.modelFallbackProfiles, [{
+        provider: "alternate",
+        model: "alternate-model",
+      }]);
+      assert(approvals[0].includes('"modelFallbackProfiles"'));
+      assertEquals(JSON.parse(await request(spawn)).run, run);
+      assert((await request({
+        ...spawn,
+        fallbackModelProfiles: undefined,
+      })).startsWith("Error:"));
+      assertEquals(approvals.length, 1);
+
+      await runPlanner("failover");
+      assertEquals(calls, ["primary", "primary", "alternate"]);
+      assertEquals(rootReads, 1);
+      assert(preservedResult.startsWith("{"));
+      const active =
+        JSON.parse(await request({ ...run.ref, action: "inspect" })).run;
+      assertEquals(active.details.activeModelProfile, {
+        provider: "alternate",
+        model: "alternate-model",
+      });
+
+      scenario = "restart";
+      await runPlanner("failover");
+      assertEquals(calls, ["primary", "primary", "alternate", "alternate"]);
+      assertEquals(rootReads, 1);
+      allowedModels.pop();
+      await runPlanner("failover");
+      assertEquals(calls, ["primary", "primary", "alternate", "alternate"]);
+      allowedModels.push("alternate");
+
+      const child = JSON.parse(
+        await request({
+          ...run.ref,
+          action: "spawn",
+          targetKind: "sentinel",
+          targetId: "auth-failure",
+          requestId: crypto.randomUUID(),
+        }),
+      ).run;
+      assertEquals(
+        child.details.modelFallbackProfiles,
+        run.details.modelFallbackProfiles,
+      );
+      scenario = "authentication";
+      await runPlanner("auth-failure");
+      assertEquals(calls, [
+        "primary",
+        "primary",
+        "alternate",
+        "alternate",
+        "primary",
+      ]);
+      assertEquals(
+        readSentinelAssessment(pathFor("auth-failure"))?.plan
+          .modelFallbackIndex,
+        undefined,
+      );
+      const archiveScope = { ...run.ref, runId: run.details.runId };
+      assertEquals(
+        JSON.parse(
+          await request({
+            ...archiveScope,
+            action: "cancel",
+          }),
+        ).run.status,
+        "stopped",
+      );
+      const archiveId = crypto.randomUUID();
+      assertEquals(
+        JSON.parse(
+          await request({
+            ...archiveScope,
+            action: "archive",
+            requestId: archiveId,
+          }),
+        ).receipt.status,
+        "succeeded",
+      );
+      await Deno.rename(
+        dirname(pathFor("failover")),
+        join(baseDir, "prior-failover"),
+      );
+      assertEquals(
+        JSON.parse(
+          await request({
+            ...archiveScope,
+            action: "restore",
+            archiveId,
+            requestId: crypto.randomUUID(),
+          }),
+        ).receipt.status,
+        "succeeded",
+      );
+      const restored = readSentinelAssessment(pathFor("failover"));
+      assert(restored?.paused);
+      assertEquals(restored.plan.modelFallbackIndex, 1);
+    }, routing.list);
+  } finally {
+    await Deno.remove(baseDir, { recursive: true });
+  }
+});

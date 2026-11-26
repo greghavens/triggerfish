@@ -63,3 +63,21 @@ export function selectedModelProvider(
     ? provider
     : undefined;
 }
+
+/** Validate the bounded, ordered alternates of one already approved primary route. */
+export function parseModelFallbackProfiles(
+  value: unknown,
+  primary: SelectedModelProfile | undefined,
+): readonly SelectedModelProfile[] | undefined {
+  if (
+    !primary || !Array.isArray(value) || value.length < 1 || value.length > 3
+  ) {
+    return;
+  }
+  if (!value.every(isSelectedModelProfile)) return;
+  const names = new Set([
+    primary.provider,
+    ...value.map(({ provider }) => provider),
+  ]);
+  return names.size === value.length + 1 ? value : undefined;
+}

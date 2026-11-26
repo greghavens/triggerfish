@@ -77,6 +77,12 @@ requesting a linked Sentinel run. Omit it to inherit the exact parent
 selection, or use the standard classification route when the parent had
 no explicit selection. Sentinel planner and worker turns use the approved
 selection while its provider, model, and current grant still match.
+For an explicitly selected or inherited primary route, pass up to three
+approved provider names in `fallbackModelProfiles` in the order to try.
+Sentinel advances the saved route after an availability failure before
+that model call returns a response. It reuses completed tool exchanges.
+New child runs inherit the chain with the parent profile when both are
+omitted. A revoked or changed profile prevents model dispatch.
 To direct the child's shared discovery reads, pass up to four
 `sourceCases` entries with an existing `caseId` and exact saved `revision`.
 The approval includes the resolved source run identities. The planner

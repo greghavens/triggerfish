@@ -3523,12 +3523,16 @@ function createAgent(
     : undefined;
   if (provider) {
     registry.register({
-      name: provider.name,
+      get name() {
+        return provider.name;
+      },
+      get model() {
+        return provider.model;
+      },
       supportsStreaming: false,
       ...(provider.contextWindow !== undefined
         ? { contextWindow: provider.contextWindow }
         : {}),
-      ...(provider.model !== undefined ? { model: provider.model } : {}),
       async complete(messages, tools, callOptions) {
         const signal = active?.signal;
         signal?.throwIfAborted();

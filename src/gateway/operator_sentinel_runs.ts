@@ -23,6 +23,7 @@ import {
   readSentinelAssessmentRevision,
   readSentinelCaseStatus,
   readSentinelChildDescription,
+  readSentinelFallbackModelsForRevision,
   readSentinelFormalGoalApproval,
   readSentinelLinkedSourcesForRevision,
   readSentinelLinkedStartSeed,
@@ -60,6 +61,9 @@ export function createOperatorSentinelRuns(
   ): SentinelCaseMembershipProof | undefined;
   startOrganization(ref: OperatorRunRef): string | undefined;
   modelProfile(ref: OperatorRunRef): SelectedModelProfile | undefined;
+  fallbackModels(
+    ref: OperatorRunRef,
+  ): readonly SelectedModelProfile[] | undefined;
   plannerHeartbeat(ref: OperatorRunRef): number | undefined;
   linkedCaseSources(
     ref: OperatorRunRef,
@@ -85,6 +89,7 @@ export function createOperatorSentinelRuns(
       seedTask?: SentinelLinkedSeedTask;
       timeoutSeconds?: number;
       modelProfile?: SelectedModelProfile;
+      modelFallbackProfiles?: readonly SelectedModelProfile[];
       plannerHeartbeatSeconds?: number;
       linkedCaseSources?: readonly SentinelLinkedCaseSource[];
     },
@@ -160,6 +165,10 @@ export function createOperatorSentinelRuns(
       path,
       publicRef.revision,
     );
+    const modelFallbackProfiles = readSentinelFallbackModelsForRevision(
+      path,
+      publicRef.revision,
+    );
     const modelProfile = readSentinelModelProfileForRevision(
       path,
       publicRef.revision,
@@ -181,6 +190,14 @@ export function createOperatorSentinelRuns(
         ...(linkedCaseSources && { linkedCaseSources }),
         adaptiveRevision: adaptive?.revision ?? null,
         ...(modelProfile && { modelProfile }),
+        ...(modelFallbackProfiles && {
+          modelFallbackProfiles,
+          ...(current.revision === publicRef.revision && {
+            activeModelProfile: current.plan.modelFallbackIndex
+              ? modelFallbackProfiles[current.plan.modelFallbackIndex - 1]
+              : modelProfile,
+          }),
+        }),
         ...(publicRef.revision === current.revision &&
           state.plan?.timeoutSeconds !== undefined && {
           timeoutSeconds: state.plan.timeoutSeconds,
@@ -292,6 +309,12 @@ export function createOperatorSentinelRuns(
       const path = pathFor(ref);
       return path && ref.revision !== undefined
         ? readSentinelPlannerHeartbeatForRevision(path, ref.revision)
+        : undefined;
+    },
+    fallbackModels(ref) {
+      const path = pathFor(ref);
+      return path && ref.revision !== undefined
+        ? readSentinelFallbackModelsForRevision(path, ref.revision)
         : undefined;
     },
     modelProfile(ref) {

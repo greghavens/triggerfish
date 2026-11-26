@@ -1,6 +1,9 @@
 import { parseSentinelLinkedCaseSources } from "./linked_case_sources.ts";
 import { validPlannerHeartbeatSeconds } from "../core/evidence_task_progression.ts";
-import { isSelectedModelProfile } from "../core/model_profile_selection.ts";
+import {
+  isSelectedModelProfile,
+  parseModelFallbackProfiles,
+} from "../core/model_profile_selection.ts";
 import {
   decodeSentinelToolDecisions,
   sentinelArchivedToolDecisionsFile,
@@ -344,7 +347,11 @@ function restoreAssessment(
       childDescription !== undefined &&
       !validSentinelChildDescription(childDescription)
     ) throw new Error("Invalid archived linked Sentinel description");
-    const linkedCaseSources = object(JSON.parse(row.plan)).linkedCaseSources;
+    const {
+      linkedCaseSources,
+      modelFallbackProfiles,
+      modelFallbackIndex,
+    } = object(JSON.parse(row.plan));
     if (
       linkedCaseSources !== undefined &&
       !parseSentinelLinkedCaseSources(linkedCaseSources)
@@ -359,6 +366,19 @@ function restoreAssessment(
     }
     if (modelProfile !== undefined && !isSelectedModelProfile(modelProfile)) {
       throw new Error("Invalid archived Sentinel assessment model profile");
+    }
+    const fallbacks = parseModelFallbackProfiles(
+      modelFallbackProfiles,
+      isSelectedModelProfile(modelProfile) ? modelProfile : undefined,
+    );
+    if (
+      (modelFallbackProfiles !== undefined && !fallbacks) ||
+      (modelFallbackIndex !== undefined && (!fallbacks ||
+        typeof modelFallbackIndex !== "number" ||
+        !Number.isSafeInteger(modelFallbackIndex) || modelFallbackIndex < 1 ||
+        modelFallbackIndex > fallbacks.length))
+    ) {
+      throw new Error("Invalid archived Sentinel fallback model selection");
     }
     if (
       (timeoutSeconds !== undefined || deadlineAt !== undefined ||

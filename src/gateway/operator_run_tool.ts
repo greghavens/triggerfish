@@ -117,6 +117,7 @@ import { createHash } from "node:crypto";
 import type { EffectiveModelProfile } from "../agent/llm.ts";
 import {
   isModelProfileName,
+  parseModelFallbackProfiles,
   type SelectedModelProfile,
 } from "../core/model_profile_selection.ts";
 import type { RecoveryToolCall } from "../core/types/orchestrator.ts";
@@ -679,6 +680,11 @@ export const operatorRunTool: ToolDefinition = {
       type: "integer",
       description:
         "Optional idle planning interval for the linked Sentinel run, 600 to 86400 seconds",
+    },
+    fallbackModelProfiles: {
+      type: "array",
+      description:
+        "Up to three distinct approved INTERNAL provider names in failover order.",
     },
     modelProfile: {
       type: "string",
@@ -7872,6 +7878,7 @@ export function createOperatorRunToolExecutor(options: {
           seedTask: rawSeedTask,
           timeoutSeconds,
           modelProfile: namedProfile,
+          fallbackModelProfiles: namedFallbacks,
           plannerHeartbeatSeconds,
           sourceCases,
         } = args;
@@ -7899,6 +7906,7 @@ export function createOperatorRunToolExecutor(options: {
               "seedTask",
               "timeoutSeconds",
               "modelProfile",
+              "fallbackModelProfiles",
               "plannerHeartbeatSeconds",
               "sourceCases",
             ].includes(key)
@@ -7921,6 +7929,10 @@ export function createOperatorRunToolExecutor(options: {
           (plannerHeartbeatSeconds !== undefined &&
             (targetKind !== "sentinel" ||
               !validPlannerHeartbeatSeconds(plannerHeartbeatSeconds))) ||
+          (namedFallbacks !== undefined &&
+            (targetKind !== "sentinel" || !Array.isArray(namedFallbacks) ||
+              !namedFallbacks.length || namedFallbacks.length > 3 ||
+              !namedFallbacks.every(isModelProfileName))) ||
           (namedProfile !== undefined &&
             (targetKind !== "sentinel" || !isModelProfileName(namedProfile))) ||
           (timeoutSeconds !== undefined &&
@@ -8015,6 +8027,28 @@ export function createOperatorRunToolExecutor(options: {
         ) {
           return unavailable;
         }
+        const inheritedFallbacks =
+          namedFallbacks === undefined && inheritedProfile
+            ? providers.sentinel.fallbackModels(parent)
+            : undefined;
+        const selectFallbacks = () => {
+          const profiles = options.sentinelProfiles?.() ?? [];
+          const selected = Array.isArray(namedFallbacks)
+            ? namedFallbacks.map((name) =>
+              profiles.find(({ provider }) => provider === name)
+            )
+            : inheritedFallbacks?.map((fallback) =>
+              profiles.find((candidate) =>
+                isDeepStrictEqual(fallback, candidate)
+              )
+            );
+          return parseModelFallbackProfiles(selected, modelProfile);
+        };
+        const modelFallbackProfiles = selectFallbacks();
+        if (
+          (namedFallbacks !== undefined || inheritedFallbacks !== undefined) &&
+          !modelFallbackProfiles
+        ) return unavailable;
         const parentScope = backgroundRole &&
           readBackgroundTrace(backgroundRole, parent.id)?.scope;
         if (backgroundRole && !parentScope) return unavailable;
@@ -8059,6 +8093,10 @@ export function createOperatorRunToolExecutor(options: {
               !isDeepStrictEqual(
                 providers.sentinel.modelProfile(other),
                 modelProfile,
+              ) ||
+              !isDeepStrictEqual(
+                providers.sentinel.fallbackModels(other),
+                modelFallbackProfiles,
               )
             ) return unavailable;
             const child = await controller.inspect(other);
@@ -8098,6 +8136,7 @@ export function createOperatorRunToolExecutor(options: {
                 ...(seedTask && { seedTask }),
                 ...(timeoutSeconds !== undefined && { timeoutSeconds }),
                 ...(modelProfile && { modelProfile }),
+                ...(modelFallbackProfiles && { modelFallbackProfiles }),
                 ...(linkedCaseSources && { linkedCaseSources }),
                 ...(plannerHeartbeatSeconds !== undefined &&
                   { plannerHeartbeatSeconds }),
@@ -8108,6 +8147,7 @@ export function createOperatorRunToolExecutor(options: {
         if (
           !await controller.inspect(parent) ||
           !isDeepStrictEqual(selectableProfile(), modelProfile) ||
+          !isDeepStrictEqual(selectFallbacks(), modelFallbackProfiles) ||
           !isDeepStrictEqual(await readSourceCases(), linkedCaseSources) ||
           (backgroundRole &&
             !isDeepStrictEqual(
@@ -8136,6 +8176,7 @@ export function createOperatorRunToolExecutor(options: {
               seedTask,
               timeoutSeconds,
               modelProfile,
+              modelFallbackProfiles,
               plannerHeartbeatSeconds,
               linkedCaseSources,
             });

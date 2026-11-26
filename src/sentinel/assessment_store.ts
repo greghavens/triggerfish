@@ -9,6 +9,7 @@ import {
 import { validPlannerHeartbeatSeconds } from "../core/evidence_task_progression.ts";
 import {
   isSelectedModelProfile,
+  parseModelFallbackProfiles,
   type SelectedModelProfile,
 } from "../core/model_profile_selection.ts";
 import {
@@ -100,6 +101,8 @@ export type AssessmentPlan =
     readonly timeoutSeconds?: number;
     readonly deadlineAt?: number;
     readonly modelProfile?: SelectedModelProfile;
+    readonly modelFallbackProfiles?: readonly SelectedModelProfile[];
+    readonly modelFallbackIndex?: number;
     readonly plannerHeartbeatSeconds?: number;
     readonly linkedCaseSources?: readonly SentinelLinkedCaseSource[];
     readonly childDescription?: string;
@@ -727,6 +730,7 @@ function saveAssessmentRunRevision(
     runId,
     timeoutSeconds,
     modelProfile,
+    modelFallbackProfiles,
     plannerHeartbeatSeconds,
     linkedCaseSources,
     childDescription,
@@ -735,6 +739,7 @@ function saveAssessmentRunRevision(
     | "runId"
     | "timeoutSeconds"
     | "modelProfile"
+    | "modelFallbackProfiles"
     | "plannerHeartbeatSeconds"
     | "linkedCaseSources"
     | "childDescription"
@@ -744,7 +749,7 @@ function saveAssessmentRunRevision(
   db.exec(`CREATE TABLE IF NOT EXISTS assessment_run_revisions (
     revision INTEGER PRIMARY KEY, runId TEXT NOT NULL, timeoutSeconds INTEGER,
     modelProfile TEXT, plannerHeartbeatSeconds INTEGER, linkedCaseSources TEXT,
-    childDescription TEXT
+    childDescription TEXT, modelFallbackProfiles TEXT
   )`);
   const columns = db.prepare("PRAGMA table_info(assessment_run_revisions)")
     .all().map(({ name }) => name);
@@ -773,10 +778,15 @@ function saveAssessmentRunRevision(
       "ALTER TABLE assessment_run_revisions ADD COLUMN childDescription TEXT",
     );
   }
+  if (!columns.includes("modelFallbackProfiles")) {
+    db.exec(
+      "ALTER TABLE assessment_run_revisions ADD COLUMN modelFallbackProfiles TEXT",
+    );
+  }
   db.prepare(
     `INSERT OR IGNORE INTO assessment_run_revisions
-      (revision, runId, timeoutSeconds, modelProfile, plannerHeartbeatSeconds, linkedCaseSources, childDescription)
-      VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      (revision, runId, timeoutSeconds, modelProfile, plannerHeartbeatSeconds, linkedCaseSources, childDescription, modelFallbackProfiles)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     revision,
     runId,
@@ -785,6 +795,7 @@ function saveAssessmentRunRevision(
     plannerHeartbeatSeconds ?? null,
     linkedCaseSources ? JSON.stringify(linkedCaseSources) : null,
     childDescription ?? null,
+    modelFallbackProfiles ? JSON.stringify(modelFallbackProfiles) : null,
   );
 }
 
@@ -1405,6 +1416,7 @@ export function startSentinelAssessment(
     childDescription?: string;
     timeoutSeconds?: number;
     modelProfile?: SelectedModelProfile;
+    modelFallbackProfiles?: readonly SelectedModelProfile[];
     plannerHeartbeatSeconds?: number;
     linkedCaseSources?: readonly SentinelLinkedCaseSource[];
   },
@@ -1430,8 +1442,20 @@ export function startSentinelAssessment(
   ) {
     throw new Error("Invalid linked Sentinel case sources");
   }
-  const { timeoutSeconds, modelProfile, plannerHeartbeatSeconds } =
-    linkedStart ?? {};
+  const {
+    timeoutSeconds,
+    modelProfile,
+    plannerHeartbeatSeconds,
+    modelFallbackProfiles,
+  } = linkedStart ?? {};
+  if (
+    plan.modelFallbackProfiles !== undefined ||
+    plan.modelFallbackIndex !== undefined ||
+    (modelFallbackProfiles !== undefined &&
+      !parseModelFallbackProfiles(modelFallbackProfiles, modelProfile))
+  ) {
+    throw new Error("Invalid Sentinel fallback model profiles");
+  }
   if (
     plan.plannerHeartbeatSeconds !== undefined ||
     (plannerHeartbeatSeconds !== undefined &&
@@ -1500,6 +1524,7 @@ export function startSentinelAssessment(
             runId: crypto.randomUUID(),
             admissionAt: nextAssessmentAdmission(),
             ...(modelProfile && { modelProfile }),
+            ...(modelFallbackProfiles && { modelFallbackProfiles }),
             ...(linkedCaseSources && { linkedCaseSources }),
             ...(childDescription !== undefined && { childDescription }),
             ...(formal && {
@@ -2649,6 +2674,75 @@ export function readSentinelPlannerHeartbeatForRevision(
       throw new Error("Invalid saved Sentinel planner heartbeat interval");
     }
     return value;
+  } finally {
+    db.close();
+  }
+}
+
+/** Read the immutable approval for each alternate in the exact saved revision. */
+export function readSentinelFallbackModelsForRevision(
+  path: string,
+  revision: number,
+) {
+  const primary = readSentinelModelProfileForRevision(path, revision);
+  const db = openStore(path, false);
+  if (!db) return;
+  try {
+    const current = getRow(db);
+    const encoded = current?.revision === revision
+      ? undefined
+      : hasTable(db, "assessment_run_revisions")
+      ? db.prepare("SELECT * FROM assessment_run_revisions WHERE revision = ?")
+        .get(revision)?.modelFallbackProfiles
+      : undefined;
+    const raw = current?.revision === revision
+      ? (JSON.parse(current.plan) as AssessmentPlan).modelFallbackProfiles
+      : typeof encoded === "string"
+      ? JSON.parse(encoded)
+      : encoded ?? undefined;
+    if (raw === undefined) return;
+    const fallbackProfiles = parseModelFallbackProfiles(raw, primary);
+    if (!fallbackProfiles) {
+      throw new Error("Invalid saved Sentinel fallback model profiles");
+    }
+    return fallbackProfiles;
+  } finally {
+    db.close();
+  }
+}
+
+/** Advance once, leaving the approved model choices and evidence revision intact. */
+export function advanceSentinelModelFallback(
+  path: string,
+  scope: { readonly runId: string; readonly revision: number },
+  failedIndex: number,
+) {
+  const db = openStore(path, false);
+  if (!db) return;
+  try {
+    return transact(db, () => {
+      const row = getRow(db);
+      if (row?.active !== 1 || row.revision !== scope.revision) return;
+      const plan = JSON.parse(row.plan) as AssessmentPlan;
+      const fallbacks = parseModelFallbackProfiles(
+        plan.modelFallbackProfiles,
+        plan.modelProfile,
+      );
+      const index = plan.modelFallbackIndex ?? 0;
+      if (
+        plan.runId !== scope.runId || !fallbacks ||
+        (plan.deadlineAt !== undefined && Date.now() >= plan.deadlineAt) ||
+        !Number.isSafeInteger(failedIndex) || failedIndex < 0 ||
+        failedIndex >= fallbacks.length || !Number.isSafeInteger(index) ||
+        index < failedIndex || index > fallbacks.length
+      ) return;
+      if (index > failedIndex) return index;
+      const next = index + 1;
+      db.prepare("UPDATE assessment SET plan = ? WHERE id = 1").run(
+        JSON.stringify({ ...plan, modelFallbackIndex: next }),
+      );
+      return next;
+    });
   } finally {
     db.close();
   }
