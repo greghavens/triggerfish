@@ -2,6 +2,7 @@
 import { isSentinelCaseId } from "./cases.ts";
 import { redactCredentialText } from "../core/logger/redactor.ts";
 import { createHash } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import type { SentinelFindingReview } from "./assessment_store.ts";
 import {
   type SentinelAssetType,
@@ -460,6 +461,102 @@ export function readSentinelPlannerCoverageResult(
         ...(args.limit !== undefined && { limit }),
       },
       assetIds,
+    };
+  } catch {
+    return;
+  }
+}
+
+/** Preserve only exact planner asset pages and the existing coverage projection. */
+export function readSentinelPlannerInventoryResult(
+  args: Record<string, unknown>,
+  text: string,
+  scope?: {
+    caseId: string;
+    evidenceRevision: number;
+    snapshotDigest: string;
+    snapshot?: Snapshot;
+  },
+) {
+  if (args?.view === "coverage") {
+    const coverage = readSentinelPlannerCoverageResult(args, text, scope);
+    return coverage && { ...coverage, requestedAssetIds: coverage.assetIds };
+  }
+  if (
+    args?.view !== "assets" ||
+    Object.keys(args).some((key) =>
+      !["view", "assetIds", "limit", "cursor"].includes(key)
+    ) ||
+    typeof text !== "string" || text.length > 6000 ||
+    redactCredentialText(text) !== text
+  ) return;
+  const batch = parseSentinelInventoryAssetIds(args.assetIds);
+  const { limit = 5, cursor } = args;
+  const cursorPattern = /^[a-f0-9]{64}\.[a-f0-9]{64}$/;
+  if (
+    !batch || typeof limit !== "number" || !Number.isSafeInteger(limit) ||
+    limit < 1 || limit > 10 ||
+    (cursor !== undefined &&
+      (typeof cursor !== "string" || !cursorPattern.test(cursor)))
+  ) return;
+  const offset = cursor === undefined
+    ? 0
+    : batch.findIndex((id) => hash(id) === cursor.slice(65)) + 1;
+  if (cursor !== undefined && !offset) return;
+  const ids = batch.slice(offset, offset + limit);
+  try {
+    const page = JSON.parse(text);
+    if (
+      Object.keys(page).length !== 6 || page._classification !== "INTERNAL" ||
+      !isSentinelCaseId(page.caseId) ||
+      !Number.isSafeInteger(page.evidenceRevision) ||
+      page.evidenceRevision < 1 ||
+      typeof page.snapshotDigest !== "string" ||
+      !/^[a-f0-9]{64}$/.test(page.snapshotDigest) ||
+      (scope && (page.caseId !== scope.caseId ||
+        page.evidenceRevision !== scope.evidenceRevision ||
+        page.snapshotDigest !== scope.snapshotDigest)) ||
+      !Array.isArray(page.assets) || page.assets.length !== ids.length
+    ) return;
+    if (offset + limit < batch.length) {
+      if (
+        typeof page.nextCursor !== "string" ||
+        !cursorPattern.test(page.nextCursor) ||
+        page.nextCursor.slice(65) !== hash(ids.at(-1)!) ||
+        (cursor !== undefined &&
+          cursor.slice(0, 64) !== page.nextCursor.slice(0, 64))
+      ) return;
+    } else if (page.nextCursor !== null) return;
+    const pinned = scope?.snapshot &&
+      new Map(scope.snapshot.nodes.map((node) => [node.id, node]));
+    if (pinned && batch.some((id) => pinned.get(id)?.kind !== "asset")) return;
+    for (const [index, row] of page.assets.entries()) {
+      if (
+        !row || row.id !== ids[index] || row.kind !== "asset" ||
+        !validIdentifier(row.label) ||
+        Object.keys(row).some((key) =>
+          ![
+            "id",
+            "kind",
+            "label",
+            "aliases",
+            "assetType",
+            "parentId",
+            "organization",
+          ].includes(key)
+        ) ||
+        (pinned && !isDeepStrictEqual(pinned.get(row.id), row))
+      ) return;
+    }
+    return {
+      args: {
+        view: "assets" as const,
+        assetIds: batch,
+        ...(args.limit !== undefined && { limit }),
+        ...(cursor !== undefined && { cursor }),
+      },
+      assetIds: ids,
+      requestedAssetIds: batch,
     };
   } catch {
     return;

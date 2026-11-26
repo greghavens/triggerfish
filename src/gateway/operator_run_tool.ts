@@ -70,7 +70,7 @@ import {
 } from "../sentinel/incident_archive.ts";
 import { redactCredentialText } from "../core/logger/redactor.ts";
 import { sentinelIncidentCandidates } from "../sentinel/adaptive_planner.ts";
-import { readSentinelPlannerCoverageResult } from "../sentinel/inventory_queries.ts";
+import { readSentinelPlannerInventoryResult } from "../sentinel/inventory_queries.ts";
 import { readSentinelPlannerDigestResult } from "../sentinel/evidence_digests.ts";
 import {
   amendOperatorSentinelFindingReport,
@@ -8270,20 +8270,21 @@ ${
             return safeProjection({ ...selected, read });
           }
           const authorize = context?.authorizeSentinelTraceRead;
-          const coverage = includeResult &&
+          const inventory = includeResult &&
             read.tool === "sentinel_case_inventory" &&
             read.plannerCoverageResult;
-          const snapshot = coverage &&
+          const snapshot = inventory &&
             readSentinelAssessmentRevision(path, ref.revision)?.result
               .sharedGraph.snapshot;
-          const coveragePage = coverage && snapshot &&
-            readSentinelPlannerCoverageResult(
-              coverage.args,
-              coverage.text,
+          const inventoryPage = inventory && snapshot &&
+            readSentinelPlannerInventoryResult(
+              inventory.args,
+              inventory.text,
               {
                 caseId: ref.id,
                 evidenceRevision: ref.revision,
                 snapshotDigest: digestSentinelSnapshot(snapshot),
+                snapshot,
               },
             );
           const digest = read.plannerDigestResult;
@@ -8294,8 +8295,8 @@ ${
               digest.text,
               { caseId: ref.id, runId, evidenceRevision: ref.revision },
             );
-          const selector = coveragePage
-            ? coveragePage.args
+          const selector = inventoryPage
+            ? inventoryPage.args
             : digestArgs || sentinelTraceSourceSelector(read);
           const scope = {
             caseId: ref.id,
@@ -8343,20 +8344,25 @@ ${
             ) return unavailable;
             return safeProjection({ ...selected, source });
           }
-          if (coverage && coveragePage) {
-            const allowed = readSentinelOperatingConstraints(path, runId)
-              ?.constraints.allowedAssetIds;
+          if (inventory && inventoryPage) {
+            const assetsAllowed = () => {
+              const allowed = readSentinelOperatingConstraints(path, runId)
+                ?.constraints.allowedAssetIds;
+              return !allowed ||
+                inventoryPage.requestedAssetIds.every((id) =>
+                  allowed.includes(id)
+                );
+            };
             if (
-              (allowed &&
-                coveragePage.assetIds.some((id) => !allowed.includes(id))) ||
-              createHash("sha256").update(coverage.text).digest("hex") !==
-                coverage.sha256 ||
-              !await authorize(scope, read.tool, selector, coverage.text) ||
-              !isCurrent()
+              !assetsAllowed() ||
+              createHash("sha256").update(inventory.text).digest("hex") !==
+                inventory.sha256 ||
+              !await authorize(scope, read.tool, selector, inventory.text) ||
+              !assetsAllowed() || !isCurrent()
             ) return unavailable;
             return safeProjection({
               ...selected,
-              result: JSON.parse(coverage.text),
+              result: JSON.parse(inventory.text),
             });
           }
           if (digest && digestArgs) {

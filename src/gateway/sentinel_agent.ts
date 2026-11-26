@@ -5,7 +5,7 @@ import {
 import { readLinkedFindingProof } from "./sentinel_linked_findings.ts";
 import { notifyCommittedEvidence } from "../core/evidence_task_progression.ts";
 import { guardAssignmentExecution } from "../core/durable_assignment.ts";
-import { readSentinelPlannerCoverageResult } from "../sentinel/inventory_queries.ts";
+import { readSentinelPlannerInventoryResult } from "../sentinel/inventory_queries.ts";
 import { readSentinelPlannerDigestResult } from "../sentinel/evidence_digests.ts";
 import { readSentinelIntermediateWorkflowObservations } from "./sentinel_adaptive_runtime.ts";
 import { readScopedSentinelSharedAssetDiscoveries } from "./sentinel_asset_discoveries.ts";
@@ -5929,9 +5929,9 @@ function createAgent(
           !failed && canReadPlannerCase && isSentinelEvidenceDigestTool(name)
             ? readSentinelPlannerDigestResult(name, args, result)
             : undefined;
-        const coverage =
+        const inventory =
           !failed && canReadPlannerCase && name === sentinelInventoryTool.name
-            ? readSentinelPlannerCoverageResult(args, result)
+            ? readSentinelPlannerInventoryResult(args, result)
             : undefined;
         const provenanceNodeResult =
           (canReadPlannerCase || turn.requiresLiveAssignment) &&
@@ -5992,9 +5992,9 @@ function createAgent(
           ...(linkedTrafficPayload && { linkedTrafficPayload }),
           ...(goalReceiptRead && { goalReceiptRead }),
           ...(graphOverviewProjection && { graphOverviewProjection }),
-          ...(coverage && {
+          ...(inventory && {
             plannerCoverageResult: {
-              args: coverage.args,
+              args: inventory.args,
               text: result,
               sha256: createHash("sha256").update(result).digest("hex"),
             },

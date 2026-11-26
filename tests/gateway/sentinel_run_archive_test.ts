@@ -90,7 +90,9 @@ import {
   readSentinelAssessment,
   readSentinelAssessmentAlerts,
   readSentinelFindingReviews,
+  readSentinelOperatingConstraints,
   recordSentinelFindingReview,
+  recordSentinelOperatingConstraints,
   refreshSentinelAssessment,
   startSentinelAssessment,
   stopSentinelAssessment,
@@ -4179,7 +4181,7 @@ async function verifyPlannerArchive(
         args: { view: "coverage", assetId: "app" },
       }, {
         name: "sentinel_case_inventory",
-        args: { view: "coverage", coverageGap: "unreviewed", limit: 1 },
+        args: { view: "assets", assetIds: ["db", "app"], limit: 1 },
       });
     }
     advanceAdaptiveSentinel(path, state);
@@ -4309,7 +4311,12 @@ async function verifyPlannerArchive(
     const observed = JSON.parse(responses[10]);
     if (mode === "coverage") {
       assertEquals(observed.assets[0].findings[0].review, null);
-      assertEquals(JSON.parse(responses[11]).assets.length, 1);
+      const exactAssetPage = JSON.parse(responses[11]);
+      assertEquals(exactAssetPage.assets.map(({ id }: { id: string }) => id), [
+        "app",
+      ]);
+      assert(exactAssetPage.nextCursor);
+
       const store = openSentinelAdaptiveStore(
         join(dirname(path), "sentinel-adaptive.db"),
       );
@@ -5222,6 +5229,27 @@ async function verifyPlannerArchive(
         "PRE_TOOL_CALL",
         "POST_TOOL_RESPONSE",
       ]);
+      if (mode === "coverage") {
+        policy.denyWorkerSourceAfter = false;
+        assert(run.runId);
+        const prior = readSentinelOperatingConstraints(path, run.runId);
+        assert(recordSentinelOperatingConstraints(path, {
+          evidenceRevision: run.revision,
+          runId: run.runId,
+          requestId: crypto.randomUUID(),
+          expectedVersion: prior?.version ?? 0,
+          operatorScope: "fixture-current-owner",
+          constraints: {
+            deniedKinds: prior?.constraints.deniedKinds ?? [],
+            allowedAssetIds: ["app"],
+          },
+        }));
+        assertStringIncludes(
+          await turn({ ...resultRead, ordinal: 12 }),
+          "unavailable",
+        );
+        assertEquals(policy.workerSourceHooks.splice(0), ["PRE_TOOL_CALL"]);
+      }
       if (mode === "digests") {
         policy.denyWorkerSourceAfter = false;
         assert(stopSentinelAssessment(path));

@@ -269,6 +269,7 @@ export interface SentinelReviewStep {
       typeof import("./worker_goal_recovery.ts").readSentinelGraphOverviewProjection
     >
   >;
+  /** Persisted planner inventory page. The legacy key also carries exact asset pages. */
   readonly plannerCoverageResult?: {
     readonly args: Record<string, unknown>;
     readonly text: string;

@@ -15,7 +15,7 @@ import {
   createAssignmentControlJournal,
   createAssignmentLeaseJournal,
 } from "../core/durable_assignment.ts";
-import { readSentinelPlannerCoverageResult } from "./inventory_queries.ts";
+import { readSentinelPlannerInventoryResult } from "./inventory_queries.ts";
 import { readSentinelPlannerDigestResult } from "./evidence_digests.ts";
 import { readSentinelGraphFactPageReference } from "./worker_graph_facts.ts";
 import { redactCredentialText } from "../core/logger/redactor.ts";
@@ -1289,16 +1289,16 @@ function normalizePlannerRead(read: AdaptivePlannerRead): AdaptivePlannerRead {
       ...(assetId !== undefined && { assetId }),
     };
   });
-  const coverage = read.plannerCoverageResult;
-  const coveragePage = coverage && read.tool === "sentinel_case_inventory" &&
-    readSentinelPlannerCoverageResult(coverage.args, coverage.text);
+  const inventory = read.plannerCoverageResult;
+  const inventoryPage = inventory && read.tool === "sentinel_case_inventory" &&
+    readSentinelPlannerInventoryResult(inventory.args, inventory.text);
   if (
-    coverage &&
-    (!coveragePage ||
-      createHash("sha256").update(coverage.text).digest("hex") !==
-        coverage.sha256)
+    inventory &&
+    (!inventoryPage ||
+      createHash("sha256").update(inventory.text).digest("hex") !==
+        inventory.sha256)
   ) {
-    throw new Error("Invalid Sentinel planner coverage result");
+    throw new Error("Invalid Sentinel planner inventory result");
   }
   const digestResult = read.plannerDigestResult;
   const digestArgs = digestResult && typeof digestResult.text === "string"
@@ -1610,11 +1610,11 @@ function normalizePlannerRead(read: AdaptivePlannerRead): AdaptivePlannerRead {
     }),
     ...(findingPage && { findingPage }),
     ...(graphFactPage && { graphFactPage }),
-    ...(coverage && coveragePage && {
+    ...(inventory && inventoryPage && {
       plannerCoverageResult: {
-        args: coveragePage.args,
-        text: coverage.text,
-        sha256: coverage.sha256,
+        args: inventoryPage.args,
+        text: inventory.text,
+        sha256: inventory.sha256,
       },
     }),
     ...(digestResult && digestArgs && {
