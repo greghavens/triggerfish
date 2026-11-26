@@ -18,10 +18,12 @@ import {
   readSentinelDecisions,
   readSentinelFindingReviews,
   readSentinelIncidentReviews,
+  readSentinelOperatingConstraints,
   readSentinelOperatingConstraintsForRevision,
   readSentinelRunIdForRevision,
   sentinelFindingDispositions,
 } from "./assessment_store.ts";
+import { sentinelOperatingConstraintsAllow } from "./operating_constraints.ts";
 import { locateSentinelCase } from "./cases.ts";
 import { encodeSentinelFindingZip } from "./finding_export_zip.ts";
 import {
@@ -492,6 +494,24 @@ function renderFindingExport(
     ) => [finding.id, finding]),
   );
   const runId = readSentinelRunIdForRevision(path, assessment.revision);
+  const snapshot = assessment.result?.sharedGraph.snapshot;
+  const savedPolicy = readSentinelOperatingConstraintsForRevision(
+    path,
+    assessment.revision,
+  );
+  const policyRunId = runId ?? savedPolicy?.runId;
+  const currentPolicy = policyRunId
+    ? readSentinelOperatingConstraints(path, policyRunId)
+    : undefined;
+  const allows = (kind: "review_finding" | "review_evidence", nodeId: string) =>
+    sentinelOperatingConstraintsAllow(savedPolicy?.constraints, {
+      kind,
+      nodeId,
+    }, snapshot) &&
+    sentinelOperatingConstraintsAllow(currentPolicy?.constraints, {
+      kind,
+      nodeId,
+    }, snapshot);
   const revisions = readSentinelFindingReviews(path, assessment.revision);
   const remediationFor = createSentinelFindingRemediationReader(
     path,
@@ -532,6 +552,8 @@ function renderFindingExport(
     selection,
     format,
     language,
+    savedPolicy ? [savedPolicy.version, savedPolicy.digest] : null,
+    currentPolicy ? [currentPolicy.version, currentPolicy.digest] : null,
   ]));
   let findingTotal = 0;
   try {
@@ -559,6 +581,13 @@ function renderFindingExport(
             item.caseId !== caseId || item.runId !== runId
           ))
       ) return;
+      const visible = imported
+        ? allows("review_finding", imported.id)
+        : !!report && allows("review_evidence", report.finding.targetId);
+      if (!visible) {
+        if (explicit) return;
+        continue;
+      }
       if (!explicit) {
         if (
           !matchesFindingFilter(selection, {
@@ -576,15 +605,24 @@ function renderFindingExport(
         ) continue;
         if (!page && records.length >= MAX_FINDING_EXPORT_SELECTION) return;
       }
-      const composition = trafficCompositionByFinding.get(id) ?? [];
       const exactAttachments = (attachmentsByFinding.get(id) ?? []).filter(
-        ({ caseId: sourceCase }) => sourceCase === caseId,
+        ({ caseId: sourceCase, assetId }) =>
+          sourceCase === caseId && assetId === report?.finding.targetId &&
+          allows("review_evidence", assetId),
+      );
+      const visibleLinks = new Set(exactAttachments.map(({ id }) => id));
+      const composition = (trafficCompositionByFinding.get(id) ?? []).filter(
+        (edit) =>
+          edit.operation === "withdraw"
+            ? visibleLinks.has(edit.linkId)
+            : edit.linkIds.every((linkId) => visibleLinks.has(linkId)),
       );
       const linkedRechecks = report && journal
         ? journal.listFindingRechecks(id, assessment.revision)
           .filter((item) =>
             item.caseId === caseId && item.runId === runId &&
-            item.targetId === report.finding.targetId
+            item.targetId === report.finding.targetId &&
+            allows("review_evidence", item.evidenceId)
           )
         : [];
       const verified = report && remediationFor(report.finding, linkedRechecks);

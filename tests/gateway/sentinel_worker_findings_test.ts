@@ -1350,6 +1350,17 @@ Deno.test("Leased Sentinel workers report, recheck, and amend findings visible i
           assertEquals(report.disposition, undefined);
         },
       );
+      const reviewedDownload = {
+        format: "findings-json",
+        revision: second.revision,
+        findingFilter: {},
+        findingPageSize: 1,
+      };
+      const reviewedPage = await request("export", reviewedDownload);
+      assertEquals(reviewedPage.type, "export");
+      const oldFindingCursor =
+        (reviewedPage.findingPage as { nextCursor?: string }).nextCursor;
+      assert(oldFindingCursor);
       assert(recordSentinelOperatingConstraints(path, {
         runId: second.plan.runId!,
         evidenceRevision: second.revision,
@@ -1387,6 +1398,43 @@ Deno.test("Leased Sentinel workers report, recheck, and amend findings visible i
       });
       assertEquals(hiddenMarkdown.type, "export");
       assert(!String(hiddenMarkdown.content).includes(original.title));
+      for (const format of ["findings-json", "markdown", "md-zip"]) {
+        const deniedDownload = await request("export", {
+          format,
+          revision: second.revision,
+          findingIds: ["review-gap", original.id],
+        });
+        assertEquals(deniedDownload.type, "error");
+        assertEquals(deniedDownload.content, undefined);
+      }
+      const stalePage = await request("export", {
+        ...reviewedDownload,
+        findingCursor: oldFindingCursor,
+      });
+      assertEquals(stalePage.type, "error");
+      assertEquals(stalePage.content, undefined);
+      const filtered = await request("export", {
+        ...reviewedDownload,
+        findingFilter: { kind: "worker" },
+      });
+      assertEquals(filtered.type, "export");
+      assertEquals(JSON.parse(String(filtered.content)).findings, []);
+      assertEquals((filtered.findingPage as { total: number }).total, 0);
+      assert(recordSentinelOperatingConstraints(path, {
+        runId: second.plan.runId!,
+        evidenceRevision: second.revision,
+        expectedVersion: 1,
+        requestId: crypto.randomUUID(),
+        operatorScope: "owner",
+        constraints: { deniedKinds: [], allowedAssetIds: ["dependent-asset"] },
+      }));
+      const hiddenImported = await request("export", {
+        format: "findings-json",
+        revision: second.revision,
+        findingIds: ["review-gap"],
+      });
+      assertEquals(hiddenImported.type, "error");
+      assertEquals(hiddenImported.content, undefined);
       const matchingRun = readSentinelAssessment(path);
       assert(matchingRun?.plan.runId);
       const priorPolicyVersion = readSentinelOperatingConstraints(
