@@ -6738,19 +6738,51 @@ Deno.test("Committed worker narrative reaches peers and planning while its sourc
       );
     const peerRegistry = createProviderRegistry();
     let peerResult: unknown;
+    let savedPeerResult: string | undefined;
+    let phase: "interrupt" | "denied" | "resume" = "interrupt";
+    let peerRequests = 0;
+    let deniedSourceChecks = 0;
+    const peerHooks: HookRunner = {
+      evaluateHook(hook, context) {
+        const { input } = context;
+        if (
+          phase === "denied" && hook === "PRE_TOOL_CALL" &&
+          input.case_id === caseId &&
+          input.tool_name === "sentinel_provenance_node"
+        ) {
+          deniedSourceChecks++;
+          return Promise.resolve({
+            allowed: false,
+            action: "BLOCK",
+            duration: 0,
+            ruleId: null,
+          });
+        }
+        return hooks.evaluateHook(hook, context);
+      },
+    };
     peerRegistry.register({
       name: "narrative-citing-worker",
       supportsStreaming: false,
       complete(messages) {
         const saved = messages.findLast(({ role }) => role === "tool");
         if (!saved) {
+          peerRequests++;
+          assertEquals(phase, "interrupt");
           return Promise.resolve({
             content: "",
             usage,
             toolCalls: [call(reopen, selector, "cite-committed-observation")],
           });
         }
-        peerResult = JSON.parse(String(saved.content));
+        if (phase === "interrupt") {
+          savedPeerResult = String(saved.content);
+          coordinator?.stop();
+        } else {
+          assertEquals(phase, "resume");
+          assertEquals(String(saved.content), savedPeerResult);
+          peerResult = JSON.parse(String(saved.content));
+        }
         return Promise.resolve({
           content:
             '{"summary":"Confirmed the retained worker observation.","followUps":[]}',
@@ -6760,22 +6792,24 @@ Deno.test("Committed worker narrative reaches peers and planning while its sourc
       },
     });
     peerRegistry.setDefault("narrative-citing-worker");
-    coordinator = createSentinelModelPlanner(
-      path,
-      (current, taskId, token) =>
-        taskId && taskId !== followup()?.id
-          ? { execute: () => Promise.resolve(), clear() {} }
-          : createSentinelSubagent({
-            snapshotPath: path,
-            assessmentRevision: current.revision,
-            ...(taskId
-              ? { assignedTaskId: taskId, assignedTaskLeaseToken: token }
-              : { plannerExecutionEvidenceRunId: current.plan.runId }),
-            providerRegistry: taskId ? peerRegistry : planningRegistry,
-            hookRunner: hooks,
-            allowModelAccess: true,
-          }),
-    );
+    const startCoordinator = () =>
+      createSentinelModelPlanner(
+        path,
+        (current, taskId, token) =>
+          taskId && taskId !== followup()?.id
+            ? { execute: () => Promise.resolve(), clear() {} }
+            : createSentinelSubagent({
+              snapshotPath: path,
+              assessmentRevision: current.revision,
+              ...(taskId
+                ? { assignedTaskId: taskId, assignedTaskLeaseToken: token }
+                : { plannerExecutionEvidenceRunId: current.plan.runId }),
+              providerRegistry: taskId ? peerRegistry : planningRegistry,
+              hookRunner: taskId ? peerHooks : hooks,
+              allowModelAccess: true,
+            }),
+      );
+    coordinator = startCoordinator();
     await waitForCondition(
       () => !!followup(),
       () => coordinator!.advance(state),
@@ -6784,9 +6818,42 @@ Deno.test("Committed worker narrative reaches peers and planning while its sourc
       readAdaptiveSentinel(path, state, "revision")
         ?.modelReviews.find(({ taskId }) => taskId === followup()?.id);
     await waitForCondition(
-      () => !!peerReview(),
+      () => savedPeerResult !== undefined && !coordinator!.hasInFlightWork(),
       () => coordinator!.advance(state),
     );
+    const adaptive = new DatabaseSync(
+      join(dirname(path), "sentinel-adaptive.db"),
+      { readOnly: true },
+    );
+    try {
+      const checkpoint = String(
+        adaptive.prepare(
+          "SELECT checkpoint FROM adaptive_worker_checkpoints WHERE taskId = ?",
+        )
+          .get(followup()!.id)?.checkpoint,
+      );
+      assertStringIncludes(checkpoint, "sentinel-worker-narrative:");
+      assert(!checkpoint.includes(narrative.summary));
+    } finally {
+      adaptive.close();
+    }
+    phase = "denied";
+    coordinator = startCoordinator();
+    await waitForCondition(
+      () => deniedSourceChecks > 0 && !coordinator!.hasInFlightWork(),
+      () => coordinator!.advance(state),
+    );
+    assertEquals(peerResult, undefined);
+    assertEquals(peerRequests, 1);
+    coordinator.stop();
+    phase = "resume";
+    coordinator = startCoordinator();
+    await waitForCondition(
+      () => !!peerReview(),
+      () => coordinator!.advance(state),
+      20_000,
+    );
+    assertEquals(peerRequests, 1);
     assertEquals(peerResult, committed);
     assertEquals(
       peerReview()?.steps.map(({ tool, target }) => [tool, target]),
